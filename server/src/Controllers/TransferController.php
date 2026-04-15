@@ -302,12 +302,11 @@ class TransferController
         $start = time();
 
         while (time() - $start < $timeout) {
-            // Check for pending incoming transfers
+            // Check for any pending incoming transfers (no time filter — may have been uploaded earlier)
             $pending = $db->querySingle(
                 'SELECT COUNT(*) as count FROM transfers
-                 WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0
-                 AND created_at > :since',
-                [':rid' => $deviceId, ':since' => $since]
+                 WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0',
+                [':rid' => $deviceId]
             );
 
             // Check for newly delivered sent transfers (using delivered_at timestamp)
