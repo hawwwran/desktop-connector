@@ -45,6 +45,9 @@ class FcmSender
                 'message' => [
                     'token' => $fcmToken,
                     'data' => $data,
+                    'android' => [
+                        'priority' => 'high',
+                    ],
                 ],
             ]);
 
