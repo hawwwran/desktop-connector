@@ -4,6 +4,12 @@ End-to-end encrypted file and clipboard sharing between your Android phone and L
 
 The relay server never sees your data — all content is encrypted on-device before it leaves, using X25519 key exchange and AES-256-GCM.
 
+<p align="center">
+  <img src="images/android-app.jpg" alt="Android app" width="280"/>
+  &nbsp;&nbsp;&nbsp;
+  <img src="images/desktop-app-history.png" alt="Desktop app" width="280"/>
+</p>
+
 ## Features
 
 - **Send files** both ways (phone to PC and PC to phone)
