@@ -233,11 +233,17 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
         log.error("Cannot reach server at %s", config.server_url)
         return 1
 
-    if api.send_file(filepath, target_id, symmetric_key):
-        log.info("Photo sent successfully")
+    tid = api.send_file(filepath, target_id, symmetric_key)
+    if tid:
+        from .history import TransferHistory
+        history = TransferHistory(config.config_dir)
+        history.add(filename=filepath.name, display_label=filepath.name,
+                     direction="sent", size=filepath.stat().st_size,
+                     content_path=str(filepath), transfer_id=tid)
+        log.info("File sent successfully")
         return 0
     else:
-        log.error("Failed to send photo")
+        log.error("Failed to send file")
         return 1
 
 
@@ -252,18 +258,17 @@ def run_receiver(config: Config, crypto: KeyManager, headless: bool) -> None:
     # Wire up notifications
     poller.on_file_received(notify_file_received)
 
-    was_connected = [None]  # None = never connected yet, False = was connected then lost
+    last_notified = [None]  # "connected", "disconnected", or None (never notified)
 
     def on_state_change(state):
-        if state == ConnectionState.CONNECTED:
-            if was_connected[0] is False:
-                # Reconnected after a disconnect — notify
+        if state == ConnectionState.CONNECTED and last_notified[0] != "connected":
+            if last_notified[0] == "disconnected":
                 notify_connection_restored()
-            # First connection or reconnection — just mark as connected
-            was_connected[0] = True
-        elif state == ConnectionState.DISCONNECTED and was_connected[0] is True:
-            notify_connection_lost()
-            was_connected[0] = False
+            last_notified[0] = "connected"
+        elif state == ConnectionState.DISCONNECTED and last_notified[0] != "disconnected":
+            if last_notified[0] == "connected":
+                notify_connection_lost()
+            last_notified[0] = "disconnected"
 
     conn.on_state_change(on_state_change)
 

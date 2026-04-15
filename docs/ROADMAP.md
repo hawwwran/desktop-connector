@@ -2,19 +2,32 @@
 
 Potential features organized by effort. All use the existing `.fn.` transfer convention unless noted.
 
-## Quick wins
+## Done
 
-### ~~Send URL~~ (Done)
+### ~~Send URL~~
 - Implemented via smart link detection in clipboard transfers
 - Share from Chrome/YouTube sends URL as clipboard text
 - Both apps detect single URLs, show link icon, Open/Copy dialog
 - Desktop auto-opens links by default (configurable in Settings)
 
-### ~~Right-click "Send to Phone"~~ (Done)
-- Nautilus script installed to `~/.local/share/nautilus/scripts/Send to Phone`
+### ~~Right-click "Send to Phone"~~
+- File manager integration for Nautilus, Nemo, and Dolphin
 - Right-click any file(s) → Scripts → Send to Phone
-- Calls `desktop-connector --headless --send` for each file
-- Installed/removed automatically by install.sh/uninstall.sh
+- Auto-detected and installed by install.sh
+
+### ~~Long polling~~
+- Server endpoint blocks up to 25s, returns instantly on new data
+- ~1s delivery latency instead of 10-30s polling
+- Graceful fallback to regular polling if server doesn't support it
+- `?test=1` instant probe for availability testing
+- Status visible in both apps' settings with retry button
+
+### ~~Delivery tracking~~
+- Server records `delivered_at` timestamp on ack
+- Long poll wakes sender immediately on delivery
+- "Sent" → "Delivered" updates in ~1s
+
+## Quick wins
 
 ### Find my phone
 - `.fn.ring` — phone plays a loud alarm sound for 15 seconds, even on silent
@@ -55,6 +68,12 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Each pairing has its own X25519 keypair and symmetric key
 - UI: device picker when sending, or send to all
 - Server already supports multiple devices — just need client UI
+
+### Auto-update
+- `version.json` in repo tracks current versions for all components
+- Both apps check on startup, show update banner if newer version available
+- Android: download APK and trigger package installer
+- Desktop: show notification with link to installer
 
 ## Larger features
 

@@ -241,9 +241,12 @@ class TransferController
             rmdir($dir);
         }
 
-        // Delete chunk records and mark downloaded
+        // Delete chunk records and mark downloaded with timestamp
         $db->execute('DELETE FROM chunks WHERE transfer_id = :tid', [':tid' => $transferId]);
-        $db->execute('UPDATE transfers SET downloaded = 1 WHERE id = :id', [':id' => $transferId]);
+        $db->execute(
+            'UPDATE transfers SET downloaded = 1, delivered_at = :now WHERE id = :id',
+            [':now' => time(), ':id' => $transferId]
+        );
 
         Router::json(['status' => 'deleted']);
     }
@@ -276,6 +279,73 @@ class TransferController
         }
 
         Router::json(['transfers' => $result]);
+    }
+
+    /**
+     * Long poll: block until there's a new transfer for this device or timeout.
+     * Returns immediately if pending transfers exist, otherwise waits up to 25s.
+     */
+    public static function notify(Database $db, string $deviceId): void
+    {
+        // test=1 returns immediately — used to verify the endpoint works
+        if (!empty($_GET['test'])) {
+            $db->execute(
+                'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
+                [':now' => time(), ':id' => $deviceId]
+            );
+            Router::json(['pending' => false, 'delivered' => false, 'time' => time(), 'test' => true]);
+            return;
+        }
+
+        $since = isset($_GET['since']) ? (int)$_GET['since'] : 0;
+        $timeout = 25;
+        $start = time();
+
+        while (time() - $start < $timeout) {
+            // Check for pending incoming transfers
+            $pending = $db->querySingle(
+                'SELECT COUNT(*) as count FROM transfers
+                 WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0
+                 AND created_at > :since',
+                [':rid' => $deviceId, ':since' => $since]
+            );
+
+            // Check for newly delivered sent transfers (using delivered_at timestamp)
+            $delivered = $db->querySingle(
+                'SELECT COUNT(*) as count FROM transfers
+                 WHERE sender_id = :sid AND delivered_at > :since',
+                [':sid' => $deviceId, ':since' => $since]
+            );
+
+            $hasPending = ($pending['count'] ?? 0) > 0;
+            $hasDelivered = ($delivered['count'] ?? 0) > 0;
+
+            if ($hasPending || $hasDelivered) {
+                // Update last_seen
+                $db->execute(
+                    'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
+                    [':now' => time(), ':id' => $deviceId]
+                );
+                Router::json([
+                    'pending' => $hasPending,
+                    'delivered' => $hasDelivered,
+                    'time' => time(),
+                ]);
+                return;
+            }
+
+            usleep(1000000); // 1 second
+        }
+
+        // Timeout — nothing new
+        $db->execute(
+            'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
+            [':now' => time(), ':id' => $deviceId]
+        );
+        Router::json([
+            'pending' => false,
+            'time' => time(),
+        ]);
     }
 
     private static function cleanup(Database $db): void

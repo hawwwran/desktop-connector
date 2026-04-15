@@ -29,6 +29,12 @@ class Database
     {
         $sql = file_get_contents(__DIR__ . '/../migrations/001_initial.sql');
         $this->db->exec($sql);
+
+        // Add delivered_at column if missing (upgrade from older schema)
+        $cols = $this->db->querySingle("SELECT sql FROM sqlite_master WHERE type='table' AND name='transfers'");
+        if ($cols && strpos($cols, 'delivered_at') === false) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN delivered_at INTEGER DEFAULT 0');
+        }
     }
 
     public function query(string $sql, array $params = []): SQLite3Result

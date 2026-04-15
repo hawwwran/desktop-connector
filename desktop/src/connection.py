@@ -74,7 +74,7 @@ class ConnectionManager:
                 except Exception:
                     log.exception("State change callback error")
 
-    def _auth_headers(self) -> dict:
+    def auth_headers(self) -> dict:
         return {
             "X-Device-ID": self.device_id,
             "Authorization": f"Bearer {self.auth_token}",
@@ -86,7 +86,7 @@ class ConnectionManager:
         try:
             resp = requests.get(
                 f"{self.server_url}/api/health",
-                headers=self._auth_headers(),
+                headers=self.auth_headers(),
                 timeout=3,
             )
             if resp.status_code == 200:
@@ -152,7 +152,7 @@ class ConnectionManager:
         None on connection failure (and updates backoff state).
         """
         url = f"{self.server_url}{path}"
-        kwargs.setdefault("headers", {}).update(self._auth_headers())
+        kwargs.setdefault("headers", {}).update(self.auth_headers())
         kwargs.setdefault("timeout", 30)
         try:
             resp = requests.request(method, url, **kwargs)

@@ -7,6 +7,8 @@ import logging
 import threading
 import time
 
+import requests as _raw_requests
+
 from .api_client import ApiClient
 from .clipboard import write_clipboard_text, write_clipboard_image
 from .config import Config, FAST_POLL_INTERVAL, DEFAULT_POLL_INTERVAL, FAST_POLL_DURATION
@@ -32,6 +34,30 @@ class Poller:
         self._poll_interval = DEFAULT_POLL_INTERVAL
         self._fast_poll_until = 0.0
         self._on_file_received: list = []
+        self._poll_status_file = config.config_dir / "poll_status.json"
+
+    def _write_poll_status(self, status: str) -> None:
+        """Write long poll status: 'active', 'unavailable', 'testing', 'offline'."""
+        try:
+            import json
+            self._poll_status_file.write_text(json.dumps({"long_poll": status}))
+        except Exception:
+            pass
+
+    def _test_long_poll(self) -> bool:
+        """Quick test if /notify endpoint exists. Returns True if available."""
+        try:
+            resp = _raw_requests.get(
+                f"{self.conn.server_url}/api/transfers/notify?test=1",
+                headers=self.conn.auth_headers(), timeout=5)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def retry_long_poll(self) -> None:
+        """Reset long poll state to re-test on next cycle."""
+        self._write_poll_status("testing")
+        self._wake_event.set()
 
     def on_file_received(self, callback) -> None:
         """Register callback: callback(filepath)."""
@@ -46,21 +72,76 @@ class Poller:
         self._wake_event.set()
 
     def run(self) -> None:
-        """Main polling loop. Runs in a background thread."""
+        """Main polling loop. Uses long polling after connection is confirmed."""
         log.info("Poller started")
+        last_check_time = 0
+        long_poll_available = None  # None = untested, True/False = tested
+        self._write_poll_status("offline")
         while self._running:
+            # Check for retry signal from settings
+            try:
+                if self._poll_status_file.exists():
+                    import json
+                    status = json.loads(self._poll_status_file.read_text())
+                    if status.get("long_poll") == "testing":
+                        log.info("Long poll retry requested")
+                        long_poll_available = None
+            except Exception:
+                pass
+
             if self.conn.state == ConnectionState.CONNECTED:
                 try:
-                    self._poll_once()
+                    # Test long poll availability if untested
+                    if long_poll_available is None:
+                        self._write_poll_status("testing")
+                        long_poll_available = self._test_long_poll()
+                        self._write_poll_status("active" if long_poll_available else "unavailable")
+                        log.info("Long poll %s", "available" if long_poll_available else "not available")
+
+                    if long_poll_available:
+                        notified = self._long_poll(last_check_time)
+                        last_check_time = int(time.time())
+                        if notified is True:
+                            self._poll_once()
+                        elif notified is False:
+                            self._check_delivery_status()
+                        else:
+                            # Long poll broke mid-session
+                            long_poll_available = False
+                            self._write_poll_status("unavailable")
+                            self._poll_once()
+                            self._sleep(self._current_interval())
+                    else:
+                        self._poll_once()
+                        self._sleep(self._current_interval())
                 except Exception:
                     log.exception("Error during poll")
-                self._sleep(self._current_interval())
+                    self._sleep(self._current_interval())
             else:
-                # Wait for backoff then try reconnecting
+                long_poll_available = None
+                self._write_poll_status("offline")
                 self.conn.wait_for_retry()
                 if self._running:
                     self.conn.check_connection()
         log.info("Poller stopped")
+
+    def _long_poll(self, since: int) -> bool | None:
+        """
+        Long poll the server. Returns:
+        - True: new data available
+        - False: timed out, nothing new
+        - None: endpoint not available or error (fall back to regular polling)
+        Uses raw requests — does NOT affect connection state machine.
+        """
+        url = f"{self.conn.server_url}/api/transfers/notify?since={since}"
+        try:
+            resp = _raw_requests.get(url, headers=self.conn.auth_headers(), timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("pending", False) or data.get("delivered", False)
+            return None
+        except _raw_requests.RequestException:
+            return None
 
     def _poll_once(self) -> None:
         # Check delivery status of sent items

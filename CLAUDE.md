@@ -58,7 +58,6 @@ cd android && ./gradlew assembleDebug
 ### Integration test
 ```bash
 ./test_loop.sh    # full closed-loop: register, pair, encrypt, upload, download, decrypt, verify
-./try-it.sh       # interactive demo with pre-paired sender/receiver
 ```
 
 ## Installation (desktop)
@@ -120,6 +119,9 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 - **APK install**: Tapping an APK file in Android history checks `REQUEST_INSTALL_PACKAGES` permission, redirects to settings if needed, then opens the system package installer.
 - **Remote device status**: Desktop tray icon shows green/yellow donut (connected to server, phone offline) vs green/white (both online). Checked every 30s via stats endpoint.
 - **Pull-to-refresh scope**: Android pull-to-refresh wraps the entire HomeScreen (buttons, recent files, history), not just the history list. Also resets connection backoff.
+- **Long polling**: Server endpoint `GET /api/transfers/notify` blocks up to 25s, checks every 1s for new transfers or deliveries. Clients test with `?test=1` (instant response) before committing to long poll. Falls back to regular polling if unavailable. Status visible in both apps' settings.
+- **Delivery tracking**: Server records `delivered_at` timestamp on ack. Long poll wakes sender immediately when delivery is detected. Both clients check delivery status on every poll cycle.
+- **Connection state isolation**: Long poll uses raw HTTP requests, not the connection manager. Only the short health check affects connection state. Prevents state oscillation.
 
 ## Project structure
 
@@ -187,7 +189,7 @@ android/app/src/main/kotlin/com/desktopconnector/
       TransferViewModel.kt   — uploads, clipboard, history, delivery tracking
 
 test_loop.sh                 — automated integration test
-try-it.sh                    — interactive demo
+version.json                 — version tracking for all three components
 temp/                        — numbered install scripts (dev only, run with sudo)
 ```
 
@@ -213,4 +215,5 @@ temp/                        — numbered install scripts (dev only, run with su
 | GET | /api/transfers/{id}/chunks/{i} | Yes | Download chunk |
 | POST | /api/transfers/{id}/ack | Yes | Acknowledge receipt |
 | GET | /api/transfers/sent-status | Yes | Delivery status |
+| GET | /api/transfers/notify | Yes | Long poll for new transfers/deliveries (?test=1 for instant probe) |
 | GET | /dashboard | No | HTML dashboard |

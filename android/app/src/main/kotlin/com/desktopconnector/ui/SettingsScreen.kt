@@ -78,6 +78,34 @@ fun SettingsScreen(
                 singleLine = true,
             )
 
+            // Long poll status
+            val lpStatus = com.desktopconnector.service.PollService.longPollStatus
+            val lpLabel = when (lpStatus) {
+                "active" -> "Active"
+                "unavailable" -> "Not available"
+                "testing" -> "Testing (may take up to 35s)..."
+                "offline" -> "Offline"
+                else -> "Unknown"
+            }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            ) {
+                Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                    Text("Long Polling", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    SettingsRow("Status", lpLabel)
+                    if (lpStatus != "active") {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = {
+                            com.desktopconnector.service.PollService.retryLongPoll = true
+                        }) {
+                            Text("Retry")
+                        }
+                    }
+                }
+            }
+
             // This device
             Card(
                 modifier = Modifier.fillMaxWidth(),

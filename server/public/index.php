@@ -97,5 +97,11 @@ $router->get('/api/transfers/sent-status', function () use ($db) {
     TransferController::sentStatus($db, $deviceId);
 });
 
+$router->get('/api/transfers/notify', function () use ($db) {
+    $deviceId = Router::authenticate($db);
+    if ($deviceId === null) return;
+    TransferController::notify($db, $deviceId);
+});
+
 // Dispatch
 $router->dispatch($_SERVER['REQUEST_METHOD'], $_SERVER['REQUEST_URI']);

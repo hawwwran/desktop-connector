@@ -268,11 +268,18 @@ echo -e "  Starts automatically on login."
 echo -e "  Uninstall:  ${BOLD}$INSTALL_DIR/uninstall.sh${NC}"
 echo ""
 
+# --- Clear Python cache ---
+
+find "$INSTALL_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
+find "$INSTALL_DIR" -name "*.pyc" -delete 2>/dev/null
+info "Cleared Python cache"
+
 # --- Start the app ---
 
 # Kill any existing instance
+pkill -f "desktop-connector" 2>/dev/null || true
 pkill -f "python3 -m src.main" 2>/dev/null || true
-sleep 0.5
+sleep 1
 
 step "Starting Desktop Connector..."
 nohup "$BIN_DIR/$APP_NAME" > /dev/null 2>&1 &

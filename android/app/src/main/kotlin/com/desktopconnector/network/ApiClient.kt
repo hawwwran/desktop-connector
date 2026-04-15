@@ -22,6 +22,12 @@ class ApiClient(
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    // Separate client for long poll with longer read timeout
+    private val longPollClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(35, TimeUnit.SECONDS)
+        .build()
+
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val binaryType = "application/octet-stream".toMediaType()
 
@@ -104,6 +110,28 @@ class ApiClient(
             .get()
             .build()
         return executeJson(request)
+    }
+
+    fun longPollNotify(sinceEpoch: Long, test: Boolean = false): JSONObject? {
+        val url = if (test) {
+            "$serverUrl/api/transfers/notify?test=1"
+        } else {
+            "$serverUrl/api/transfers/notify?since=$sinceEpoch"
+        }
+        val request = authHeaders(Request.Builder())
+            .url(url)
+            .get()
+            .build()
+        // Use short timeout for test, long timeout for actual long poll
+        val httpClient = if (test) client else longPollClient
+        return try {
+            httpClient.newCall(request).execute().use { resp ->
+                val body = resp.body?.string() ?: return null
+                if (resp.isSuccessful) JSONObject(body) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     fun getSentStatus(): List<JSONObject> {

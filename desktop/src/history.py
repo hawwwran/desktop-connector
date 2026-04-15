@@ -67,6 +67,8 @@ class TransferHistory:
 
     def get_undelivered_transfer_ids(self) -> list[str]:
         """Get transfer_ids of sent items not yet marked delivered."""
+        # Reload from disk to pick up transfers added by other processes (--send, subprocesses)
+        self._items = self._load()
         with self._lock:
             return [
                 item["transfer_id"] for item in self._items

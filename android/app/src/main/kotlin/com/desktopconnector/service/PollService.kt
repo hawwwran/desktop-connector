@@ -38,6 +38,10 @@ class PollService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val POLL_INTERVAL = 10_000L
 
+        // Shared state for UI — "active", "unavailable", "testing", "offline"
+        @Volatile var longPollStatus: String = "offline"
+        @Volatile var retryLongPoll: Boolean = false
+
         fun start(context: Context) {
             val intent = Intent(context, PollService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -131,6 +135,7 @@ class PollService : Service() {
 
         val prefs = AppPreferences(this)
         var lastPollTime = 0L
+        var longPollAvailable: Boolean? = null  // null = untested
         while (running) {
             if (prefs.serverUrl == null || prefs.deviceId == null || prefs.authToken == null) {
                 delay(5000)
@@ -143,43 +148,93 @@ class PollService : Service() {
                 continue
             }
 
-            // Throttle: max once per 10s
-            val now = System.currentTimeMillis()
-            val sinceLast = now - lastPollTime
-            if (sinceLast < POLL_INTERVAL) {
-                delay(POLL_INTERVAL - sinceLast)
+            // Check for retry signal from settings
+            if (retryLongPoll) {
+                retryLongPoll = false
+                longPollAvailable = null
+                AppLog.log("Poll", "Long poll retry requested")
             }
-            lastPollTime = System.currentTimeMillis()
 
             val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
             try {
-                val reachable = api.healthCheck()
-                if (reachable != isConnected) {
-                    isConnected = reachable
-                    AppLog.log("Poll", if (isConnected) "Connected to ${prefs.serverUrl}" else "Disconnected")
-                    updateNotification(buildIdleNotification(isConnected))
+                // Ensure we're connected first
+                if (!isConnected) {
+                    longPollStatus = "offline"
+                    val reachable = api.healthCheck()
+                    if (reachable) {
+                        isConnected = true
+                        longPollAvailable = null
+                        AppLog.log("Poll", "Connected to ${prefs.serverUrl}")
+                        updateNotification(buildIdleNotification(true))
+                    } else {
+                        delay(POLL_INTERVAL)
+                        continue
+                    }
                 }
 
-                if (reachable) {
-                    val transfers = api.getPendingTransfers()
-                    if (transfers.isNotEmpty()) {
-                        AppLog.log("Poll", "Found ${transfers.size} pending transfer(s)")
+                // Quick test before committing to long poll
+                if (longPollAvailable == null) {
+                    longPollStatus = "testing"
+                    val testResult = api.longPollNotify(0, test = true)
+                    longPollAvailable = testResult != null
+                    longPollStatus = if (longPollAvailable == true) "active" else "unavailable"
+                    AppLog.log("Poll", "Long poll ${if (longPollAvailable == true) "available" else "not available"}")
+                }
+
+                if (longPollAvailable == true) {
+                    val notifyResult = api.longPollNotify(lastPollTime / 1000)
+
+                    if (notifyResult != null) {
+                        lastPollTime = System.currentTimeMillis()
+
+                        val hasPending = notifyResult.optBoolean("pending", false)
+                        val hasDelivered = notifyResult.optBoolean("delivered", false)
+
+                        if (hasPending) {
+                            val transfers = api.getPendingTransfers()
+                            if (transfers.isNotEmpty()) {
+                                AppLog.log("Poll", "Found ${transfers.size} pending transfer(s)")
+                            }
+                            for (t in transfers) {
+                                if (!running) break
+                                handleIncomingTransfer(t, api, keyManager, prefs)
+                            }
+                        }
+
+                        // Always check delivery — server can't reliably track "new" deliveries
+                        checkDeliveryStatus(api)
+                    } else {
+                        longPollAvailable = false
+                        longPollStatus = "unavailable"
+                        AppLog.log("Poll", "Long poll not available, using regular polling")
+                        // Do a regular poll + sleep
+                        val transfers = api.getPendingTransfers()
+                        for (t in transfers) {
+                            if (!running) break
+                            handleIncomingTransfer(t, api, keyManager, prefs)
+                        }
+                        checkDeliveryStatus(api)
+                        delay(POLL_INTERVAL)
                     }
+                } else {
+                    // Regular polling — long poll not available
+                    val transfers = api.getPendingTransfers()
                     for (t in transfers) {
                         if (!running) break
                         handleIncomingTransfer(t, api, keyManager, prefs)
                     }
-
                     checkDeliveryStatus(api)
+                    delay(POLL_INTERVAL)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Poll failed: ${e.message}")
                 AppLog.log("Poll", "Failed: ${e.message}")
-                isConnected = false
                 if (isConnected) {
                     isConnected = false
+                    longPollAvailable = null
                     updateNotification(buildIdleNotification(false))
                 }
+                delay(POLL_INTERVAL)
             }
 
             if (!isScreenOn()) {

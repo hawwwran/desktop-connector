@@ -28,6 +28,7 @@ The relay server never sees your data — all content is encrypted on-device bef
 - **Right-click "Send to Phone"** — file manager integration (Nautilus, Nemo, Dolphin)
 - **Smart link detection** — shared URLs show a link icon, tap to open or copy
 - **Transfer history** with delivery status (Sent / Delivered / Received), swipe to delete
+- **Near-instant delivery** — long polling with ~1s latency, graceful fallback to regular polling
 - **Offline resilient** — exponential backoff, queues transfers, catches up on reconnect
 - **Zero battery drain** — Android does not poll when screen is off, polls immediately on wake
 - **Unpair syncs both sides** — unpair from either device, the other side reacts automatically

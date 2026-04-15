@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS transfers (
     chunks_received INTEGER DEFAULT 0,
     complete        INTEGER DEFAULT 0,
     created_at      INTEGER NOT NULL,
-    downloaded      INTEGER DEFAULT 0
+    downloaded      INTEGER DEFAULT 0,
+    delivered_at    INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chunks (

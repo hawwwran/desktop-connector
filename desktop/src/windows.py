@@ -402,6 +402,31 @@ def show_settings(config_dir: Path):
         server_row = Adw.EntryRow(title="Relay Server URL", text=config.server_url)
         conn_group.add(server_row)
 
+        # Long poll status (auto-refreshes every 3s)
+        poll_status_file = config_dir / "poll_status.json"
+        lp_labels = {"active": "Active", "unavailable": "Not available", "testing": "Testing (may take up to 30s)...", "offline": "Offline", "unknown": "Unknown"}
+        lp_row = Adw.ActionRow(title="Long polling", subtitle="...")
+        retry_btn = Gtk.Button(label="Retry", valign=Gtk.Align.CENTER)
+        retry_btn.add_css_class("suggested-action")
+        def on_retry_lp(btn):
+            poll_status_file.write_text(json.dumps({"long_poll": "testing"}))
+            lp_row.set_subtitle("Testing (may take up to 30s)...")
+            btn.set_visible(False)
+        retry_btn.connect("clicked", on_retry_lp)
+        lp_row.add_suffix(retry_btn)
+        conn_group.add(lp_row)
+
+        def refresh_lp_status():
+            try:
+                s = json.loads(poll_status_file.read_text()).get("long_poll", "unknown") if poll_status_file.exists() else "unknown"
+            except Exception:
+                s = "unknown"
+            lp_row.set_subtitle(lp_labels.get(s, s))
+            retry_btn.set_visible(s != "active")
+            return True  # Keep timer
+        refresh_lp_status()
+        GLib.timeout_add(3000, refresh_lp_status)
+
         # Auto-open links toggle
         link_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
         link_switch.set_active(config.auto_open_links)

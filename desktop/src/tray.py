@@ -30,15 +30,13 @@ _icon_cache: dict[str, Image.Image] = {}
 
 
 def _make_icon(color: str) -> Image.Image:
-    if color in _icon_cache:
-        return _icon_cache[color]
+    if color not in _icon_cache:
+        png_path = _ASSETS_DIR / f"icon_{color}.png"
+        if png_path.exists():
+            _icon_cache[color] = Image.open(png_path)
 
-    # Try loading pre-built PNG (works reliably with AppIndicator)
-    png_path = _ASSETS_DIR / f"icon_{color}.png"
-    if png_path.exists():
-        img = Image.open(png_path)
-        _icon_cache[color] = img
-        return img
+    if color in _icon_cache:
+        return _icon_cache[color].copy()  # Fresh copy so pystray detects the change
 
     # Fallback: generate dynamically
     size = 128
@@ -82,22 +80,24 @@ class TrayApp:
             return
 
         def build_menu():
+            # Refresh icon on every menu open to fix stale icons
+            self._update_icon()
             return pystray.Menu(
                 pystray.MenuItem(
-                    lambda _: self.conn.get_status_text(),
+                    lambda _: "Online" if self.conn.state == ConnectionState.CONNECTED else "Offline",
                     None,
                     enabled=False,
+                ),
+                pystray.MenuItem(
+                    "Force Reconnect",
+                    self._try_now,
+                    visible=lambda _: self.conn.state != ConnectionState.CONNECTED,
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Send Files...", self._send_files, visible=lambda _: self.config.is_paired),
                 pystray.MenuItem("Send Clipboard", self._send_clipboard, visible=lambda _: self.config.is_paired),
                 pystray.MenuItem("Show History", self._show_history),
                 pystray.MenuItem("Open Save Folder", self._open_folder),
-                pystray.MenuItem(
-                    "Try Again Now",
-                    self._try_now,
-                    visible=lambda _: self.conn.state != ConnectionState.CONNECTED,
-                ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Pair...", self._pair, visible=lambda _: not self.config.is_paired),
                 pystray.MenuItem("Settings...", self._show_settings),
@@ -136,20 +136,24 @@ class TrayApp:
                     self._was_paired = paired
                     changed = True
 
-                # Check remote device online status every 30s
+                # Check remote device online status every 30s (only when connected)
                 self._remote_check_counter += 1
                 if self._remote_check_counter >= 15:
                     self._remote_check_counter = 0
-                    try:
-                        stats = self.api.get_stats()
-                        if stats:
-                            paired_devs = stats.get("paired_devices", [])
-                            online = paired_devs[0].get("online", False) if paired_devs else False
-                            if online != self._remote_online:
-                                self._remote_online = online
-                                self._update_icon()
-                    except Exception:
-                        pass
+                    if self.conn.state == ConnectionState.CONNECTED:
+                        try:
+                            stats = self.api.get_stats()
+                            if stats:
+                                paired_devs = stats.get("paired_devices", [])
+                                online = paired_devs[0].get("online", False) if paired_devs else False
+                                if online != self._remote_online:
+                                    self._remote_online = online
+                                    self._update_icon()
+                        except Exception:
+                            pass
+                    elif self._remote_online:
+                        self._remote_online = False
+                        self._update_icon()
 
                 if changed:
                     try:
@@ -181,7 +185,10 @@ class TrayApp:
 
     def _update_icon(self) -> None:
         if self._icon:
-            self._icon.icon = self._get_state_icon()
+            try:
+                self._icon.icon = self._get_state_icon()
+            except Exception:
+                pass
 
     # --- GTK4 windows (subprocess to avoid GTK3/4 conflict) ---
 
