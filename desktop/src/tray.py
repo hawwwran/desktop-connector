@@ -71,6 +71,7 @@ class TrayApp:
         self._icon = None
         self._should_quit = threading.Event()
         self._was_uploading = False
+        self._remote_online = False
 
     def run(self) -> None:
         try:
@@ -116,6 +117,8 @@ class TrayApp:
         self._upload_status_file = self.config.config_dir / "upload_active.json"
         self._was_uploading = False
         self._was_paired = self.config.is_paired
+        self._remote_online = False
+        self._remote_check_counter = 0
         import threading as _t
         def icon_poll():
             import time
@@ -132,6 +135,21 @@ class TrayApp:
                 if paired != self._was_paired:
                     self._was_paired = paired
                     changed = True
+
+                # Check remote device online status every 30s
+                self._remote_check_counter += 1
+                if self._remote_check_counter >= 15:
+                    self._remote_check_counter = 0
+                    try:
+                        stats = self.api.get_stats()
+                        if stats:
+                            paired_devs = stats.get("paired_devices", [])
+                            online = paired_devs[0].get("online", False) if paired_devs else False
+                            if online != self._remote_online:
+                                self._remote_online = online
+                                self._update_icon()
+                    except Exception:
+                        pass
 
                 if changed:
                     try:
@@ -157,6 +175,8 @@ class TrayApp:
             return _make_icon("blue")
         if state == ConnectionState.RECONNECTING:
             return _make_icon("yellow")
+        if not self._remote_online:
+            return _make_icon("green_yellow")
         return _make_icon("green")
 
     def _update_icon(self) -> None:

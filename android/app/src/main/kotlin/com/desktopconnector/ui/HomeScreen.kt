@@ -102,77 +102,86 @@ fun HomeScreen(
             )
         },
     ) { padding ->
-        Column(modifier = Modifier.padding(padding)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(
-                    onClick = onSendClipboard,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    ),
-                ) {
-                    Icon(
-                        painter = androidx.compose.ui.res.painterResource(R.drawable.ic_clipboard),
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("Send Clipboard")
-                }
-                Button(
-                    onClick = { filePicker.launch(arrayOf("*/*")) },
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Send Files")
+        val recentLoader = rememberRecentFilesLoader()
+        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    recentLoader.refresh()
                 }
             }
-            val recentLoader = rememberRecentFilesLoader()
-            val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-            DisposableEffect(lifecycleOwner) {
-                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-                    if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                        recentLoader.refresh()
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+
+        val pullState = rememberPullToRefreshState()
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                recentLoader.refresh()
+                onRefresh()
+            },
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize(),
+            state = pullState,
+            indicator = {
+                PullToRefreshDefaults.Indicator(
+                    state = pullState,
+                    isRefreshing = isRefreshing,
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    color = MaterialTheme.colorScheme.primary,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                )
+            },
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = onSendClipboard,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        ),
+                    ) {
+                        Icon(
+                            painter = androidx.compose.ui.res.painterResource(R.drawable.ic_clipboard),
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Send Clipboard")
+                    }
+                    Button(
+                        onClick = { filePicker.launch(arrayOf("*/*")) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Send Files")
                     }
                 }
-                lifecycleOwner.lifecycle.addObserver(observer)
-                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-            }
-            RecentFilesStrip(loader = recentLoader, onSend = { uri -> onSendUri(uri) })
 
-            Text(
-                "History",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
-            )
+                RecentFilesStrip(loader = recentLoader, onSend = { uri -> onSendUri(uri) })
 
-            val pullState = rememberPullToRefreshState()
-            PullToRefreshBox(
-                isRefreshing = isRefreshing,
-                onRefresh = onRefresh,
-                modifier = Modifier.weight(1f),
-                state = pullState,
-                indicator = {
-                    PullToRefreshDefaults.Indicator(
-                        state = pullState,
-                        isRefreshing = isRefreshing,
-                        modifier = Modifier.align(Alignment.TopCenter),
-                        color = MaterialTheme.colorScheme.primary,
-                        containerColor = MaterialTheme.colorScheme.surface,
-                    )
-                },
-            ) {
+                Text(
+                    "History",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
+                )
+
                 if (transfers.isEmpty()) {
                     Box(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
@@ -190,6 +199,7 @@ fun HomeScreen(
                         state = historyListState,
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp, top = 4.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f),
                     ) {
                         items(transfers, key = { it.id }) { transfer ->
                             SwipeToDeleteItem(
@@ -258,6 +268,13 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                     )
                 } else if (mime.startsWith("image/") || mime.startsWith("video/")) {
                     TransferThumbnail(transfer)
+                } else if (mime == "application/vnd.android.package-archive" || transfer.displayName.endsWith(".apk")) {
+                    Icon(
+                        painter = androidx.compose.ui.res.painterResource(R.drawable.ic_apk),
+                        contentDescription = null,
+                        modifier = Modifier.size(28.dp),
+                        tint = Color.Unspecified,
+                    )
                 } else {
                     Icon(
                         imageVector = if (mime.startsWith("text/")) Icons.Default.Edit
