@@ -402,6 +402,15 @@ def show_settings(config_dir: Path):
         server_row = Adw.EntryRow(title="Relay Server URL", text=config.server_url)
         conn_group.add(server_row)
 
+        # Auto-open links toggle
+        link_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        link_switch.set_active(config.auto_open_links)
+        link_switch.connect("notify::active", lambda sw, _: setattr(config, 'auto_open_links', sw.get_active()))
+        link_row = Adw.ActionRow(title="Auto-open links", subtitle="Open received URLs in browser automatically")
+        link_row.add_suffix(link_switch)
+        link_row.set_activatable_widget(link_switch)
+        conn_group.add(link_row)
+
         save_btn = Gtk.Button(label="Save", valign=Gtk.Align.CENTER)
         save_btn.add_css_class("suggested-action")
         server_row.add_suffix(save_btn)
@@ -534,10 +543,44 @@ def show_history(config_dir: Path):
 
     app = Adw.Application(application_id="com.desktopconnector.history")
 
+    import re as _re
+    _url_re = _re.compile(r'https?://\S+')
+
+    def _contains_single_url(text):
+        return len(_url_re.findall(text)) == 1
+
+    def _extract_single_url(text):
+        m = _url_re.findall(text)
+        return m[0] if len(m) == 1 else None
+
     def on_item_click(item, win):
         filename = item.get("filename", "")
         content_path = item.get("content_path", "")
         is_clipboard = filename.startswith(".fn.clipboard")
+        label = item.get("display_label", "")
+
+        # Link detection — show open/copy dialog
+        if is_clipboard and _contains_single_url(label):
+            url = _extract_single_url(label)
+            dialog = Adw.MessageDialog(
+                transient_for=win,
+                heading="Link detected",
+                body=url,
+            )
+            dialog.add_response("copy", "Copy")
+            dialog.add_response("open", "Open in Browser")
+            dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
+
+            def on_response(dlg, response):
+                if response == "open":
+                    subprocess.Popen(["xdg-open", url])
+                elif response == "copy":
+                    write_clipboard_text(label)
+                    show_toast(win, "Copied to clipboard")
+
+            dialog.connect("response", on_response)
+            dialog.present()
+            return
 
         if is_clipboard:
             # Push to clipboard
@@ -700,8 +743,12 @@ def show_history(config_dir: Path):
                         except Exception:
                             pass
 
+                    is_link = is_clipboard and _contains_single_url(label)
+
                     if thumb_widget is None:
-                        if is_clipboard:
+                        if is_link:
+                            icon = Gtk.Image.new_from_icon_name("web-browser-symbolic")
+                        elif is_clipboard:
                             icon = Gtk.Image.new_from_icon_name("edit-paste-symbolic")
                         elif mime and mime.startswith("image/"):
                             icon = Gtk.Image.new_from_icon_name("image-x-generic-symbolic")

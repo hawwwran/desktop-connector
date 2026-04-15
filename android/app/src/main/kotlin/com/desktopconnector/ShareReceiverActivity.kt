@@ -13,7 +13,7 @@ import com.desktopconnector.ui.theme.DesktopConnectorTheme
 
 /**
  * Handles share intents from other apps.
- * Extracts URIs and passes them to AppNavigation which queues them for upload.
+ * Supports both file URIs (EXTRA_STREAM) and text/URLs (EXTRA_TEXT).
  */
 class ShareReceiverActivity : ComponentActivity() {
 
@@ -23,16 +23,17 @@ class ShareReceiverActivity : ComponentActivity() {
         val prefs = AppPreferences(this)
         val keyManager = KeyManager(this)
 
-        val uris = extractUris(intent)
-
-        if (uris.isEmpty()) {
-            Toast.makeText(this, "No files to share", Toast.LENGTH_SHORT).show()
+        if (!keyManager.hasPairedDevice()) {
+            Toast.makeText(this, "Not paired with a desktop yet. Open the app first.", Toast.LENGTH_LONG).show()
             finish()
             return
         }
 
-        if (!keyManager.hasPairedDevice()) {
-            Toast.makeText(this, "Not paired with a desktop yet. Open the app first.", Toast.LENGTH_LONG).show()
+        val uris = extractUris(intent)
+        val sharedText = extractText(intent)
+
+        if (uris.isEmpty() && sharedText == null) {
+            Toast.makeText(this, "Nothing to share", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
@@ -43,16 +44,21 @@ class ShareReceiverActivity : ComponentActivity() {
                     prefs = prefs,
                     keyManager = keyManager,
                     initialUris = uris,
+                    initialClipboardText = sharedText,
                 )
             }
         }
 
-        Toast.makeText(this, "${uris.size} file(s) queued for sending", Toast.LENGTH_SHORT).show()
+        if (uris.isNotEmpty()) {
+            Toast.makeText(this, "${uris.size} file(s) queued for sending", Toast.LENGTH_SHORT).show()
+        } else if (sharedText != null) {
+            val preview = if (sharedText.length > 30) sharedText.take(30) + "..." else sharedText
+            Toast.makeText(this, "Sending: $preview", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun extractUris(intent: Intent): List<Uri> {
         val uris = mutableListOf<Uri>()
-
         when (intent.action) {
             Intent.ACTION_SEND -> {
                 intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { uris.add(it) }
@@ -61,7 +67,13 @@ class ShareReceiverActivity : ComponentActivity() {
                 intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let { uris.addAll(it) }
             }
         }
-
         return uris
+    }
+
+    private fun extractText(intent: Intent): String? {
+        if (intent.action != Intent.ACTION_SEND) return null
+        // Only use EXTRA_TEXT if no file URI was shared
+        if (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) != null) return null
+        return intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }
     }
 }

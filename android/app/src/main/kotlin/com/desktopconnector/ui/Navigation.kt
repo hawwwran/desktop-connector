@@ -18,6 +18,7 @@ fun AppNavigation(
     prefs: AppPreferences,
     keyManager: KeyManager,
     initialUris: List<Uri> = emptyList(),
+    initialClipboardText: String? = null,
 ) {
     val navController = rememberNavController()
     val startDest = if (keyManager.hasPairedDevice()) "home" else "pairing"
@@ -29,6 +30,13 @@ fun AppNavigation(
     LaunchedEffect(initialUris) {
         if (initialUris.isNotEmpty() && keyManager.hasPairedDevice()) {
             transferViewModel.queueFiles(initialUris)
+        }
+    }
+
+    // Handle shared text (URLs from Chrome, YouTube, etc.)
+    LaunchedEffect(initialClipboardText) {
+        if (initialClipboardText != null && keyManager.hasPairedDevice()) {
+            transferViewModel.sendClipboardText(initialClipboardText)
         }
     }
 
@@ -49,6 +57,26 @@ fun AppNavigation(
             val connState by transferViewModel.connectionState.collectAsState()
             val transfers by transferViewModel.transfers.collectAsState()
             val isRefreshing by transferViewModel.isRefreshing.collectAsState()
+            val linkDialog by transferViewModel.linkDialog.collectAsState()
+
+            // Link open/copy dialog
+            linkDialog?.let { (url, fullText) ->
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { transferViewModel.dismissLinkDialog() },
+                    title = { androidx.compose.material3.Text("Link detected") },
+                    text = { androidx.compose.material3.Text(url, maxLines = 3) },
+                    confirmButton = {
+                        androidx.compose.material3.TextButton(
+                            onClick = { transferViewModel.openLink(url) }
+                        ) { androidx.compose.material3.Text("Open") }
+                    },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(
+                            onClick = { transferViewModel.copyLinkToClipboard(fullText) }
+                        ) { androidx.compose.material3.Text("Copy") }
+                    },
+                )
+            }
 
             HomeScreen(
                 connectionState = connState,

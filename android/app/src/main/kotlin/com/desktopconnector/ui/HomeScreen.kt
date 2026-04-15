@@ -239,6 +239,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
     }
     val label = transfer.displayLabel.ifEmpty { transfer.displayName }
     val isClipboard = transfer.displayName.startsWith(".fn.clipboard")
+    val isLink = isClipboard && containsSingleUrl(label)
     val mime = transfer.mimeType
 
     Card(
@@ -259,7 +260,14 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center,
             ) {
-                if (isClipboard) {
+                if (isLink) {
+                    Icon(
+                        painter = androidx.compose.ui.res.painterResource(R.drawable.ic_link),
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                } else if (isClipboard) {
                     Icon(
                         painter = androidx.compose.ui.res.painterResource(R.drawable.ic_clipboard),
                         contentDescription = null,
@@ -705,6 +713,20 @@ private fun RecentFileDialog(
 private fun formatTimestamp(epochSeconds: Long): String {
     val sdf = java.text.SimpleDateFormat("MMM d, HH:mm", java.util.Locale.getDefault())
     return sdf.format(java.util.Date(epochSeconds * 1000))
+}
+
+private val URL_REGEX = Regex("https?://\\S+")
+
+/** Returns true if text contains exactly one URL. */
+fun containsSingleUrl(text: String): Boolean {
+    val matches = URL_REGEX.findAll(text).toList()
+    return matches.size == 1
+}
+
+/** Extract the single URL from text, or null. */
+fun extractSingleUrl(text: String): String? {
+    val matches = URL_REGEX.findAll(text).toList()
+    return if (matches.size == 1) matches[0].value else null
 }
 
 private fun formatSize(bytes: Long): String {

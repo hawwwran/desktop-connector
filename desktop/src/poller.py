@@ -167,6 +167,13 @@ class Poller:
                         notify("Clipboard received", preview)
                         self.history.add(filename=filepath.name, display_label=preview,
                                          direction="received", size=len(text))
+                        # Auto-open link if enabled
+                        import re
+                        urls = re.findall(r'https?://\S+', text)
+                        if len(urls) == 1 and self.config.auto_open_links:
+                            import subprocess
+                            log.info("Auto-opening link: %s", urls[0])
+                            subprocess.Popen(["xdg-open", urls[0]])
                     else:
                         log.warning("Failed to set clipboard text")
                 elif subtype == "image":

@@ -110,6 +110,15 @@ class Config:
         return None
 
     @property
+    def auto_open_links(self) -> bool:
+        return self._data.get("auto_open_links", True)
+
+    @auto_open_links.setter
+    def auto_open_links(self, value: bool) -> None:
+        self._data["auto_open_links"] = value
+        self.save()
+
+    @property
     def is_registered(self) -> bool:
         return self.auth_token is not None and self.device_id is not None
 

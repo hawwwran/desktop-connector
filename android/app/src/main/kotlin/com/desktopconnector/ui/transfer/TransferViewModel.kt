@@ -52,6 +52,11 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
 
+    // Link dialog state — set when user taps a link item
+    private val _linkDialog = MutableStateFlow<Pair<String, String>?>(null) // (url, fullText)
+    val linkDialog: StateFlow<Pair<String, String>?> = _linkDialog.asStateFlow()
+    fun dismissLinkDialog() { _linkDialog.value = null }
+
     val pairedDeviceName: String
         get() = keyManager.getFirstPairedDevice()?.name ?: ""
 
@@ -206,6 +211,14 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun sendClipboardText(text: String) {
+        val app = getApplication<Application>()
+        val paired = keyManager.getFirstPairedDevice() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            queueClipboardText(text, paired.deviceId)
+        }
+    }
+
     private suspend fun queueClipboardText(text: String, recipientId: String) {
         val app = getApplication<Application>()
         val data = text.toByteArray()
@@ -267,11 +280,42 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun openLink(url: String) {
+        val app = getApplication<Application>()
+        try {
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            app.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(app, "Cannot open link", Toast.LENGTH_SHORT).show()
+        }
+        _linkDialog.value = null
+    }
+
+    fun copyLinkToClipboard(text: String) {
+        val app = getApplication<Application>()
+        val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Desktop Connector", text))
+        Toast.makeText(app, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+        _linkDialog.value = null
+    }
+
     fun onItemClick(transfer: QueuedTransfer) {
         val app = getApplication<Application>()
         val isClipboard = transfer.displayName.startsWith(".fn.clipboard")
+        val label = transfer.displayLabel.ifEmpty { transfer.displayName }
 
-        com.desktopconnector.data.AppLog.log("Click", "name=${transfer.displayName} label=${transfer.displayLabel} mime=${transfer.mimeType} uri=${transfer.contentUri}")
+        com.desktopconnector.data.AppLog.log("Click", "name=${transfer.displayName} label=${label} mime=${transfer.mimeType} uri=${transfer.contentUri}")
+
+        // Check for link — show dialog instead of immediate action
+        if (isClipboard) {
+            val url = com.desktopconnector.ui.extractSingleUrl(label)
+            if (url != null) {
+                _linkDialog.value = Pair(url, label)
+                return
+            }
+        }
 
         viewModelScope.launch {
             if (isClipboard) {
