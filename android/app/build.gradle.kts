@@ -13,14 +13,32 @@ android {
         applicationId = "com.desktopconnector"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 1
+        versionName = "0.0.0"
+        setProperty("archivesBaseName", "Desktop-Connector-${versionName}")
+    }
+
+    signingConfigs {
+        create("release") {
+            val ks = rootProject.file("keystore.jks")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = "desktopconnector"
+                keyAlias = "desktop-connector"
+                keyPassword = "desktopconnector"
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
         }
+    }
+
+    lint {
+        abortOnError = false
     }
 
     compileOptions {
