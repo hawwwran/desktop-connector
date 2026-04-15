@@ -27,18 +27,20 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Long poll wakes sender immediately on delivery
 - "Sent" → "Delivered" updates in ~1s
 
+### ~~FCM push wake~~
+- Server sends silent FCM data message when a transfer completes
+- Android wakes from screen-off and polls immediately (~2s delivery)
+- Firebase initialized dynamically from server config — no baked-in credentials
+- Each server deployment can use its own Firebase project
+- Optional: falls back to long-polling if server has no FCM config
+- Status and manual "Check" button in Android settings
+
 ## Quick wins
 
 ### Find my phone
 - `.fn.ring` — phone plays a loud alarm sound for 15 seconds, even on silent
 - Desktop tray menu: "Ring Phone"
 - Phone: `MediaPlayer` with `AudioManager.STREAM_ALARM` at max volume
-
-### Battery status
-- Phone includes battery level + charging state in health check headers
-- Server passes it through to the desktop via stats endpoint
-- Desktop shows in tray tooltip: "Phone: 73% charging"
-- No extra transfers needed — piggybacks on existing polling
 
 ## Medium effort
 
@@ -49,13 +51,11 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Privacy concern: user must explicitly enable in Android settings
 - Filter by app (don't forward every notification)
 
-### Auto-sync folder
-- Watch a designated folder on both sides for changes
-- New/modified files automatically transferred
-- Conflict resolution: last-modified wins, or keep both
-- Desktop: `inotifywait` or `watchdog` library
-- Android: `FileObserver`
-- Needs deletion sync too (`.fn.delete.filename`)
+### Download folder manager (Android)
+- Folder icon button on top of HomeScreen
+- History-like list of files in `DesktopConnector/` folder
+- Swipe sideways to permanently delete from storage
+- Header text: "Swipe to permanently delete"
 
 ### Transfer resume
 - Track which chunks were successfully uploaded per transfer
@@ -75,6 +75,11 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Android: download APK and trigger package installer
 - Desktop: show notification with link to installer
 
+### Windows client
+- Cross-platform refactor: extract shared core, add Windows platform layer
+- 8-phase plan: core extraction -> platform abstraction -> UI reorganization -> Windows implementation
+- Detailed roadmap: [ROADMAP-windows-client.md](ROADMAP-windows-client.md)
+
 ## Larger features
 
 ### Notification mirroring with actions
@@ -88,8 +93,3 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Desktop: conversation UI in GTK4
 - Privacy/permission heavy
 
-### Remote terminal
-- Run desktop shell commands from the phone
-- `.fn.exec` with command, desktop runs it and sends `.fn.exec.result` back
-- Security: whitelist commands, require confirmation on desktop
-- Useful for: restart a service, check disk space, run a script

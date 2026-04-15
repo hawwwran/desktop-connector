@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.desktopconnector.crypto.KeyManager
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.network.ApiClient
+import com.desktopconnector.network.FcmManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -88,6 +89,9 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         )
 
         _state.value = current.copy(stage = PairingStage.COMPLETE)
+
+        // Trigger FCM init now that we have a paired device
+        FcmManager.reset()
     }
 
     fun cancel() {

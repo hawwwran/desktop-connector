@@ -24,6 +24,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getString("auth_token", null)
         set(value) = prefs.edit().putString("auth_token", value).apply()
 
+    var fcmToken: String?
+        get() = prefs.getString("fcm_token", null)
+        set(value) = prefs.edit().putString("fcm_token", value).apply()
+
     val isRegistered: Boolean
         get() = deviceId != null && authToken != null
 

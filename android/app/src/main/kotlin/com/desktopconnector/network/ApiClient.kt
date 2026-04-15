@@ -166,6 +166,17 @@ class ApiClient(
         return executeStatus(request)
     }
 
+    fun updateFcmToken(token: String): Boolean {
+        val body = JSONObject().apply {
+            put("fcm_token", token)
+        }
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/devices/fcm-token")
+            .post(body.toString().toRequestBody(jsonType))
+            .build()
+        return executeStatus(request)
+    }
+
     fun healthCheck(): Boolean {
         return try {
             val request = Request.Builder().url("$serverUrl/api/health").get().build()

@@ -13,7 +13,7 @@ android {
         applicationId = "com.desktopconnector"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
+        versionCode = 3
         versionName = "0.1.1"
         setProperty("archivesBaseName", "Desktop-Connector-${versionName}")
     }
@@ -89,6 +89,10 @@ dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
+
+    // Firebase (dynamic init — no google-services plugin)
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
 
     // Core
     implementation("androidx.core:core-ktx:1.13.1")

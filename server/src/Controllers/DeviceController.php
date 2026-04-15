@@ -114,6 +114,23 @@ class DeviceController
         ]);
     }
 
+    public static function updateFcmToken(Database $db, string $deviceId): void
+    {
+        $body = Router::getJsonBody();
+        if (!$body || !array_key_exists('fcm_token', $body)) {
+            Router::json(['error' => 'Missing fcm_token'], 400);
+            return;
+        }
+
+        $token = $body['fcm_token']; // string or null (to clear)
+        $db->execute(
+            'UPDATE devices SET fcm_token = :token WHERE device_id = :id',
+            [':token' => $token, ':id' => $deviceId]
+        );
+
+        Router::json(['status' => 'ok']);
+    }
+
     public static function health(Database $db = null): void
     {
         // If auth headers present, update last_seen (acts as heartbeat)

@@ -5,6 +5,7 @@ class TransferController
     private const MAX_PENDING_BYTES = 500 * 1024 * 1024; // 500 MB per recipient
     private const TRANSFER_EXPIRY = 7 * 24 * 3600;       // 7 days
     private const INCOMPLETE_EXPIRY = 24 * 3600;          // 24 hours
+    private const LONG_POLL_TIMEOUT = 25;                 // seconds
 
     public static function init(Database $db, string $deviceId): void
     {
@@ -138,6 +139,7 @@ class TransferController
 
         if ($complete) {
             $db->execute('UPDATE transfers SET complete = 1 WHERE id = :id', [':id' => $transferId]);
+            self::sendFcmWake($db, $transferId);
         }
 
         Router::json([
@@ -148,8 +150,10 @@ class TransferController
 
     public static function pending(Database $db, string $deviceId): void
     {
-        // Run garbage collection piggyback
-        self::cleanup($db);
+        // Run garbage collection ~5% of requests (expiry is hours/days, no rush)
+        if (random_int(1, 20) === 1) {
+            self::cleanup($db);
+        }
 
         $transfers = $db->queryAll(
             'SELECT id as transfer_id, sender_id, encrypted_meta, chunk_count, created_at
@@ -287,29 +291,18 @@ class TransferController
      */
     public static function notify(Database $db, string $deviceId): void
     {
-        // test=1 returns immediately — used to verify the endpoint works
-        if (!empty($_GET['test'])) {
-            $db->execute(
-                'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
-                [':now' => time(), ':id' => $deviceId]
-            );
-            Router::json(['pending' => false, 'delivered' => false, 'time' => time(), 'test' => true]);
-            return;
-        }
-
         $since = isset($_GET['since']) ? (int)$_GET['since'] : 0;
-        $timeout = 25;
-        $start = time();
+        $isTest = !empty($_GET['test']);
+        $hasPending = false;
+        $hasDelivered = false;
 
-        while (time() - $start < $timeout) {
-            // Check for any pending incoming transfers (no time filter — may have been uploaded earlier)
+        $start = time();
+        do {
             $pending = $db->querySingle(
                 'SELECT COUNT(*) as count FROM transfers
                  WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0',
                 [':rid' => $deviceId]
             );
-
-            // Check for newly delivered sent transfers (using delivered_at timestamp)
             $delivered = $db->querySingle(
                 'SELECT COUNT(*) as count FROM transfers
                  WHERE sender_id = :sid AND delivered_at > :since',
@@ -319,32 +312,54 @@ class TransferController
             $hasPending = ($pending['count'] ?? 0) > 0;
             $hasDelivered = ($delivered['count'] ?? 0) > 0;
 
-            if ($hasPending || $hasDelivered) {
-                // Update last_seen
-                $db->execute(
-                    'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
-                    [':now' => time(), ':id' => $deviceId]
-                );
-                Router::json([
-                    'pending' => $hasPending,
-                    'delivered' => $hasDelivered,
-                    'time' => time(),
-                ]);
-                return;
+            if ($isTest || $hasPending || $hasDelivered) {
+                break;
             }
 
             usleep(1000000); // 1 second
-        }
+        } while (time() - $start < self::LONG_POLL_TIMEOUT);
 
-        // Timeout — nothing new
-        $db->execute(
-            'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
-            [':now' => time(), ':id' => $deviceId]
-        );
-        Router::json([
-            'pending' => false,
+        $response = [
+            'pending' => $hasPending,
+            'delivered' => $hasDelivered,
             'time' => time(),
-        ]);
+        ];
+        if ($isTest) {
+            $response['test'] = true;
+        }
+        Router::json($response);
+    }
+
+    private static function sendFcmWake(Database $db, string $transferId): void
+    {
+        try {
+            if (!FcmSender::isAvailable()) {
+                return;
+            }
+
+            $transfer = $db->querySingle(
+                'SELECT recipient_id FROM transfers WHERE id = :id',
+                [':id' => $transferId]
+            );
+            if (!$transfer) {
+                return;
+            }
+
+            $device = $db->querySingle(
+                'SELECT fcm_token FROM devices WHERE device_id = :id',
+                [':id' => $transfer['recipient_id']]
+            );
+            if (!$device || empty($device['fcm_token'])) {
+                return;
+            }
+
+            FcmSender::sendDataMessage($device['fcm_token'], [
+                'type' => 'transfer_ready',
+                'transfer_id' => $transferId,
+            ]);
+        } catch (\Throwable $e) {
+            // FCM failure must never break the transfer flow
+        }
     }
 
     private static function cleanup(Database $db): void

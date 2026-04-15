@@ -95,9 +95,11 @@ desktop-connector/
   data/                — protected (SQLite DB)
   storage/             — protected (encrypted blobs)
   migrations/          — protected
+  firebase-service-account.json  — optional, FCM push (protected by .htaccess)
+  google-services.json           — optional, FCM push (protected by .htaccess)
 ```
 
-Requires: PHP 8.0+, SQLite3 extension, mod_rewrite enabled.
+Requires: PHP 8.0+, SQLite3 extension, mod_rewrite enabled. For FCM push wake: curl extension, openssl extension.
 
 The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any subdirectory without configuration.
 
@@ -106,7 +108,8 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 - **PHP single-threaded**: The built-in PHP server handles one request at a time. Dashboard auto-refresh can block API calls. For production, use nginx + php-fpm or Apache + mod_php.
 - **Chunked transfers**: 2MB chunks for resume capability and memory efficiency.
 - **Delivery ACK**: Server tracks `downloaded` flag. Sender polls `GET /api/transfers/sent-status` to update "Sent" → "Delivered" in history.
-- **Battery**: Android app does NOT poll when screen is off. Polls immediately on screen wake with 10s throttle. Zero battery drain while idle.
+- **Battery**: Android app pauses polling when screen is off. With FCM configured, the server sends a silent push on new transfers, waking the app to poll immediately. Without FCM, polls resume on screen wake. Zero battery drain while idle.
+- **FCM push wake**: Optional. Server reads `firebase-service-account.json` and `google-services.json` at server root. If present, sends data-only FCM on transfer complete. Android app initializes Firebase dynamically from `GET /api/fcm/config` — no baked-in `google-services.json`. Each server deployment can use its own Firebase project. Falls back to long-polling if unavailable.
 - **Desktop GTK4 subprocess pattern**: pystray loads GTK3 internally. All Adw/GTK4 windows must run as `python3 -m src.windows <name>` subprocesses to avoid version conflict.
 - **Notification icons**: Android status bar icons are monochrome. Use distinct shapes for states (filled circle=connected, ring=disconnected). No intermediate "connecting" state in notifications — only updates on actual state change.
 - **Unpair syncs both sides**: When either side unpairs, it sends `.fn.unpair` to the other. Android navigates to pairing screen automatically. Desktop shows notification and updates tray menu.
@@ -133,10 +136,12 @@ server/
   src/Router.php             — URL routing + auth + base path detection
   src/Database.php           — SQLite wrapper
   src/Controllers/
-    DeviceController.php     — register, health, stats
+    DeviceController.php     — register, health, stats, FCM token
     PairingController.php    — QR pairing flow
-    TransferController.php   — upload, download, ack, sent-status
+    TransferController.php   — upload, download, ack, sent-status, FCM wake
     DashboardController.php  — HTML dashboard
+    FcmController.php        — FCM config endpoint
+  src/FcmSender.php          — FCM HTTP v1 API sender (JWT + OAuth2)
   migrations/001_initial.sql
 
 desktop/
@@ -168,9 +173,11 @@ android/app/src/main/kotlin/com/desktopconnector/
   network/
     ApiClient.kt             — OkHttp server API
     ConnectionManager.kt     — backoff state machine
+    FcmManager.kt            — dynamic Firebase init + FCM token management
     UploadWorker.kt          — WorkManager background uploads
   service/
     PollService.kt           — foreground service, polls for incoming transfers
+    FcmService.kt            — FCM message receiver, wakes PollService
   data/
     AppDatabase.kt           — Room DB
     QueuedTransfer.kt        — transfer entity + DAO
@@ -206,6 +213,8 @@ temp/                        — numbered install scripts (dev only, run with su
 | POST | /api/devices/register | No | Register device |
 | GET | /api/health | Optional | Health check + heartbeat |
 | GET | /api/devices/stats | Yes | Connection statistics |
+| POST | /api/devices/fcm-token | Yes | Store FCM token for push wake |
+| GET | /api/fcm/config | No | Firebase client config (for dynamic init) |
 | POST | /api/pairing/request | Yes | Phone sends pairing request |
 | GET | /api/pairing/poll | Yes | Desktop polls for pairing |
 | POST | /api/pairing/confirm | Yes | Confirm pairing |

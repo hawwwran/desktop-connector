@@ -8,6 +8,8 @@ require_once __DIR__ . '/../src/Controllers/DeviceController.php';
 require_once __DIR__ . '/../src/Controllers/PairingController.php';
 require_once __DIR__ . '/../src/Controllers/TransferController.php';
 require_once __DIR__ . '/../src/Controllers/DashboardController.php';
+require_once __DIR__ . '/../src/Controllers/FcmController.php';
+require_once __DIR__ . '/../src/FcmSender.php';
 
 // Initialize database
 $db = Database::getInstance();
@@ -23,6 +25,10 @@ $router->get('/api/health', function () use ($db) {
 
 $router->post('/api/devices/register', function () use ($db) {
     DeviceController::register($db);
+});
+
+$router->get('/api/fcm/config', function () {
+    FcmController::config();
 });
 
 $router->get('/api/devices/stats', function () use ($db) {
@@ -42,6 +48,12 @@ $router->get('/', function () {
 });
 
 // --- Authenticated routes ---
+
+$router->post('/api/devices/fcm-token', function () use ($db) {
+    $deviceId = Router::authenticate($db);
+    if ($deviceId === null) return;
+    DeviceController::updateFcmToken($db, $deviceId);
+});
 
 $router->post('/api/pairing/request', function () use ($db) {
     $deviceId = Router::authenticate($db);

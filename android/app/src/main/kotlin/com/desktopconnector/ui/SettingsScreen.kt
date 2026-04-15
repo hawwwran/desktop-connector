@@ -9,11 +9,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.network.ApiClient
+import com.desktopconnector.network.FcmManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -101,6 +103,42 @@ fun SettingsScreen(
                             com.desktopconnector.service.PollService.retryLongPoll = true
                         }) {
                             Text("Retry")
+                        }
+                    }
+                }
+            }
+
+            // FCM push status
+            val context = LocalContext.current
+            var fcmChecking by remember { mutableStateOf(false) }
+            var fcmActive by remember { mutableStateOf(FcmManager.isInitialized) }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            ) {
+                Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                    Text("FCM Push Wake", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    SettingsRow("Status", if (fcmChecking) "Checking..." else if (fcmActive) "Active" else "Not available")
+                    if (!fcmActive) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                fcmChecking = true
+                                scope.launch(Dispatchers.IO) {
+                                    FcmManager.reset()
+                                    val result = try {
+                                        FcmManager.initialize(context.applicationContext, prefs)
+                                    } catch (_: Exception) { false }
+                                    withContext(Dispatchers.Main) {
+                                        fcmActive = result
+                                        fcmChecking = false
+                                    }
+                                }
+                            },
+                            enabled = !fcmChecking,
+                        ) {
+                            Text("Check")
                         }
                     }
                 }

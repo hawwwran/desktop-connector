@@ -4,11 +4,13 @@
 RewriteEngine On
 RewriteBase /SERVICES/desktop-connector/
 
-# Block direct access to protected directories
+# Block direct access to protected directories and files
 RewriteRule ^src/ - [F,L]
 RewriteRule ^data/ - [F,L]
 RewriteRule ^storage/ - [F,L]
 RewriteRule ^migrations/ - [F,L]
+RewriteRule ^firebase-service-account\.json$ - [F,L]
+RewriteRule ^google-services\.json$ - [F,L]
 
 # Route everything else to public/index.php
 RewriteCond %{REQUEST_FILENAME} !-f

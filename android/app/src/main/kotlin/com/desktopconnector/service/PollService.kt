@@ -26,6 +26,7 @@ import com.desktopconnector.data.QueuedTransfer
 import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
 import com.desktopconnector.network.ApiClient
+import com.desktopconnector.network.FcmManager
 import kotlinx.coroutines.*
 import org.json.JSONObject
 
@@ -41,6 +42,7 @@ class PollService : Service() {
         // Shared state for UI — "active", "unavailable", "testing", "offline"
         @Volatile var longPollStatus: String = "offline"
         @Volatile var retryLongPoll: Boolean = false
+        @Volatile var fcmWakeSignal: Boolean = false
 
         fun start(context: Context) {
             val intent = Intent(context, PollService::class.java)
@@ -148,6 +150,11 @@ class PollService : Service() {
                 continue
             }
 
+            // One-time FCM initialization attempt (retried on pairing or app restart)
+            if (!FcmManager.isInitialized && !FcmManager.initAttempted) {
+                try { FcmManager.initialize(applicationContext, prefs) } catch (_: Exception) {}
+            }
+
             // Check for retry signal from settings
             if (retryLongPoll) {
                 retryLongPoll = false
@@ -238,9 +245,23 @@ class PollService : Service() {
             }
 
             if (!isScreenOn()) {
-                AppLog.log("Poll", "Screen off, pausing")
-                while (!isScreenOn() && running) {
-                    delay(500)
+                if (FcmManager.isInitialized) {
+                    // FCM available — wait for push wake or screen on
+                    AppLog.log("Poll", "Screen off, waiting for FCM wake")
+                    while (!isScreenOn() && !fcmWakeSignal && running) {
+                        delay(500)
+                    }
+                    if (fcmWakeSignal) {
+                        fcmWakeSignal = false
+                        AppLog.log("Poll", "FCM wake, polling")
+                        continue
+                    }
+                } else {
+                    // No FCM — pause until screen on
+                    AppLog.log("Poll", "Screen off, pausing")
+                    while (!isScreenOn() && running) {
+                        delay(500)
+                    }
                 }
                 if (running) {
                     AppLog.log("Poll", "Screen on, resuming")

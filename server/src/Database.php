@@ -35,6 +35,12 @@ class Database
         if ($cols && strpos($cols, 'delivered_at') === false) {
             $this->db->exec('ALTER TABLE transfers ADD COLUMN delivered_at INTEGER DEFAULT 0');
         }
+
+        // Add fcm_token column if missing (FCM push wake support)
+        $deviceCols = $this->db->querySingle("SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'");
+        if ($deviceCols && strpos($deviceCols, 'fcm_token') === false) {
+            $this->db->exec('ALTER TABLE devices ADD COLUMN fcm_token TEXT DEFAULT NULL');
+        }
     }
 
     public function query(string $sql, array $params = []): SQLite3Result
