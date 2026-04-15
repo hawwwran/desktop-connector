@@ -5,9 +5,11 @@ End-to-end encrypted file and clipboard sharing between your Android phone and L
 The relay server never sees your data — all content is encrypted on-device before it leaves, using X25519 key exchange and AES-256-GCM.
 
 <p align="center">
-  <img src="images/android-app.jpg" alt="Android app" width="280"/>
-  &nbsp;&nbsp;&nbsp;
-  <img src="images/desktop-app-history.png" alt="Desktop app" width="280"/>
+  <img src="images/android-app.jpg" alt="Android app" width="250"/>
+  &nbsp;&nbsp;
+  <img src="images/desktop-app-send-to-phone.png" alt="Send to Phone" width="250"/>
+  &nbsp;&nbsp;
+  <img src="images/desktop-app-history.png" alt="Transfer History" width="250"/>
 </p>
 
 ## Features
@@ -40,7 +42,7 @@ To uninstall:
 
 ## Install (Android)
 
-Download the APK from [Releases](../../releases) and install it on your phone.
+Download the APK from [Releases](../../releases) and install it on your phone. The app registers as a "Share to" target — send files from any app (gallery, file manager, browser) directly to your desktop.
 
 ## Setup
 
