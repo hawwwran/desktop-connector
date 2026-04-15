@@ -1,0 +1,438 @@
+package com.desktopconnector.ui.transfer
+
+import android.app.Application
+import android.content.ClipboardManager
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.util.Base64
+import android.util.Log
+import android.widget.Toast
+import androidx.core.content.FileProvider
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.desktopconnector.crypto.CryptoUtils
+import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.data.AppDatabase
+import com.desktopconnector.data.AppPreferences
+import com.desktopconnector.data.QueuedTransfer
+import com.desktopconnector.data.TransferDirection
+import com.desktopconnector.data.TransferStatus
+import com.desktopconnector.network.ApiClient
+import com.desktopconnector.network.ConnectionManager
+import com.desktopconnector.network.ConnectionState
+import com.desktopconnector.network.UploadWorker
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.util.UUID
+
+class TransferViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val prefs = AppPreferences(application)
+    private val keyManager = KeyManager(application)
+    private val db = AppDatabase.getInstance(application)
+    val connectionManager = ConnectionManager(prefs.serverUrl ?: "")
+
+    private val _transfers = MutableStateFlow<List<QueuedTransfer>>(emptyList())
+    val transfers: StateFlow<List<QueuedTransfer>> = _transfers.asStateFlow()
+
+    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+
+    private val _statusText = MutableStateFlow("Disconnected")
+    val statusText: StateFlow<String> = _statusText.asStateFlow()
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    val pairedDeviceName: String
+        get() = keyManager.getFirstPairedDevice()?.name ?: ""
+
+    private val _isPaired = MutableStateFlow(keyManager.hasPairedDevice())
+    val isPaired: StateFlow<Boolean> = _isPaired.asStateFlow()
+
+    init {
+        // Pass auth credentials to connection manager for heartbeat
+        if (prefs.serverUrl != null) {
+            connectionManager.serverUrl = prefs.serverUrl!!
+            connectionManager.deviceId = prefs.deviceId ?: ""
+            connectionManager.authToken = prefs.authToken ?: ""
+        }
+
+        // Health check loop — pings server, then waits for backoff or 15s
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                if (prefs.serverUrl != null) {
+                    connectionManager.serverUrl = prefs.serverUrl!!
+                    connectionManager.deviceId = prefs.deviceId ?: ""
+                    connectionManager.authToken = prefs.authToken ?: ""
+                    val reachable = connectionManager.checkConnection()
+
+                    if (!reachable) {
+                        // Wait for backoff duration (UI tick loop updates countdown)
+                        val backoff = connectionManager.retryInfo.value.currentBackoff
+                        delay((backoff * 1000).toLong())
+                    } else {
+                        delay(15_000)
+                    }
+                } else {
+                    delay(5_000)
+                }
+            }
+        }
+
+        // UI tick — updates status text and connection state every second
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                _connectionState.value = connectionManager.state.value
+                _statusText.value = connectionManager.getStatusText()
+                delay(1_000)
+            }
+        }
+
+        // Refresh transfer list + pairing state periodically
+        viewModelScope.launch {
+            while (true) {
+                refreshTransfers()
+                _isPaired.value = keyManager.hasPairedDevice()
+                delay(2000)
+            }
+        }
+    }
+
+    private suspend fun refreshTransfers() {
+        _transfers.value = db.transferDao().getRecent()
+    }
+
+    fun onRefresh() {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            refreshTransfers()
+            withContext(Dispatchers.IO) {
+                // Reset backoff — user explicitly asked to retry now
+                connectionManager.tryNow()
+                _connectionState.value = connectionManager.state.value
+            }
+            _isRefreshing.value = false
+        }
+    }
+
+    fun queueFiles(uris: List<Uri>) {
+        val app = getApplication<Application>()
+        val paired = keyManager.getFirstPairedDevice() ?: return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            for (uri in uris) {
+                val (name, size, mime) = getFileInfo(app, uri)
+                try {
+                    app.contentResolver.takePersistableUriPermission(
+                        uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: SecurityException) {}
+
+                val transfer = QueuedTransfer(
+                    contentUri = uri.toString(),
+                    displayName = name,
+                    displayLabel = name,
+                    mimeType = mime,
+                    sizeBytes = size,
+                    recipientDeviceId = paired.deviceId,
+                )
+                val id = db.transferDao().insert(transfer)
+                UploadWorker.enqueue(app, id)
+            }
+            refreshTransfers()
+        }
+    }
+
+    fun sendClipboard() {
+        val app = getApplication<Application>()
+        val paired = keyManager.getFirstPairedDevice()
+        if (paired == null) {
+            viewModelScope.launch(Dispatchers.Main) {
+                Toast.makeText(app, "No paired device", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+
+            val clip = withContext(Dispatchers.Main) { clipboard.primaryClip }
+            if (clip == null || clip.itemCount == 0) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(app, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            val item = clip.getItemAt(0)
+
+            // Try to get URI first (image/file)
+            val uri = item.uri
+            if (uri != null) {
+                val mime = app.contentResolver.getType(uri)
+                if (mime != null && (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("application/"))) {
+                    // Clipboard has a file/image URI — send it as a file with clipboard flag
+                    queueClipboardFile(uri, paired.deviceId)
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(app, "Sending clipboard image...", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+            }
+
+            // Fall back to text
+            val text = item.coerceToText(app)?.toString()
+            if (!text.isNullOrEmpty()) {
+                queueClipboardText(text, paired.deviceId)
+                val preview = if (text.length > 30) text.take(30) + "..." else text
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(app, "Sending: $preview", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(app, "Unsupported clipboard content", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private suspend fun queueClipboardText(text: String, recipientId: String) {
+        val app = getApplication<Application>()
+        val data = text.toByteArray()
+        val preview = if (text.length > 40) text.take(40) + "..." else text
+
+        val tempFile = File(app.cacheDir, ".fn.clipboard.text_${System.currentTimeMillis()}")
+        FileOutputStream(tempFile).use { it.write(data) }
+
+        val uri = Uri.fromFile(tempFile)
+        val transfer = QueuedTransfer(
+            contentUri = uri.toString(),
+            displayName = ".fn.clipboard.text",
+            displayLabel = preview,
+            mimeType = "text/plain",
+            sizeBytes = data.size.toLong(),
+            recipientDeviceId = recipientId,
+        )
+        val id = db.transferDao().insert(transfer)
+        UploadWorker.enqueue(app, id)
+        refreshTransfers()
+    }
+
+    private suspend fun queueClipboardFile(uri: Uri, recipientId: String) {
+        val app = getApplication<Application>()
+        val (_, size, mime) = getFileInfo(app, uri)
+
+        val transfer = QueuedTransfer(
+            contentUri = uri.toString(),
+            displayName = ".fn.clipboard.image",
+            displayLabel = "Clipboard image",
+            mimeType = mime,
+            sizeBytes = size,
+            recipientDeviceId = recipientId,
+        )
+        val id = db.transferDao().insert(transfer)
+        UploadWorker.enqueue(app, id)
+        refreshTransfers()
+    }
+
+    fun resend(transfer: QueuedTransfer) {
+        val app = getApplication<Application>()
+        val paired = keyManager.getFirstPairedDevice() ?: return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val newTransfer = transfer.copy(
+                id = 0,
+                status = TransferStatus.QUEUED,
+                chunksUploaded = 0,
+                errorMessage = null,
+                createdAt = System.currentTimeMillis() / 1000,
+                recipientDeviceId = paired.deviceId,
+            )
+            val id = db.transferDao().insert(newTransfer)
+            UploadWorker.enqueue(app, id)
+            refreshTransfers()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(app, "Resending...", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun onItemClick(transfer: QueuedTransfer) {
+        val app = getApplication<Application>()
+        val isClipboard = transfer.displayName.startsWith(".fn.clipboard")
+
+        viewModelScope.launch {
+            if (isClipboard) {
+                // Push to clipboard
+                val content = if (transfer.contentUri.isNotEmpty()) {
+                    try {
+                        val uri = Uri.parse(transfer.contentUri)
+                        if (uri.scheme == "file") {
+                            java.io.File(uri.path!!).readText()
+                        } else {
+                            app.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
+                        }
+                    } catch (_: Exception) { null }
+                } else null
+
+                if (content != null) {
+                    withContext(Dispatchers.Main) {
+                        val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Desktop Connector", content))
+                        Toast.makeText(app, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    // For received clipboard items, use the display label as the content
+                    val label = transfer.displayLabel
+                    if (label.isNotEmpty() && label != "Clipboard image") {
+                        withContext(Dispatchers.Main) {
+                            val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Desktop Connector", label))
+                            Toast.makeText(app, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(app, "Clipboard content no longer available", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            } else {
+                // Open file — try contentUri for sent, or DesktopConnector dir for received
+                val fileUri: Uri? = if (transfer.contentUri.isNotEmpty()) {
+                    Uri.parse(transfer.contentUri)
+                } else if (transfer.direction == TransferDirection.INCOMING) {
+                    val dir = java.io.File(android.os.Environment.getExternalStorageDirectory(), "DesktopConnector")
+                    val file = java.io.File(dir, transfer.displayLabel.ifEmpty { transfer.displayName })
+                    if (file.exists()) Uri.fromFile(file) else null
+                } else null
+
+                if (fileUri != null) {
+                    try {
+                        val actualUri = if (fileUri.scheme == "file") {
+                            val file = java.io.File(fileUri.path!!)
+                            if (!file.exists()) throw Exception("File no longer exists")
+                            androidx.core.content.FileProvider.getUriForFile(
+                                app, "${app.packageName}.fileprovider", file
+                            )
+                        } else fileUri
+
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                            setDataAndType(actualUri, transfer.mimeType)
+                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        app.startActivity(intent)
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(app, "Cannot open: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(app, "File no longer exists", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
+
+    fun sendUnpairNotification(pairedDeviceId: String) {
+        val app = getApplication<Application>()
+        val paired = keyManager.getPairedDevice(pairedDeviceId) ?: return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val prefs = AppPreferences(app)
+                val symmetricKey = android.util.Base64.decode(paired.symmetricKeyB64, android.util.Base64.NO_WRAP)
+                val api = com.desktopconnector.network.ApiClient(
+                    prefs.serverUrl ?: "", prefs.deviceId ?: "", prefs.authToken ?: ""
+                )
+
+                // Encrypt a tiny .fn.unpair payload
+                val data = "unpair".toByteArray()
+                val result = keyManager.encryptFileToChunks(
+                    inputStream = data.inputStream(),
+                    fileSize = data.size.toLong(),
+                    fileName = ".fn.unpair",
+                    mimeType = "application/octet-stream",
+                    symmetricKey = symmetricKey,
+                )
+
+                val transferId = java.util.UUID.randomUUID().toString()
+                if (api.initTransfer(transferId, pairedDeviceId, result.encryptedMeta, result.encryptedChunks.size)) {
+                    for ((i, chunk) in result.encryptedChunks.withIndex()) {
+                        api.uploadChunk(transferId, i, chunk)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("TransferVM", "Failed to send unpair notification: ${e.message}")
+            }
+        }
+    }
+
+    fun sendLogsToDesktop(text: String) {
+        val app = getApplication<Application>()
+        val paired = keyManager.getFirstPairedDevice() ?: return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val tempFile = java.io.File(app.cacheDir, "android_logs_${System.currentTimeMillis()}.txt")
+            java.io.FileOutputStream(tempFile).use { it.write(text.toByteArray()) }
+
+            val transfer = QueuedTransfer(
+                contentUri = Uri.fromFile(tempFile).toString(),
+                displayName = "android_logs.txt",
+                displayLabel = "App logs",
+                mimeType = "text/plain",
+                sizeBytes = text.toByteArray().size.toLong(),
+                recipientDeviceId = paired.deviceId,
+            )
+            val id = db.transferDao().insert(transfer)
+            UploadWorker.enqueue(app, id)
+            refreshTransfers()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(app, "Sending logs to desktop...", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun deleteTransfer(transfer: QueuedTransfer) {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.transferDao().delete(transfer.id)
+            refreshTransfers()
+        }
+    }
+
+    fun tryNow() {
+        viewModelScope.launch(Dispatchers.IO) {
+            connectionManager.tryNow()
+            _connectionState.value = connectionManager.state.value
+            _statusText.value = connectionManager.getStatusText()
+        }
+    }
+
+    private fun getFileInfo(app: Application, uri: Uri): Triple<String, Long, String> {
+        var name = "unknown"
+        var size = 0L
+        val mime = app.contentResolver.getType(uri) ?: "application/octet-stream"
+
+        app.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (cursor.moveToFirst()) {
+                if (nameIndex >= 0) name = cursor.getString(nameIndex) ?: "unknown"
+                if (sizeIndex >= 0) size = cursor.getLong(sizeIndex)
+            }
+        }
+        return Triple(name, size, mime)
+    }
+}

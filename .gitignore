@@ -1,0 +1,24 @@
+# Server
+server/data/
+server/storage/
+server/test.php
+
+# Desktop
+desktop/__pycache__/
+desktop/src/__pycache__/
+desktop/assets/
+*.pyc
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+
+# Temp / dev
+temp/
+*.log
+__pycache__/
+.env

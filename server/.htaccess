@@ -1,0 +1,15 @@
+# Route all requests through public/index.php
+# Protect src/, data/, storage/, migrations/ from direct access
+
+RewriteEngine On
+RewriteBase /SERVICES/desktop-connector/
+
+# Block direct access to protected directories
+RewriteRule ^src/ - [F,L]
+RewriteRule ^data/ - [F,L]
+RewriteRule ^storage/ - [F,L]
+RewriteRule ^migrations/ - [F,L]
+
+# Route everything else to public/index.php
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^ public/index.php [QSA,L]
