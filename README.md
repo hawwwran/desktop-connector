@@ -51,11 +51,11 @@ Download the APK from [Releases](../../releases) and install it on your phone.
 
 ## Server
 
-The relay server is a PHP app that stores only encrypted blobs. It never sees your files or clipboard content.
+The relay server is a config-less PHP app — no configuration files, no database setup, no management needed. Just upload and it works. It stores only encrypted blobs and device IDs. It never sees your files or clipboard content.
 
 ### Self-hosting
 
-Upload the `server/` directory to any PHP 8.0+ hosting with SQLite support. See [CLAUDE.md](CLAUDE.md) for deployment details.
+Upload the `server/` directory to any PHP 8.0+ hosting with SQLite support. No configuration needed — the database and storage directories are created automatically on first request. See [CLAUDE.md](CLAUDE.md) for deployment details.
 
 ### Local development
 
