@@ -116,6 +116,9 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 - **Config reload**: Desktop config reloads `paired_devices` from disk on every access to pick up changes from subprocess windows (settings, pairing).
 - **Recent files**: Android HomeScreen shows lazy-loaded recent files from MediaStore, excluding files in `DesktopConnector/` folder. Refreshes on app resume.
 - **Dependency checker**: Desktop app checks all imports on startup. If missing, shows GTK4 dialog with "Install" button that opens installer in terminal.
+- **APK install**: Tapping an APK file in Android history checks `REQUEST_INSTALL_PACKAGES` permission, redirects to settings if needed, then opens the system package installer.
+- **Remote device status**: Desktop tray icon shows green/yellow donut (connected to server, phone offline) vs green/white (both online). Checked every 30s via stats endpoint.
+- **Pull-to-refresh scope**: Android pull-to-refresh wraps the entire HomeScreen (buttons, recent files, history), not just the history list. Also resets connection backoff.
 
 ## Project structure
 
