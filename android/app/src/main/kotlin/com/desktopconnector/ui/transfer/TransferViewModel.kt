@@ -222,7 +222,9 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
     private suspend fun queueClipboardText(text: String, recipientId: String) {
         val app = getApplication<Application>()
         val data = text.toByteArray()
-        val preview = if (text.length > 40) text.take(40) + "..." else text
+        // Keep full text if it contains a URL (so we can open it on click), truncate otherwise
+        val hasUrl = com.desktopconnector.ui.containsSingleUrl(text)
+        val preview = if (hasUrl) text else if (text.length > 40) text.take(40) + "..." else text
 
         val tempFile = File(app.cacheDir, ".fn.clipboard.text_${System.currentTimeMillis()}")
         FileOutputStream(tempFile).use { it.write(data) }

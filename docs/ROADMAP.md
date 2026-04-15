@@ -4,16 +4,17 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 
 ## Quick wins
 
-### Send URL
-- `.fn.url` — receiver opens the link in the default browser
-- Desktop: tray menu "Send URL from clipboard" or detect clipboard contains URL
-- Android: share intent for URLs, or "Send URL" button
-- Bidirectional
+### ~~Send URL~~ (Done)
+- Implemented via smart link detection in clipboard transfers
+- Share from Chrome/YouTube sends URL as clipboard text
+- Both apps detect single URLs, show link icon, Open/Copy dialog
+- Desktop auto-opens links by default (configurable in Settings)
 
-### Right-click "Send to Phone"
-- Nautilus/file manager integration via a `.desktop` action
-- Script calls `desktop-connector --send="/path/to/file"`
-- Linux only, single file at a time (or multi-select)
+### ~~Right-click "Send to Phone"~~ (Done)
+- Nautilus script installed to `~/.local/share/nautilus/scripts/Send to Phone`
+- Right-click any file(s) → Scripts → Send to Phone
+- Calls `desktop-connector --headless --send` for each file
+- Installed/removed automatically by install.sh/uninstall.sh
 
 ### Find my phone
 - `.fn.ring` — phone plays a loud alarm sound for 15 seconds, even on silent

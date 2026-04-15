@@ -25,6 +25,8 @@ The relay server never sees your data — all content is encrypted on-device bef
 - **Share intent** — share any file from any Android app to your desktop
 - **Recent files** strip on Android for quick sending
 - **Drag and drop** on desktop to send files
+- **Right-click "Send to Phone"** — file manager integration (Nautilus, Nemo, Dolphin)
+- **Smart link detection** — shared URLs show a link icon, tap to open or copy
 - **Transfer history** with delivery status (Sent / Delivered / Received), swipe to delete
 - **Offline resilient** — exponential backoff, queues transfers, catches up on reconnect
 - **Zero battery drain** — Android does not poll when screen is off, polls immediately on wake

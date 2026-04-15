@@ -326,8 +326,8 @@ class PollService : Service() {
                 "text" -> {
                     val text = String(data)
                     pushTextToClipboard(text)
-                    val preview = if (text.length > 40) text.take(40) + "..." else text
-                    preview
+                    val hasUrl = com.desktopconnector.ui.containsSingleUrl(text)
+                    if (hasUrl) text else if (text.length > 40) text.take(40) + "..." else text
                 }
                 "image" -> {
                     pushImageToClipboard(data)

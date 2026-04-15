@@ -163,13 +163,18 @@ class Poller:
                     if write_clipboard_text(text):
                         log.info("Clipboard text set (%d chars)", len(text))
                         from .notifications import notify
-                        preview = text[:60] + "..." if len(text) > 60 else text
-                        notify("Clipboard received", preview)
+                        import re
+                        urls = re.findall(r'https?://\S+', text)
+                        if len(urls) == 1:
+                            preview = text  # Keep full text for URL items
+                        elif len(text) > 60:
+                            preview = text[:60] + "..."
+                        else:
+                            preview = text
+                        notify("Clipboard received", preview[:60])
                         self.history.add(filename=filepath.name, display_label=preview,
                                          direction="received", size=len(text))
                         # Auto-open link if enabled
-                        import re
-                        urls = re.findall(r'https?://\S+', text)
                         if len(urls) == 1 and self.config.auto_open_links:
                             import subprocess
                             log.info("Auto-opening link: %s", urls[0])

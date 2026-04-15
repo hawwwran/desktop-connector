@@ -233,9 +233,15 @@ class TrayApp:
         tid = self.api.send_file(tmp, target_id, symmetric_key, filename_override=filename)
         if tid:
             if mime_type.startswith("text/"):
-                preview = data.decode("utf-8", errors="replace")[:40]
-                if len(data) > 40:
-                    preview += "..."
+                import re
+                text = data.decode("utf-8", errors="replace")
+                urls = re.findall(r'https?://\S+', text)
+                if len(urls) == 1:
+                    preview = text  # Keep full text for URL items
+                elif len(text) > 40:
+                    preview = text[:40] + "..."
+                else:
+                    preview = text
             else:
                 preview = "Clipboard image"
             log.info("Clipboard sent: %s", preview)

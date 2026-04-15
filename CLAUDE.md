@@ -74,6 +74,7 @@ What it does:
 - Downloads app to `~/.local/share/desktop-connector/`
 - Creates `desktop-connector` launcher in `~/.local/bin/`
 - Adds app menu entry and autostart
+- Installs file manager right-click "Send to Phone" (auto-detects Nautilus, Nemo, Dolphin)
 
 Uninstall:
 ```bash
@@ -139,6 +140,7 @@ server/
 desktop/
   install.sh       — idempotent Linux installer (one-liner curl | bash)
   uninstall.sh     — clean removal
+  nautilus-send-to-phone.py — file manager "Send to Phone" script (Nautilus/Nemo/Dolphin)
   src/
     main.py          — entry point (--headless, --send, --pair) + dependency checker
   crypto.py        — X25519 + AES-256-GCM + HKDF

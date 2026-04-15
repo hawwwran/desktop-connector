@@ -27,6 +27,11 @@ echo -e "${GREEN}[✓]${NC} Removed app menu entry"
 rm -f "$AUTOSTART_FILE"
 echo -e "${GREEN}[✓]${NC} Removed autostart entry"
 
+rm -f "$HOME/.local/share/nautilus/scripts/Send to Phone"
+rm -f "$HOME/.local/share/nemo/scripts/Send to Phone"
+rm -f "$HOME/.local/share/kservices5/ServiceMenus/desktop-connector-send.desktop"
+echo -e "${GREEN}[✓]${NC} Removed file manager integrations"
+
 rm -rf "$INSTALL_DIR"
 echo -e "${GREEN}[✓]${NC} Removed app files"
 

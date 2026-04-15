@@ -145,6 +145,54 @@ EOF
 
 info "App menu entry installed"
 
+# --- File manager "Send to Phone" integration ---
+
+FM_INSTALLED=false
+
+# Nautilus (GNOME, Ubuntu, Zorin)
+if command -v nautilus >/dev/null 2>&1; then
+    NAUTILUS_SCRIPTS="$HOME/.local/share/nautilus/scripts"
+    mkdir -p "$NAUTILUS_SCRIPTS"
+    cp "$INSTALL_DIR/nautilus-send-to-phone.py" "$NAUTILUS_SCRIPTS/Send to Phone"
+    chmod +x "$NAUTILUS_SCRIPTS/Send to Phone"
+    info "Nautilus: Scripts → 'Send to Phone' installed"
+    FM_INSTALLED=true
+fi
+
+# Nemo (Cinnamon, Mint)
+if command -v nemo >/dev/null 2>&1; then
+    NEMO_SCRIPTS="$HOME/.local/share/nemo/scripts"
+    mkdir -p "$NEMO_SCRIPTS"
+    cp "$INSTALL_DIR/nautilus-send-to-phone.py" "$NEMO_SCRIPTS/Send to Phone"
+    chmod +x "$NEMO_SCRIPTS/Send to Phone"
+    info "Nemo: Scripts → 'Send to Phone' installed"
+    FM_INSTALLED=true
+fi
+
+# Dolphin (KDE)
+if command -v dolphin >/dev/null 2>&1; then
+    DOLPHIN_SERVICES="$HOME/.local/share/kservices5/ServiceMenus"
+    mkdir -p "$DOLPHIN_SERVICES"
+    cat > "$DOLPHIN_SERVICES/desktop-connector-send.desktop" << DOLPHIN_EOF
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=application/octet-stream;
+Actions=sendToPhone
+
+[Desktop Action sendToPhone]
+Name=Send to Phone
+Icon=preferences-system-network
+Exec=$BIN_DIR/$APP_NAME --headless --send=%f
+DOLPHIN_EOF
+    info "Dolphin: 'Send to Phone' service menu installed"
+    FM_INSTALLED=true
+fi
+
+if [ "$FM_INSTALLED" = false ]; then
+    warn "No supported file manager found (Nautilus, Nemo, Dolphin). Right-click integration skipped."
+fi
+
 # --- Autostart (optional, don't overwrite if user removed it) ---
 
 if [ ! -f "$AUTOSTART_FILE" ] && [ ! -f "$HOME/.config/$APP_NAME/.no-autostart" ]; then
