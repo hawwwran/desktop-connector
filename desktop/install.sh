@@ -6,8 +6,17 @@ set -e
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
+#   curl -fsSL ... | bash -s -- --version=0.1.1
 
 APP_NAME="desktop-connector"
+INSTALL_VERSION=""
+
+# Parse arguments
+for arg in "$@"; do
+    case "$arg" in
+        --version=*) INSTALL_VERSION="${arg#--version=}" ;;
+    esac
+done
 INSTALL_DIR="$HOME/.local/share/$APP_NAME"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_FILE="$HOME/.local/share/applications/$APP_NAME.desktop"
@@ -92,8 +101,20 @@ if [ -f "$SCRIPT_DIR/src/main.py" ]; then
     step "Installing from local files..."
     cp -r "$SCRIPT_DIR/." "$INSTALL_DIR/"
     info "App files installed from local copy"
+elif [ -n "$INSTALL_VERSION" ]; then
+    step "Downloading version ${INSTALL_VERSION}..."
+    TMP=$(mktemp -d)
+    RELEASE_URL="$REPO_URL/releases/download/desktop/v${INSTALL_VERSION}/desktop-connector-${INSTALL_VERSION}.tar.gz"
+    if curl -fsSL "$RELEASE_URL" | tar xz -C "$INSTALL_DIR"; then
+        info "Installed v${INSTALL_VERSION} from release"
+    else
+        echo -e "${RED}Failed to download v${INSTALL_VERSION}. Check the version exists.${NC}"
+        rm -rf "$TMP"
+        exit 1
+    fi
+    rm -rf "$TMP"
 else
-    step "Downloading app..."
+    step "Downloading latest from main..."
     TMP=$(mktemp -d)
     if command -v git >/dev/null 2>&1; then
         git clone --quiet --depth 1 "$REPO_URL.git" "$TMP/repo" 2>/dev/null && \
