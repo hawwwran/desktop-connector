@@ -33,7 +33,7 @@ The relay server never sees your data — all content is encrypted on-device bef
 - **Zero battery drain** — Android does not poll when screen is off, polls immediately on wake
 - **Unpair syncs both sides** — unpair from either device, the other side reacts automatically
 - **APK install** — send APK to phone, tap to install with permission handling
-- **Self-hosted relay** — run your own PHP server on any PHP 8.0+ hosting
+- **Self-hosted relay** — config-less PHP server, just upload to any PHP 8.0+ hosting and it works
 - **One-command install** — idempotent installer with dependency checking
 
 ## Install (Linux Desktop)
