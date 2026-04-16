@@ -370,21 +370,7 @@ class PollService : Service() {
 
         val symmetricKey = Base64.decode(paired.symmetricKeyB64, Base64.NO_WRAP)
 
-        Log.i(TAG, "Receiving transfer $transferId from ${senderId.take(12)} ($chunkCount chunks)")
-
-
-        // Download all chunks
-        val chunks = mutableListOf<ByteArray>()
-        for (i in 0 until chunkCount) {
-            val chunk = api.downloadChunk(transferId, i)
-            if (chunk == null) {
-                Log.e(TAG, "Failed to download chunk $i of $transferId")
-                return
-            }
-            chunks.add(chunk)
-        }
-
-        // Decrypt metadata
+        // Decrypt metadata first so we can show filename in progress UI
         val metaBlob = Base64.decode(encryptedMeta, Base64.NO_WRAP)
         val metaJson: JSONObject
         try {
@@ -396,18 +382,60 @@ class PollService : Service() {
         }
 
         val fileName = metaJson.getString("filename")
+        val mimeType = metaJson.optString("mime_type", "application/octet-stream")
         val baseNonceB64 = metaJson.getString("base_nonce")
         val baseNonce = Base64.decode(baseNonceB64, Base64.NO_WRAP)
+        val isFnTransfer = fileName.startsWith(".fn.")
+
+        Log.i(TAG, "Receiving transfer $transferId from ${senderId.take(12)} ($chunkCount chunks): $fileName")
+
+        // Insert into DB before downloading so the UI shows progress immediately
+        // Skip for small .fn. system transfers (clipboard, unpair)
+        val db = AppDatabase.getInstance(this)
+        var dbRowId: Long = 0
+        if (!isFnTransfer) {
+            dbRowId = db.transferDao().insert(QueuedTransfer(
+                contentUri = "",
+                displayName = fileName,
+                displayLabel = fileName,
+                mimeType = mimeType,
+                sizeBytes = 0,
+                recipientDeviceId = prefs.deviceId ?: "",
+                direction = TransferDirection.INCOMING,
+                status = TransferStatus.UPLOADING,  // reuse UPLOADING for download progress
+                totalChunks = chunkCount,
+                chunksUploaded = 0,
+                transferId = transferId,
+            ))
+        }
+
+        // Download all chunks with progress updates
+        val chunks = mutableListOf<ByteArray>()
+        for (i in 0 until chunkCount) {
+            val chunk = api.downloadChunk(transferId, i)
+            if (chunk == null) {
+                Log.e(TAG, "Failed to download chunk $i of $transferId")
+                if (dbRowId > 0) {
+                    db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
+                }
+                return
+            }
+            chunks.add(chunk)
+            if (dbRowId > 0) {
+                db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
+            }
+        }
 
         // Decrypt chunks
         val plainParts = mutableListOf<ByteArray>()
         for ((i, chunk) in chunks.withIndex()) {
             try {
-                val nonce = CryptoUtils.makeChunkNonce(baseNonce, i)
-                // chunk has nonce prepended from encrypt_blob, so use decryptBlob
                 plainParts.add(CryptoUtils.decryptBlob(chunk, symmetricKey))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to decrypt chunk $i: ${e.message}")
+                if (dbRowId > 0) {
+                    db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Decryption failed")
+                }
                 return
             }
         }
@@ -418,7 +446,7 @@ class PollService : Service() {
         // Handle .fn. transfers
         val displayLabel: String
         var savedUri = ""
-        if (fileName.startsWith(".fn.")) {
+        if (isFnTransfer) {
             displayLabel = handleFnTransfer(fileName, data)
             AppLog.log("Recv", "Fn transfer: $fileName -> $displayLabel")
         } else {
@@ -433,19 +461,28 @@ class PollService : Service() {
         api.ackTransfer(transferId)
         AppLog.log("Recv", "Acked $transferId")
 
-        // Record in history (skip system .fn. commands like unpair)
-        if (fileName != ".fn.unpair") {
-            val db = AppDatabase.getInstance(this)
-            db.transferDao().insert(QueuedTransfer(
-                contentUri = savedUri,
-                displayName = fileName,
-                displayLabel = displayLabel,
-                mimeType = metaJson.optString("mime_type", "application/octet-stream"),
-                sizeBytes = data.size.toLong(),
-                recipientDeviceId = prefs.deviceId ?: "",
-                direction = TransferDirection.INCOMING,
-                status = TransferStatus.COMPLETE,
-            ))
+        // Finalize in history
+        if (isFnTransfer) {
+            // .fn. transfers were not pre-inserted — add now (skip unpair)
+            if (fileName != ".fn.unpair") {
+                db.transferDao().insert(QueuedTransfer(
+                    contentUri = savedUri,
+                    displayName = fileName,
+                    displayLabel = displayLabel,
+                    mimeType = mimeType,
+                    sizeBytes = data.size.toLong(),
+                    recipientDeviceId = prefs.deviceId ?: "",
+                    direction = TransferDirection.INCOMING,
+                    status = TransferStatus.COMPLETE,
+                ))
+                db.transferDao().trimHistory()
+                showTransferNotification(displayLabel)
+            }
+        } else {
+            // Update the pre-inserted row to COMPLETE with final data
+            db.transferDao().completeDownload(
+                dbRowId, TransferStatus.COMPLETE, savedUri, displayLabel, data.size.toLong()
+            )
             db.transferDao().trimHistory()
             showTransferNotification(displayLabel)
         }

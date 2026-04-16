@@ -726,6 +726,29 @@ def show_history(config_dir: Path):
             "xdg-open", str(config.save_directory)
         ]))
         header.pack_start(folder_btn)
+
+        clear_all_btn = Gtk.Button.new_from_icon_name("edit-clear-all-symbolic")
+        clear_all_btn.set_tooltip_text("Clear all history")
+        def on_clear_all(b):
+            dialog = Adw.MessageDialog(
+                transient_for=win,
+                heading="Clear history?",
+                body="This will remove all transfer history entries.",
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("clear", "Clear All")
+            dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
+            def on_response(dlg, response):
+                if response == "clear":
+                    with history._lock:
+                        history._items.clear()
+                        history._save()
+                    last_snapshot[0] = None
+            dialog.connect("response", on_response)
+            dialog.present()
+        clear_all_btn.connect("clicked", on_clear_all)
+        header.pack_end(clear_all_btn)
+
         toolbar_view.add_top_bar(header)
 
         scroll = Gtk.ScrolledWindow(vexpand=True)
@@ -741,16 +764,23 @@ def show_history(config_dir: Path):
         last_snapshot = [None]
         current_rows = []
 
+        has_downloading = [False]
+
         def build_list():
             # Reload from disk to pick up changes from the main process
             history._items = history._load()
             items = history.items
 
-            # Check if anything changed
-            snapshot = json.dumps(items)
-            if snapshot == last_snapshot[0]:
+            # Fast change detection: count + newest timestamp + any downloading status
+            downloading = any(i.get("status") == "downloading" for i in items)
+            sig = (len(items),
+                   items[0].get("timestamp", 0) if items else 0,
+                   items[0].get("status") if items else None,
+                   sum(i.get("chunks_downloaded", 0) for i in items if i.get("status") == "downloading"))
+            if sig == last_snapshot[0]:
                 return True  # No change, keep timer going
-            last_snapshot[0] = snapshot
+            last_snapshot[0] = sig
+            has_downloading[0] = downloading
 
             # Remove previously added rows
             for row in current_rows:
@@ -770,7 +800,15 @@ def show_history(config_dir: Path):
                     ts = time.strftime("%b %d, %H:%M", time.localtime(item.get("timestamp", 0)))
                     is_clipboard = item.get("filename", "").startswith(".fn.clipboard")
                     delivered = item.get("delivered", False)
-                    if item["direction"] == "received":
+                    item_status = item.get("status", "complete")
+                    chunks_dl = item.get("chunks_downloaded", 0)
+                    chunks_total = item.get("chunks_total", 0)
+
+                    if item_status == "downloading":
+                        status = f"Downloading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Downloading"
+                    elif item_status == "failed":
+                        status = "Failed"
+                    elif item["direction"] == "received":
                         status = "Received"
                     elif delivered:
                         status = "Delivered"
@@ -780,7 +818,7 @@ def show_history(config_dir: Path):
                     row = Adw.ActionRow(
                         title=f"{direction_prefix}  {label}",
                         subtitle=f"{size}  \u00b7  {ts}  \u00b7  {status}",
-                        activatable=True,
+                        activatable=item_status != "downloading",
                     )
                     row.set_title_lines(1)
 
@@ -845,26 +883,44 @@ def show_history(config_dir: Path):
                     del_btn.add_css_class("circular")
                     captured_item = item
 
-                    def on_delete(b, it=captured_item):
+                    def on_delete(b, it=captured_item, r=row):
                         history.remove(it)
-                        last_snapshot[0] = None  # Force rebuild
-                        build_list()
+                        # Remove row from UI immediately (no full rebuild)
+                        group.remove(r)
+                        current_rows.remove(r)
+                        last_snapshot[0] = None  # Sync on next tick
 
                     del_btn.connect("clicked", on_delete)
                     row.add_suffix(del_btn)
 
                     captured = item
-                    row.connect("activated", lambda r, it=captured: on_item_click(it, win))
+                    if item_status != "downloading":
+                        row.connect("activated", lambda r, it=captured: on_item_click(it, win))
 
                     group.add(row)
                     current_rows.append(row)
+
+                    # Progress bar for downloading items
+                    if item_status == "downloading" and chunks_total > 0:
+                        progress_bar = Gtk.ProgressBar()
+                        progress_bar.set_fraction(chunks_dl / chunks_total)
+                        progress_bar.set_margin_start(16)
+                        progress_bar.set_margin_end(16)
+                        progress_bar.set_margin_bottom(8)
+                        group.add(progress_bar)
+                        current_rows.append(progress_bar)
 
             return True  # Keep timer going
 
         build_list()
 
-        # Auto-refresh every 3 seconds
-        GLib.timeout_add(3000, build_list)
+        # Adaptive refresh: 1s during downloads, 3s otherwise
+        def refresh_tick():
+            build_list()
+            interval = 1000 if has_downloading[0] else 3000
+            GLib.timeout_add(interval, refresh_tick)
+            return False  # don't repeat this one, the new timeout takes over
+        GLib.timeout_add(1000, refresh_tick)
 
         win.present()
 

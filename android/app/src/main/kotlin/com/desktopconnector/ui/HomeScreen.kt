@@ -229,7 +229,10 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
     val dirLabel = if (transfer.direction == TransferDirection.INCOMING) "\u2193 " else "\u2191 "
     val statusText = when (transfer.status) {
         TransferStatus.QUEUED -> "Queued"
-        TransferStatus.UPLOADING -> if (transfer.totalChunks > 0) "Uploading ${transfer.chunksUploaded}/${transfer.totalChunks}" else "Uploading"
+        TransferStatus.UPLOADING -> when (transfer.direction) {
+            TransferDirection.INCOMING -> if (transfer.totalChunks > 0) "Downloading ${transfer.chunksUploaded}/${transfer.totalChunks}" else "Downloading"
+            TransferDirection.OUTGOING -> if (transfer.totalChunks > 0) "Uploading ${transfer.chunksUploaded}/${transfer.totalChunks}" else "Uploading"
+        }
         TransferStatus.COMPLETE -> when {
             transfer.direction == TransferDirection.INCOMING -> "Received"
             transfer.delivered -> "Delivered"

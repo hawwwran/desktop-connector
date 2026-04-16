@@ -39,7 +39,8 @@ class TransferHistory:
 
     def add(self, filename: str, display_label: str, direction: str,
             size: int, content_path: str = "", sender_id: str = "",
-            transfer_id: str = "") -> None:
+            transfer_id: str = "", status: str = "complete",
+            chunks_downloaded: int = 0, chunks_total: int = 0) -> None:
         with self._lock:
             self._items.insert(0, {
                 "filename": filename,
@@ -49,11 +50,24 @@ class TransferHistory:
                 "content_path": content_path,
                 "sender_id": sender_id,
                 "transfer_id": transfer_id,
-                "delivered": direction == "received",  # received items are delivered by definition
+                "status": status,
+                "chunks_downloaded": chunks_downloaded,
+                "chunks_total": chunks_total,
+                "delivered": direction == "received" and status == "complete",
                 "timestamp": int(time.time()),
             })
             self._items = self._items[:MAX_HISTORY]
             self._save()
+
+    def update(self, transfer_id: str, **fields) -> bool:
+        """Update an existing history entry by transfer_id. Returns True if found."""
+        with self._lock:
+            for item in self._items:
+                if item.get("transfer_id") == transfer_id:
+                    item.update(fields)
+                    self._save()
+                    return True
+        return False
 
     def mark_delivered(self, transfer_id: str) -> bool:
         """Mark a sent transfer as delivered. Returns True if found and updated."""

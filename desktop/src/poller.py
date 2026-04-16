@@ -173,18 +173,44 @@ class Poller:
 
         symmetric_key = base64.b64decode(paired["symmetric_key_b64"])
 
-        log.info("Downloading transfer %s from %s (%d chunks)",
-                 transfer_id[:12], sender_id[:12], chunk_count)
+        # Decrypt metadata early to get filename for progress display
+        meta_json = self.crypto.decrypt_metadata(encrypted_meta, symmetric_key)
+        if meta_json is None:
+            log.error("Failed to decrypt metadata for %s", transfer_id[:12])
+            return
+        filename = meta_json["filename"]
+        is_fn = filename.startswith(".fn.")
 
-        # Download all chunks
+        log.info("Downloading transfer %s from %s (%d chunks): %s",
+                 transfer_id[:12], sender_id[:12], chunk_count, filename)
+
+        # Insert into history before downloading (skip .fn. system transfers)
+        if not is_fn:
+            self.history.add(
+                filename=filename,
+                display_label=filename,
+                direction="received",
+                size=0,
+                transfer_id=transfer_id,
+                sender_id=sender_id,
+                status="downloading",
+                chunks_downloaded=0,
+                chunks_total=chunk_count,
+            )
+
+        # Download all chunks with progress updates
         encrypted_chunks = []
         for i in range(chunk_count):
             log.info("Downloading chunk %d/%d", i + 1, chunk_count)
             chunk_data = self.api.download_chunk(transfer_id, i)
             if chunk_data is None:
                 log.error("Failed to download chunk %d of transfer %s", i, transfer_id[:12])
+                if not is_fn:
+                    self.history.update(transfer_id, status="failed")
                 return
             encrypted_chunks.append(chunk_data)
+            if not is_fn:
+                self.history.update(transfer_id, chunks_downloaded=i + 1)
 
         # Decrypt and save
         try:
@@ -194,10 +220,11 @@ class Poller:
             log.info("Saved: %s", save_path)
         except Exception:
             log.exception("Failed to decrypt transfer %s", transfer_id[:12])
+            if not is_fn:
+                self.history.update(transfer_id, status="failed")
             return
 
         # Check for special .fn. transfers
-        is_fn = save_path.name.startswith(".fn.")
         if is_fn:
             self._handle_fn_transfer(save_path)
 
@@ -207,18 +234,16 @@ class Poller:
         else:
             log.warning("Failed to acknowledge transfer %s", transfer_id[:12])
 
-        # Log to history
+        # Finalize history
         if is_fn:
-            # .fn. transfers get a nice label from _handle_fn_transfer
-            pass  # already logged in _handle_fn_transfer
+            pass  # .fn. transfers are logged in _handle_fn_transfer
         else:
-            self.history.add(
-                filename=save_path.name,
-                display_label=save_path.name,
-                direction="received",
+            self.history.update(
+                transfer_id,
+                status="complete",
                 size=save_path.stat().st_size,
                 content_path=str(save_path),
-                sender_id=sender_id,
+                delivered=True,
             )
             for cb in self._on_file_received:
                 try:

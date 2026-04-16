@@ -47,6 +47,9 @@ interface TransferDao {
     @Query("UPDATE queued_transfers SET chunksUploaded = :uploaded, totalChunks = :total WHERE id = :id")
     suspend fun updateProgress(id: Long, uploaded: Int, total: Int)
 
+    @Query("UPDATE queued_transfers SET status = :status, contentUri = :uri, displayLabel = :label, sizeBytes = :size WHERE id = :id")
+    suspend fun completeDownload(id: Long, status: TransferStatus, uri: String, label: String, size: Long)
+
     @Query("UPDATE queued_transfers SET transferId = :transferId WHERE id = :id")
     suspend fun setTransferId(id: Long, transferId: String)
 
