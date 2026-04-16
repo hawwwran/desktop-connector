@@ -561,8 +561,10 @@ def show_settings(config_dir: Path):
             content.append(stats_group)
 
             paired_devs = stats.get("paired_devices", [])
-            if paired_devs:
-                pd = paired_devs[0]
+            # Match by device ID (may have multiple pairings)
+            target_id = paired[0]
+            pd = next((d for d in paired_devs if d.get("device_id") == target_id), paired_devs[0] if paired_devs else None)
+            if pd:
                 online = pd.get("online", False)
                 stats_group.add(Adw.ActionRow(
                     title="Paired device status",
@@ -771,12 +773,12 @@ def show_history(config_dir: Path):
             history._items = history._load()
             items = history.items
 
-            # Fast change detection: count + newest timestamp + any downloading status
+            # Change detection: count + delivery count + download progress + statuses
             downloading = any(i.get("status") == "downloading" for i in items)
-            sig = (len(items),
-                   items[0].get("timestamp", 0) if items else 0,
-                   items[0].get("status") if items else None,
-                   sum(i.get("chunks_downloaded", 0) for i in items if i.get("status") == "downloading"))
+            delivered_count = sum(1 for i in items if i.get("delivered"))
+            dl_progress = sum(i.get("chunks_downloaded", 0) for i in items if i.get("status") == "downloading")
+            sig = (len(items), delivered_count, dl_progress,
+                   items[0].get("status") if items else None)
             if sig == last_snapshot[0]:
                 return True  # No change, keep timer going
             last_snapshot[0] = sig

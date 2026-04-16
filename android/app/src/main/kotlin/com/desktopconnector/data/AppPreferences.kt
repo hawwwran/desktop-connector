@@ -43,6 +43,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean("allow_silent_search", true)
         set(value) = prefs.edit().putBoolean("allow_silent_search", value).apply()
 
+    var batteryPromptDismissed: Boolean
+        get() = prefs.getBoolean("battery_prompt_dismissed", false)
+        set(value) = prefs.edit().putBoolean("battery_prompt_dismissed", value).apply()
+
     fun clear() {
         prefs.edit().clear().apply()
     }

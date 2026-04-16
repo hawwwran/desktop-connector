@@ -67,6 +67,8 @@ class MainActivity : ComponentActivity() {
             startActivity(intent)
         }
 
+        // Battery optimization is requested via dialog in Navigation.kt (like location prompt)
+
     }
 
     override fun onResume() {

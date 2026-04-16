@@ -53,6 +53,19 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Server: `AppLog.php` with 2-file rotation (1MB each), logs fasttrack and FCM operations
 - Addresses data privacy: GPS coordinates and decrypted payloads only written to log files when user opts in
 
+### ~~Download folder manager (Android)~~
+- FolderScreen: lists all files in `DesktopConnector/` with thumbnails, file size, date
+- Swipe-to-delete with animation (250ms shrink+fade), permanently removes from storage + MediaStore
+- Tap to open via FileProvider, Delete-all with confirmation
+- Folder icon in HomeScreen top bar
+
+### ~~Download progress~~
+- Incoming transfers appear in history immediately with progress bar (chunk-by-chunk)
+- Wake lock + WiFi lock prevent Doze from throttling downloads
+- Per-chunk retry (3 attempts with backoff), DB row reused on retry
+- User can cancel by deleting downloading item
+- Clear-all history with confirmation (preserves active transfers)
+
 ## Medium effort
 
 *Note: The fasttrack encrypted message relay (`/api/fasttrack/`) is now available for lightweight bidirectional commands. Future features can use new `fn` values inside encrypted payloads — no server changes needed.*
@@ -64,17 +77,12 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Privacy concern: user must explicitly enable in Android settings
 - Filter by app (don't forward every notification)
 
-### Download folder manager (Android)
-- Folder icon button on top of HomeScreen
-- History-like list of files in `DesktopConnector/` folder
-- Swipe sideways to permanently delete from storage
-- Header text: "Swipe to permanently delete"
-
 ### Transfer resume
 - Track which chunks were successfully uploaded per transfer
 - On retry, skip already-uploaded chunks
 - Server already stores individual chunks — just need client-side tracking
 - Important for large video files on unstable connections
+- *Partial: retry reuses DB row and restarts from chunk 0. Full resume (skip downloaded chunks) not yet implemented.*
 
 ### Multi-device support
 - Pair with multiple desktops or multiple phones

@@ -266,9 +266,16 @@ class PollService : Service() {
             if (!isScreenOn()) {
                 if (FcmManager.isInitialized) {
                     // FCM available — wait for push wake or screen on
+                    // Send periodic heartbeat so server knows we're reachable
                     AppLog.log("Poll", "Screen off, waiting for FCM wake")
+                    var heartbeatCounter = 0
                     while (!isScreenOn() && !fcmWakeSignal && !fasttrackWakeSignal && running) {
                         delay(500)
+                        heartbeatCounter++
+                        if (heartbeatCounter >= 180) { // every 90s (180 * 500ms)
+                            heartbeatCounter = 0
+                            try { api.healthCheck(fast = true) } catch (_: Exception) {}
+                        }
                     }
                     if (fcmWakeSignal) {
                         fcmWakeSignal = false
@@ -389,39 +396,88 @@ class PollService : Service() {
 
         Log.i(TAG, "Receiving transfer $transferId from ${senderId.take(12)} ($chunkCount chunks): $fileName")
 
-        // Insert into DB before downloading so the UI shows progress immediately
-        // Skip for small .fn. system transfers (clipboard, unpair)
+        // Acquire wake + wifi locks to prevent Doze from throttling the download
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DesktopConnector:download")
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+        @Suppress("DEPRECATION")
+        val wifiMode = if (Build.VERSION.SDK_INT >= 29) android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        else android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        val wifiLock = wifiManager.createWifiLock(wifiMode, "DesktopConnector:download")
+        wakeLock.acquire(2 * 60 * 1000L) // 2 min, refreshed per chunk
+        wifiLock.acquire() // released in finally block
+
+        try {
+            handleIncomingTransferInner(
+                transferId, senderId, encryptedMeta, chunkCount, symmetricKey,
+                metaJson, fileName, mimeType, baseNonce, isFnTransfer, api, prefs, wakeLock
+            )
+        } finally {
+            if (wakeLock.isHeld) wakeLock.release()
+            if (wifiLock.isHeld) wifiLock.release()
+        }
+    }
+
+    private suspend fun handleIncomingTransferInner(
+        transferId: String, senderId: String, encryptedMeta: String, chunkCount: Int,
+        symmetricKey: ByteArray, metaJson: JSONObject, fileName: String, mimeType: String,
+        baseNonce: ByteArray, isFnTransfer: Boolean, api: ApiClient, prefs: AppPreferences,
+        wakeLock: PowerManager.WakeLock,
+    ) {
         val db = AppDatabase.getInstance(this)
+
+        // Reuse existing DB row on retry (prevents duplicates after transient failures)
         var dbRowId: Long = 0
         if (!isFnTransfer) {
-            dbRowId = db.transferDao().insert(QueuedTransfer(
-                contentUri = "",
-                displayName = fileName,
-                displayLabel = fileName,
-                mimeType = mimeType,
-                sizeBytes = 0,
-                recipientDeviceId = prefs.deviceId ?: "",
-                direction = TransferDirection.INCOMING,
-                status = TransferStatus.UPLOADING,  // reuse UPLOADING for download progress
-                totalChunks = chunkCount,
-                chunksUploaded = 0,
-                transferId = transferId,
-            ))
+            val existing = db.transferDao().getByTransferId(transferId)
+            if (existing != null) {
+                dbRowId = existing.id
+                db.transferDao().updateStatus(dbRowId, TransferStatus.UPLOADING)
+                db.transferDao().updateProgress(dbRowId, 0, chunkCount)
+                AppLog.log("Recv", "Resuming transfer $transferId (reusing row $dbRowId)")
+            } else {
+                dbRowId = db.transferDao().insert(QueuedTransfer(
+                    contentUri = "",
+                    displayName = fileName,
+                    displayLabel = fileName,
+                    mimeType = mimeType,
+                    sizeBytes = 0,
+                    recipientDeviceId = prefs.deviceId ?: "",
+                    direction = TransferDirection.INCOMING,
+                    status = TransferStatus.UPLOADING,
+                    totalChunks = chunkCount,
+                    chunksUploaded = 0,
+                    transferId = transferId,
+                ))
+            }
         }
 
-        // Download all chunks with progress updates
+        // Download all chunks with progress updates and retry
         val chunks = mutableListOf<ByteArray>()
         for (i in 0 until chunkCount) {
-            val chunk = api.downloadChunk(transferId, i)
+            var chunk: ByteArray? = null
+            for (attempt in 1..3) {
+                chunk = api.downloadChunk(transferId, i)
+                if (chunk != null) break
+                AppLog.log("Recv", "Chunk $i failed (attempt $attempt/3), retrying...")
+                delay(2000L * attempt)
+            }
             if (chunk == null) {
-                Log.e(TAG, "Failed to download chunk $i of $transferId")
+                Log.e(TAG, "Failed to download chunk $i of $transferId after 3 attempts")
                 if (dbRowId > 0) {
                     db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
                 }
                 return
             }
             chunks.add(chunk)
+            wakeLock.acquire(2 * 60 * 1000L)  // refresh: 2 min from last chunk
             if (dbRowId > 0) {
+                // Check if user deleted the item — stop downloading if so
+                if (db.transferDao().exists(dbRowId) == 0) {
+                    AppLog.log("Recv", "Download cancelled by user at chunk ${i + 1}/$chunkCount")
+                    api.ackTransfer(transferId)
+                    return
+                }
                 db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
             }
         }
@@ -463,7 +519,6 @@ class PollService : Service() {
 
         // Finalize in history
         if (isFnTransfer) {
-            // .fn. transfers were not pre-inserted — add now (skip unpair)
             if (fileName != ".fn.unpair") {
                 db.transferDao().insert(QueuedTransfer(
                     contentUri = savedUri,
@@ -479,12 +534,15 @@ class PollService : Service() {
                 showTransferNotification(displayLabel)
             }
         } else {
-            // Update the pre-inserted row to COMPLETE with final data
+            // Check if user deleted the row while downloading — if so, skip notification
+            val stillExists = db.transferDao().exists(dbRowId) > 0
             db.transferDao().completeDownload(
                 dbRowId, TransferStatus.COMPLETE, savedUri, displayLabel, data.size.toLong()
             )
             db.transferDao().trimHistory()
-            showTransferNotification(displayLabel)
+            if (stillExists) {
+                showTransferNotification(displayLabel)
+            }
         }
     }
 

@@ -203,6 +203,38 @@ fun SettingsScreen(
                 }
             }
 
+            // Battery optimization
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                val context = LocalContext.current
+                val pm = remember { context.getSystemService(android.os.PowerManager::class.java) }
+                var batteryOptimized by remember {
+                    mutableStateOf(!pm.isIgnoringBatteryOptimizations(context.packageName))
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                ) {
+                    Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                        Text("Background Downloads", style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.height(4.dp))
+                        SettingsRow("Battery optimization", if (batteryOptimized) "Restricted" else "Unrestricted")
+                        if (batteryOptimized) {
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedButton(onClick = {
+                                @Suppress("BatteryLife")
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                intent.data = android.net.Uri.parse("package:${context.packageName}")
+                                context.startActivity(intent)
+                                batteryOptimized = false
+                            }) {
+                                Text("Remove Restriction")
+                            }
+                        }
+                    }
+                }
+            }
+
             // This device
             Card(
                 modifier = Modifier.fillMaxWidth(),

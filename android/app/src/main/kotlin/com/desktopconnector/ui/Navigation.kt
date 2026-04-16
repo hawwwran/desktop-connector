@@ -151,6 +151,55 @@ fun AppNavigation(
                 )
             }
 
+            // Battery optimization prompt for reliable background downloads
+            var showBatteryPrompt by remember { mutableStateOf(false) }
+            var showBatteryDismissed by remember { mutableStateOf(false) }
+
+            LaunchedEffect(Unit) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    val pm = context.getSystemService(android.os.PowerManager::class.java)
+                    if (!pm.isIgnoringBatteryOptimizations(context.packageName)
+                        && !prefs.batteryPromptDismissed
+                    ) {
+                        showBatteryPrompt = true
+                    }
+                }
+            }
+
+            if (showBatteryPrompt) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    title = { Text("Battery Optimization") },
+                    text = { Text("For reliable background file downloads, allow Desktop Connector to run without battery restrictions.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showBatteryPrompt = false
+                            @Suppress("BatteryLife")
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            intent.data = android.net.Uri.parse("package:${context.packageName}")
+                            context.startActivity(intent)
+                        }) { Text("Allow") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showBatteryPrompt = false
+                            prefs.batteryPromptDismissed = true
+                            showBatteryDismissed = true
+                        }) { Text("Dismiss") }
+                    },
+                )
+            }
+
+            if (showBatteryDismissed) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    text = { Text("You can change this later in Settings.") },
+                    confirmButton = {
+                        TextButton(onClick = { showBatteryDismissed = false }) { Text("OK") }
+                    },
+                )
+            }
+
             // Link open/copy dialog
             linkDialog?.let { (url, fullText) ->
                 androidx.compose.material3.AlertDialog(

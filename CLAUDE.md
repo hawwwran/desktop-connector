@@ -139,8 +139,13 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 - **Delivery tracking**: Server records `delivered_at` timestamp on ack. Long poll wakes sender immediately when delivery is detected. Both clients check delivery status on every poll cycle.
 - **Connection state isolation**: Long poll uses raw HTTP requests, not the connection manager. Only the short health check affects connection state. Prevents state oscillation.
 - **Fasttrack message relay**: Lightweight encrypted message queue for commands too small for the full transfer pipeline. Server stores opaque blobs, sends FCM wake. Used by find-my-phone; extensible for future features. 10-minute expiry, 100-message limit per recipient.
-- **Find my phone**: Desktop sends encrypted start/stop commands via fasttrack. Phone plays alarm (STREAM_ALARM, bypasses silent), vibrates, reports encrypted GPS every 5s. Desktop shows location on Leaflet/OSM map (WebKitWebView, fallback to text). Requires FCM — menu item hidden without it. Configurable volume and timeout (max 5 min). Auto-stops on timeout.
+- **Find my phone**: Desktop sends encrypted start/stop commands via fasttrack. Phone plays alarm (STREAM_ALARM, bypasses silent), vibrates, reports encrypted GPS every 5s. Desktop shows location on Leaflet/OSM map (WebKitWebView, fallback to text). Requires FCM — menu item hidden without it. Configurable volume, hardcoded 5-min timeout on phone. Auto-stops on timeout. Silent search mode (GPS only, no alarm/vibration/notification — for stolen phone). Android settings: "Allow silent search" toggle (default on). Desktop: heartbeat-based status with "Lost communication" detection. Generation-counter thread safety for poll loop.
 - **Find my phone GPS permission**: Android prompts on app open (FCM active + not granted + not dismissed). "Dismiss" is permanent — user can grant later in Settings. Alarm works without GPS permission (just no coordinates). Settings shows GPS permission status with grant button when FCM is active.
+- **Find my phone overlay**: Android shows full-screen overlay when alarm is active (stop button, "Silent search in progress" for silent mode). No overlay notification for silent search.
+- **Download progress**: Incoming transfers appear in history immediately with chunk-by-chunk progress bar. Android reuses `UPLOADING` status + `chunksUploaded`/`totalChunks` fields for incoming. Desktop shows "Downloading X/Y" with `Gtk.ProgressBar`. Both update per chunk.
+- **Download reliability**: Wake lock (`PARTIAL_WAKE_LOCK`, 2-min timeout refreshed per chunk) and WiFi lock prevent Android Doze from throttling downloads. Per-chunk retry (3 attempts with backoff). DB row reused on retry (no duplicate history entries). User can cancel by deleting the downloading item — current chunk finishes, transfer ACKed, no more chunks fetched.
+- **Download folder manager**: Android FolderScreen lists all files in `DesktopConnector/` with thumbnails (async-loaded), file size, date. Swipe-to-delete permanently removes from storage + MediaStore. Tap to open via FileProvider. Delete-all with confirmation. Accessible via folder icon in HomeScreen top bar.
+- **History clear**: Both platforms have "Clear all" with confirmation dialog. Android preserves active uploads/downloads. Desktop removes all entries. Swipe-to-delete animated (250ms shrink+fade).
 - **Logging**: Opt-in file logging on both desktop and Android (off by default, "Allow logging" toggle in Settings). Desktop uses Python `RotatingFileHandler` (1MB + 1 backup = 2MB max) at `~/.config/desktop-connector/logs/`. Android gates `AppLog` writes on preference. Server logs to `data/logs/server.log` with 2-file rotation (1MB each). Desktop settings has "Download Logs" button that copies to `~/Downloads/` and opens the folder.
 
 ## Project structure
@@ -204,7 +209,8 @@ android/app/src/main/kotlin/com/desktopconnector/
     AppPreferences.kt        — SharedPreferences config
     AppLog.kt                — file-based log (2000 lines max, gated on loggingEnabled pref)
   ui/
-    HomeScreen.kt            — main screen, recent files, history, swipe-to-delete
+    HomeScreen.kt            — main screen, recent files, history, swipe-to-delete, clear history
+    FolderScreen.kt          — download folder manager (browse, delete, open files)
     StatusBar.kt             — connection status composable (unused, dot in title instead)
     SettingsScreen.kt        — settings with server stats and logs
     Navigation.kt            — NavHost

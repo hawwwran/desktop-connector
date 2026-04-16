@@ -222,10 +222,17 @@ class ApiClient(
         return executeStatus(request)
     }
 
-    fun healthCheck(): Boolean {
+    // Fast client for heartbeats — 1s timeout so it never blocks the poll loop
+    private val heartbeatClient = OkHttpClient.Builder()
+        .connectTimeout(1, TimeUnit.SECONDS)
+        .readTimeout(1, TimeUnit.SECONDS)
+        .build()
+
+    fun healthCheck(fast: Boolean = false): Boolean {
         return try {
-            val request = Request.Builder().url("$serverUrl/api/health").get().build()
-            client.newCall(request).execute().use { it.isSuccessful }
+            val request = authHeaders(Request.Builder()).url("$serverUrl/api/health").get().build()
+            val c = if (fast) heartbeatClient else client
+            c.newCall(request).execute().use { it.isSuccessful }
         } catch (e: Exception) {
             false
         }

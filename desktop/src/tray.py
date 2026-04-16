@@ -122,7 +122,7 @@ class TrayApp:
         self._was_uploading = False
         self._was_paired = self.config.is_paired
         self._remote_online = False
-        self._remote_check_counter = 0
+        self._remote_check_counter = 14  # fire on first tick after connection
         import threading as _t
         def icon_poll():
             import time
@@ -159,12 +159,14 @@ class TrayApp:
                             stats = self.api.get_stats()
                             if stats:
                                 paired_devs = stats.get("paired_devices", [])
-                                online = paired_devs[0].get("online", False) if paired_devs else False
+                                # Check if ANY paired device is online (handles multiple pairings)
+                                online = any(d.get("online", False) for d in paired_devs)
                                 if online != self._remote_online:
+                                    log.info("Remote device %s", "online" if online else "offline")
                                     self._remote_online = online
                                     self._update_icon()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.warning("Stats check failed: %s", e)
                     elif self._remote_online:
                         self._remote_online = False
                         self._update_icon()

@@ -32,6 +32,12 @@ interface TransferDao {
     @Query("SELECT * FROM queued_transfers WHERE id = :id")
     suspend fun getById(id: Long): QueuedTransfer?
 
+    @Query("SELECT COUNT(*) FROM queued_transfers WHERE id = :id")
+    suspend fun exists(id: Long): Int
+
+    @Query("SELECT * FROM queued_transfers WHERE transferId = :transferId AND direction = 'INCOMING' LIMIT 1")
+    suspend fun getByTransferId(transferId: String): QueuedTransfer?
+
     @Query("SELECT * FROM queued_transfers ORDER BY createdAt DESC LIMIT 100")
     suspend fun getRecent(): List<QueuedTransfer>
 
