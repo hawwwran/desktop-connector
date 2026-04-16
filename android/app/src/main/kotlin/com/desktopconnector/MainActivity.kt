@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
         } else {
             perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
+        // Location permission is requested separately via the find-phone GPS prompt
 
         val needed = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED

@@ -41,6 +41,18 @@ class Database
         if ($deviceCols && strpos($deviceCols, 'fcm_token') === false) {
             $this->db->exec('ALTER TABLE devices ADD COLUMN fcm_token TEXT DEFAULT NULL');
         }
+
+        // Fasttrack: lightweight encrypted message relay between paired devices
+        $this->db->exec('
+            CREATE TABLE IF NOT EXISTS fasttrack_messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_id       TEXT NOT NULL,
+                recipient_id    TEXT NOT NULL,
+                encrypted_data  TEXT NOT NULL,
+                created_at      INTEGER NOT NULL
+            )
+        ');
+        $this->db->exec('CREATE INDEX IF NOT EXISTS idx_fasttrack_recipient ON fasttrack_messages(recipient_id, created_at)');
     }
 
     public function query(string $sql, array $params = []): SQLite3Result

@@ -16,7 +16,15 @@ class FcmService : FirebaseMessagingService() {
         val type = remoteMessage.data["type"] ?: "unknown"
         AppLog.log("FCM", "Message received: $type")
         Log.i("FcmService", "FCM message: $type")
-        PollService.fcmWakeSignal = true
+
+        when (type) {
+            "fasttrack" -> {
+                PollService.fasttrackWakeSignal = true
+                // Cancel any blocking long poll so PollService processes fasttrack immediately
+                PollService.activeApi?.cancelLongPoll()
+            }
+            else -> PollService.fcmWakeSignal = true
+        }
     }
 
     override fun onNewToken(token: String) {

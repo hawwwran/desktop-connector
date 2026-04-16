@@ -43,6 +43,9 @@ class PollService : Service() {
         @Volatile var longPollStatus: String = "offline"
         @Volatile var retryLongPoll: Boolean = false
         @Volatile var fcmWakeSignal: Boolean = false
+        @Volatile var fasttrackWakeSignal: Boolean = false
+        // Active ApiClient — used to cancel long poll from FcmService
+        @Volatile var activeApi: ApiClient? = null
 
         fun start(context: Context) {
             val intent = Intent(context, PollService::class.java)
@@ -106,6 +109,14 @@ class PollService : Service() {
                 CHANNEL_TRANSFER, "Transfers",
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply { description = "Notifications for received transfers" })
+
+            mgr.createNotificationChannel(NotificationChannel(
+                "dc_find_phone", "Find My Phone",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Alarm when phone is being located"
+                setBypassDnd(true)
+            })
         }
     }
 
@@ -163,6 +174,7 @@ class PollService : Service() {
             }
 
             val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
+            activeApi = api
             try {
                 // Ensure we're connected first
                 if (!isConnected) {
@@ -177,6 +189,13 @@ class PollService : Service() {
                         delay(POLL_INTERVAL)
                         continue
                     }
+                }
+
+                // Process fasttrack messages before long poll (which blocks 25s)
+                if (fasttrackWakeSignal || FindPhoneManager.isRinging) {
+                    AppLog.log("Fasttrack", "Processing (wake=$fasttrackWakeSignal, ringing=${FindPhoneManager.isRinging})")
+                    fasttrackWakeSignal = false
+                    handleFasttrackMessages(api, keyManager)
                 }
 
                 // Quick test before committing to long poll
@@ -211,9 +230,9 @@ class PollService : Service() {
                         // Always check delivery — server can't reliably track "new" deliveries
                         checkDeliveryStatus(api)
                     } else {
-                        longPollAvailable = false
+                        longPollAvailable = null  // re-test next cycle (might be transient failure)
                         longPollStatus = "unavailable"
-                        AppLog.log("Poll", "Long poll not available, using regular polling")
+                        AppLog.log("Poll", "Long poll failed, will re-test next cycle")
                         // Do a regular poll + sleep
                         val transfers = api.getPendingTransfers()
                         for (t in transfers) {
@@ -221,7 +240,7 @@ class PollService : Service() {
                             handleIncomingTransfer(t, api, keyManager, prefs)
                         }
                         checkDeliveryStatus(api)
-                        delay(POLL_INTERVAL)
+                        if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
                     }
                 } else {
                     // Regular polling — long poll not available
@@ -231,7 +250,7 @@ class PollService : Service() {
                         handleIncomingTransfer(t, api, keyManager, prefs)
                     }
                     checkDeliveryStatus(api)
-                    delay(POLL_INTERVAL)
+                    if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Poll failed: ${e.message}")
@@ -241,19 +260,26 @@ class PollService : Service() {
                     longPollAvailable = null
                     updateNotification(buildIdleNotification(false))
                 }
-                delay(POLL_INTERVAL)
+                if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
             }
 
             if (!isScreenOn()) {
                 if (FcmManager.isInitialized) {
                     // FCM available — wait for push wake or screen on
                     AppLog.log("Poll", "Screen off, waiting for FCM wake")
-                    while (!isScreenOn() && !fcmWakeSignal && running) {
+                    while (!isScreenOn() && !fcmWakeSignal && !fasttrackWakeSignal && running) {
                         delay(500)
                     }
                     if (fcmWakeSignal) {
                         fcmWakeSignal = false
+                        longPollAvailable = null  // re-test after wake
                         AppLog.log("Poll", "FCM wake, polling")
+                        continue
+                    }
+                    if (fasttrackWakeSignal) {
+                        // Don't clear — let the fasttrack check at top of loop consume it
+                        longPollAvailable = null  // re-test after wake
+                        AppLog.log("Poll", "Fasttrack FCM wake")
                         continue
                     }
                 } else {
@@ -264,11 +290,64 @@ class PollService : Service() {
                     }
                 }
                 if (running) {
+                    longPollAvailable = null  // re-test after screen wake
                     AppLog.log("Poll", "Screen on, resuming")
                     continue
                 }
             }
-            delay(POLL_INTERVAL)
+            if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
+        }
+    }
+
+    private suspend fun handleFasttrackMessages(api: ApiClient, keyManager: KeyManager) {
+        AppLog.log("Fasttrack", "Fetching pending messages...")
+        val messages = api.fasttrackPending()
+        if (messages.isEmpty()) {
+            AppLog.log("Fasttrack", "No pending messages")
+            return
+        }
+
+        AppLog.log("Fasttrack", "Processing ${messages.size} message(s)")
+
+        for (msg in messages) {
+            val messageId = msg.getInt("id")
+            val senderId = msg.getString("sender_id")
+            val encryptedDataB64 = msg.getString("encrypted_data")
+
+            val paired = keyManager.getPairedDevice(senderId)
+            if (paired == null) {
+                AppLog.log("Fasttrack", "Message $messageId from unknown device ${senderId.take(12)}, skipping")
+                api.fasttrackAck(messageId)
+                continue
+            }
+
+            try {
+                val symmetricKey = Base64.decode(paired.symmetricKeyB64, Base64.NO_WRAP)
+                val encryptedBytes = Base64.decode(encryptedDataB64, Base64.NO_WRAP)
+                val plainBytes = CryptoUtils.decryptBlob(encryptedBytes, symmetricKey)
+                val payload = JSONObject(String(plainBytes))
+
+                val fn = payload.optString("fn", "")
+                AppLog.log("Fasttrack", "Message $messageId: fn=$fn, payload=$payload")
+
+                when (fn) {
+                    "find-phone" -> {
+                        val action = payload.optString("action", "")
+                        AppLog.log("Fasttrack", "Find-phone action=$action")
+                        FindPhoneManager.handleCommand(
+                            applicationContext, action, payload,
+                            senderId, api, symmetricKey
+                        )
+                    }
+                    else -> AppLog.log("Fasttrack", "Unknown fn: $fn")
+                }
+            } catch (e: Exception) {
+                AppLog.log("Fasttrack", "Failed to process message $messageId: ${e.message}")
+                Log.e(TAG, "Failed to process fasttrack message $messageId: ${e.message}")
+            }
+
+            api.fasttrackAck(messageId)
+            AppLog.log("Fasttrack", "Acked message $messageId")
         }
     }
 

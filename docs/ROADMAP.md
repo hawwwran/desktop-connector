@@ -35,14 +35,27 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Optional: falls back to long-polling if server has no FCM config
 - Status and manual "Check" button in Android settings
 
-## Quick wins
+### ~~Find my phone~~
+- Uses fasttrack encrypted message relay (not `.fn.` transfers — too heavy for lightweight commands)
+- Desktop tray menu: "Find my Phone" (only visible when FCM available)
+- GTK4 window with volume/timeout sliders, start/stop, Leaflet/OSM map (WebKit fallback to text coordinates)
+- Phone: `MediaPlayer` with `STREAM_ALARM` at configurable volume, vibration, looping
+- Encrypted GPS reporting every 5s via fasttrack (server never sees coordinates)
+- Auto-stop on configurable timeout (max 5 min)
+- Notification with "Stop Alarm" action on phone
+- GPS permission: prompted on app open (FCM active + not yet granted + not dismissed), grantable from Settings
+- Requires FCM — feature gated on server FCM availability
 
-### Find my phone
-- `.fn.ring` — phone plays a loud alarm sound for 15 seconds, even on silent
-- Desktop tray menu: "Ring Phone"
-- Phone: `MediaPlayer` with `AudioManager.STREAM_ALARM` at max volume
+### ~~Logging infrastructure~~
+- Opt-in file logging on desktop and Android ("Allow logging" toggle in Settings, off by default)
+- Desktop: Python `RotatingFileHandler` — 1MB + 1 backup = 2MB max, "Download Logs" button in Settings
+- Android: `AppLog` gated on `loggingEnabled` preference, immediate toggle effect
+- Server: `AppLog.php` with 2-file rotation (1MB each), logs fasttrack and FCM operations
+- Addresses data privacy: GPS coordinates and decrypted payloads only written to log files when user opts in
 
 ## Medium effort
+
+*Note: The fasttrack encrypted message relay (`/api/fasttrack/`) is now available for lightweight bidirectional commands. Future features can use new `fn` values inside encrypted payloads — no server changes needed.*
 
 ### Notification mirroring
 - Android `NotificationListenerService` reads notifications

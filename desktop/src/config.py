@@ -119,6 +119,15 @@ class Config:
         self.save()
 
     @property
+    def allow_logging(self) -> bool:
+        return self._data.get("allow_logging", False)
+
+    @allow_logging.setter
+    def allow_logging(self, value: bool) -> None:
+        self._data["allow_logging"] = value
+        self.save()
+
+    @property
     def is_registered(self) -> bool:
         return self.auth_token is not None and self.device_id is not None
 

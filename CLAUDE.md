@@ -25,6 +25,18 @@ Files named `.fn.<function>.<subtype>` trigger special behavior on the receiver:
 - `.fn.unpair` — remove pairing on the receiving side
 - Extensible for future functions
 
+## Fasttrack: lightweight encrypted message relay
+
+For commands that are too lightweight for the full transfer pipeline (encrypt → chunk → upload → download → decrypt → ack), the fasttrack system provides a simple encrypted message queue between paired devices.
+
+- **Server-side**: `fasttrack_messages` table stores opaque encrypted blobs. Three endpoints: send, pending, ack.
+- **Function-agnostic**: The server never knows what function is being executed. The `fn` field lives inside the E2E encrypted payload.
+- **FCM-triggered**: On send, the server fires an FCM wake with `{type: "fasttrack"}` — no content leaked.
+- **Auto-cleanup**: Messages expire after 10 minutes. Max 100 pending per recipient.
+- **Encrypted payload format**: `{fn: "find-phone", action: "start", ...}` — same AES-256-GCM as transfers.
+- **Bidirectional**: Both desktop and phone can send/receive. Each polls `/api/fasttrack/pending`.
+- **Extensible**: Future features use new `fn` values with zero server changes.
+
 ## Building
 
 ### Server
@@ -41,11 +53,12 @@ cd desktop && python3 -m src.main --send="/path/to/file"  # send and exit
 cd desktop && python3 -m src.main --pair       # pairing flow
 ```
 
-GTK4 windows (settings, history, send files) run as separate processes:
+GTK4 windows (settings, history, send files, find phone) run as separate processes:
 ```bash
 python3 -m src.windows send-files --config-dir=~/.config/desktop-connector
 python3 -m src.windows settings --config-dir=~/.config/desktop-connector
 python3 -m src.windows history --config-dir=~/.config/desktop-connector
+python3 -m src.windows find-phone --config-dir=~/.config/desktop-connector
 ```
 
 ### Android
@@ -125,6 +138,10 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 - **Long polling**: Server endpoint `GET /api/transfers/notify` blocks up to 25s, checks every 1s for new transfers or deliveries. Clients test with `?test=1` (instant response) before committing to long poll. Falls back to regular polling if unavailable. Status visible in both apps' settings.
 - **Delivery tracking**: Server records `delivered_at` timestamp on ack. Long poll wakes sender immediately when delivery is detected. Both clients check delivery status on every poll cycle.
 - **Connection state isolation**: Long poll uses raw HTTP requests, not the connection manager. Only the short health check affects connection state. Prevents state oscillation.
+- **Fasttrack message relay**: Lightweight encrypted message queue for commands too small for the full transfer pipeline. Server stores opaque blobs, sends FCM wake. Used by find-my-phone; extensible for future features. 10-minute expiry, 100-message limit per recipient.
+- **Find my phone**: Desktop sends encrypted start/stop commands via fasttrack. Phone plays alarm (STREAM_ALARM, bypasses silent), vibrates, reports encrypted GPS every 5s. Desktop shows location on Leaflet/OSM map (WebKitWebView, fallback to text). Requires FCM — menu item hidden without it. Configurable volume and timeout (max 5 min). Auto-stops on timeout.
+- **Find my phone GPS permission**: Android prompts on app open (FCM active + not granted + not dismissed). "Dismiss" is permanent — user can grant later in Settings. Alarm works without GPS permission (just no coordinates). Settings shows GPS permission status with grant button when FCM is active.
+- **Logging**: Opt-in file logging on both desktop and Android (off by default, "Allow logging" toggle in Settings). Desktop uses Python `RotatingFileHandler` (1MB + 1 backup = 2MB max) at `~/.config/desktop-connector/logs/`. Android gates `AppLog` writes on preference. Server logs to `data/logs/server.log` with 2-file rotation (1MB each). Desktop settings has "Download Logs" button that copies to `~/Downloads/` and opens the folder.
 
 ## Project structure
 
@@ -135,12 +152,14 @@ server/
   .htaccess                  — root rewrite + directory protection
   src/Router.php             — URL routing + auth + base path detection
   src/Database.php           — SQLite wrapper
+  src/AppLog.php             — file-based server logger (2-file rotation, 1MB each)
   src/Controllers/
     DeviceController.php     — register, health, stats, FCM token
     PairingController.php    — QR pairing flow
     TransferController.php   — upload, download, ack, sent-status, FCM wake
     DashboardController.php  — HTML dashboard
     FcmController.php        — FCM config endpoint
+    FasttrackController.php  — encrypted message relay (send, pending, ack)
   src/FcmSender.php          — FCM HTTP v1 API sender (JWT + OAuth2)
   migrations/001_initial.sql
 
@@ -159,7 +178,7 @@ desktop/
   history.py       — JSON-based transfer history (50 items)
   pairing.py       — QR code generation + tkinter pairing window
   tray.py          — pystray tray icon, spawns GTK4 windows as subprocesses
-  windows.py       — GTK4/libadwaita windows (send-files, settings, history)
+  windows.py       — GTK4/libadwaita windows (send-files, settings, history, find-phone)
   dialogs.py       — zenity file picker + confirmation dialogs
   notifications.py — notify-send wrapper
 
@@ -176,13 +195,14 @@ android/app/src/main/kotlin/com/desktopconnector/
     FcmManager.kt            — dynamic Firebase init + FCM token management
     UploadWorker.kt          — WorkManager background uploads
   service/
-    PollService.kt           — foreground service, polls for incoming transfers
-    FcmService.kt            — FCM message receiver, wakes PollService
+    PollService.kt           — foreground service, polls for transfers + fasttrack messages
+    FcmService.kt            — FCM message receiver, wakes PollService (transfer or fasttrack)
+    FindPhoneManager.kt      — alarm, vibration, GPS reporting for find-my-phone
   data/
     AppDatabase.kt           — Room DB
     QueuedTransfer.kt        — transfer entity + DAO
     AppPreferences.kt        — SharedPreferences config
-    AppLog.kt                — file-based log (2000 lines max)
+    AppLog.kt                — file-based log (2000 lines max, gated on loggingEnabled pref)
   ui/
     HomeScreen.kt            — main screen, recent files, history, swipe-to-delete
     StatusBar.kt             — connection status composable (unused, dot in title instead)
@@ -202,9 +222,9 @@ temp/                        — numbered install scripts (dev only, run with su
 
 ## Config locations
 
-- Desktop: `~/.config/desktop-connector/` (config.json, keys/, history.json)
-- Android: app internal storage (EncryptedSharedPreferences for keys, Room DB for transfers)
-- Server: `server/data/connector.db` (SQLite), `server/storage/` (encrypted blobs)
+- Desktop: `~/.config/desktop-connector/` (config.json, keys/, history.json, logs/)
+- Android: app internal storage (EncryptedSharedPreferences for keys, Room DB for transfers, app.log)
+- Server: `server/data/connector.db` (SQLite), `server/storage/` (encrypted blobs), `server/data/logs/` (server.log)
 
 ## API endpoints
 
@@ -225,4 +245,7 @@ temp/                        — numbered install scripts (dev only, run with su
 | POST | /api/transfers/{id}/ack | Yes | Acknowledge receipt |
 | GET | /api/transfers/sent-status | Yes | Delivery status |
 | GET | /api/transfers/notify | Yes | Long poll for new transfers/deliveries (?test=1 for instant probe) |
+| POST | /api/fasttrack/send | Yes | Send encrypted message to paired device (triggers FCM wake) |
+| GET | /api/fasttrack/pending | Yes | Fetch pending encrypted messages |
+| POST | /api/fasttrack/{id}/ack | Yes | Acknowledge and delete a message |
 | GET | /dashboard | No | HTML dashboard |

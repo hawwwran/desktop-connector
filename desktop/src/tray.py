@@ -70,6 +70,8 @@ class TrayApp:
         self._should_quit = threading.Event()
         self._was_uploading = False
         self._remote_online = False
+        self._fcm_available = False
+        self._fcm_checked = False
 
     def run(self) -> None:
         try:
@@ -96,6 +98,8 @@ class TrayApp:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Send Files...", self._send_files, visible=lambda _: self.config.is_paired),
                 pystray.MenuItem("Send Clipboard", self._send_clipboard, visible=lambda _: self.config.is_paired),
+                pystray.MenuItem("Find my Phone", self._find_phone,
+                                 visible=lambda _: self.config.is_paired and self._fcm_available),
                 pystray.MenuItem("Show History", self._show_history),
                 pystray.MenuItem("Open Save Folder", self._open_folder),
                 pystray.Menu.SEPARATOR,
@@ -135,6 +139,16 @@ class TrayApp:
                 if paired != self._was_paired:
                     self._was_paired = paired
                     changed = True
+
+                # One-time FCM availability check on first connection
+                if not self._fcm_checked and self.conn.state == ConnectionState.CONNECTED:
+                    try:
+                        self._fcm_available = self.api.check_fcm_available()
+                        self._fcm_checked = True
+                        if self._fcm_available:
+                            changed = True
+                    except Exception:
+                        pass
 
                 # Check remote device online status every 30s (only when connected)
                 self._remote_check_counter += 1
@@ -207,6 +221,9 @@ class TrayApp:
 
     def _show_history(self, *_) -> None:
         self._open_gtk4_window("history")
+
+    def _find_phone(self, *_) -> None:
+        self._open_gtk4_window("find-phone")
 
     # --- Pairing ---
 

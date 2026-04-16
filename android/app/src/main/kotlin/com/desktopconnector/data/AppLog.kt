@@ -13,20 +13,27 @@ object AppLog {
     private const val MAX_LINES = 2000
     private const val FILENAME = "app.log"
     private lateinit var logFile: File
+    private var enabled = false
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
     fun init(context: Context) {
         logFile = File(context.filesDir, FILENAME)
+        enabled = AppPreferences(context).loggingEnabled
     }
 
     fun log(tag: String, message: String) {
-        if (!::logFile.isInitialized) return
+        if (!::logFile.isInitialized || !enabled) return
         val ts = dateFormat.format(Date())
         val line = "$ts [$tag] $message\n"
         try {
             logFile.appendText(line)
             trimIfNeeded()
         } catch (_: Exception) {}
+    }
+
+    /** Call after preference change to pick up new state. */
+    fun refreshEnabled(context: Context) {
+        enabled = AppPreferences(context).loggingEnabled
     }
 
     fun read(): String {

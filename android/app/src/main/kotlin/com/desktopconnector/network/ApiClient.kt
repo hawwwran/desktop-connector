@@ -112,6 +112,14 @@ class ApiClient(
         return executeJson(request)
     }
 
+    // Active long poll call — can be cancelled externally to unblock the poll loop
+    @Volatile private var activeLongPollCall: okhttp3.Call? = null
+
+    fun cancelLongPoll() {
+        activeLongPollCall?.cancel()
+        activeLongPollCall = null
+    }
+
     fun longPollNotify(sinceEpoch: Long, test: Boolean = false): JSONObject? {
         val url = if (test) {
             "$serverUrl/api/transfers/notify?test=1"
@@ -124,12 +132,16 @@ class ApiClient(
             .build()
         // Use short timeout for test, long timeout for actual long poll
         val httpClient = if (test) client else longPollClient
+        val call = httpClient.newCall(request)
+        if (!test) activeLongPollCall = call
         return try {
-            httpClient.newCall(request).execute().use { resp ->
+            call.execute().use { resp ->
+                activeLongPollCall = null
                 val body = resp.body?.string() ?: return null
                 if (resp.isSuccessful) JSONObject(body) else null
             }
         } catch (e: Exception) {
+            activeLongPollCall = null
             null
         }
     }
@@ -173,6 +185,39 @@ class ApiClient(
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/devices/fcm-token")
             .post(body.toString().toRequestBody(jsonType))
+            .build()
+        return executeStatus(request)
+    }
+
+    // --- Fasttrack: lightweight encrypted message relay ---
+
+    fun fasttrackSend(recipientId: String, encryptedData: String): Int? {
+        val body = JSONObject().apply {
+            put("recipient_id", recipientId)
+            put("encrypted_data", encryptedData)
+        }
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/fasttrack/send")
+            .post(body.toString().toRequestBody(jsonType))
+            .build()
+        val result = executeJson(request) ?: return null
+        return result.optInt("message_id", -1).takeIf { it > 0 }
+    }
+
+    fun fasttrackPending(): List<JSONObject> {
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/fasttrack/pending")
+            .get()
+            .build()
+        val result = executeJson(request) ?: return emptyList()
+        val arr = result.optJSONArray("messages") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+    }
+
+    fun fasttrackAck(messageId: Int): Boolean {
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/fasttrack/$messageId/ack")
+            .post("".toRequestBody(jsonType))
             .build()
         return executeStatus(request)
     }

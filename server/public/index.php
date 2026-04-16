@@ -9,7 +9,9 @@ require_once __DIR__ . '/../src/Controllers/PairingController.php';
 require_once __DIR__ . '/../src/Controllers/TransferController.php';
 require_once __DIR__ . '/../src/Controllers/DashboardController.php';
 require_once __DIR__ . '/../src/Controllers/FcmController.php';
+require_once __DIR__ . '/../src/Controllers/FasttrackController.php';
 require_once __DIR__ . '/../src/FcmSender.php';
+require_once __DIR__ . '/../src/AppLog.php';
 
 // Initialize database
 $db = Database::getInstance();
@@ -113,6 +115,26 @@ $router->get('/api/transfers/notify', function () use ($db) {
     $deviceId = Router::authenticate($db);
     if ($deviceId === null) return;
     TransferController::notify($db, $deviceId);
+});
+
+// --- Fasttrack: lightweight encrypted message relay ---
+
+$router->post('/api/fasttrack/send', function () use ($db) {
+    $deviceId = Router::authenticate($db);
+    if ($deviceId === null) return;
+    FasttrackController::send($db, $deviceId);
+});
+
+$router->get('/api/fasttrack/pending', function () use ($db) {
+    $deviceId = Router::authenticate($db);
+    if ($deviceId === null) return;
+    FasttrackController::pending($db, $deviceId);
+});
+
+$router->post('/api/fasttrack/{id}/ack', function ($params) use ($db) {
+    $deviceId = Router::authenticate($db);
+    if ($deviceId === null) return;
+    FasttrackController::ack($db, $deviceId, $params);
 });
 
 // Dispatch

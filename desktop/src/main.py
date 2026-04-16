@@ -181,13 +181,30 @@ from .poller import Poller
 log = logging.getLogger("desktop-connector")
 
 
-def setup_logging(verbose: bool = False) -> None:
+def setup_logging(verbose: bool = False, config_dir: Path | None = None) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+
+    logging.basicConfig(level=level, format=fmt, datefmt=datefmt)
+
+    # File logging with 2-file rotation (max 1MB each, 2MB total)
+    # Only enabled when user opts in via Settings -> Allow logging
+    if config_dir:
+        from .config import Config
+        config = Config(config_dir)
+        if config.allow_logging:
+            from logging.handlers import RotatingFileHandler
+            log_dir = config_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_dir / "desktop-connector.log",
+                maxBytes=1_000_000,  # 1 MB
+                backupCount=1,       # keeps .log and .log.1 = 2 files max
+            )
+            file_handler.setFormatter(logging.Formatter(fmt, datefmt))
+            file_handler.setLevel(level)
+            logging.getLogger().addHandler(file_handler)
 
 
 def register_device(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
@@ -324,9 +341,8 @@ def main() -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
-    setup_logging(args.verbose)
-
     config = Config(Path(args.config_dir) if args.config_dir else None)
+    setup_logging(args.verbose, config.config_dir)
     if args.server_url:
         config.server_url = args.server_url
     if args.save_dir:

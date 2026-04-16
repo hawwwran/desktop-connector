@@ -450,6 +450,49 @@ def show_settings(config_dir: Path):
 
         save_btn.connect("clicked", on_save)
 
+        # Logs
+        logs_group = Adw.PreferencesGroup(title="Logs")
+        content.append(logs_group)
+
+        log_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        log_switch.set_active(config.allow_logging)
+        log_switch.connect("notify::active", lambda sw, _: setattr(config, 'allow_logging', sw.get_active()))
+        log_toggle_row = Adw.ActionRow(title="Allow logging", subtitle="Write logs to file (requires restart)")
+        log_toggle_row.add_suffix(log_switch)
+        log_toggle_row.set_activatable_widget(log_switch)
+        logs_group.add(log_toggle_row)
+
+        log_dir = config_dir / "logs"
+        log_files = sorted(log_dir.glob("desktop-connector.log*")) if log_dir.exists() else []
+        total_size = sum(f.stat().st_size for f in log_files) if log_files else 0
+        log_size_text = _format_bytes(total_size) if total_size > 0 else "No logs"
+
+        log_row = Adw.ActionRow(title="Log files", subtitle=log_size_text)
+        download_btn = Gtk.Button(label="Download Logs", valign=Gtk.Align.CENTER)
+
+        def on_download_logs(btn):
+            import shutil, subprocess as _sp
+            downloads = Path.home() / "Downloads"
+            downloads.mkdir(exist_ok=True)
+            dest = downloads / f"desktop-connector-logs-{time.strftime('%Y%m%d-%H%M%S')}"
+            dest.mkdir(exist_ok=True)
+            copied = 0
+            for f in (log_dir.glob("desktop-connector.log*") if log_dir.exists() else []):
+                shutil.copy2(f, dest / f.name)
+                copied += 1
+            if copied > 0:
+                _sp.Popen(["xdg-open", str(dest)])
+                btn.set_label(f"\u2713 Saved to Downloads")
+                btn.set_sensitive(False)
+                GLib.timeout_add(3000, lambda: (btn.set_label("Download Logs"), btn.set_sensitive(True), False)[-1])
+            else:
+                btn.set_label("No logs found")
+                GLib.timeout_add(2000, lambda: (btn.set_label("Download Logs"), btn.set_sensitive(True), False)[-1])
+
+        download_btn.connect("clicked", on_download_logs)
+        log_row.add_suffix(download_btn)
+        logs_group.add(log_row)
+
         # This device
         device_group = Adw.PreferencesGroup(title="This Device")
         content.append(device_group)
@@ -962,15 +1005,372 @@ def show_pairing(config_dir: Path):
     app.run(None)
 
 
+# ─── Find My Phone Window ───────────────────────────────────────────
+
+def show_find_phone(config_dir: Path):
+    import logging
+    log = logging.getLogger("desktop-connector.find-phone")
+
+    from .config import Config
+    from .crypto import KeyManager
+    from .connection import ConnectionManager
+    from .api_client import ApiClient
+
+    config = Config(config_dir)
+    crypto = KeyManager(config_dir)
+
+    # Check WebKit availability
+    has_webkit = False
+    try:
+        gi.require_version("WebKit", "6.0")
+        from gi.repository import WebKit
+        has_webkit = True
+    except (ValueError, ImportError):
+        pass
+
+    MAP_HTML = """<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9/dist/leaflet.js"></script>
+<style>body{margin:0;background:#1e1e1e}#map{width:100%;height:100vh}</style>
+</head><body>
+<div id="map"></div>
+<script>
+var map = L.map('map').setView([0,0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {attribution:'OSM', maxZoom:19}).addTo(map);
+var marker = null;
+var circle = null;
+function updatePos(lat,lng,acc) {
+  if (!marker) {
+    marker = L.marker([lat,lng]).addTo(map);
+    map.setView([lat,lng], 16);
+  } else {
+    marker.setLatLng([lat,lng]);
+    map.panTo([lat,lng]);
+  }
+  if (circle) map.removeLayer(circle);
+  if (acc && acc > 0) {
+    circle = L.circle([lat,lng], {radius:acc, color:'#3b82f6',
+      fillColor:'#3b82f6', fillOpacity:0.15, weight:1}).addTo(map);
+  }
+}
+</script>
+</body></html>"""
+
+    app = Adw.Application(application_id="com.desktopconnector.findphone")
+
+    def on_activate(app):
+        win = Adw.ApplicationWindow(application=app, title="Find my Phone",
+                                     default_width=480, default_height=640)
+
+        toolbar_view = Adw.ToolbarView()
+        toast_overlay = Adw.ToastOverlay()
+        toast_overlay.set_child(toolbar_view)
+        win.set_content(toast_overlay)
+
+        header = Adw.HeaderBar()
+        toolbar_view.add_top_bar(header)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                          margin_top=16, margin_bottom=16, margin_start=16, margin_end=16)
+        toolbar_view.set_content(content)
+
+        # Status
+        status_label = Gtk.Label(label="Ready")
+        status_label.add_css_class("title-3")
+        content.append(status_label)
+
+        # Settings group
+        settings_group = Adw.PreferencesGroup(title="Settings")
+        content.append(settings_group)
+
+        # Silent search toggle
+        silent_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+        silent_switch.set_active(False)
+        silent_row = Adw.ActionRow(title="Silent search", subtitle="Track location without alarm (stolen phone)")
+        silent_row.add_suffix(silent_switch)
+        silent_row.set_activatable_widget(silent_switch)
+        settings_group.add(silent_row)
+
+        # Volume slider
+        volume_row = Adw.ActionRow(title="Volume")
+        volume_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10, 100, 10)
+        volume_scale.set_value(80)
+        volume_scale.set_hexpand(True)
+        volume_scale.set_valign(Gtk.Align.CENTER)
+        volume_scale.set_draw_value(True)
+        volume_scale.set_value_pos(Gtk.PositionType.RIGHT)
+        volume_row.add_suffix(volume_scale)
+        settings_group.add(volume_row)
+
+        def on_silent_changed(sw, _):
+            volume_scale.set_sensitive(not sw.get_active())
+        silent_switch.connect("notify::active", on_silent_changed)
+
+        # Action buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                          halign=Gtk.Align.CENTER, margin_top=4)
+        content.append(btn_box)
+
+        start_btn = Gtk.Button(label="Start")
+        start_btn.add_css_class("suggested-action")
+        start_btn.add_css_class("pill")
+        btn_box.append(start_btn)
+
+        stop_btn = Gtk.Button(label="Stop")
+        stop_btn.add_css_class("destructive-action")
+        stop_btn.add_css_class("pill")
+        stop_btn.set_visible(False)
+        btn_box.append(stop_btn)
+
+        # Map or fallback
+        webview = [None]
+
+        if has_webkit:
+            from gi.repository import WebKit
+            wv = WebKit.WebView()
+            wv.set_vexpand(True)
+            wv.set_hexpand(True)
+            wv.set_size_request(-1, 250)
+            wv.load_html(MAP_HTML, "about:blank")
+            map_frame = Gtk.Frame()
+            map_frame.set_child(wv)
+            map_frame.set_overflow(Gtk.Overflow.HIDDEN)
+            content.append(map_frame)
+            webview[0] = wv
+        else:
+            map_placeholder = Gtk.Label(label="Map unavailable (install gir1.2-webkit-6.0)")
+            map_placeholder.add_css_class("dim-label")
+            map_placeholder.set_vexpand(True)
+            content.append(map_placeholder)
+
+        # Location info + open in browser
+        loc_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        content.append(loc_box)
+
+        loc_label = Gtk.Label(label="", xalign=0, hexpand=True)
+        loc_label.add_css_class("caption")
+        loc_label.add_css_class("dim-label")
+        loc_box.append(loc_label)
+
+        open_map_btn = Gtk.Button(label="Open in Browser")
+        open_map_btn.add_css_class("flat")
+        open_map_btn.set_visible(False)
+        loc_box.append(open_map_btn)
+
+        # ── State ─────────────────────────────────────────────────
+        # poll_generation: incremented on each Start. Old poll threads see mismatch and exit.
+        # No shared mutable flags — eliminates all thread races.
+        poll_generation = [0]
+        last_lat = [None]
+        last_lng = [None]
+        is_silent = [False]
+        shared_api = [None]
+        shared_target = [None]
+        shared_key = [None]
+
+        LOST_COMMS_TIMEOUT = 20  # seconds with no heartbeat
+
+        def set_ui(status_text, sliders_enabled, show_start, show_stop):
+            status_label.set_text(status_text)
+            volume_scale.set_sensitive(sliders_enabled and not silent_switch.get_active())
+            silent_row.set_sensitive(sliders_enabled)
+            start_btn.set_visible(show_start)
+            stop_btn.set_visible(show_stop)
+
+        def update_location(lat, lng, accuracy):
+            last_lat[0] = lat
+            last_lng[0] = lng
+            if lat is not None and lng is not None:
+                acc_text = f"  |  ~{int(accuracy)}m" if accuracy else ""
+                loc_label.set_text(f"{lat:.6f}, {lng:.6f}{acc_text}  |  {time.strftime('%H:%M:%S')}")
+                open_map_btn.set_visible(True)
+                if webview[0]:
+                    acc_val = accuracy if accuracy else 0
+                    webview[0].evaluate_javascript(
+                        f"updatePos({lat},{lng},{acc_val})", -1, None, None, None, None, None)
+
+        def on_open_map(btn):
+            if last_lat[0] is not None:
+                import subprocess
+                url = f"https://www.openstreetmap.org/?mlat={last_lat[0]}&mlon={last_lng[0]}#map=16/{last_lat[0]}/{last_lng[0]}"
+                subprocess.Popen(["xdg-open", url])
+        open_map_btn.connect("clicked", on_open_map)
+
+        def _send_stop(api, target_id, symmetric_key):
+            payload = json.dumps({"fn": "find-phone", "action": "stop"}).encode()
+            encrypted = crypto.encrypt_blob(payload, symmetric_key)
+            encrypted_b64 = base64.b64encode(encrypted).decode()
+            log.info("Sending find-phone stop to %s", target_id[:12])
+            api.fasttrack_send(target_id, encrypted_b64)
+
+        def on_start(btn):
+            paired = config.get_first_paired_device()
+            if not paired:
+                toast_overlay.add_toast(Adw.Toast(title="Not paired with any device", timeout=3))
+                return
+
+            target_id, target_info = paired
+            symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+            volume = 0 if silent_switch.get_active() else int(volume_scale.get_value())
+            is_silent[0] = silent_switch.get_active()
+
+            # Advance generation — any old poll thread will see mismatch and exit
+            poll_generation[0] += 1
+            my_gen = poll_generation[0]
+
+            set_ui("Sending command...", False, False, True)
+
+            payload = json.dumps({
+                "fn": "find-phone",
+                "action": "start",
+                "volume": volume,
+                "timeout": 300,  # hardcoded 5 min, enforced on phone
+            }).encode()
+            encrypted = crypto.encrypt_blob(payload, symmetric_key)
+            encrypted_b64 = base64.b64encode(encrypted).decode()
+
+            def do_poll():
+                conn = ConnectionManager(config.server_url, config.device_id or "", config.auth_token or "")
+                api = ApiClient(conn, crypto)
+                shared_api[0] = api
+                shared_target[0] = target_id
+                shared_key[0] = symmetric_key
+
+                # Flush stale messages from previous sessions
+                stale = api.fasttrack_pending()
+                for m in stale:
+                    mid = m.get("id")
+                    if mid:
+                        api.fasttrack_ack(mid)
+                if stale:
+                    log.info("Flushed %d stale message(s)", len(stale))
+
+                log.info("Sending start (volume=%d, silent=%s) to %s",
+                         volume, is_silent[0], target_id[:12])
+                msg_id = api.fasttrack_send(target_id, encrypted_b64)
+                if msg_id is None:
+                    log.error("Failed to send fasttrack message")
+                    GLib.idle_add(set_ui, "Failed to reach phone", True, True, False)
+                    return
+
+                log.info("Sent msg_id=%s, polling...", msg_id)
+                last_heartbeat = time.time()
+                comms_lost_shown = False
+
+                while poll_generation[0] == my_gen:
+                    time.sleep(3)
+                    if poll_generation[0] != my_gen:
+                        break
+
+                    # Lost communication detection (fire UI update only once)
+                    silence = time.time() - last_heartbeat
+                    if silence > LOST_COMMS_TIMEOUT and not comms_lost_shown:
+                        log.warning("No heartbeat for %.0fs", silence)
+                        GLib.idle_add(set_ui, "Lost communication", False, True, True)
+                        comms_lost_shown = True
+
+                    try:
+                        messages = api.fasttrack_pending()
+                        for m in messages:
+                            mid = m.get("id")
+                            enc_data = m.get("encrypted_data", "")
+                            try:
+                                enc_bytes = base64.b64decode(enc_data)
+                                plain = crypto.decrypt_blob(enc_bytes, symmetric_key)
+                                resp = json.loads(plain)
+                                log.info("Response: %s", resp)
+
+                                if resp.get("fn") == "find-phone":
+                                    resp_state = resp.get("state", "")
+                                    lat = resp.get("lat")
+                                    lng = resp.get("lng")
+                                    accuracy = resp.get("accuracy")
+
+                                    if resp_state == "ringing":
+                                        last_heartbeat = time.time()
+                                        comms_lost_shown = False
+                                        label = "Search in progress" if is_silent[0] else "Phone is ringing!"
+                                        GLib.idle_add(set_ui, label, False, False, True)
+                                        if lat is not None:
+                                            log.info("GPS: %.6f, %.6f acc=%.1f", lat, lng, accuracy or 0)
+                                            GLib.idle_add(update_location, lat, lng, accuracy)
+                                    elif resp_state == "stopped":
+                                        log.info("Phone confirmed stopped")
+                                        GLib.idle_add(set_ui, "Alarm stopped", True, True, False)
+                                        if mid:
+                                            api.fasttrack_ack(mid)
+                                        return  # clean exit
+                            except Exception as e:
+                                log.error("Decrypt failed: %s", e)
+                            if mid:
+                                api.fasttrack_ack(mid)
+                    except Exception as e:
+                        log.error("Poll failed: %s", e)
+
+            threading.Thread(target=do_poll, daemon=True).start()
+
+        def on_stop(btn):
+            set_ui("Stopping...", False, False, False)
+            poll_generation[0] += 1  # kill poll thread
+            def do_stop():
+                api, tid, key = shared_api[0], shared_target[0], shared_key[0]
+                if api and tid and key:
+                    _send_stop(api, tid, key)
+                GLib.idle_add(set_ui, "Alarm stopped", True, True, False)
+            threading.Thread(target=do_stop, daemon=True).start()
+
+        start_btn.connect("clicked", on_start)
+        stop_btn.connect("clicked", on_stop)
+
+        def on_close(w):
+            poll_generation[0] += 1  # kill poll thread
+            api, tid, key = shared_api[0], shared_target[0], shared_key[0]
+            if api and tid and key:
+                threading.Thread(target=_send_stop, args=(api, tid, key), daemon=True).start()
+            return False
+
+        win.connect("close-request", on_close)
+
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run(None)
+
+
 # ─── CLI entry point ─────────────────────────────────────────────────
+
+def _setup_subprocess_logging(config_dir: Path) -> None:
+    """Set up file logging for subprocess windows (mirrors main.py setup_logging)."""
+    from .config import Config
+    config = Config(config_dir)
+    if not config.allow_logging:
+        return
+    import logging
+    from logging.handlers import RotatingFileHandler
+    log_dir = config_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    handler = RotatingFileHandler(
+        log_dir / "desktop-connector.log",
+        maxBytes=1_000_000, backupCount=1,
+    )
+    handler.setFormatter(logging.Formatter(fmt, "%Y-%m-%d %H:%M:%S"))
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().setLevel(logging.INFO)
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("window", choices=["send-files", "settings", "history", "pairing"])
+    parser.add_argument("window", choices=["send-files", "settings", "history", "pairing", "find-phone"])
     parser.add_argument("--config-dir", required=True)
     args = parser.parse_args()
 
     config_dir = Path(args.config_dir)
+    _setup_subprocess_logging(config_dir)
 
     if args.window == "send-files":
         show_send_files(config_dir)
@@ -980,6 +1380,8 @@ def main():
         show_history(config_dir)
     elif args.window == "pairing":
         show_pairing(config_dir)
+    elif args.window == "find-phone":
+        show_find_phone(config_dir)
 
 
 if __name__ == "__main__":

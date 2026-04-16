@@ -1,5 +1,9 @@
 package com.desktopconnector.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.rememberScrollState
@@ -12,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.network.ApiClient
@@ -144,6 +149,60 @@ fun SettingsScreen(
                 }
             }
 
+            // GPS permission for Find my Phone (only shown when FCM is active)
+            if (fcmActive) {
+                val context = LocalContext.current
+                var hasLocation by remember {
+                    mutableStateOf(
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                            PackageManager.PERMISSION_GRANTED
+                    )
+                }
+                val locationLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { results ->
+                    hasLocation = results[Manifest.permission.ACCESS_FINE_LOCATION] == true
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                ) {
+                    Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                        Text("Find My Phone", style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.height(4.dp))
+                        SettingsRow("GPS Permission", if (hasLocation) "Granted" else "Not granted")
+                        if (!hasLocation) {
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedButton(onClick = {
+                                locationLauncher.launch(arrayOf(
+                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                                ))
+                            }) {
+                                Text("Grant GPS Permission")
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        var allowSilent by remember { mutableStateOf(prefs.allowSilentSearch) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Allow silent search", style = MaterialTheme.typography.bodySmall)
+                            Switch(
+                                checked = allowSilent,
+                                onCheckedChange = {
+                                    allowSilent = it
+                                    prefs.allowSilentSearch = it
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
             // This device
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -223,8 +282,27 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
             ) {
+                val context = LocalContext.current
+                var loggingOn by remember { mutableStateOf(prefs.loggingEnabled) }
+
                 Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                     Text("Logs", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Allow logging", style = MaterialTheme.typography.bodySmall)
+                        Switch(
+                            checked = loggingOn,
+                            onCheckedChange = {
+                                loggingOn = it
+                                prefs.loggingEnabled = it
+                                AppLog.refreshEnabled(context)
+                            },
+                        )
+                    }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { AppLog.clear() }) {

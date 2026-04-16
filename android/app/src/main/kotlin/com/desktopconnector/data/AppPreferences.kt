@@ -31,6 +31,18 @@ class AppPreferences(context: Context) {
     val isRegistered: Boolean
         get() = deviceId != null && authToken != null
 
+    var locationPromptDismissed: Boolean
+        get() = prefs.getBoolean("location_prompt_dismissed", false)
+        set(value) = prefs.edit().putBoolean("location_prompt_dismissed", value).apply()
+
+    var loggingEnabled: Boolean
+        get() = prefs.getBoolean("logging_enabled", false)
+        set(value) = prefs.edit().putBoolean("logging_enabled", value).apply()
+
+    var allowSilentSearch: Boolean
+        get() = prefs.getBoolean("allow_silent_search", true)
+        set(value) = prefs.edit().putBoolean("allow_silent_search", value).apply()
+
     fun clear() {
         prefs.edit().clear().apply()
     }

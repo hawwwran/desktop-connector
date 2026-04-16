@@ -146,3 +146,49 @@ class ApiClient:
         if resp and resp.status_code == 200:
             return resp.json().get("transfers", [])
         return []
+
+    # --- Fasttrack: lightweight encrypted message relay ---
+
+    def check_fcm_available(self) -> bool:
+        """Check if the server has FCM configured. Uses unauthenticated endpoint."""
+        try:
+            resp = requests.get(
+                f"{self.conn.server_url}/api/fcm/config",
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("available", False)
+        except requests.RequestException:
+            pass
+        return False
+
+    def fasttrack_send(self, recipient_id: str, encrypted_data: str) -> int | None:
+        """Send an encrypted fasttrack message. Returns message_id or None."""
+        log.info("Fasttrack send to %s (%d bytes)", recipient_id[:12], len(encrypted_data))
+        resp = self.conn.request("POST", "/api/fasttrack/send", json={
+            "recipient_id": recipient_id,
+            "encrypted_data": encrypted_data,
+        })
+        if resp and resp.status_code == 201:
+            msg_id = resp.json().get("message_id")
+            log.info("Fasttrack sent, message_id=%s", msg_id)
+            return msg_id
+        log.error("Fasttrack send failed: %s", resp.status_code if resp else "no response")
+        return None
+
+    def fasttrack_pending(self) -> list[dict]:
+        """Fetch pending fasttrack messages for this device."""
+        resp = self.conn.request("GET", "/api/fasttrack/pending")
+        if resp and resp.status_code == 200:
+            msgs = resp.json().get("messages", [])
+            if msgs:
+                log.info("Fasttrack pending: %d message(s)", len(msgs))
+            return msgs
+        return []
+
+    def fasttrack_ack(self, message_id: int) -> bool:
+        """Acknowledge and delete a fasttrack message."""
+        resp = self.conn.request("POST", f"/api/fasttrack/{message_id}/ack")
+        ok = resp is not None and resp.status_code == 200
+        log.debug("Fasttrack ack %d: %s", message_id, "ok" if ok else "failed")
+        return ok
