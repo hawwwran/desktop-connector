@@ -224,6 +224,7 @@ class ApiClient(
         return executeStatus(request)
     }
 
+
     // Fast client for heartbeats — 1s timeout so it never blocks the poll loop
     private val heartbeatClient = OkHttpClient.Builder()
         .connectTimeout(1, TimeUnit.SECONDS)

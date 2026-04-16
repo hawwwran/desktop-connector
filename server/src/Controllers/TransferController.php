@@ -173,7 +173,7 @@ class TransferController
 
         // Verify transfer is for this recipient
         $transfer = $db->querySingle(
-            'SELECT recipient_id FROM transfers WHERE id = :id',
+            'SELECT recipient_id, chunk_count FROM transfers WHERE id = :id',
             [':id' => $transferId]
         );
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
@@ -195,6 +195,17 @@ class TransferController
             Router::json(['error' => 'Chunk file missing from storage'], 500);
             return;
         }
+
+        // Track download progress, capped at chunk_count - 1 until ack.
+        // chunks_downloaded == chunk_count iff downloaded == 1 — gives the sender's
+        // delivery tracker a rock-solid "done" signal that can't be faked by serving
+        // the last chunk (which might still fail client-side before ack).
+        $cap = (int)$transfer['chunk_count'] - 1;
+        $newProgress = min($chunkIndex + 1, max(0, $cap));
+        $db->execute(
+            'UPDATE transfers SET chunks_downloaded = MAX(chunks_downloaded, :progress) WHERE id = :id',
+            [':progress' => $newProgress, ':id' => $transferId]
+        );
 
         Router::binary(file_get_contents($fullPath));
     }
@@ -245,10 +256,11 @@ class TransferController
             rmdir($dir);
         }
 
-        // Delete chunk records and mark downloaded with timestamp
+        // Delete chunk records and mark downloaded with timestamp.
+        // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
         $db->execute('DELETE FROM chunks WHERE transfer_id = :tid', [':tid' => $transferId]);
         $db->execute(
-            'UPDATE transfers SET downloaded = 1, delivered_at = :now WHERE id = :id',
+            'UPDATE transfers SET downloaded = 1, delivered_at = :now, chunks_downloaded = chunk_count WHERE id = :id',
             [':now' => time(), ':id' => $transferId]
         );
 
@@ -259,7 +271,7 @@ class TransferController
     {
         // Return delivery status of transfers sent by this device
         $transfers = $db->queryAll(
-            'SELECT id as transfer_id, recipient_id, complete, downloaded, created_at
+            'SELECT id as transfer_id, recipient_id, complete, downloaded, chunk_count, chunks_downloaded, created_at
              FROM transfers
              WHERE sender_id = :sid
              ORDER BY created_at DESC
@@ -270,14 +282,20 @@ class TransferController
         $result = [];
         foreach ($transfers as $t) {
             $status = 'uploading';
+            $deliveryState = 'not_started';
             if ($t['downloaded']) {
                 $status = 'delivered';
+                $deliveryState = 'delivered';
             } elseif ($t['complete']) {
                 $status = 'pending';  // uploaded but not yet downloaded by recipient
+                $deliveryState = ((int)$t['chunks_downloaded'] > 0) ? 'in_progress' : 'not_started';
             }
             $result[] = [
                 'transfer_id' => $t['transfer_id'],
                 'status' => $status,
+                'delivery_state' => $deliveryState,
+                'chunks_downloaded' => (int)($t['chunks_downloaded'] ?? 0),
+                'chunk_count' => (int)$t['chunk_count'],
                 'created_at' => (int)$t['created_at'],
             ];
         }
@@ -295,6 +313,15 @@ class TransferController
         $isTest = !empty($_GET['test']);
         $hasPending = false;
         $hasDelivered = false;
+        $hasDownloadProgress = false;
+
+        // Snapshot current download progress for sent transfers to detect changes
+        $initialProgress = $db->querySingle(
+            'SELECT COALESCE(SUM(chunks_downloaded), 0) as total FROM transfers
+             WHERE sender_id = :sid AND complete = 1 AND downloaded = 0',
+            [':sid' => $deviceId]
+        );
+        $initialProgressTotal = (int)($initialProgress['total'] ?? 0);
 
         $start = time();
         do {
@@ -305,28 +332,66 @@ class TransferController
             );
             $delivered = $db->querySingle(
                 'SELECT COUNT(*) as count FROM transfers
-                 WHERE sender_id = :sid AND delivered_at > :since',
+                 WHERE sender_id = :sid AND delivered_at >= :since',
                 [':sid' => $deviceId, ':since' => $since]
+            );
+
+            // Check if recipient has downloaded more chunks of our sent transfers
+            $currentProgress = $db->querySingle(
+                'SELECT COALESCE(SUM(chunks_downloaded), 0) as total FROM transfers
+                 WHERE sender_id = :sid AND complete = 1 AND downloaded = 0',
+                [':sid' => $deviceId]
             );
 
             $hasPending = ($pending['count'] ?? 0) > 0;
             $hasDelivered = ($delivered['count'] ?? 0) > 0;
+            $hasDownloadProgress = ((int)($currentProgress['total'] ?? 0)) != $initialProgressTotal;
 
-            if ($isTest || $hasPending || $hasDelivered) {
+            if ($isTest || $hasPending || $hasDelivered || $hasDownloadProgress) {
                 break;
             }
 
-            usleep(1000000); // 1 second
+            usleep(500000); // 500ms
         } while (time() - $start < self::LONG_POLL_TIMEOUT);
 
         $response = [
             'pending' => $hasPending,
             'delivered' => $hasDelivered,
+            'download_progress' => $hasDownloadProgress,
             'time' => time(),
         ];
         if ($isTest) {
             $response['test'] = true;
         }
+
+        // Include sent transfer progress inline so clients don't need a second request
+        if ($hasDownloadProgress || $hasDelivered) {
+            $sent = $db->queryAll(
+                'SELECT id as transfer_id, complete, downloaded, chunk_count, chunks_downloaded
+                 FROM transfers WHERE sender_id = :sid AND complete = 1
+                 ORDER BY created_at DESC LIMIT 50',
+                [':sid' => $deviceId]
+            );
+            $sentStatus = [];
+            foreach ($sent as $t) {
+                if ($t['downloaded']) {
+                    $status = 'delivered';
+                    $deliveryState = 'delivered';
+                } else {
+                    $status = 'pending';
+                    $deliveryState = ((int)$t['chunks_downloaded'] > 0) ? 'in_progress' : 'not_started';
+                }
+                $sentStatus[] = [
+                    'transfer_id' => $t['transfer_id'],
+                    'status' => $status,
+                    'delivery_state' => $deliveryState,
+                    'chunks_downloaded' => (int)($t['chunks_downloaded'] ?? 0),
+                    'chunk_count' => (int)$t['chunk_count'],
+                ];
+            }
+            $response['sent_status'] = $sentStatus;
+        }
+
         Router::json($response);
     }
 

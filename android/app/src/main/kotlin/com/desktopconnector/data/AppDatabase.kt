@@ -14,7 +14,7 @@ class Converters {
     fun toDirection(value: String): TransferDirection = TransferDirection.valueOf(value)
 }
 
-@Database(entities = [QueuedTransfer::class], version = 3, exportSchema = false)
+@Database(entities = [QueuedTransfer::class], version = 6, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transferDao(): TransferDao

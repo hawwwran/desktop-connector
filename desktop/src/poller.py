@@ -18,6 +18,11 @@ from .history import TransferHistory
 
 log = logging.getLogger(__name__)
 
+# Delivery tracker: after this many seconds with no chunks_downloaded advancement,
+# stop fast-polling a given transfer. Transfer stays as sent/undelivered; long-poll
+# inline sent_status and app-restart delivery check still catch eventual delivery.
+DELIVERY_STALL_TIMEOUT = 2 * 60
+
 
 class Poller:
     """Polls server for pending transfers and downloads them."""
@@ -35,6 +40,11 @@ class Poller:
         self._fast_poll_until = 0.0
         self._on_file_received: list = []
         self._poll_status_file = config.config_dir / "poll_status.json"
+        self._last_delivery_check = 0.0  # timestamp of last delivery status check
+        # Delivery tracker state (protected by _tracker_state_lock)
+        self._tracker_state_lock = threading.Lock()
+        self._tracker_last_progress: dict[str, tuple[int, float]] = {}  # tid -> (chunks_downloaded, monotonic_ts)
+        self._tracker_gave_up: set[str] = set()
 
     def _write_poll_status(self, status: str) -> None:
         """Write long poll status: 'active', 'unavailable', 'testing', 'offline'."""
@@ -74,6 +84,7 @@ class Poller:
     def run(self) -> None:
         """Main polling loop. Uses long polling after connection is confirmed."""
         log.info("Poller started")
+        threading.Thread(target=self._delivery_tracker_loop, daemon=True).start()
         last_check_time = 0
         long_poll_available = None  # None = untested, True/False = tested
         self._write_poll_status("offline")
@@ -98,12 +109,23 @@ class Poller:
                         self._write_poll_status("active" if long_poll_available else "unavailable")
                         log.info("Long poll %s", "available" if long_poll_available else "not available")
 
-                    if long_poll_available:
-                        notified = self._long_poll(last_check_time)
+                    # Skip long poll while outgoing transfers in progress (avoids blocking single-threaded PHP server)
+                    upload_active = (self.config.config_dir / "upload_active.json").exists()
+                    has_undelivered = bool(self.history.get_undelivered_transfer_ids())
+                    busy_outgoing = upload_active or has_undelivered
+
+                    if long_poll_available and not busy_outgoing:
+                        result = self._long_poll(last_check_time)
                         last_check_time = int(time.time())
-                        if notified is True:
-                            self._poll_once()
-                        elif notified is False:
+                        if isinstance(result, dict):
+                            if result.get("pending"):
+                                self._poll_once()
+                            # Use inline sent_status if available (no second request)
+                            if "sent_status" in result:
+                                self._process_delivery_statuses(result["sent_status"])
+                            elif result.get("delivered") or result.get("download_progress"):
+                                self._check_delivery_status()
+                        elif result is False:
                             self._check_delivery_status()
                         else:
                             # Long poll broke mid-session
@@ -113,7 +135,7 @@ class Poller:
                             self._sleep(self._current_interval())
                     else:
                         self._poll_once()
-                        self._sleep(self._current_interval())
+                        self._sleep(0.5 if busy_outgoing else self._current_interval())
                 except Exception:
                     log.exception("Error during poll")
                     self._sleep(self._current_interval())
@@ -125,10 +147,10 @@ class Poller:
                     self.conn.check_connection()
         log.info("Poller stopped")
 
-    def _long_poll(self, since: int) -> bool | None:
+    def _long_poll(self, since: int) -> dict | bool | None:
         """
         Long poll the server. Returns:
-        - True: new data available
+        - dict: response data (something happened)
         - False: timed out, nothing new
         - None: endpoint not available or error (fall back to regular polling)
         Uses raw requests — does NOT affect connection state machine.
@@ -138,15 +160,16 @@ class Poller:
             resp = _raw_requests.get(url, headers=self.conn.auth_headers(), timeout=30)
             if resp.status_code == 200:
                 data = resp.json()
-                return data.get("pending", False) or data.get("delivered", False)
+                if data.get("pending") or data.get("delivered") or data.get("download_progress"):
+                    return data
+                return False
             return None
         except _raw_requests.RequestException:
             return None
 
     def _poll_once(self) -> None:
-        # Check delivery status of sent items
-        self._check_delivery_status()
-
+        # Delivery tracker (separate thread) owns sent-status polling during
+        # active deliveries. This path only handles incoming.
         transfers = self.api.get_pending_transfers()
         if not transfers:
             return
@@ -238,12 +261,15 @@ class Poller:
         if is_fn:
             pass  # .fn. transfers are logged in _handle_fn_transfer
         else:
+            # Download logic cleans up its own progress fields on completion.
             self.history.update(
                 transfer_id,
                 status="complete",
                 size=save_path.stat().st_size,
                 content_path=str(save_path),
                 delivered=True,
+                chunks_downloaded=0,
+                chunks_total=0,
             )
             for cb in self._on_file_received:
                 try:
@@ -318,19 +344,182 @@ class Poller:
         else:
             log.warning("Unknown .fn function: %s", fn)
 
+    def _delivery_tracker_loop(self) -> None:
+        """Paints per-chunk "Delivering X/Y" progress for OUTGOING transfers while
+        the phone pulls them off the server.
+
+        Cadence: 500ms tick, single in-flight poll at a time (overlap -> skip + log),
+        750ms abort timeout per poll. Idle when no active deliveries or offline.
+
+        Stall safeguard: if chunks_downloaded does not advance for DELIVERY_STALL_TIMEOUT
+        seconds on a given transfer, the tracker gives up tracking that transfer
+        (clears its progress fields so UI falls back to "Sent"). The transfer row stays
+        sent/undelivered; long-poll inline sent_status and app-restart delivery check
+        still catch eventual delivery if the phone comes online.
+
+        Does NOT mark delivered=True itself. When the server reports delivery_state
+        == "delivered" for any tracked transfer, delegates to _check_delivery_status
+        - the same path used at app start - as the single source of truth.
+
+        Symmetric with Android's PollService.deliveryTrackerLoop.
+        """
+        log.info("Delivery tracker started")
+        in_flight = threading.Lock()
+
+        def run_poll():
+            try:
+                statuses = self.api.get_sent_status(timeout=0.75)
+                if self._process_delivery_progress(statuses):
+                    self._check_delivery_status()
+            except Exception:
+                log.debug("Delivery tracker poll failed", exc_info=True)
+            finally:
+                in_flight.release()
+
+        while self._running:
+            tick_start = time.monotonic()
+            try:
+                if self.conn.state == ConnectionState.CONNECTED:
+                    undelivered = set(self.history.get_undelivered_transfer_ids())
+                    # Prune tracker state for transfers no longer undelivered
+                    # (deleted, or marked delivered via long-poll inline path).
+                    with self._tracker_state_lock:
+                        stale = [k for k in self._tracker_last_progress if k not in undelivered]
+                        for k in stale:
+                            del self._tracker_last_progress[k]
+                        self._tracker_gave_up &= undelivered
+                        has_tracked = bool(undelivered - self._tracker_gave_up)
+
+                    if has_tracked:
+                        if in_flight.acquire(blocking=False):
+                            threading.Thread(target=run_poll, daemon=True).start()
+                        else:
+                            log.info("Delivery tracker: skip tick — previous poll still in flight")
+            except Exception:
+                log.exception("Delivery tracker error")
+            elapsed = time.monotonic() - tick_start
+            time.sleep(max(0.0, 0.5 - elapsed))
+
     def _check_delivery_status(self) -> None:
-        """Check if any sent transfers have been delivered."""
+        """Check delivery via separate request (fallback when inline data unavailable)."""
+        now = time.time()
+        if now - self._last_delivery_check < 0.5:
+            return
+        self._last_delivery_check = now
+
         undelivered = self.history.get_undelivered_transfer_ids()
         if not undelivered:
             return
 
-        statuses = self.api.get_sent_status()
-        delivered_ids = {s["transfer_id"] for s in statuses if s.get("status") == "delivered"}
+        statuses = self.api.get_sent_status(timeout=3)
+        self._process_delivery_statuses(statuses)
 
-        for tid in undelivered:
-            if tid in delivered_ids:
-                if self.history.mark_delivered(tid):
-                    log.info("Transfer %s delivered", tid[:12])
+    def _process_delivery_statuses(self, statuses: list[dict]) -> None:
+        """Process sent-status data (inline long poll or standard / app-start path).
+
+        Authoritative marker for `delivered=True`. The delivery tracker does NOT
+        come through here — it paints progress via `_process_delivery_progress`
+        and delegates to this function only at the delivered transition.
+
+        Authoritative signal is `delivery_state`: not_started | in_progress | delivered.
+        Server guarantees chunks_downloaded == chunk_count iff delivery_state == "delivered"
+        (incremented to cap-1 during serving, bumped to full count only on ack).
+        """
+        undelivered = self.history.get_undelivered_transfer_ids()
+        if not undelivered:
+            return
+
+        for s in statuses:
+            tid = s.get("transfer_id")
+            if tid not in undelivered:
+                continue
+
+            state = s.get("delivery_state", "not_started")
+            chunks_dl = s.get("chunks_downloaded", 0)
+            chunk_count = s.get("chunk_count", 0)
+
+            if state == "delivered":
+                # Delivery logic cleans up its own progress fields as it marks delivered.
+                self.history.update(tid,
+                    recipient_chunks_downloaded=0,
+                    recipient_chunks_total=0,
+                    delivered=True)
+                log.info("Transfer %s delivered", tid[:12])
+            elif state == "in_progress":
+                self.history.update(tid,
+                    recipient_chunks_downloaded=chunks_dl,
+                    recipient_chunks_total=chunk_count)
+
+    def _process_delivery_progress(self, statuses: list[dict]) -> bool:
+        """Tracker-only: paint progress for in-flight deliveries. Returns True if
+        any transfer flipped to delivery_state="delivered" (caller delegates to
+        standard poll as the authoritative marker).
+
+        Also runs stall detection: if chunks_downloaded doesn't advance within
+        DELIVERY_STALL_TIMEOUT, the transfer is moved to _tracker_gave_up and its
+        progress fields are cleared so UI falls back to "Sent".
+
+        DB writes only on change — _tracker_last_progress already tells us whether
+        the value moved since last tick. Avoids ~240 redundant history writes per
+        stuck transfer over the 2 min stall window.
+        """
+        undelivered = set(self.history.get_undelivered_transfer_ids())
+        if not undelivered:
+            return False
+
+        now = time.monotonic()
+        any_just_delivered = False
+
+        for s in statuses:
+            tid = s.get("transfer_id")
+            if tid not in undelivered:
+                continue
+
+            state = s.get("delivery_state", "not_started")
+            chunks_dl = s.get("chunks_downloaded", 0)
+            chunk_count = s.get("chunk_count", 0)
+
+            # Decide action under a single lock acquisition per transfer.
+            action: str  # "skip" | "delivered" | "advanced" | "stalled"
+            stall_seconds = 0.0
+            with self._tracker_state_lock:
+                if tid in self._tracker_gave_up:
+                    action = "skip"
+                elif state == "delivered":
+                    self._tracker_last_progress.pop(tid, None)
+                    any_just_delivered = True
+                    action = "delivered"
+                else:
+                    prev = self._tracker_last_progress.get(tid)
+                    if prev is None or prev[0] != chunks_dl:
+                        self._tracker_last_progress[tid] = (chunks_dl, now)
+                        action = "advanced"
+                    elif now - prev[1] > DELIVERY_STALL_TIMEOUT:
+                        stall_seconds = now - prev[1]
+                        self._tracker_gave_up.add(tid)
+                        self._tracker_last_progress.pop(tid, None)
+                        action = "stalled"
+                    else:
+                        action = "skip"  # unchanged value, no DB write needed
+
+            # I/O outside the lock.
+            if action == "stalled":
+                log.info("Delivery tracker: stall on %s after %.0fs — giving up",
+                         tid[:12], stall_seconds)
+                self.history.update(tid,
+                    recipient_chunks_downloaded=0,
+                    recipient_chunks_total=0)
+            elif action == "advanced":
+                if state == "in_progress":
+                    self.history.update(tid,
+                        recipient_chunks_downloaded=chunks_dl,
+                        recipient_chunks_total=chunk_count)
+                elif state == "not_started":
+                    # Keep bar visible at 0/N so user sees "Delivering 0/N".
+                    self.history.update(tid,
+                        recipient_chunks_downloaded=0,
+                        recipient_chunks_total=chunk_count)
+        return any_just_delivered
 
     def _current_interval(self) -> float:
         if time.time() < self._fast_poll_until:

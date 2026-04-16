@@ -106,10 +106,12 @@ class ApiClient:
         return resp is not None and resp.status_code == 200
 
     def send_file(self, filepath: Path, recipient_id: str, symmetric_key: bytes,
-                  filename_override: str | None = None) -> str | None:
+                  filename_override: str | None = None,
+                  on_progress: callable = None) -> str | None:
         """
         Encrypt and upload a file to a recipient.
         filename_override: use this name in metadata instead of the actual file name.
+        on_progress: callback(transfer_id, chunks_uploaded, total_chunks) called per chunk.
         Returns transfer_id on success, None on failure.
         """
         display = filename_override or filepath.name
@@ -123,12 +125,17 @@ class ApiClient:
             log.error("Failed to init transfer")
             return None
 
+        if on_progress:
+            on_progress(transfer_id, 0, len(chunks))
+
         for i, chunk_data in enumerate(chunks):
             log.info("Uploading chunk %d/%d", i + 1, len(chunks))
             result = self.upload_chunk(transfer_id, i, chunk_data)
             if result is None:
                 log.error("Failed to upload chunk %d", i)
                 return None
+            if on_progress:
+                on_progress(transfer_id, i + 1, len(chunks))
 
         log.info("File sent successfully: %s (transfer_id=%s)", filepath.name, transfer_id)
         return transfer_id
@@ -143,9 +150,9 @@ class ApiClient:
             return resp.json()
         return None
 
-    def get_sent_status(self) -> list[dict]:
+    def get_sent_status(self, timeout: float = 30) -> list[dict]:
         """Get delivery status of transfers sent by this device."""
-        resp = self.conn.request("GET", "/api/transfers/sent-status")
+        resp = self.conn.request("GET", "/api/transfers/sent-status", timeout=timeout)
         if resp and resp.status_code == 200:
             return resp.json().get("transfers", [])
         return []

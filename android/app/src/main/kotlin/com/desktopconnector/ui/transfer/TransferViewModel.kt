@@ -398,21 +398,35 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                 }
             } else {
                 // Open file — try contentUri for sent, or DesktopConnector dir for received
-                val fileUri: Uri? = if (transfer.contentUri.isNotEmpty()) {
-                    Uri.parse(transfer.contentUri)
-                } else if (transfer.direction == TransferDirection.INCOMING) {
+                var fileUri: Uri? = null
+
+                if (transfer.direction == TransferDirection.INCOMING) {
+                    // Received files: check DesktopConnector dir first, then contentUri
                     val dir = java.io.File(android.os.Environment.getExternalStorageDirectory(), "DesktopConnector")
                     val file = java.io.File(dir, transfer.displayLabel.ifEmpty { transfer.displayName })
-                    if (file.exists()) Uri.fromFile(file) else null
-                } else null
+                    fileUri = if (file.exists()) Uri.fromFile(file)
+                              else if (transfer.contentUri.isNotEmpty()) Uri.parse(transfer.contentUri)
+                              else null
+                } else if (transfer.contentUri.isNotEmpty()) {
+                    // Sent files: try the original URI (may have expired permission)
+                    val uri = Uri.parse(transfer.contentUri)
+                    if (uri.scheme == "file") {
+                        val file = java.io.File(uri.path!!)
+                        if (file.exists()) fileUri = uri
+                    } else {
+                        // content:// URI — check if we still have read access
+                        try {
+                            app.contentResolver.openInputStream(uri)?.close()
+                            fileUri = uri
+                        } catch (_: Exception) {}
+                    }
+                }
 
                 if (fileUri != null) {
                     try {
                         val actualUri = if (fileUri.scheme == "file") {
-                            val file = java.io.File(fileUri.path!!)
-                            if (!file.exists()) throw Exception("File no longer exists")
                             androidx.core.content.FileProvider.getUriForFile(
-                                app, "${app.packageName}.fileprovider", file
+                                app, "${app.packageName}.fileprovider", java.io.File(fileUri.path!!)
                             )
                         } else fileUri
 
@@ -429,7 +443,9 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                     }
                 } else {
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(app, "File no longer exists", Toast.LENGTH_SHORT).show()
+                        val msg = if (transfer.direction == TransferDirection.OUTGOING)
+                            "Original file no longer accessible" else "File no longer exists"
+                        Toast.makeText(app, msg, Toast.LENGTH_SHORT).show()
                     }
                 }
             }

@@ -250,16 +250,32 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
         log.error("Cannot reach server at %s", config.server_url)
         return 1
 
-    tid = api.send_file(filepath, target_id, symmetric_key)
+    from .history import TransferHistory
+    history = TransferHistory(config.config_dir)
+    file_size = filepath.stat().st_size
+
+    progress_tid = [None]
+    def upload_progress(transfer_id, uploaded, total_chunks):
+        if uploaded == 0:
+            progress_tid[0] = transfer_id
+            history.add(filename=filepath.name, display_label=filepath.name,
+                        direction="sent", size=file_size,
+                        content_path=str(filepath), transfer_id=transfer_id,
+                        status="uploading",
+                        chunks_downloaded=0, chunks_total=total_chunks)
+        else:
+            history.update(transfer_id,
+                           chunks_downloaded=uploaded, chunks_total=total_chunks)
+
+    tid = api.send_file(filepath, target_id, symmetric_key, on_progress=upload_progress)
     if tid:
-        from .history import TransferHistory
-        history = TransferHistory(config.config_dir)
-        history.add(filename=filepath.name, display_label=filepath.name,
-                     direction="sent", size=filepath.stat().st_size,
-                     content_path=str(filepath), transfer_id=tid)
+        # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.
+        history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
         log.info("File sent successfully")
         return 0
     else:
+        if progress_tid[0]:
+            history.update(progress_tid[0], status="failed")
         log.error("Failed to send file")
         return 1
 

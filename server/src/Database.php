@@ -42,6 +42,11 @@ class Database
             $this->db->exec('ALTER TABLE devices ADD COLUMN fcm_token TEXT DEFAULT NULL');
         }
 
+        // Add chunks_downloaded column if missing (download progress tracking for sender)
+        if ($cols && strpos($cols, 'chunks_downloaded') === false) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN chunks_downloaded INTEGER DEFAULT 0');
+        }
+
         // Fasttrack: lightweight encrypted message relay between paired devices
         $this->db->exec('
             CREATE TABLE IF NOT EXISTS fasttrack_messages (

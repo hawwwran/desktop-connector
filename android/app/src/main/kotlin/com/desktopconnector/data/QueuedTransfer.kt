@@ -18,6 +18,10 @@ data class QueuedTransfer(
     val status: TransferStatus = TransferStatus.QUEUED,
     val chunksUploaded: Int = 0,
     val totalChunks: Int = 0,
+    // Delivery phase progress (outgoing only, after upload completes).
+    // Owned by the 500ms DeliveryTracker — cleared when delivery logic starts/ends.
+    val deliveryChunks: Int = 0,
+    val deliveryTotal: Int = 0,
     val errorMessage: String? = null,
     val transferId: String? = null,
     val delivered: Boolean = false,
@@ -52,6 +56,15 @@ interface TransferDao {
 
     @Query("UPDATE queued_transfers SET chunksUploaded = :uploaded, totalChunks = :total WHERE id = :id")
     suspend fun updateProgress(id: Long, uploaded: Int, total: Int)
+
+    @Query("UPDATE queued_transfers SET deliveryChunks = :downloaded, deliveryTotal = :total WHERE transferId = :transferId")
+    suspend fun updateDeliveryProgress(transferId: String, downloaded: Int, total: Int)
+
+    @Query("UPDATE queued_transfers SET deliveryChunks = 0, deliveryTotal = 0 WHERE transferId = :transferId")
+    suspend fun clearDeliveryProgress(transferId: String)
+
+    @Query("SELECT transferId FROM queued_transfers WHERE direction = 'OUTGOING' AND status = 'COMPLETE' AND delivered = 0 AND transferId IS NOT NULL")
+    suspend fun getActiveDeliveryIds(): List<String>
 
     @Query("UPDATE queued_transfers SET status = :status, contentUri = :uri, displayLabel = :label, sizeBytes = :size WHERE id = :id")
     suspend fun completeDownload(id: Long, status: TransferStatus, uri: String, label: String, size: Long)

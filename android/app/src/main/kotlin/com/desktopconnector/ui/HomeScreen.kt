@@ -263,9 +263,11 @@ fun HomeScreen(
 private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
     val statusColor = when {
         transfer.status == TransferStatus.QUEUED -> Color(0xFF94A3B8)
+        transfer.status == TransferStatus.UPLOADING && transfer.direction == TransferDirection.INCOMING -> Color(0xFF22C55E)
         transfer.status == TransferStatus.UPLOADING -> Color(0xFFF59E0B)
         transfer.status == TransferStatus.COMPLETE && transfer.direction == TransferDirection.INCOMING -> Color(0xFF22C55E)
         transfer.status == TransferStatus.COMPLETE && transfer.delivered -> Color(0xFF22C55E)
+        transfer.status == TransferStatus.COMPLETE && transfer.deliveryTotal > 0 -> Color(0xFF22C55E)
         transfer.status == TransferStatus.COMPLETE -> Color(0xFF93C5FD)
         transfer.status == TransferStatus.FAILED -> Color(0xFFEF4444)
         else -> Color(0xFF94A3B8)
@@ -280,6 +282,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
         TransferStatus.COMPLETE -> when {
             transfer.direction == TransferDirection.INCOMING -> "Received"
             transfer.delivered -> "Delivered"
+            transfer.deliveryTotal > 0 -> "Delivering ${transfer.deliveryChunks}/${transfer.deliveryTotal}"
             else -> "Sent"
         }
         TransferStatus.FAILED -> transfer.errorMessage ?: "Failed"
@@ -367,13 +370,28 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                 }
             }
         }
+        // Progress bar: uploading (orange), downloading (green), delivering-to-desktop (green)
         if (transfer.status == TransferStatus.UPLOADING && transfer.totalChunks > 0) {
+            val barColor = if (transfer.direction == TransferDirection.INCOMING) Color(0xFF22C55E) else Color(0xFFF59E0B)
             LinearProgressIndicator(
                 progress = { transfer.chunksUploaded.toFloat() / transfer.totalChunks },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 6.dp),
+                color = barColor,
+            )
+        } else if (transfer.status == TransferStatus.COMPLETE
+            && transfer.direction == TransferDirection.OUTGOING
+            && !transfer.delivered
+            && transfer.deliveryTotal > 0) {
+            LinearProgressIndicator(
+                progress = { transfer.deliveryChunks.toFloat() / transfer.deliveryTotal },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .padding(bottom = 6.dp),
+                color = Color(0xFF22C55E),
             )
         }
     }

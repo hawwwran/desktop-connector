@@ -2,6 +2,7 @@
 Transfer history tracking and GTK4/libadwaita display.
 """
 
+import fcntl
 import json
 import logging
 import threading
@@ -14,7 +15,9 @@ MAX_HISTORY = 50
 
 
 class TransferHistory:
-    """Persistent transfer history (JSON file, max 50 items)."""
+    """Persistent transfer history (JSON file, max 50 items).
+    All mutations use file locking so multiple processes (tray, send-files,
+    history window, --send CLI) can safely read/write the same file."""
 
     def __init__(self, config_dir: Path):
         self.history_file = config_dir / "history.json"
@@ -29,8 +32,31 @@ class TransferHistory:
                 log.warning("Failed to load history, starting fresh")
         return []
 
-    def _save(self) -> None:
-        self.history_file.write_text(json.dumps(self._items, indent=2))
+    def _locked_read_modify_write(self, modify_fn) -> bool:
+        """Atomically read history from disk, apply modify_fn, write back.
+        modify_fn(items) should return True if it made changes, False otherwise.
+        Uses flock to serialize access across processes."""
+        with self._lock:
+            try:
+                fd = open(self.history_file, "a+")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    fd.seek(0)
+                    content = fd.read()
+                    items = json.loads(content) if content.strip() else []
+                    changed = modify_fn(items)
+                    if changed:
+                        fd.seek(0)
+                        fd.truncate()
+                        fd.write(json.dumps(items, indent=2))
+                    self._items = items
+                    return changed
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    fd.close()
+            except Exception:
+                log.exception("History file locked read-modify-write failed")
+                return False
 
     @property
     def items(self) -> list[dict]:
@@ -41,47 +67,49 @@ class TransferHistory:
             size: int, content_path: str = "", sender_id: str = "",
             transfer_id: str = "", status: str = "complete",
             chunks_downloaded: int = 0, chunks_total: int = 0) -> None:
-        with self._lock:
-            self._items.insert(0, {
-                "filename": filename,
-                "display_label": display_label,
-                "direction": direction,
-                "size": size,
-                "content_path": content_path,
-                "sender_id": sender_id,
-                "transfer_id": transfer_id,
-                "status": status,
-                "chunks_downloaded": chunks_downloaded,
-                "chunks_total": chunks_total,
-                "delivered": direction == "received" and status == "complete",
-                "timestamp": int(time.time()),
-            })
-            self._items = self._items[:MAX_HISTORY]
-            self._save()
+        new_item = {
+            "filename": filename,
+            "display_label": display_label,
+            "direction": direction,
+            "size": size,
+            "content_path": content_path,
+            "sender_id": sender_id,
+            "transfer_id": transfer_id,
+            "status": status,
+            "chunks_downloaded": chunks_downloaded,
+            "chunks_total": chunks_total,
+            "delivered": direction == "received" and status == "complete",
+            "timestamp": int(time.time()),
+        }
+        def do_add(items):
+            items.insert(0, new_item)
+            del items[MAX_HISTORY:]
+            return True
+        self._locked_read_modify_write(do_add)
 
     def update(self, transfer_id: str, **fields) -> bool:
         """Update an existing history entry by transfer_id. Returns True if found."""
-        with self._lock:
-            for item in self._items:
+        def do_update(items):
+            for item in items:
                 if item.get("transfer_id") == transfer_id:
                     item.update(fields)
-                    self._save()
                     return True
-        return False
+            return False
+        return self._locked_read_modify_write(do_update)
 
     def mark_delivered(self, transfer_id: str) -> bool:
         """Mark a sent transfer as delivered. Returns True if found and updated."""
-        with self._lock:
-            for item in self._items:
+        def do_mark(items):
+            for item in items:
                 if item.get("transfer_id") == transfer_id and not item.get("delivered"):
                     item["delivered"] = True
-                    self._save()
                     return True
-        return False
+            return False
+        return self._locked_read_modify_write(do_mark)
 
     def get_undelivered_transfer_ids(self) -> list[str]:
         """Get transfer_ids of sent items not yet marked delivered."""
-        # Reload from disk to pick up transfers added by other processes (--send, subprocesses)
+        # Reload from disk to pick up transfers added by other processes
         self._items = self._load()
         with self._lock:
             return [
@@ -93,9 +121,14 @@ class TransferHistory:
 
     def remove(self, item: dict) -> None:
         """Remove a specific item from history."""
-        with self._lock:
-            self._items = [i for i in self._items if i is not item and i.get("timestamp") != item.get("timestamp")]
-            self._save()
+        ts = item.get("timestamp")
+        tid = item.get("transfer_id")
+        def do_remove(items):
+            before = len(items)
+            items[:] = [i for i in items
+                        if not (i.get("timestamp") == ts and i.get("transfer_id") == tid)]
+            return len(items) != before
+        self._locked_read_modify_write(do_remove)
 
     def get_label(self, item: dict) -> str:
         return item.get("display_label") or item.get("filename", "Unknown")

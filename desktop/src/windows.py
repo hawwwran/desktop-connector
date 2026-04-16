@@ -280,13 +280,30 @@ def show_send_files(config_dir: Path):
                     GLib.idle_add(mark_row_uploading, filepath)
                     write_status(True, filepath.name, i + 1, total)
 
-                    tid = api.send_file(filepath, target_id, symmetric_key)
+                    # Track upload progress in history
+                    file_size = filepath.stat().st_size
+                    progress_tid = [None]
+                    def upload_progress(transfer_id, uploaded, total_chunks, fp=filepath, sz=file_size):
+                        if uploaded == 0:
+                            progress_tid[0] = transfer_id
+                            history.add(filename=fp.name, display_label=fp.name,
+                                        direction="sent", size=sz,
+                                        content_path=str(fp), transfer_id=transfer_id,
+                                        status="uploading",
+                                        chunks_downloaded=0, chunks_total=total_chunks)
+                        else:
+                            history.update(transfer_id,
+                                           chunks_downloaded=uploaded, chunks_total=total_chunks)
+
+                    tid = api.send_file(filepath, target_id, symmetric_key,
+                                        on_progress=upload_progress)
                     if tid:
                         sent += 1
-                        history.add(filename=filepath.name, display_label=filepath.name,
-                                     direction="sent", size=filepath.stat().st_size,
-                                     content_path=str(filepath), transfer_id=tid)
+                        # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.
+                        history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
                         GLib.idle_add(remove_row, filepath)
+                    elif progress_tid[0]:
+                        history.update(progress_tid[0], status="failed")
 
                 clear_status()
                 GLib.idle_add(finish_sending, sent, total)
@@ -726,6 +743,28 @@ def show_history(config_dir: Path):
                 background: alpha(@card_shade_color, 0.3);
                 border-radius: 6px;
             }
+            .upload-bar trough, .upload-bar progress {
+                min-height: 6px;
+            }
+            .upload-bar progress {
+                background-color: #F59E0B;
+                border-radius: 3px;
+            }
+            .download-bar trough, .download-bar progress {
+                min-height: 6px;
+            }
+            .download-bar progress {
+                background-color: #22C55E;
+                border-radius: 3px;
+            }
+            @keyframes pulse {
+                0% { opacity: 0.5; }
+                50% { opacity: 1.0; }
+                100% { opacity: 0.5; }
+            }
+            .pulse-bar progress {
+                animation: pulse 2s ease-in-out infinite;
+            }
         """)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -779,163 +818,264 @@ def show_history(config_dir: Path):
         group = Adw.PreferencesGroup()
         clamp.set_child(group)
 
-        last_snapshot = [None]
-        current_rows = []
+        has_active = [False]
+        # row_widgets[transfer_id] = (box_widget, row, progress_bar_or_None)
+        row_widgets = {}
+        all_widgets = []  # ordered list of group children
+        structural_sig = [None]  # (transfer_id, ...) — triggers full rebuild
+        progress_sig = [None]    # mutable fields — triggers in-place update
 
-        has_downloading = [False]
+        def _compute_status(item):
+            item_status = item.get("status", "complete")
+            chunks_dl = item.get("chunks_downloaded", 0)
+            chunks_total = item.get("chunks_total", 0)
+            recv_dl = item.get("recipient_chunks_downloaded", 0)
+            recv_total = item.get("recipient_chunks_total", 0)
+            delivered = item.get("delivered", False)
+
+            if item_status == "uploading":
+                text = f"Uploading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Uploading"
+            elif item_status == "downloading":
+                text = f"Downloading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Downloading"
+            elif item_status == "failed":
+                text = "Failed"
+            elif item["direction"] == "received":
+                text = "Received"
+            elif delivered:
+                text = "Delivered"
+            elif recv_dl > 0 and recv_total > 0:
+                text = f"Delivering {recv_dl}/{recv_total}"
+            else:
+                text = "Sent"
+
+            # Progress bar state: (show, css_class, fraction)
+            if item_status == "uploading" and chunks_total > 0:
+                bar = (True, "upload-bar", chunks_dl / chunks_total)
+            elif item_status == "downloading" and chunks_total > 0:
+                bar = (True, "download-bar", chunks_dl / chunks_total)
+            elif (item["direction"] == "sent" and not delivered and item_status == "complete"):
+                if recv_dl > 0 and recv_total > 0:
+                    bar = (True, "download-bar", recv_dl / recv_total)
+                else:
+                    bar = (True, "upload-bar pulse-bar", 1.0)
+            else:
+                bar = (False, None, 0.0)
+
+            return text, bar
+
+        def _create_row(item):
+            """Create a new row widget (Box containing ActionRow + ProgressBar)."""
+            direction_prefix = "\u2193" if item["direction"] == "received" else "\u2191"
+            label = history.get_label(item)
+            size = format_size(item.get("size", 0))
+            ts = time.strftime("%b %d, %H:%M", time.localtime(item.get("timestamp", 0)))
+            status_text, bar_state = _compute_status(item)
+
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+            row = Adw.ActionRow(
+                title=f"{direction_prefix}  {label}",
+                subtitle=f"{size}  \u00b7  {ts}  \u00b7  {status_text}",
+            )
+            row.set_title_lines(1)
+
+            # Thumbnail or icon as prefix
+            content_path = item.get("content_path", "")
+            filename = item.get("filename", "")
+            import mimetypes as _mt
+            mime, _ = _mt.guess_type(filename or content_path)
+            thumb_widget = None
+            is_clipboard = item.get("filename", "").startswith(".fn.clipboard")
+
+            if content_path and Path(content_path).exists() and mime and (mime.startswith("image/") or mime.startswith("video/")):
+                try:
+                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(content_path, 100, 100, True)
+                    w, h = pixbuf.get_width(), pixbuf.get_height()
+                    s = min(w, h)
+                    cropped = pixbuf.new_subpixbuf((w - s) // 2, (h - s) // 2, s, s)
+                    scaled = cropped.scale_simple(50, 50, GdkPixbuf.InterpType.BILINEAR)
+                    texture = Gdk.Texture.new_for_pixbuf(scaled)
+                    img = Gtk.Picture.new_for_paintable(texture)
+                    img.set_size_request(50, 50)
+                    img.set_content_fit(Gtk.ContentFit.COVER)
+                    frame = Gtk.Frame()
+                    frame.set_size_request(50, 50)
+                    frame.set_child(img)
+                    frame.set_overflow(Gtk.Overflow.HIDDEN)
+                    thumb_widget = frame
+                except Exception:
+                    pass
+
+            is_link = is_clipboard and _contains_single_url(label)
+
+            if thumb_widget is None:
+                if is_link:
+                    icon = Gtk.Image.new_from_icon_name("web-browser-symbolic")
+                elif is_clipboard:
+                    icon = Gtk.Image.new_from_icon_name("edit-paste-symbolic")
+                elif mime and mime.startswith("image/"):
+                    icon = Gtk.Image.new_from_icon_name("image-x-generic-symbolic")
+                elif mime and mime.startswith("video/"):
+                    icon = Gtk.Image.new_from_icon_name("video-x-generic-symbolic")
+                elif mime and mime.startswith("text/"):
+                    icon = Gtk.Image.new_from_icon_name("text-x-generic-symbolic")
+                else:
+                    icon = Gtk.Image.new_from_icon_name("document-open-symbolic")
+                icon.set_pixel_size(22)
+                icon.set_halign(Gtk.Align.CENTER)
+                icon.set_valign(Gtk.Align.CENTER)
+                frame = Gtk.Frame()
+                frame.set_size_request(50, 50)
+                frame.set_child(icon)
+                frame.set_overflow(Gtk.Overflow.HIDDEN)
+                thumb_widget = frame
+
+            thumb_widget.set_margin_start(0)
+            row.add_prefix(thumb_widget)
+
+            # Delete button
+            del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
+            del_btn.set_valign(Gtk.Align.CENTER)
+            del_btn.add_css_class("flat")
+            del_btn.add_css_class("circular")
+            captured_item = item
+            def on_delete(b, it=captured_item, bx=box):
+                history.remove(it)
+                group.remove(bx)
+                tid = it.get("transfer_id", id(it))
+                row_widgets.pop(tid, None)
+                if bx in all_widgets:
+                    all_widgets.remove(bx)
+                structural_sig[0] = None
+            del_btn.connect("clicked", on_delete)
+            row.add_suffix(del_btn)
+
+            captured = item
+            row.set_activatable(True)
+            row.connect("activated", lambda r, it=captured: on_item_click(it, win))
+
+            box.append(row)
+
+            # Progress bar
+            show, bar_cls, fraction = bar_state
+            progress_bar = None
+            if show:
+                progress_bar = Gtk.ProgressBar()
+                progress_bar.set_fraction(fraction)
+                for cls in bar_cls.split():
+                    progress_bar.add_css_class(cls)
+                progress_bar.set_margin_start(16)
+                progress_bar.set_margin_end(16)
+                progress_bar.set_margin_bottom(8)
+                box.append(progress_bar)
+
+            return box, row, progress_bar
+
+        def _update_row(item, row, old_progress_bar, parent_box):
+            """Update an existing row in-place (subtitle + progress bar)."""
+            size = format_size(item.get("size", 0))
+            ts = time.strftime("%b %d, %H:%M", time.localtime(item.get("timestamp", 0)))
+            status_text, bar_state = _compute_status(item)
+            row.set_subtitle(f"{size}  \u00b7  {ts}  \u00b7  {status_text}")
+
+            show, bar_cls, fraction = bar_state
+
+            if show:
+                if old_progress_bar:
+                    old_progress_bar.set_fraction(fraction)
+                    # Update CSS classes
+                    for cls in ("upload-bar", "download-bar", "pulse-bar"):
+                        if cls in (bar_cls or ""):
+                            old_progress_bar.add_css_class(cls)
+                        else:
+                            old_progress_bar.remove_css_class(cls)
+                    return old_progress_bar
+                else:
+                    progress_bar = Gtk.ProgressBar()
+                    progress_bar.set_fraction(fraction)
+                    for cls in bar_cls.split():
+                        progress_bar.add_css_class(cls)
+                    progress_bar.set_margin_start(16)
+                    progress_bar.set_margin_end(16)
+                    progress_bar.set_margin_bottom(8)
+                    parent_box.append(progress_bar)
+                    return progress_bar
+            else:
+                if old_progress_bar:
+                    parent_box.remove(old_progress_bar)
+                return None
 
         def build_list():
-            # Reload from disk to pick up changes from the main process
             history._items = history._load()
             items = history.items
 
-            # Change detection: count + delivery count + download progress + statuses
-            downloading = any(i.get("status") == "downloading" for i in items)
-            delivered_count = sum(1 for i in items if i.get("delivered"))
-            dl_progress = sum(i.get("chunks_downloaded", 0) for i in items if i.get("status") == "downloading")
-            sig = (len(items), delivered_count, dl_progress,
-                   items[0].get("status") if items else None)
-            if sig == last_snapshot[0]:
-                return True  # No change, keep timer going
-            last_snapshot[0] = sig
-            has_downloading[0] = downloading
+            # Structural sig: item identity and base state
+            s_sig = tuple(
+                (i.get("transfer_id", i.get("timestamp")), i.get("direction"))
+                for i in items
+            )
+            # Progress sig: all mutable fields
+            p_sig = tuple(
+                (i.get("transfer_id"), i.get("status"), i.get("delivered"),
+                 i.get("chunks_downloaded", 0), i.get("recipient_chunks_downloaded", 0))
+                for i in items
+            )
 
-            # Remove previously added rows
-            for row in current_rows:
-                group.remove(row)
-            current_rows.clear()
+            if p_sig == progress_sig[0]:
+                return True  # Nothing changed at all
 
-            if not items:
-                row = Adw.ActionRow(title="No transfers yet")
-                row.add_css_class("dim-label")
-                group.add(row)
-                current_rows.append(row)
+            # Check if we need a full rebuild or just in-place updates
+            needs_rebuild = (s_sig != structural_sig[0])
+            structural_sig[0] = s_sig
+            progress_sig[0] = p_sig
+
+            # Update has_active flag
+            downloading = any(i.get("status") in ("downloading", "uploading") for i in items)
+            active_sent = any(
+                i.get("direction") == "sent" and not i.get("delivered")
+                for i in items
+            )
+            has_active[0] = downloading or active_sent
+
+            if needs_rebuild:
+                # Full rebuild — items added, removed, or reordered
+                for w in all_widgets:
+                    group.remove(w)
+                all_widgets.clear()
+                row_widgets.clear()
+
+                if not items:
+                    row = Adw.ActionRow(title="No transfers yet")
+                    row.add_css_class("dim-label")
+                    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                    box.append(row)
+                    group.add(box)
+                    all_widgets.append(box)
+                else:
+                    for item in items:
+                        tid = item.get("transfer_id", item.get("timestamp"))
+                        box, row, pbar = _create_row(item)
+                        group.add(box)
+                        all_widgets.append(box)
+                        row_widgets[tid] = (box, row, pbar)
             else:
+                # In-place update — just refresh subtitles and progress bars
                 for item in items:
-                    direction_prefix = "\u2193" if item["direction"] == "received" else "\u2191"
-                    label = history.get_label(item)
-                    size = format_size(item.get("size", 0))
-                    ts = time.strftime("%b %d, %H:%M", time.localtime(item.get("timestamp", 0)))
-                    is_clipboard = item.get("filename", "").startswith(".fn.clipboard")
-                    delivered = item.get("delivered", False)
-                    item_status = item.get("status", "complete")
-                    chunks_dl = item.get("chunks_downloaded", 0)
-                    chunks_total = item.get("chunks_total", 0)
+                    tid = item.get("transfer_id", item.get("timestamp"))
+                    entry = row_widgets.get(tid)
+                    if entry:
+                        box, row, old_pbar = entry
+                        new_pbar = _update_row(item, row, old_pbar, box)
+                        row_widgets[tid] = (box, row, new_pbar)
 
-                    if item_status == "downloading":
-                        status = f"Downloading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Downloading"
-                    elif item_status == "failed":
-                        status = "Failed"
-                    elif item["direction"] == "received":
-                        status = "Received"
-                    elif delivered:
-                        status = "Delivered"
-                    else:
-                        status = "Sent"
-
-                    row = Adw.ActionRow(
-                        title=f"{direction_prefix}  {label}",
-                        subtitle=f"{size}  \u00b7  {ts}  \u00b7  {status}",
-                        activatable=item_status != "downloading",
-                    )
-                    row.set_title_lines(1)
-
-                    # Thumbnail or icon as prefix
-                    content_path = item.get("content_path", "")
-                    filename = item.get("filename", "")
-                    import mimetypes as _mt
-                    mime, _ = _mt.guess_type(filename or content_path)
-                    thumb_widget = None
-
-                    if content_path and Path(content_path).exists() and mime and (mime.startswith("image/") or mime.startswith("video/")):
-                        try:
-                            # Load and crop to square (cover style)
-                            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(content_path, 100, 100, True)
-                            w, h = pixbuf.get_width(), pixbuf.get_height()
-                            s = min(w, h)
-                            cropped = pixbuf.new_subpixbuf((w - s) // 2, (h - s) // 2, s, s)
-                            scaled = cropped.scale_simple(50, 50, GdkPixbuf.InterpType.BILINEAR)
-                            texture = Gdk.Texture.new_for_pixbuf(scaled)
-                            img = Gtk.Picture.new_for_paintable(texture)
-                            img.set_size_request(50, 50)
-                            img.set_content_fit(Gtk.ContentFit.COVER)
-                            frame = Gtk.Frame()
-                            frame.set_size_request(50, 50)
-                            frame.set_child(img)
-                            frame.set_overflow(Gtk.Overflow.HIDDEN)
-                            thumb_widget = frame
-                        except Exception:
-                            pass
-
-                    is_link = is_clipboard and _contains_single_url(label)
-
-                    if thumb_widget is None:
-                        if is_link:
-                            icon = Gtk.Image.new_from_icon_name("web-browser-symbolic")
-                        elif is_clipboard:
-                            icon = Gtk.Image.new_from_icon_name("edit-paste-symbolic")
-                        elif mime and mime.startswith("image/"):
-                            icon = Gtk.Image.new_from_icon_name("image-x-generic-symbolic")
-                        elif mime and mime.startswith("video/"):
-                            icon = Gtk.Image.new_from_icon_name("video-x-generic-symbolic")
-                        elif mime and mime.startswith("text/"):
-                            icon = Gtk.Image.new_from_icon_name("text-x-generic-symbolic")
-                        else:
-                            icon = Gtk.Image.new_from_icon_name("document-open-symbolic")
-                        icon.set_pixel_size(22)
-                        icon.set_halign(Gtk.Align.CENTER)
-                        icon.set_valign(Gtk.Align.CENTER)
-                        frame = Gtk.Frame()
-                        frame.set_size_request(50, 50)
-                        frame.set_child(icon)
-                        frame.set_overflow(Gtk.Overflow.HIDDEN)
-                        thumb_widget = frame
-
-                    thumb_widget.set_margin_start(0)
-                    row.add_prefix(thumb_widget)
-
-                    # Delete button
-                    del_btn = Gtk.Button.new_from_icon_name("user-trash-symbolic")
-                    del_btn.set_valign(Gtk.Align.CENTER)
-                    del_btn.add_css_class("flat")
-                    del_btn.add_css_class("circular")
-                    captured_item = item
-
-                    def on_delete(b, it=captured_item, r=row):
-                        history.remove(it)
-                        # Remove row from UI immediately (no full rebuild)
-                        group.remove(r)
-                        current_rows.remove(r)
-                        last_snapshot[0] = None  # Sync on next tick
-
-                    del_btn.connect("clicked", on_delete)
-                    row.add_suffix(del_btn)
-
-                    captured = item
-                    if item_status != "downloading":
-                        row.connect("activated", lambda r, it=captured: on_item_click(it, win))
-
-                    group.add(row)
-                    current_rows.append(row)
-
-                    # Progress bar for downloading items
-                    if item_status == "downloading" and chunks_total > 0:
-                        progress_bar = Gtk.ProgressBar()
-                        progress_bar.set_fraction(chunks_dl / chunks_total)
-                        progress_bar.set_margin_start(16)
-                        progress_bar.set_margin_end(16)
-                        progress_bar.set_margin_bottom(8)
-                        group.add(progress_bar)
-                        current_rows.append(progress_bar)
-
-            return True  # Keep timer going
+            return True
 
         build_list()
 
-        # Adaptive refresh: 1s during downloads, 3s otherwise
+        # Adaptive refresh: 1s during active transfers, 3s otherwise
         def refresh_tick():
             build_list()
-            interval = 1000 if has_downloading[0] else 3000
+            interval = 1000 if has_active[0] else 3000
             GLib.timeout_add(interval, refresh_tick)
             return False  # don't repeat this one, the new timeout takes over
         GLib.timeout_add(1000, refresh_tick)

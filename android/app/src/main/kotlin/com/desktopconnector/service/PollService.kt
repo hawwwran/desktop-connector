@@ -29,6 +29,8 @@ import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
 import kotlinx.coroutines.*
 import org.json.JSONObject
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 class PollService : Service() {
 
@@ -38,6 +40,7 @@ class PollService : Service() {
         private const val CHANNEL_TRANSFER = "dc_transfers"
         private const val NOTIFICATION_ID = 1
         private const val POLL_INTERVAL = 10_000L
+        private const val DELIVERY_STALL_TIMEOUT_MS = 2 * 60 * 1000L
 
         // Shared state for UI — "active", "unavailable", "testing", "offline"
         @Volatile var longPollStatus: String = "offline"
@@ -67,6 +70,7 @@ class PollService : Service() {
         createNotificationChannels()
         startForeground(NOTIFICATION_ID, buildIdleNotification(false))
         scope.launch { pollLoop() }
+        scope.launch { deliveryTrackerLoop() }
         Log.i(TAG, "PollService started")
     }
 
@@ -214,7 +218,6 @@ class PollService : Service() {
                         lastPollTime = System.currentTimeMillis()
 
                         val hasPending = notifyResult.optBoolean("pending", false)
-                        val hasDelivered = notifyResult.optBoolean("delivered", false)
 
                         if (hasPending) {
                             val transfers = api.getPendingTransfers()
@@ -227,13 +230,11 @@ class PollService : Service() {
                             }
                         }
 
-                        // Always check delivery — server can't reliably track "new" deliveries
                         checkDeliveryStatus(api)
                     } else {
-                        longPollAvailable = null  // re-test next cycle (might be transient failure)
+                        longPollAvailable = null
                         longPollStatus = "unavailable"
                         AppLog.log("Poll", "Long poll failed, will re-test next cycle")
-                        // Do a regular poll + sleep
                         val transfers = api.getPendingTransfers()
                         for (t in transfers) {
                             if (!running) break
@@ -243,7 +244,6 @@ class PollService : Service() {
                         if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
                     }
                 } else {
-                    // Regular polling — long poll not available
                     val transfers = api.getPendingTransfers()
                     for (t in transfers) {
                         if (!running) break
@@ -543,6 +543,123 @@ class PollService : Service() {
             if (stillExists) {
                 showTransferNotification(displayLabel)
             }
+        }
+    }
+
+    /**
+     * DeliveryTracker — paints per-chunk "Delivering X/Y" progress for OUTGOING
+     * transfers while the desktop pulls them off the server.
+     *
+     * Cadence: 500ms tick, single in-flight poll at a time (overlap → skip + log),
+     * 750ms abort timeout per poll. Idle when no active deliveries or screen off.
+     *
+     * Stall safeguard: if chunks_downloaded does not advance for 2 minutes on a
+     * given transfer, the tracker gives up tracking that transfer (clears its
+     * progress fields so UI falls back to "Sent"). The transfer row stays
+     * COMPLETE/undelivered; the long-poll inline sent_status + app-restart
+     * delivery check still catch eventual delivery if the desktop comes online.
+     *
+     * Does NOT mark delivered=true itself. When the server reports delivery_state
+     * == "delivered" for any tracked transfer, the tracker clears its own
+     * progress fields and delegates to checkDeliveryStatus — the same path that
+     * runs on app start — as the single source of truth for the "Delivered" flag.
+     */
+    private val trackerLastProgress = ConcurrentHashMap<String, Pair<Int, Long>>()
+    private val trackerGaveUp: MutableSet<String> =
+        Collections.newSetFromMap(ConcurrentHashMap())
+
+    private suspend fun deliveryTrackerLoop() {
+        delay(3000)
+        val prefs = AppPreferences(this)
+        val db = AppDatabase.getInstance(this)
+        var inFlightJob: Job? = null
+
+        while (running) {
+            val tickStart = System.currentTimeMillis()
+            try {
+                if (prefs.serverUrl == null || prefs.deviceId == null || prefs.authToken == null
+                    || !isScreenOn()) {
+                    delay(500); continue
+                }
+
+                val allActiveIds = db.transferDao().getActiveDeliveryIds().toSet()
+
+                // Prune tracker state for transfers no longer active (deleted, delivered via long-poll, etc.)
+                trackerGaveUp.retainAll(allActiveIds)
+                trackerLastProgress.keys.retainAll(allActiveIds)
+
+                val trackedIds = (allActiveIds - trackerGaveUp).toList()
+                if (trackedIds.isEmpty()) {
+                    delay(500); continue
+                }
+
+                if (inFlightJob?.isActive == true) {
+                    AppLog.log("Delivery", "Skip tick — previous poll still in flight")
+                } else {
+                    val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
+                    inFlightJob = scope.launch {
+                        try {
+                            withTimeout(750) { runDeliveryPoll(api, trackedIds, db) }
+                        } catch (_: TimeoutCancellationException) {
+                            AppLog.log("Delivery", "Poll timed out (>750ms), aborted")
+                        } catch (_: Exception) {
+                            // transient — next tick retries
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // loop must never die
+            }
+            val elapsed = System.currentTimeMillis() - tickStart
+            delay((500 - elapsed).coerceAtLeast(0))
+        }
+    }
+
+    private suspend fun runDeliveryPoll(
+        api: ApiClient,
+        activeIds: List<String>,
+        db: AppDatabase,
+    ) {
+        val statuses = api.getSentStatus()
+        val byId = statuses.associateBy { it.getString("transfer_id") }
+        val now = System.currentTimeMillis()
+
+        var anyJustDelivered = false
+        for (tid in activeIds) {
+            val s = byId[tid] ?: continue
+            val state = s.optString("delivery_state", "not_started")
+            val downloaded = s.optInt("chunks_downloaded", 0)
+            val total = s.optInt("chunk_count", 0)
+
+            if (state == "delivered") {
+                db.transferDao().clearDeliveryProgress(tid)
+                trackerLastProgress.remove(tid)
+                anyJustDelivered = true
+                continue
+            }
+
+            // Stall detection: timer resets when chunks_downloaded advances.
+            // DB writes only on change — trackerLastProgress already tells us
+            // whether the value moved since last tick.
+            val prev = trackerLastProgress[tid]
+            val advanced = prev == null || prev.first != downloaded
+
+            if (advanced) {
+                trackerLastProgress[tid] = Pair(downloaded, now)
+                // not_started reports 0 chunks; keep bar visible at 0/N.
+                val dbValue = if (state == "in_progress") downloaded else 0
+                db.transferDao().updateDeliveryProgress(tid, dbValue, total)
+            } else if (now - prev!!.second > DELIVERY_STALL_TIMEOUT_MS) {
+                AppLog.log("Delivery", "Stall on $tid after ${(now - prev.second) / 1000}s — giving up")
+                db.transferDao().clearDeliveryProgress(tid)
+                trackerGaveUp.add(tid)
+                trackerLastProgress.remove(tid)
+            }
+        }
+
+        if (anyJustDelivered) {
+            // Hand off to the standard sent-status path (same one used on app start).
+            checkDeliveryStatus(api)
         }
     }
 

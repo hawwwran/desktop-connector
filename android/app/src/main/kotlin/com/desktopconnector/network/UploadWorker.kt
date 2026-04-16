@@ -94,6 +94,8 @@ class UploadWorker(
             }
 
             db.transferDao().setTransferId(transferDbId, transferId)
+            // Upload logic cleans up its own progress fields; DeliveryTracker owns deliveryChunks/deliveryTotal from here.
+            db.transferDao().updateProgress(transferDbId, 0, 0)
             db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
             AppLog.log("Upload", "Complete: ${transfer.displayName}")
             return Result.success()

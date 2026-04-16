@@ -26,32 +26,35 @@ _DESKTOP_DIR = Path(__file__).parent.parent
 
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
-_icon_cache: dict[str, Image.Image] = {}
+
+
+def _load_icons() -> dict[str, Image.Image]:
+    """Load all icon variants eagerly at import time. Thread-safe after init."""
+    icons = {}
+    for color in ("green", "green_yellow", "green_red", "red", "yellow", "blue"):
+        png_path = _ASSETS_DIR / f"icon_{color}.png"
+        if png_path.exists():
+            img = Image.open(png_path)
+            img.load()  # Force full pixel read (Image.open is lazy)
+            icons[color] = img
+    # Generate fallbacks for any missing icons
+    for color, rgb in (("green", (34, 197, 94)), ("red", (239, 68, 68)),
+                        ("yellow", (245, 158, 11)), ("blue", (59, 130, 246))):
+        if color not in icons:
+            size = 128
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            ImageDraw.Draw(img).ellipse([16, 16, size - 16, size - 16], fill=rgb)
+            icons[color] = img
+    return icons
+
+
+_icons = _load_icons()
 
 
 def _make_icon(color: str) -> Image.Image:
-    if color not in _icon_cache:
-        png_path = _ASSETS_DIR / f"icon_{color}.png"
-        if png_path.exists():
-            _icon_cache[color] = Image.open(png_path)
-
-    if color in _icon_cache:
-        return _icon_cache[color].copy()  # Fresh copy so pystray detects the change
-
-    # Fallback: generate dynamically
-    size = 128
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    colors = {
-        "green": (34, 197, 94),
-        "red": (239, 68, 68),
-        "yellow": (245, 158, 11),
-        "blue": (59, 130, 246),
-    }
-    rgb = colors.get(color, (148, 163, 184))
-    draw.ellipse([16, 16, size - 16, size - 16], fill=rgb)
-    _icon_cache[color] = img
-    return img
+    """Return a copy of a pre-loaded icon. Safe to call from any thread."""
+    img = _icons.get(color) or _icons.get("green")
+    return img.copy()
 
 
 class TrayApp:
@@ -256,27 +259,43 @@ class TrayApp:
         tmp = Path(tempfile.mktemp(suffix="_" + filename))
         tmp.write_bytes(data)
 
-        tid = self.api.send_file(tmp, target_id, symmetric_key, filename_override=filename)
-        if tid:
-            if mime_type.startswith("text/"):
-                import re
-                text = data.decode("utf-8", errors="replace")
-                urls = re.findall(r'https?://\S+', text)
-                if len(urls) == 1:
-                    preview = text  # Keep full text for URL items
-                elif len(text) > 40:
-                    preview = text[:40] + "..."
-                else:
-                    preview = text
+        if mime_type.startswith("text/"):
+            import re
+            text = data.decode("utf-8", errors="replace")
+            urls = re.findall(r'https?://\S+', text)
+            if len(urls) == 1:
+                preview = text
+            elif len(text) > 40:
+                preview = text[:40] + "..."
             else:
-                preview = "Clipboard image"
+                preview = text
+        else:
+            preview = "Clipboard image"
+
+        # Add to history before uploading so it appears immediately
+        progress_tid = [None]
+        def upload_progress(transfer_id, uploaded, total_chunks):
+            if uploaded == 0:
+                progress_tid[0] = transfer_id
+                self.history.add(filename=filename, display_label=preview,
+                                 direction="sent", size=len(data), content_path=str(tmp),
+                                 transfer_id=transfer_id, status="uploading",
+                                 chunks_downloaded=0, chunks_total=total_chunks)
+            else:
+                self.history.update(transfer_id,
+                                    chunks_downloaded=uploaded, chunks_total=total_chunks)
+
+        tid = self.api.send_file(tmp, target_id, symmetric_key,
+                                 filename_override=filename, on_progress=upload_progress)
+        if tid:
             log.info("Clipboard sent: %s", preview)
             from .notifications import notify
             notify("Clipboard sent", preview)
-            self.history.add(filename=filename, display_label=preview,
-                             direction="sent", size=len(data), content_path=str(tmp),
-                             transfer_id=tid)
+            # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.
+            self.history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
         else:
+            if progress_tid[0]:
+                self.history.update(progress_tid[0], status="failed")
             from .notifications import notify
             notify("Send failed", "Could not send clipboard")
 
