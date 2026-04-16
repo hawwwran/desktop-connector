@@ -45,7 +45,7 @@ fun SettingsScreen(
         withContext(Dispatchers.IO) {
             if (prefs.serverUrl != null && prefs.deviceId != null && prefs.authToken != null) {
                 val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
-                stats = api.getStats()
+                stats = api.getStats(pairedWith = pairedDeviceId.ifEmpty { null })
             }
         }
     }
@@ -266,7 +266,21 @@ fun SettingsScreen(
 
                         if (pairedStats != null) {
                             val online = pairedStats.optBoolean("online", false)
-                            SettingsRow("Status", if (online) "Online" else "Offline")
+                            val statusStr = if (online) {
+                                "Online"
+                            } else {
+                                val lastSeen = pairedStats.optLong("last_seen", 0)
+                                if (lastSeen > 0) {
+                                    val ago = (System.currentTimeMillis() / 1000) - lastSeen
+                                    when {
+                                        ago < 60 -> "Last seen just now"
+                                        ago < 3600 -> "Last seen ${ago / 60} min ago"
+                                        ago < 86400 -> "Last seen ${ago / 3600}h ago"
+                                        else -> "Last seen ${formatTimestamp(lastSeen)}"
+                                    }
+                                } else "Offline"
+                            }
+                            SettingsRow("Status", statusStr)
                         }
 
                         Spacer(Modifier.height(12.dp))

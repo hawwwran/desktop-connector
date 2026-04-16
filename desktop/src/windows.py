@@ -360,7 +360,8 @@ def show_settings(config_dir: Path):
     stats = None
     try:
         api = ApiClient(conn, crypto)
-        stats = api.get_stats()
+        paired_dev = config.get_first_paired_device()
+        stats = api.get_stats(paired_with=paired_dev[0] if paired_dev else None)
     except Exception:
         pass
 
@@ -566,9 +567,24 @@ def show_settings(config_dir: Path):
             pd = next((d for d in paired_devs if d.get("device_id") == target_id), paired_devs[0] if paired_devs else None)
             if pd:
                 online = pd.get("online", False)
+                last_seen = pd.get("last_seen", 0)
+                if online:
+                    status_str = "Online"
+                elif last_seen:
+                    ago = int(time.time()) - last_seen
+                    if ago < 60:
+                        status_str = "Last seen just now"
+                    elif ago < 3600:
+                        status_str = f"Last seen {ago // 60} min ago"
+                    elif ago < 86400:
+                        status_str = f"Last seen {ago // 3600}h ago"
+                    else:
+                        status_str = f"Last seen {time.strftime('%b %d, %H:%M', time.localtime(last_seen))}"
+                else:
+                    status_str = "Offline"
                 stats_group.add(Adw.ActionRow(
                     title="Paired device status",
-                    subtitle="Online" if online else "Offline",
+                    subtitle=status_str,
                 ))
                 stats_group.add(Adw.ActionRow(
                     title="Total transfers",

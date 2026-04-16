@@ -91,17 +91,32 @@ class DeviceController
             ];
         }
 
-        // Pending transfers for this device
-        $pendingIn = $db->querySingle(
-            'SELECT COUNT(*) as count, COALESCE(SUM(chunk_count), 0) as chunks
-             FROM transfers WHERE recipient_id = :id AND complete = 1 AND downloaded = 0',
-            [':id' => $deviceId]
-        );
-        $pendingOut = $db->querySingle(
-            'SELECT COUNT(*) as count FROM transfers
-             WHERE sender_id = :id AND downloaded = 0',
-            [':id' => $deviceId]
-        );
+        // Pending transfers for this device (only to/from currently paired device)
+        $pairedId = $_GET['paired_with'] ?? null;
+
+        if ($pairedId) {
+            $pendingIn = $db->querySingle(
+                'SELECT COUNT(*) as count, COALESCE(SUM(chunk_count), 0) as chunks
+                 FROM transfers WHERE recipient_id = :id AND sender_id = :paired AND complete = 1 AND downloaded = 0',
+                [':id' => $deviceId, ':paired' => $pairedId]
+            );
+            $pendingOut = $db->querySingle(
+                'SELECT COUNT(*) as count FROM transfers
+                 WHERE sender_id = :id AND recipient_id = :paired AND downloaded = 0',
+                [':id' => $deviceId, ':paired' => $pairedId]
+            );
+        } else {
+            $pendingIn = $db->querySingle(
+                'SELECT COUNT(*) as count, COALESCE(SUM(chunk_count), 0) as chunks
+                 FROM transfers WHERE recipient_id = :id AND complete = 1 AND downloaded = 0',
+                [':id' => $deviceId]
+            );
+            $pendingOut = $db->querySingle(
+                'SELECT COUNT(*) as count FROM transfers
+                 WHERE sender_id = :id AND downloaded = 0',
+                [':id' => $deviceId]
+            );
+        }
 
         Router::json([
             'device_id' => $deviceId,

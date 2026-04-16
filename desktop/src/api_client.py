@@ -133,9 +133,12 @@ class ApiClient:
         log.info("File sent successfully: %s (transfer_id=%s)", filepath.name, transfer_id)
         return transfer_id
 
-    def get_stats(self) -> dict | None:
+    def get_stats(self, paired_with: str | None = None) -> dict | None:
         """Get connection statistics from the server."""
-        resp = self.conn.request("GET", "/api/devices/stats")
+        path = "/api/devices/stats"
+        if paired_with:
+            path += f"?paired_with={paired_with}"
+        resp = self.conn.request("GET", path)
         if resp and resp.status_code == 200:
             return resp.json()
         return None

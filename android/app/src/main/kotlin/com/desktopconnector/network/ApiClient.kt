@@ -104,9 +104,11 @@ class ApiClient(
         return (0 until arr.length()).map { arr.getJSONObject(it) }
     }
 
-    fun getStats(): JSONObject? {
+    fun getStats(pairedWith: String? = null): JSONObject? {
+        val url = if (pairedWith != null) "$serverUrl/api/devices/stats?paired_with=$pairedWith"
+                  else "$serverUrl/api/devices/stats"
         val request = authHeaders(Request.Builder())
-            .url("$serverUrl/api/devices/stats")
+            .url(url)
             .get()
             .build()
         return executeJson(request)
