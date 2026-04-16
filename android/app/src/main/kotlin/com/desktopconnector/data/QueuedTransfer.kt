@@ -61,4 +61,7 @@ interface TransferDao {
 
     @Query("DELETE FROM queued_transfers WHERE id NOT IN (SELECT id FROM queued_transfers ORDER BY createdAt DESC LIMIT 100)")
     suspend fun trimHistory()
+
+    @Query("DELETE FROM queued_transfers WHERE status NOT IN ('QUEUED', 'UPLOADING')")
+    suspend fun clearAll()
 }

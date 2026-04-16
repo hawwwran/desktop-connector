@@ -502,6 +502,13 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun clearHistory() {
+        viewModelScope.launch(Dispatchers.IO) {
+            db.transferDao().clearAll()
+            refreshTransfers()
+        }
+    }
+
     fun tryNow() {
         viewModelScope.launch(Dispatchers.IO) {
             connectionManager.tryNow()

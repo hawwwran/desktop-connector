@@ -61,6 +61,8 @@ fun HomeScreen(
     onDelete: (QueuedTransfer) -> Unit,
     onRefresh: () -> Unit,
     onNavigateSettings: () -> Unit,
+    onNavigateDownloads: () -> Unit,
+    onClearHistory: () -> Unit,
 ) {
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -92,6 +94,9 @@ fun HomeScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onNavigateDownloads) {
+                        Text("\uD83D\uDCC2", style = MaterialTheme.typography.titleMedium)
+                    }
                     IconButton(onClick = onNavigateSettings) {
                         Icon(Icons.Default.Settings, "Settings")
                     }
@@ -170,12 +175,51 @@ fun HomeScreen(
 
                 RecentFilesStrip(loader = recentLoader, onSend = { uri -> onSendUri(uri) })
 
-                Text(
-                    "History",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
-                )
+                var showClearDialog by remember { mutableStateOf(false) }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 4.dp, top = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        "History",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (transfers.isNotEmpty()) {
+                        IconButton(
+                            onClick = { showClearDialog = true },
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Clear history",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                if (showClearDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showClearDialog = false },
+                        title = { Text("Clear history?") },
+                        text = { Text("This will remove all transfer history entries.") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                showClearDialog = false
+                                onClearHistory()
+                            }) { Text("Clear All", color = MaterialTheme.colorScheme.error) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { showClearDialog = false }) { Text("Cancel") }
+                        },
+                    )
+                }
 
                 if (transfers.isEmpty()) {
                     Box(
@@ -377,44 +421,62 @@ private fun TransferThumbnail(transfer: QueuedTransfer) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SwipeToDeleteItem(
+internal fun SwipeToDeleteItem(
     onDelete: () -> Unit,
     content: @Composable () -> Unit,
 ) {
+    var dismissed by remember { mutableStateOf(false) }
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             if (value != SwipeToDismissBoxValue.Settled) {
-                onDelete()
+                dismissed = true
                 true
             } else false
         }
     )
 
-    SwipeToDismissBox(
-        state = dismissState,
-        backgroundContent = {
-            val color by animateColorAsState(
-                when (dismissState.targetValue) {
-                    SwipeToDismissBoxValue.Settled -> Color.Transparent
-                    else -> Color(0xFFEF4444)
-                },
-                label = "swipe-bg",
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(color, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 20.dp),
-                contentAlignment = when (dismissState.dismissDirection) {
-                    SwipeToDismissBoxValue.StartToEnd -> Alignment.CenterStart
-                    else -> Alignment.CenterEnd
-                },
-            ) {
-                Icon(Icons.Default.Delete, "Delete", tint = Color.White)
-            }
-        },
+    androidx.compose.animation.AnimatedVisibility(
+        visible = !dismissed,
+        exit = androidx.compose.animation.shrinkVertically(
+            animationSpec = androidx.compose.animation.core.tween(250),
+        ) + androidx.compose.animation.fadeOut(
+            animationSpec = androidx.compose.animation.core.tween(150),
+        ),
     ) {
-        content()
+        SwipeToDismissBox(
+            state = dismissState,
+            backgroundContent = {
+                val color by animateColorAsState(
+                    when (dismissState.targetValue) {
+                        SwipeToDismissBoxValue.Settled -> Color.Transparent
+                        else -> Color(0xFFEF4444)
+                    },
+                    label = "swipe-bg",
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(color, RoundedCornerShape(12.dp))
+                        .padding(horizontal = 20.dp),
+                    contentAlignment = when (dismissState.dismissDirection) {
+                        SwipeToDismissBoxValue.StartToEnd -> Alignment.CenterStart
+                        else -> Alignment.CenterEnd
+                    },
+                ) {
+                    Icon(Icons.Default.Delete, "Delete", tint = Color.White)
+                }
+            },
+        ) {
+            content()
+        }
+    }
+
+    // Trigger actual deletion after animation completes
+    LaunchedEffect(dismissed) {
+        if (dismissed) {
+            kotlinx.coroutines.delay(280)
+            onDelete()
+        }
     }
 }
 

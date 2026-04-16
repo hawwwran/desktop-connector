@@ -181,7 +181,13 @@ fun AppNavigation(
                 onDelete = { transfer -> transferViewModel.deleteTransfer(transfer) },
                 onRefresh = { transferViewModel.onRefresh() },
                 onNavigateSettings = { navController.navigate("settings") },
+                onNavigateDownloads = { navController.navigate("downloads") },
+                onClearHistory = { transferViewModel.clearHistory() },
             )
+        }
+
+        composable("downloads") {
+            FolderScreen(onBack = { navController.popBackStack() })
         }
 
         composable("pairing") {
