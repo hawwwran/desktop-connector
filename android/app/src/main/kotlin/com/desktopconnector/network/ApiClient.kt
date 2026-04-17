@@ -180,6 +180,34 @@ class ApiClient(
         return executeStatus(request)
     }
 
+    // Short-timeout client for liveness pong — must fit inside FCM's
+    // ~10s onMessageReceived wakelock even on slow networks.
+    private val pongClient = OkHttpClient.Builder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
+        .build()
+
+    fun pong(): Boolean {
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/devices/pong")
+            .post("".toRequestBody(jsonType))
+            .build()
+        return try {
+            pongClient.newCall(request).execute().use { it.isSuccessful }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun pingDevice(recipientId: String): JSONObject? {
+        val body = JSONObject().apply { put("recipient_id", recipientId) }
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/devices/ping")
+            .post(body.toString().toRequestBody(jsonType))
+            .build()
+        return executeJson(request)
+    }
+
     fun updateFcmToken(token: String): Boolean {
         val body = JSONObject().apply {
             put("fcm_token", token)

@@ -15,6 +15,7 @@ import com.desktopconnector.crypto.CryptoUtils
 import com.desktopconnector.crypto.KeyManager
 import com.desktopconnector.data.AppDatabase
 import com.desktopconnector.data.AppPreferences
+import com.desktopconnector.data.BatteryStatsDumper
 import com.desktopconnector.data.QueuedTransfer
 import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
@@ -486,20 +487,27 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun sendLogsToDesktop(text: String) {
+    fun sendLogsToDesktop(text: String, appendBatteryStats: Boolean = false) {
         val app = getApplication<Application>()
         val paired = keyManager.getFirstPairedDevice() ?: return
 
         viewModelScope.launch(Dispatchers.IO) {
+            val combined = if (appendBatteryStats) {
+                BatteryStatsDumper.capture(app.packageName) + text
+            } else {
+                text
+            }
+            val bytes = combined.toByteArray()
+
             val tempFile = java.io.File(app.cacheDir, "android_logs_${System.currentTimeMillis()}.txt")
-            java.io.FileOutputStream(tempFile).use { it.write(text.toByteArray()) }
+            java.io.FileOutputStream(tempFile).use { it.write(bytes) }
 
             val transfer = QueuedTransfer(
                 contentUri = Uri.fromFile(tempFile).toString(),
                 displayName = "android_logs.txt",
                 displayLabel = "App logs",
                 mimeType = "text/plain",
-                sizeBytes = text.toByteArray().size.toLong(),
+                sizeBytes = bytes.size.toLong(),
                 recipientDeviceId = paired.deviceId,
             )
             val id = db.transferDao().insert(transfer)
@@ -507,6 +515,49 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             refreshTransfers()
             withContext(Dispatchers.Main) {
                 Toast.makeText(app, "Sending logs to desktop...", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun downloadLogsToPhone(text: String, appendBatteryStats: Boolean = false) {
+        val app = getApplication<Application>()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val combined = if (appendBatteryStats) {
+                    BatteryStatsDumper.capture(app.packageName) + text
+                } else {
+                    text
+                }
+
+                val timestamp = System.currentTimeMillis()
+                val filename = "android_logs_$timestamp.txt"
+
+                // Save to DesktopConnector folder
+                val dcFolder = File(
+                    android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS),
+                    "DesktopConnector"
+                )
+                dcFolder.mkdirs()
+
+                val logFile = File(dcFolder, filename)
+                logFile.writeText(combined)
+
+                // Notify MediaStore to index the file
+                android.media.MediaScannerConnection.scanFile(
+                    app,
+                    arrayOf(logFile.absolutePath),
+                    null,
+                    null
+                )
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(app, "Logs saved to Documents/DesktopConnector/$filename", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(app, "Failed to save logs: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }

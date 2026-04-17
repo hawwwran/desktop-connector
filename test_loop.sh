@@ -268,6 +268,51 @@ pass "Photo received and decrypted correctly"
 step "Verifying cleanup: transfer should be marked as downloaded"
 curl -sf "$SERVER_URL/api/health" > /dev/null && pass "Server still healthy"
 
+step "Ping/pong: auth + pairing + rate-limit gates"
+# We hit /api/devices/ping directly with curl to exercise each path.
+# Sender acts as the caller; receiver is the target. FCM isn't configured
+# in the test environment, so reachable-and-paired calls return via:no_fcm.
+
+SENDER_ID=$(python3 -c "import json; c=json.load(open('$SENDER_CONFIG/config.json')); print(c['device_id'])")
+SENDER_TOKEN=$(python3 -c "import json; c=json.load(open('$SENDER_CONFIG/config.json')); print(c['auth_token'])")
+RECEIVER_ID=$(python3 -c "import json; c=json.load(open('$RECEIVER_CONFIG/config.json')); print(c['device_id'])")
+
+# 1. No auth → 401
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$SERVER_URL/api/devices/ping" \
+  -H 'Content-Type: application/json' -d "{\"recipient_id\":\"$RECEIVER_ID\"}")
+[ "$CODE" = "401" ] && pass "Unauthenticated ping → 401" || fail "Expected 401, got $CODE"
+
+# 2. Paired + reachable, no FCM configured → 200 via:no_fcm
+RESP=$(curl -s -X POST "$SERVER_URL/api/devices/ping" \
+  -H "X-Device-ID: $SENDER_ID" -H "Authorization: Bearer $SENDER_TOKEN" \
+  -H 'Content-Type: application/json' -d "{\"recipient_id\":\"$RECEIVER_ID\"}")
+VIA=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('via',''))")
+# receiver just did stats/pairing calls, may be fresh OR no_fcm depending on timing
+case "$VIA" in
+  fresh|no_fcm) pass "Ping authenticated paired call → via:$VIA" ;;
+  *) fail "Expected via:fresh or via:no_fcm, got response: $RESP" ;;
+esac
+
+# 3. Rate limit: second ping within cooldown → 429 with Retry-After
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$SERVER_URL/api/devices/ping" \
+  -H "X-Device-ID: $SENDER_ID" -H "Authorization: Bearer $SENDER_TOKEN" \
+  -H 'Content-Type: application/json' -d "{\"recipient_id\":\"$RECEIVER_ID\"}")
+[ "$CODE" = "429" ] && pass "Back-to-back ping blocked → 429" || fail "Expected 429, got $CODE"
+
+# 4. Unpaired target → 403 (use a fake device_id that isn't paired with sender)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$SERVER_URL/api/devices/ping" \
+  -H "X-Device-ID: $SENDER_ID" -H "Authorization: Bearer $SENDER_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"recipient_id":"00000000000000000000000000000000"}')
+[ "$CODE" = "403" ] && pass "Unpaired recipient → 403" || fail "Expected 403, got $CODE"
+
+# 5. Pong is a cheap authenticated no-op returning {ok:true}
+RESP=$(curl -s -X POST "$SERVER_URL/api/devices/pong" \
+  -H "X-Device-ID: $RECEIVER_ID" \
+  -H "Authorization: Bearer $(python3 -c "import json; c=json.load(open('$RECEIVER_CONFIG/config.json')); print(c['auth_token'])")" \
+  -H 'Content-Type: application/json')
+OK=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok'))")
+[ "$OK" = "True" ] && pass "Pong endpoint returns ok" || fail "Pong failed: $RESP"
+
 cd "$PROJECT_DIR"
 
 echo ""

@@ -146,6 +146,151 @@ class DeviceController
         Router::json(['status' => 'ok']);
     }
 
+    /**
+     * POST /api/devices/ping — probe whether a paired device is online via FCM.
+     * Body: {recipient_id}
+     * Sends HIGH-priority FCM ping; polls recipient's last_seen_at for up to 5s
+     * waiting for their pong. Returns {online, last_seen_at, rtt_ms, via}.
+     *
+     * Rate-limited per (sender, recipient) pair via an atomic UPSERT on
+     * ping_rate. PING_COOLDOWN_SEC exceeds PING_MAX_WAIT_SEC, so concurrent
+     * pings for the same pair are always rejected (debounce) AND callers are
+     * capped to 1 ping per 30s (overload / battery protection).
+     * Note: same single-PHP-worker caveat as /api/transfers/notify.
+     */
+    private const PING_COOLDOWN_SEC = 30;
+    private const PING_MAX_WAIT_SEC = 5;
+
+    public static function ping(Database $db, string $deviceId): void
+    {
+        $body = Router::getJsonBody();
+        if (!$body || empty($body['recipient_id'])) {
+            Router::json(['error' => 'Missing recipient_id'], 400);
+            return;
+        }
+        $recipientId = $body['recipient_id'];
+
+        $pairing = $db->querySingle(
+            'SELECT id FROM pairings
+             WHERE (device_a_id = :a AND device_b_id = :b)
+                OR (device_a_id = :b2 AND device_b_id = :a2)',
+            [':a' => $deviceId, ':b' => $recipientId,
+             ':a2' => $deviceId, ':b2' => $recipientId]
+        );
+        if (!$pairing) {
+            Router::json(['error' => 'Devices are not paired'], 403);
+            return;
+        }
+
+        // Atomic rate-limit + concurrent-ping claim.
+        // SQLite WAL serializes writers, so the UPSERT's WHERE clause is race-safe:
+        //   - fresh row     → INSERT wins, changes()==1
+        //   - expired slot  → UPDATE wins, changes()==1
+        //   - live slot     → UPDATE's WHERE fails, changes()==0 → reject
+        $now = time();
+        $claimUntil = $now + self::PING_COOLDOWN_SEC;
+        $db->execute(
+            'INSERT INTO ping_rate (sender_id, recipient_id, cooldown_until)
+             VALUES (:s, :r, :until)
+             ON CONFLICT(sender_id, recipient_id) DO UPDATE
+             SET cooldown_until = excluded.cooldown_until
+             WHERE ping_rate.cooldown_until <= :now',
+            [':s' => $deviceId, ':r' => $recipientId,
+             ':until' => $claimUntil, ':now' => $now]
+        );
+        if ($db->changes() === 0) {
+            $row = $db->querySingle(
+                'SELECT cooldown_until FROM ping_rate WHERE sender_id = :s AND recipient_id = :r',
+                [':s' => $deviceId, ':r' => $recipientId]
+            );
+            $retryAfter = $row ? max(1, (int)$row['cooldown_until'] - $now) : 1;
+            header('Retry-After: ' . $retryAfter);
+            Router::json([
+                'error' => 'Rate limit: ping already in flight or too recent',
+                'retry_after' => $retryAfter,
+            ], 429);
+            return;
+        }
+
+        $recipient = $db->querySingle(
+            'SELECT last_seen_at, fcm_token FROM devices WHERE device_id = :id',
+            [':id' => $recipientId]
+        );
+        if (!$recipient) {
+            Router::json(['error' => 'Recipient not found'], 404);
+            return;
+        }
+
+        $baseline = $now;
+        $prevLastSeen = (int)($recipient['last_seen_at'] ?? 0);
+
+        // If recipient talked to the server this second, skip FCM — they're online.
+        if ($prevLastSeen >= $baseline) {
+            Router::json([
+                'online' => true,
+                'last_seen_at' => $prevLastSeen,
+                'rtt_ms' => 0,
+                'via' => 'fresh',
+            ]);
+            return;
+        }
+
+        if (empty($recipient['fcm_token']) || !FcmSender::isAvailable()) {
+            Router::json([
+                'online' => false,
+                'last_seen_at' => $prevLastSeen,
+                'rtt_ms' => 0,
+                'via' => 'no_fcm',
+            ]);
+            return;
+        }
+
+        $start = microtime(true);
+        if (!FcmSender::sendDataMessage($recipient['fcm_token'], ['type' => 'ping'])) {
+            Router::json([
+                'online' => false,
+                'last_seen_at' => $prevLastSeen,
+                'rtt_ms' => (int)((microtime(true) - $start) * 1000),
+                'via' => 'fcm_failed',
+            ]);
+            return;
+        }
+
+        $timeoutMs = self::PING_MAX_WAIT_SEC * 1000;
+        while ((microtime(true) - $start) * 1000 < $timeoutMs) {
+            $curr = $db->querySingle(
+                'SELECT last_seen_at FROM devices WHERE device_id = :id',
+                [':id' => $recipientId]
+            );
+            if ($curr && (int)$curr['last_seen_at'] >= $baseline) {
+                Router::json([
+                    'online' => true,
+                    'last_seen_at' => (int)$curr['last_seen_at'],
+                    'rtt_ms' => (int)((microtime(true) - $start) * 1000),
+                    'via' => 'fcm',
+                ]);
+                return;
+            }
+            usleep(100000); // 100ms
+        }
+
+        Router::json([
+            'online' => false,
+            'last_seen_at' => $prevLastSeen,
+            'rtt_ms' => (int)((microtime(true) - $start) * 1000),
+            'via' => 'fcm_timeout',
+        ]);
+    }
+
+    /**
+     * POST /api/devices/pong — phone calls this when it receives a ping FCM.
+     * Router::authenticate already bumps last_seen_at; this just acks.
+     */
+    public static function pong(Database $db, string $deviceId): void
+    {
+        Router::json(['ok' => true, 't' => time()]);
+    }
+
     public static function health(Database $db = null): void
     {
         // If auth headers present, update last_seen (acts as heartbeat)

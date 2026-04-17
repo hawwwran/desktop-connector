@@ -57,6 +57,18 @@ $router->post('/api/devices/fcm-token', function () use ($db) {
     DeviceController::updateFcmToken($db, $deviceId);
 });
 
+$router->post('/api/devices/ping', function () use ($db) {
+    $deviceId = Router::authenticate($db);
+    if ($deviceId === null) return;
+    DeviceController::ping($db, $deviceId);
+});
+
+$router->post('/api/devices/pong', function () use ($db) {
+    $deviceId = Router::authenticate($db);
+    if ($deviceId === null) return;
+    DeviceController::pong($db, $deviceId);
+});
+
 $router->post('/api/pairing/request', function () use ($db) {
     $deviceId = Router::authenticate($db);
     if ($deviceId === null) return;

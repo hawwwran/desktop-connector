@@ -150,6 +150,18 @@ class ApiClient:
             return resp.json()
         return None
 
+    def ping_device(self, recipient_id: str, timeout: float = 8.0) -> dict | None:
+        """Probe paired device liveness. Server sends HIGH FCM and waits up to 5s
+        for pong. Returns {online, last_seen_at, rtt_ms, via} or None on failure."""
+        resp = self.conn.request(
+            "POST", "/api/devices/ping",
+            json={"recipient_id": recipient_id},
+            timeout=timeout,
+        )
+        if resp and resp.status_code == 200:
+            return resp.json()
+        return None
+
     def get_sent_status(self, timeout: float = 30) -> list[dict]:
         """Get delivery status of transfers sent by this device."""
         resp = self.conn.request("GET", "/api/transfers/sent-status", timeout=timeout)

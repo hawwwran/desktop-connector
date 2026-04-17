@@ -34,7 +34,8 @@ fun SettingsScreen(
     pairedDeviceName: String,
     pairedDeviceId: String,
     onUnpair: () -> Unit,
-    onSendLogs: (String) -> Unit,
+    onSendLogs: (String, Boolean) -> Unit,
+    onDownloadLogs: (String, Boolean) -> Unit,
     onBack: () -> Unit,
 ) {
     var serverUrl by remember { mutableStateOf(prefs.serverUrl ?: "") }
@@ -330,6 +331,7 @@ fun SettingsScreen(
             ) {
                 val context = LocalContext.current
                 var loggingOn by remember { mutableStateOf(prefs.loggingEnabled) }
+                var showLogsDialog by remember { mutableStateOf(false) }
 
                 Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                     Text("Logs", style = MaterialTheme.typography.titleSmall)
@@ -354,15 +356,30 @@ fun SettingsScreen(
                         OutlinedButton(onClick = { AppLog.clear() }) {
                             Text("Clear")
                         }
-                        OutlinedButton(onClick = {
-                            val text = AppLog.read()
-                            if (text.isNotEmpty()) {
-                                onSendLogs(text)
-                            }
-                        }) {
-                            Text("Send to Desktop")
+                        OutlinedButton(onClick = { showLogsDialog = true }) {
+                            Text("Download Logs")
                         }
                     }
+                }
+
+                if (showLogsDialog) {
+                    LogsDialog(
+                        onDismiss = { showLogsDialog = false },
+                        onSendToDesktop = { appendBatteryStats ->
+                            val text = AppLog.read()
+                            if (text.isNotEmpty()) {
+                                onSendLogs(text, appendBatteryStats)
+                            }
+                            showLogsDialog = false
+                        },
+                        onDownloadToPhone = { appendBatteryStats ->
+                            val text = AppLog.read()
+                            if (text.isNotEmpty()) {
+                                onDownloadLogs(text, appendBatteryStats)
+                            }
+                            showLogsDialog = false
+                        }
+                    )
                 }
             }
 
@@ -374,6 +391,91 @@ fun SettingsScreen(
             )
         }
     }
+}
+
+@Composable
+private fun LogsDialog(
+    onDismiss: () -> Unit,
+    onSendToDesktop: (Boolean) -> Unit,
+    onDownloadToPhone: (Boolean) -> Unit,
+) {
+    var appendBatteryStats by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Check both permissions needed for battery stats
+    val hasAllBatteryStatsPermissions = remember {
+        context.checkSelfPermission(android.Manifest.permission.DUMP) == PackageManager.PERMISSION_GRANTED &&
+        context.checkSelfPermission(android.Manifest.permission.PACKAGE_USAGE_STATS) == PackageManager.PERMISSION_GRANTED
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Download Logs") },
+        text = {
+            Column {
+                Text(
+                    "Choose how to save the logs:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                // Only show battery stats toggle if both permissions are granted (developer mode)
+                if (hasAllBatteryStatsPermissions) {
+                    Spacer(Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Append battery usage stats",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Switch(
+                            checked = appendBatteryStats,
+                            onCheckedChange = { appendBatteryStats = it }
+                        )
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "✓ Developer feature enabled",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Action buttons - stacked vertically
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { onSendToDesktop(appendBatteryStats) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Send to Desktop")
+                    }
+                    OutlinedButton(
+                        onClick = { onDownloadToPhone(appendBatteryStats) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Download to Phone")
+                    }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+        confirmButton = {
+            // Empty - buttons are in the text section now
+        }
+    )
 }
 
 @Composable

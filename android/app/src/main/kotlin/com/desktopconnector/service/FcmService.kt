@@ -3,6 +3,7 @@ package com.desktopconnector.service
 import android.util.Log
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
+import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -23,7 +24,27 @@ class FcmService : FirebaseMessagingService() {
                 // Cancel any blocking long poll so PollService processes fasttrack immediately
                 PollService.activeApi?.cancelLongPoll()
             }
+            "ping" -> sendPong()
             else -> PollService.fcmWakeSignal = true
+        }
+    }
+
+    /**
+     * Run pong synchronously on FCM's own background thread. FCM holds a
+     * ~10s wakelock around onMessageReceived, and pongClient caps the request
+     * at 3s, so completion is guaranteed before Android can kill the process.
+     * Avoids the orphan-Thread pattern where a spawned worker can be reaped
+     * mid-request when onMessageReceived returns.
+     */
+    private fun sendPong() {
+        val prefs = AppPreferences(this)
+        val server = prefs.serverUrl ?: return
+        val id = prefs.deviceId ?: return
+        val token = prefs.authToken ?: return
+        try {
+            ApiClient(server, id, token).pong()
+        } catch (e: Exception) {
+            Log.w("FcmService", "Pong failed: ${e.message}")
         }
     }
 

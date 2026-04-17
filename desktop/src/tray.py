@@ -89,7 +89,7 @@ class TrayApp:
             self._update_icon()
             return pystray.Menu(
                 pystray.MenuItem(
-                    lambda _: "Online" if self.conn.state == ConnectionState.CONNECTED else "Offline",
+                    lambda _: self._status_text(),
                     None,
                     enabled=False,
                 ),
@@ -125,10 +125,16 @@ class TrayApp:
         self._was_uploading = False
         self._was_paired = self.config.is_paired
         self._remote_online = False
-        self._remote_check_counter = 14  # fire on first tick after connection
+        self._last_ping_time = 0.0
+        self._ping_in_flight = False
+        self._ping_lock = threading.Lock()
+        # 5 min between probes: icon may be stale, but phone battery stays near-zero.
+        # On-connect triggers an immediate ping regardless.
+        self._ping_interval = 300.0
         import threading as _t
         def icon_poll():
             import time
+            was_connected = False
             while not self._should_quit.is_set():
                 changed = False
 
@@ -153,26 +159,15 @@ class TrayApp:
                     except Exception:
                         pass
 
-                # Check remote device online status every 30s (only when connected)
-                self._remote_check_counter += 1
-                if self._remote_check_counter >= 15:
-                    self._remote_check_counter = 0
-                    if self.conn.state == ConnectionState.CONNECTED:
-                        try:
-                            stats = self.api.get_stats()
-                            if stats:
-                                paired_devs = stats.get("paired_devices", [])
-                                # Check if ANY paired device is online (handles multiple pairings)
-                                online = any(d.get("online", False) for d in paired_devs)
-                                if online != self._remote_online:
-                                    log.info("Remote device %s", "online" if online else "offline")
-                                    self._remote_online = online
-                                    self._update_icon()
-                        except Exception as e:
-                            log.warning("Stats check failed: %s", e)
-                    elif self._remote_online:
-                        self._remote_online = False
-                        self._update_icon()
+                connected = self.conn.state == ConnectionState.CONNECTED
+                if connected:
+                    just_connected = not was_connected
+                    min_age = 0.0 if just_connected else self._ping_interval
+                    self._maybe_ping(min_age)
+                elif self._remote_online:
+                    self._remote_online = False
+                    self._update_icon()
+                was_connected = connected
 
                 if changed:
                     try:
@@ -208,6 +203,53 @@ class TrayApp:
                 self._icon.icon = self._get_state_icon()
             except Exception:
                 pass
+
+    def _status_text(self) -> str:
+        """Menu title text. Side effect: triggers a fresh ping when the menu
+        is rendered and our last probe is older than 30s."""
+        if self.conn.state != ConnectionState.CONNECTED:
+            return "Offline"
+        self._maybe_ping(30.0)
+        return "Online"
+
+    def _maybe_ping(self, min_age_sec: float) -> None:
+        """Atomic check-and-fire: under _ping_lock, confirm we're idle and
+        stale enough, then claim the slot before spawning the worker. Prevents
+        the icon_poll / _status_text race where both threads could pass the
+        gate simultaneously and fire two pings."""
+        import time
+        if not self.config.is_paired:
+            return
+        paired = self.config.get_first_paired_device()
+        if not paired:
+            return
+        target_id, _ = paired
+        with self._ping_lock:
+            if self._ping_in_flight:
+                return
+            if (time.monotonic() - self._last_ping_time) < min_age_sec:
+                return
+            self._last_ping_time = time.monotonic()
+            self._ping_in_flight = True
+
+        def run():
+            try:
+                result = self.api.ping_device(target_id)
+                if result is None:
+                    return
+                online = bool(result.get("online"))
+                if online != self._remote_online:
+                    log.info("Phone %s (via %s, rtt=%sms)",
+                             "online" if online else "offline",
+                             result.get("via"), result.get("rtt_ms"))
+                    self._remote_online = online
+                    self._update_icon()
+            except Exception as e:
+                log.warning("Ping failed: %s", e)
+            finally:
+                with self._ping_lock:
+                    self._ping_in_flight = False
+        threading.Thread(target=run, daemon=True).start()
 
     # --- GTK4 windows (subprocess to avoid GTK3/4 conflict) ---
 

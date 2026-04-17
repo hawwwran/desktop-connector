@@ -58,6 +58,16 @@ class Database
             )
         ');
         $this->db->exec('CREATE INDEX IF NOT EXISTS idx_fasttrack_recipient ON fasttrack_messages(recipient_id, created_at)');
+
+        // Ping rate limit: atomic per-(sender, recipient) cooldown slot
+        $this->db->exec('
+            CREATE TABLE IF NOT EXISTS ping_rate (
+                sender_id       TEXT NOT NULL,
+                recipient_id    TEXT NOT NULL,
+                cooldown_until  INTEGER NOT NULL,
+                PRIMARY KEY (sender_id, recipient_id)
+            )
+        ');
     }
 
     public function query(string $sql, array $params = []): SQLite3Result

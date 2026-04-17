@@ -282,9 +282,13 @@ fun AppNavigation(
                         popUpTo("home") { inclusive = true }
                     }
                 },
-                onSendLogs = { text ->
+                onSendLogs = { text, appendBatteryStats ->
                     // Send logs as a file transfer
-                    transferViewModel.sendLogsToDesktop(text)
+                    transferViewModel.sendLogsToDesktop(text, appendBatteryStats)
+                },
+                onDownloadLogs = { text, appendBatteryStats ->
+                    // Download logs to phone storage
+                    transferViewModel.downloadLogsToPhone(text, appendBatteryStats)
                 },
                 onBack = { navController.popBackStack() },
             )

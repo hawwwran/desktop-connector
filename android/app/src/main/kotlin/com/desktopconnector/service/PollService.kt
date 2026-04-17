@@ -265,17 +265,11 @@ class PollService : Service() {
 
             if (!isScreenOn()) {
                 if (FcmManager.isInitialized) {
-                    // FCM available — wait for push wake or screen on
-                    // Send periodic heartbeat so server knows we're reachable
+                    // FCM available — pure wait for push wake or screen on.
+                    // Server learns liveness on-demand via ping/pong, not heartbeats.
                     AppLog.log("Poll", "Screen off, waiting for FCM wake")
-                    var heartbeatCounter = 0
                     while (!isScreenOn() && !fcmWakeSignal && !fasttrackWakeSignal && running) {
                         delay(500)
-                        heartbeatCounter++
-                        if (heartbeatCounter >= 180) { // every 90s (180 * 500ms)
-                            heartbeatCounter = 0
-                            try { api.healthCheck(fast = true) } catch (_: Exception) {}
-                        }
                     }
                     if (fcmWakeSignal) {
                         fcmWakeSignal = false
