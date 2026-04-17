@@ -114,3 +114,11 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Desktop: conversation UI in GTK4
 - Privacy/permission heavy
 
+## Known issues to investigate
+
+### Android process crash
+- Observed in `dumpsys batterystats` on 2026-04-17: `Proc com.desktopconnector: 6 starts, 1 crashes`
+- Session included many APK reinstalls, find-phone tests, and ~10h on battery
+- No ANR recorded, no user-visible error reported — crash may have been during an APK self-replace
+- Next step: capture `logcat --buffer=crash` or a tombstone after reproducing, check whether `PollService`/`FcmService` survives APK upgrade cleanly
+
