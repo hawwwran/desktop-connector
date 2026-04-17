@@ -732,30 +732,62 @@ def show_history(config_dir: Path):
                                      default_width=500, default_height=480)
         win.set_size_request(400, 300)
 
-        # Reduce ActionRow left padding so thumbnails have equal spacing
+        # Card-per-item styling + flush progress bar.
         css = Gtk.CssProvider()
         css.load_from_string("""
-            row.activatable { padding-left: 3px; margin-left: 0px; }
-            row.activatable > box { margin-left: 0px; padding-left: 0px; }
-            row.activatable frame {
+            .transfer-card {
+                padding-top: 5px;
+                padding-bottom: 5px;
+                transition: background-color 120ms ease;
+            }
+            .transfer-card.has-progress {
+                padding-bottom: 0;
+            }
+            .transfer-card:hover {
+                background-color: mix(@card_bg_color, @window_fg_color, 0.06);
+            }
+            .transfer-card:active {
+                background-color: mix(@card_bg_color, @window_fg_color, 0.12);
+            }
+            .transfer-card-list,
+            .transfer-card-list > row,
+            .transfer-card-list > row.activatable {
+                background: transparent;
+                border: 0;
+                padding-left: 3px;
+                margin-left: 0px;
+            }
+            .transfer-card-list > row > box {
+                margin-left: 0px;
+                padding-left: 0px;
+            }
+            .transfer-card-list > row frame {
                 min-width: 50px;
                 min-height: 50px;
                 background: alpha(@card_shade_color, 0.3);
                 border-radius: 6px;
             }
-            .upload-bar trough, .upload-bar progress {
-                min-height: 6px;
+            .transfer-card-list > row.activatable:hover,
+            .transfer-card-list > row.activatable:active {
+                background: transparent;
+            }
+            .upload-bar, .download-bar {
+                min-height: 5px;
+            }
+            .upload-bar trough, .download-bar trough {
+                min-height: 5px;
+                background: alpha(@card_shade_color, 0.35);
+                border-radius: 0;
+            }
+            .upload-bar progress, .download-bar progress {
+                min-height: 5px;
+                border-radius: 0;
             }
             .upload-bar progress {
                 background-color: #F59E0B;
-                border-radius: 3px;
-            }
-            .download-bar trough, .download-bar progress {
-                min-height: 6px;
             }
             .download-bar progress {
                 background-color: #22C55E;
-                border-radius: 3px;
             }
             @keyframes pulse {
                 0% { opacity: 0.5; }
@@ -797,10 +829,7 @@ def show_history(config_dir: Path):
             dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
             def on_response(dlg, response):
                 if response == "clear":
-                    with history._lock:
-                        history._items.clear()
-                        history._save()
-                    last_snapshot[0] = None
+                    history.clear()
             dialog.connect("response", on_response)
             dialog.present()
         clear_all_btn.connect("clicked", on_clear_all)
@@ -812,11 +841,11 @@ def show_history(config_dir: Path):
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         toolbar_view.set_content(scroll)
 
-        clamp = Adw.Clamp(maximum_size=9999, margin_top=8, margin_bottom=8, margin_start=12, margin_end=12)
+        clamp = Adw.Clamp(maximum_size=9999, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         scroll.set_child(clamp)
 
-        group = Adw.PreferencesGroup()
-        clamp.set_child(group)
+        list_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        clamp.set_child(list_container)
 
         has_active = [False]
         # row_widgets[transfer_id] = (box_widget, row, progress_bar_or_None)
@@ -864,14 +893,23 @@ def show_history(config_dir: Path):
             return text, bar
 
         def _create_row(item):
-            """Create a new row widget (Box containing ActionRow + ProgressBar)."""
+            """Create a new card widget (Box with rounded card styling containing a single-row ListBox + optional flush ProgressBar)."""
             direction_prefix = "\u2193" if item["direction"] == "received" else "\u2191"
             label = history.get_label(item)
             size = format_size(item.get("size", 0))
             ts = time.strftime("%b %d, %H:%M", time.localtime(item.get("timestamp", 0)))
             status_text, bar_state = _compute_status(item)
 
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            # overflow HIDDEN clips the flush progress bar to the card's rounded corners.
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            card.add_css_class("card")
+            card.add_css_class("transfer-card")
+            card.set_overflow(Gtk.Overflow.HIDDEN)
+
+            inner_list = Gtk.ListBox()
+            inner_list.add_css_class("transfer-card-list")
+            inner_list.set_selection_mode(Gtk.SelectionMode.NONE)
+            card.append(inner_list)
 
             row = Adw.ActionRow(
                 title=f"{direction_prefix}  {label}",
@@ -939,13 +977,13 @@ def show_history(config_dir: Path):
             del_btn.add_css_class("flat")
             del_btn.add_css_class("circular")
             captured_item = item
-            def on_delete(b, it=captured_item, bx=box):
+            def on_delete(b, it=captured_item, c=card):
                 history.remove(it)
-                group.remove(bx)
+                list_container.remove(c)
                 tid = it.get("transfer_id", id(it))
                 row_widgets.pop(tid, None)
-                if bx in all_widgets:
-                    all_widgets.remove(bx)
+                if c in all_widgets:
+                    all_widgets.remove(c)
                 structural_sig[0] = None
             del_btn.connect("clicked", on_delete)
             row.add_suffix(del_btn)
@@ -954,9 +992,10 @@ def show_history(config_dir: Path):
             row.set_activatable(True)
             row.connect("activated", lambda r, it=captured: on_item_click(it, win))
 
-            box.append(row)
+            inner_list.append(row)
 
-            # Progress bar
+            # Progress bar — flush to card edges; card's overflow:hidden clips to rounded corners.
+            # When present, it replaces the card's bottom padding (has-progress class drops padding-bottom to 0).
             show, bar_cls, fraction = bar_state
             progress_bar = None
             if show:
@@ -964,12 +1003,10 @@ def show_history(config_dir: Path):
                 progress_bar.set_fraction(fraction)
                 for cls in bar_cls.split():
                     progress_bar.add_css_class(cls)
-                progress_bar.set_margin_start(16)
-                progress_bar.set_margin_end(16)
-                progress_bar.set_margin_bottom(8)
-                box.append(progress_bar)
+                card.append(progress_bar)
+                card.add_css_class("has-progress")
 
-            return box, row, progress_bar
+            return card, row, progress_bar
 
         def _update_row(item, row, old_progress_bar, parent_box):
             """Update an existing row in-place (subtitle + progress bar)."""
@@ -995,14 +1032,13 @@ def show_history(config_dir: Path):
                     progress_bar.set_fraction(fraction)
                     for cls in bar_cls.split():
                         progress_bar.add_css_class(cls)
-                    progress_bar.set_margin_start(16)
-                    progress_bar.set_margin_end(16)
-                    progress_bar.set_margin_bottom(8)
                     parent_box.append(progress_bar)
+                    parent_box.add_css_class("has-progress")
                     return progress_bar
             else:
                 if old_progress_bar:
                     parent_box.remove(old_progress_bar)
+                    parent_box.remove_css_class("has-progress")
                 return None
 
         def build_list():
@@ -1040,24 +1076,24 @@ def show_history(config_dir: Path):
             if needs_rebuild:
                 # Full rebuild — items added, removed, or reordered
                 for w in all_widgets:
-                    group.remove(w)
+                    list_container.remove(w)
                 all_widgets.clear()
                 row_widgets.clear()
 
                 if not items:
-                    row = Adw.ActionRow(title="No transfers yet")
-                    row.add_css_class("dim-label")
-                    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-                    box.append(row)
-                    group.add(box)
-                    all_widgets.append(box)
+                    empty = Gtk.Label(label="No transfers yet")
+                    empty.add_css_class("dim-label")
+                    empty.set_margin_top(48)
+                    empty.set_margin_bottom(48)
+                    list_container.append(empty)
+                    all_widgets.append(empty)
                 else:
                     for item in items:
                         tid = item.get("transfer_id", item.get("timestamp"))
-                        box, row, pbar = _create_row(item)
-                        group.add(box)
-                        all_widgets.append(box)
-                        row_widgets[tid] = (box, row, pbar)
+                        card, row, pbar = _create_row(item)
+                        list_container.append(card)
+                        all_widgets.append(card)
+                        row_widgets[tid] = (card, row, pbar)
             else:
                 # In-place update — just refresh subtitles and progress bars
                 for item in items:

@@ -130,6 +130,15 @@ class TransferHistory:
             return len(items) != before
         self._locked_read_modify_write(do_remove)
 
+    def clear(self) -> None:
+        """Remove all history entries."""
+        def do_clear(items):
+            if not items:
+                return False
+            items.clear()
+            return True
+        self._locked_read_modify_write(do_clear)
+
     def get_label(self, item: dict) -> str:
         return item.get("display_label") or item.get("filename", "Unknown")
 
