@@ -281,6 +281,42 @@ pass "Photo received and decrypted correctly"
 step "Verifying cleanup: transfer should be marked as downloaded"
 curl -sf "$SERVER_URL/api/health" > /dev/null && pass "Server still healthy"
 
+step "Long-poll + sent-status consistency checks"
+# Three invariants that must hold regardless of internal refactors:
+#   1. /notify?test=1 short-circuits without blocking.
+#   2. /sent-status reports status=delivered, delivery_state=delivered after ack.
+#   3. /notify inline sent_status agrees with /sent-status for the same transfer.
+SENDER_ID_CHECK=$(python3 -c "import json; c=json.load(open('$SENDER_CONFIG/config.json')); print(c['device_id'])")
+SENDER_TOKEN_CHECK=$(python3 -c "import json; c=json.load(open('$SENDER_CONFIG/config.json')); print(c['auth_token'])")
+
+RESP=$(curl -s "$SERVER_URL/api/transfers/notify?test=1" \
+  -H "X-Device-ID: $SENDER_ID_CHECK" -H "Authorization: Bearer $SENDER_TOKEN_CHECK")
+echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+assert r.get('test') is True, f'test flag missing: {r}'
+assert r.get('pending') is False, f'pending should be false: {r}'
+" && pass "/notify?test=1 short-circuits" || fail "/notify?test=1 did not short-circuit: $RESP"
+
+RESP=$(curl -s "$SERVER_URL/api/transfers/sent-status" \
+  -H "X-Device-ID: $SENDER_ID_CHECK" -H "Authorization: Bearer $SENDER_TOKEN_CHECK")
+echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+t = r['transfers'][0]
+assert t['status'] == 'delivered', f'status should be delivered, got {t}'
+assert t['delivery_state'] == 'delivered', f'delivery_state should be delivered, got {t}'
+" && pass "/sent-status shows delivered after ack" || fail "/sent-status mismatch: $RESP"
+
+RESP=$(curl -s "$SERVER_URL/api/transfers/notify?since=0" \
+  -H "X-Device-ID: $SENDER_ID_CHECK" -H "Authorization: Bearer $SENDER_TOKEN_CHECK")
+echo "$RESP" | python3 -c "
+import sys, json
+r = json.load(sys.stdin)
+assert r.get('delivered') is True, f'delivered should be true: {r}'
+assert r['sent_status'][0]['delivery_state'] == 'delivered', f'inline sent_status mismatch: {r}'
+" && pass "/notify inline sent_status agrees with /sent-status" || fail "/notify inline sent_status mismatch: $RESP"
+
 step "Streaming large file (10 MB → 5 chunks)"
 LARGE_SRC="$LOG_DIR/test_large.bin"
 LARGE_DST_DIR=$(mktemp -d /tmp/dc-large-XXXXX)
