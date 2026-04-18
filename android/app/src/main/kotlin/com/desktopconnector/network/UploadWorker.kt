@@ -10,6 +10,7 @@ import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.data.AppDatabase
 import com.desktopconnector.data.TransferStatus
+import kotlinx.coroutines.delay
 import java.io.File
 import java.io.InputStream
 import java.util.UUID
@@ -28,6 +29,8 @@ class UploadWorker(
     companion object {
         private const val TAG = "UploadWorker"
         const val KEY_TRANSFER_DB_ID = "transfer_db_id"
+        private const val CHUNK_RETRY_DELAY_MS = 5_000L
+        private const val CHUNK_MAX_FAILURE_WINDOW_MS = 120_000L
 
         fun enqueue(context: Context, transferDbId: Long) {
             val request = OneTimeWorkRequestBuilder<UploadWorker>()
@@ -119,9 +122,12 @@ class UploadWorker(
                 for (index in 0 until chunkCount) {
                     val plaintext = readFullChunk(input, buf, sourceSize, index, chunkCount)
                     val encrypted = keyManager.encryptChunk(plaintext, baseNonce, index, symmetricKey)
-                    Log.d(TAG, "Uploading chunk ${index + 1}/$chunkCount (${plaintext.size} B)")
-                    api.uploadChunk(transferId, index, encrypted)
-                        ?: throw java.io.IOException("Failed to upload chunk $index")
+                    val terminal = uploadChunkWithRetry(api, transferId, index, chunkCount, encrypted)
+                    if (terminal != null) {
+                        AppLog.log("Upload", "Failed: ${transfer.displayName} - $terminal")
+                        db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, terminal)
+                        return Result.failure()
+                    }
                     db.transferDao().updateProgress(transferDbId, index + 1, chunkCount)
                 }
             }
@@ -135,10 +141,45 @@ class UploadWorker(
         } catch (e: Exception) {
             Log.e(TAG, "Upload failed: ${e.message}", e)
             AppLog.log("Upload", "Failed: ${transfer.displayName} - ${e.message}")
-            db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, e.message)
-            return Result.retry()
+            db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, e.message ?: "Upload error")
+            return Result.failure()
         } finally {
             spoolFile?.delete()
+        }
+    }
+
+    /**
+     * Upload one chunk with 5s retry cadence. Returns null on success, or an
+     * error message string when the same chunk has been failing continuously
+     * for longer than [CHUNK_MAX_FAILURE_WINDOW_MS].
+     */
+    private suspend fun uploadChunkWithRetry(
+        api: ApiClient,
+        transferId: String,
+        index: Int,
+        chunkCount: Int,
+        encrypted: ByteArray,
+    ): String? {
+        var firstFailureAt: Long? = null
+        while (true) {
+            try {
+                val ok = api.uploadChunk(transferId, index, encrypted) != null
+                if (ok) {
+                    Log.d(TAG, "Uploaded chunk ${index + 1}/$chunkCount")
+                    return null
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "uploadChunk $index threw: ${e.message}")
+            }
+            val now = System.currentTimeMillis()
+            if (firstFailureAt == null) {
+                firstFailureAt = now
+                Log.w(TAG, "Chunk ${index + 1}/$chunkCount failed, retrying in ${CHUNK_RETRY_DELAY_MS / 1000}s")
+            } else if (now - firstFailureAt >= CHUNK_MAX_FAILURE_WINDOW_MS) {
+                val seconds = CHUNK_MAX_FAILURE_WINDOW_MS / 1000
+                return "Chunk ${index + 1}/$chunkCount failed continuously for ${seconds}s"
+            }
+            delay(CHUNK_RETRY_DELAY_MS)
         }
     }
 
