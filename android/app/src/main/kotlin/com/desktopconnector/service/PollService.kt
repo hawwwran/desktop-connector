@@ -476,11 +476,10 @@ class PollService : Service() {
     }
 
     /**
-     * Receive a normal file transfer.
-     *
-     * NOTE: this still buffers all chunks in memory before writing. Commit 4
-     * of the streaming-receive refactor replaces this with a temp-file writer
-     * that appends each decrypted chunk directly to disk.
+     * Receive a normal file transfer by streaming chunks to a temp file on
+     * disk. Memory usage is bounded by chunk size (2 MB) regardless of the
+     * total file size. The temp file lives in the same directory as the
+     * final destination so the finalize-rename is atomic.
      */
     private suspend fun receiveFileTransfer(
         transferId: String, chunkCount: Int, symmetricKey: ByteArray,
@@ -510,54 +509,96 @@ class PollService : Service() {
             ))
         }
 
-        val chunks = ArrayList<ByteArray>(chunkCount)
-        for (i in 0 until chunkCount) {
-            val chunk = downloadChunkWithRetry(api, transferId, i)
-            if (chunk == null) {
-                Log.e(TAG, "Failed to download chunk $i of $transferId")
-                db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
-                return
+        val dir = java.io.File(android.os.Environment.getExternalStorageDirectory(), "DesktopConnector")
+        if (!dir.exists() && !dir.mkdirs()) {
+            Log.e(TAG, "Could not create DesktopConnector directory")
+            db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Cannot create download folder")
+            return
+        }
+        val finalFile = pickUniqueTarget(dir, fileName)
+        val tempFile = java.io.File(dir, ".incoming_${transferId}.part")
+        tempFile.delete()  // clear stale partial from a prior aborted run
+
+        var cancelled = false
+        try {
+            java.io.BufferedOutputStream(java.io.FileOutputStream(tempFile)).use { out ->
+                for (i in 0 until chunkCount) {
+                    val encrypted = downloadChunkWithRetry(api, transferId, i)
+                    if (encrypted == null) {
+                        Log.e(TAG, "Failed to download chunk $i of $transferId")
+                        db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
+                        return
+                    }
+                    val plaintext = try {
+                        CryptoUtils.decryptBlob(encrypted, symmetricKey)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to decrypt chunk $i: ${e.message}")
+                        db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Decryption failed at chunk ${i + 1}/$chunkCount")
+                        return
+                    }
+                    out.write(plaintext)
+
+                    wakeLock.acquire(2 * 60 * 1000L)  // refresh: 2 min from last chunk
+
+                    if (db.transferDao().exists(dbRowId) == 0) {
+                        AppLog.log("Recv", "Download cancelled by user at chunk ${i + 1}/$chunkCount")
+                        cancelled = true
+                        api.ackTransfer(transferId)
+                        return
+                    }
+                    db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
+                }
+                out.flush()
             }
-            chunks.add(chunk)
-            wakeLock.acquire(2 * 60 * 1000L)  // refresh: 2 min from last chunk
-            // Check if user deleted the item — stop downloading if so
-            if (db.transferDao().exists(dbRowId) == 0) {
-                AppLog.log("Recv", "Download cancelled by user at chunk ${i + 1}/$chunkCount")
-                api.ackTransfer(transferId)
-                return
+        } catch (e: Exception) {
+            Log.e(TAG, "Streaming write failed: ${e.message}", e)
+            db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Write failed: ${e.message}")
+            return
+        } finally {
+            if (cancelled || db.transferDao().getById(dbRowId)?.status == TransferStatus.FAILED) {
+                tempFile.delete()
             }
-            db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
         }
 
-        val plainParts = ArrayList<ByteArray>(chunks.size)
-        for ((i, chunk) in chunks.withIndex()) {
-            try {
-                plainParts.add(CryptoUtils.decryptBlob(chunk, symmetricKey))
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to decrypt chunk $i: ${e.message}")
-                db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Decryption failed")
-                return
-            }
+        // Atomic finalize: rename temp → final within the same directory.
+        if (!tempFile.renameTo(finalFile)) {
+            Log.e(TAG, "Rename temp → final failed for $transferId")
+            tempFile.delete()
+            db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Cannot finalize download")
+            return
         }
+        val finalSize = finalFile.length()
+        AppLog.log("Recv", "Saved file: ${finalFile.name} ($finalSize bytes)")
 
-        val data = plainParts.fold(ByteArray(0)) { acc, part -> acc + part }
-        AppLog.log("Recv", "Decrypted: $fileName (${data.size} bytes)")
-
-        val savedFile = saveFile(fileName, data)
-        val savedUri = savedFile?.let { Uri.fromFile(it).toString() } ?: ""
-        AppLog.log("Recv", "Saved file: $fileName")
+        // Notify MediaStore so the file appears in gallery/pickers
+        android.media.MediaScannerConnection.scanFile(
+            this, arrayOf(finalFile.absolutePath), null, null
+        )
 
         api.ackTransfer(transferId)
         AppLog.log("Recv", "Acked $transferId")
 
         val stillExists = db.transferDao().exists(dbRowId) > 0
         db.transferDao().completeDownload(
-            dbRowId, TransferStatus.COMPLETE, savedUri, fileName, data.size.toLong()
+            dbRowId, TransferStatus.COMPLETE, Uri.fromFile(finalFile).toString(), fileName, finalSize
         )
         db.transferDao().trimHistory()
         if (stillExists) {
             showTransferNotification(fileName)
         }
+    }
+
+    /** Choose a non-colliding filename in [dir] by appending _1, _2, ... before the extension. */
+    private fun pickUniqueTarget(dir: java.io.File, fileName: String): java.io.File {
+        var target = java.io.File(dir, fileName)
+        var counter = 1
+        while (target.exists()) {
+            val stem = fileName.substringBeforeLast(".")
+            val ext = fileName.substringAfterLast(".", "")
+            target = java.io.File(dir, "${stem}_${counter}${if (ext.isNotEmpty()) ".$ext" else ""}")
+            counter++
+        }
+        return target
     }
 
     /** Download one chunk with the existing 3-attempt backoff policy. Returns null on terminal failure. */
