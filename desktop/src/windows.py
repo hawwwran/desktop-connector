@@ -988,9 +988,19 @@ def show_history(config_dir: Path):
             del_btn.connect("clicked", on_delete)
             row.add_suffix(del_btn)
 
-            captured = item
+            tid = item.get("transfer_id")
+            ts = item.get("timestamp")
+            def _current_item(captured=item, _tid=tid, _ts=ts):
+                # Re-fetch from history so content_path set after the row was
+                # created (e.g. download completing) is picked up on click.
+                for h in history.items:
+                    if _tid and h.get("transfer_id") == _tid:
+                        return h
+                    if not _tid and h.get("timestamp") == _ts:
+                        return h
+                return captured
             row.set_activatable(True)
-            row.connect("activated", lambda r, it=captured: on_item_click(it, win))
+            row.connect("activated", lambda r: on_item_click(_current_item(), win))
 
             inner_list.append(row)
 
