@@ -31,6 +31,7 @@ class UploadWorker(
         const val KEY_TRANSFER_DB_ID = "transfer_db_id"
         private const val CHUNK_RETRY_DELAY_MS = 5_000L
         private const val CHUNK_MAX_FAILURE_WINDOW_MS = 120_000L
+        private const val INIT_MAX_ATTEMPTS = 3
 
         fun enqueue(context: Context, transferDbId: Long) {
             val request = OneTimeWorkRequestBuilder<UploadWorker>()
@@ -107,10 +108,17 @@ class UploadWorker(
         val transferId = UUID.randomUUID().toString()
 
         if (!api.initTransfer(transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount)) {
-            AppLog.log("Upload", "initTransfer failed: ${transfer.displayName}")
-            db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Failed to initialize transfer on server")
+            AppLog.log("Upload", "initTransfer failed (attempt ${runAttemptCount + 1}/$INIT_MAX_ATTEMPTS): ${transfer.displayName}")
             spoolFile?.delete()
-            return Result.retry()
+            // Keep status at PREPARING during WorkManager back-off retries so the
+            // user doesn't see a brief FAILED that then silently un-fails. Only
+            // commit to FAILED once we've exhausted our retry budget.
+            return if (runAttemptCount + 1 >= INIT_MAX_ATTEMPTS) {
+                db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Failed to initialize transfer on server")
+                Result.failure()
+            } else {
+                Result.retry()
+            }
         }
 
         db.transferDao().updateStatus(transferDbId, TransferStatus.UPLOADING)

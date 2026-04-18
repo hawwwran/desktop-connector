@@ -41,6 +41,8 @@ class PollService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val POLL_INTERVAL = 10_000L
         private const val DELIVERY_STALL_TIMEOUT_MS = 2 * 60 * 1000L
+        private const val STALE_PART_TTL_MS = 60 * 60 * 1000L
+        private val SAFE_TRANSFER_ID = Regex("^[a-zA-Z0-9-]+$")
 
         // Shared state for UI — "active", "unavailable", "testing", "offline"
         @Volatile var longPollStatus: String = "offline"
@@ -71,7 +73,30 @@ class PollService : Service() {
         startForeground(NOTIFICATION_ID, buildIdleNotification(false))
         scope.launch { pollLoop() }
         scope.launch { deliveryTrackerLoop() }
+        scope.launch { sweepStaleParts() }
         Log.i(TAG, "PollService started")
+    }
+
+    /**
+     * Delete orphaned `.incoming_*.part` files in DesktopConnector/.parts/
+     * that were left behind by previously aborted receives (force-stop,
+     * OOM kill, reboot). Runs once on service start.
+     */
+    private fun sweepStaleParts() {
+        try {
+            val partsDir = java.io.File(
+                android.os.Environment.getExternalStorageDirectory(),
+                "DesktopConnector/.parts"
+            )
+            if (!partsDir.isDirectory) return
+            val cutoff = System.currentTimeMillis() - STALE_PART_TTL_MS
+            val removed = partsDir.listFiles()
+                ?.filter { it.name.startsWith(".incoming_") && it.lastModified() < cutoff }
+                ?.count { it.delete() } ?: 0
+            if (removed > 0) AppLog.log("Recv", "Cleaned up $removed stale .part file(s)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Parts sweep failed: ${e.message}")
+        }
     }
 
     override fun onDestroy() {
@@ -363,6 +388,13 @@ class PollService : Service() {
         val encryptedMeta = transfer.getString("encrypted_meta")
         val chunkCount = transfer.getInt("chunk_count")
 
+        // Defense-in-depth: transferId is used in a filename, so reject anything
+        // that isn't an alphanumeric/UUID-shape id before touching the disk.
+        if (!SAFE_TRANSFER_ID.matches(transferId)) {
+            Log.w(TAG, "Rejecting transfer with unsafe id: ${transferId.take(40)}")
+            return
+        }
+
         val paired = keyManager.getPairedDevice(senderId)
         if (paired == null) {
             Log.w(TAG, "Transfer from unknown device $senderId, skipping")
@@ -530,12 +562,14 @@ class PollService : Service() {
         tempFile.delete()  // clear stale partial from a prior aborted run
 
         var cancelled = false
+        var failed = false
         try {
             java.io.BufferedOutputStream(java.io.FileOutputStream(tempFile)).use { out ->
                 for (i in 0 until chunkCount) {
                     val encrypted = downloadChunkWithRetry(api, transferId, i)
                     if (encrypted == null) {
                         Log.e(TAG, "Failed to download chunk $i of $transferId")
+                        failed = true
                         db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
                         return
                     }
@@ -543,6 +577,7 @@ class PollService : Service() {
                         CryptoUtils.decryptBlob(encrypted, symmetricKey)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to decrypt chunk $i: ${e.message}")
+                        failed = true
                         db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Decryption failed at chunk ${i + 1}/$chunkCount")
                         return
                     }
@@ -562,10 +597,11 @@ class PollService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Streaming write failed: ${e.message}", e)
+            failed = true
             db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Write failed: ${e.message}")
             return
         } finally {
-            if (cancelled || db.transferDao().getById(dbRowId)?.status == TransferStatus.FAILED) {
+            if (cancelled || failed) {
                 tempFile.delete()
             }
         }
