@@ -467,22 +467,15 @@ class PollService : Service() {
         transferId: String, chunkCount: Int, symmetricKey: ByteArray,
         fileName: String, mimeType: String, api: ApiClient, prefs: AppPreferences, db: AppDatabase,
     ) {
-        val chunks = ArrayList<ByteArray>(chunkCount)
+        val parts = ArrayList<ByteArray>(chunkCount)
         for (i in 0 until chunkCount) {
-            val chunk = downloadChunkWithRetry(api, transferId, i) ?: run {
-                Log.w(TAG, ".fn transfer $transferId aborted: chunk $i unavailable")
+            val plain = downloadAndDecryptChunk(api, transferId, i, symmetricKey) ?: run {
+                Log.w(TAG, ".fn transfer $transferId aborted: chunk $i unrecoverable")
                 return
             }
-            chunks.add(chunk)
+            parts.add(plain)
         }
-
-        val data = try {
-            val decrypted = chunks.map { CryptoUtils.decryptBlob(it, symmetricKey) }
-            decrypted.fold(ByteArray(0)) { acc, part -> acc + part }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to decrypt .fn payload for $transferId: ${e.message}")
-            return
-        }
+        val data = parts.fold(ByteArray(0)) { acc, part -> acc + part }
         AppLog.log("Recv", "Decrypted .fn: $fileName (${data.size} bytes)")
 
         val displayLabel = handleFnTransfer(fileName, data)
@@ -566,19 +559,11 @@ class PollService : Service() {
         try {
             java.io.BufferedOutputStream(java.io.FileOutputStream(tempFile)).use { out ->
                 for (i in 0 until chunkCount) {
-                    val encrypted = downloadChunkWithRetry(api, transferId, i)
-                    if (encrypted == null) {
-                        Log.e(TAG, "Failed to download chunk $i of $transferId")
+                    val plaintext = downloadAndDecryptChunk(api, transferId, i, symmetricKey)
+                    if (plaintext == null) {
+                        Log.e(TAG, "Chunk $i of $transferId unrecoverable (download or decrypt)")
                         failed = true
-                        db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
-                        return
-                    }
-                    val plaintext = try {
-                        CryptoUtils.decryptBlob(encrypted, symmetricKey)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to decrypt chunk $i: ${e.message}")
-                        failed = true
-                        db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Decryption failed at chunk ${i + 1}/$chunkCount")
+                        db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Chunk ${i + 1}/$chunkCount failed")
                         return
                     }
                     out.write(plaintext)
@@ -661,13 +646,29 @@ class PollService : Service() {
         return target
     }
 
-    /** Download one chunk with the existing 3-attempt backoff policy. Returns null on terminal failure. */
-    private suspend fun downloadChunkWithRetry(api: ApiClient, transferId: String, index: Int): ByteArray? {
+    /**
+     * Download + decrypt one chunk with 3-attempt retry. Retries on either
+     * a missing body or an AES-GCM authentication failure. The latter
+     * defends against server-side races where a concurrent upload causes
+     * the reader to see partial bytes — the server's atomic rename is the
+     * primary fix; this is belt-and-suspenders. Returns plaintext or null
+     * on terminal failure.
+     */
+    private suspend fun downloadAndDecryptChunk(
+        api: ApiClient, transferId: String, index: Int, symmetricKey: ByteArray,
+    ): ByteArray? {
         for (attempt in 1..3) {
-            val chunk = api.downloadChunk(transferId, index)
-            if (chunk != null) return chunk
-            AppLog.log("Recv", "Chunk $index failed (attempt $attempt/3), retrying...")
-            delay(2000L * attempt)
+            val encrypted = api.downloadChunk(transferId, index)
+            if (encrypted != null) {
+                try {
+                    return CryptoUtils.decryptBlob(encrypted, symmetricKey)
+                } catch (e: Exception) {
+                    AppLog.log("Recv", "Chunk $index decrypt failed (attempt $attempt/3): ${e.message}")
+                }
+            } else {
+                AppLog.log("Recv", "Chunk $index download returned no body (attempt $attempt/3)")
+            }
+            if (attempt < 3) delay(2000L * attempt)
         }
         return null
     }
