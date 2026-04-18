@@ -5,7 +5,6 @@ class TransferController
     private const MAX_PENDING_BYTES = 500 * 1024 * 1024; // 500 MB per recipient
     private const TRANSFER_EXPIRY = 7 * 24 * 3600;       // 7 days
     private const INCOMPLETE_EXPIRY = 24 * 3600;          // 24 hours
-    private const LONG_POLL_TIMEOUT = 25;                 // seconds
 
     public static function init(Database $db, string $deviceId): void
     {
@@ -281,77 +280,11 @@ class TransferController
         )]);
     }
 
-    /**
-     * Long poll: block until there's a new transfer for this device or timeout.
-     * Returns immediately if pending transfers exist, otherwise waits up to 25s.
-     */
     public static function notify(Database $db, string $deviceId): void
     {
         $since = isset($_GET['since']) ? (int)$_GET['since'] : 0;
         $isTest = !empty($_GET['test']);
-        $hasPending = false;
-        $hasDelivered = false;
-        $hasDownloadProgress = false;
-
-        // Snapshot current download progress for sent transfers to detect changes
-        $initialProgress = $db->querySingle(
-            'SELECT COALESCE(SUM(chunks_downloaded), 0) as total FROM transfers
-             WHERE sender_id = :sid AND complete = 1 AND downloaded = 0',
-            [':sid' => $deviceId]
-        );
-        $initialProgressTotal = (int)($initialProgress['total'] ?? 0);
-
-        $start = time();
-        do {
-            $pending = $db->querySingle(
-                'SELECT COUNT(*) as count FROM transfers
-                 WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0',
-                [':rid' => $deviceId]
-            );
-            $delivered = $db->querySingle(
-                'SELECT COUNT(*) as count FROM transfers
-                 WHERE sender_id = :sid AND delivered_at >= :since',
-                [':sid' => $deviceId, ':since' => $since]
-            );
-
-            // Check if recipient has downloaded more chunks of our sent transfers
-            $currentProgress = $db->querySingle(
-                'SELECT COALESCE(SUM(chunks_downloaded), 0) as total FROM transfers
-                 WHERE sender_id = :sid AND complete = 1 AND downloaded = 0',
-                [':sid' => $deviceId]
-            );
-
-            $hasPending = ($pending['count'] ?? 0) > 0;
-            $hasDelivered = ($delivered['count'] ?? 0) > 0;
-            $hasDownloadProgress = ((int)($currentProgress['total'] ?? 0)) != $initialProgressTotal;
-
-            if ($isTest || $hasPending || $hasDelivered || $hasDownloadProgress) {
-                break;
-            }
-
-            usleep(500000); // 500ms
-        } while (time() - $start < self::LONG_POLL_TIMEOUT);
-
-        $response = [
-            'pending' => $hasPending,
-            'delivered' => $hasDelivered,
-            'download_progress' => $hasDownloadProgress,
-            'time' => time(),
-        ];
-        if ($isTest) {
-            $response['test'] = true;
-        }
-
-        // Include sent transfer progress inline so clients don't need a second request
-        if ($hasDownloadProgress || $hasDelivered) {
-            $sent = TransferStatusService::loadSentForDevice($db, $deviceId, 50, true);
-            $response['sent_status'] = array_map(
-                [TransferStatusService::class, 'formatSentBrief'],
-                $sent
-            );
-        }
-
-        Router::json($response);
+        Router::json(TransferNotifyService::longPoll($db, $deviceId, $since, $isTest));
     }
 
     private static function sendFcmWake(Database $db, string $transferId): void

@@ -15,6 +15,7 @@ require_once __DIR__ . '/../src/AppLog.php';
 
 // --- Services ---
 require_once __DIR__ . '/../src/Services/TransferStatusService.php';
+require_once __DIR__ . '/../src/Services/TransferNotifyService.php';
 
 // Initialize database
 $db = Database::getInstance();
