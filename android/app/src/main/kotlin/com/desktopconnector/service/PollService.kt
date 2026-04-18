@@ -519,8 +519,14 @@ class PollService : Service() {
             db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Cannot create download folder")
             return
         }
+        val partsDir = java.io.File(dir, ".parts")
+        if (!partsDir.exists() && !partsDir.mkdirs()) {
+            Log.e(TAG, "Could not create DesktopConnector/.parts directory")
+            db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Cannot create parts folder")
+            return
+        }
         val finalFile = pickUniqueTarget(dir, fileName)
-        val tempFile = java.io.File(dir, ".incoming_${transferId}.part")
+        val tempFile = java.io.File(partsDir, ".incoming_${transferId}.part")
         tempFile.delete()  // clear stale partial from a prior aborted run
 
         var cancelled = false
