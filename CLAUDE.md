@@ -167,10 +167,16 @@ server/
   src/Controllers/
     DeviceController.php     — register, health, stats, FCM token
     PairingController.php    — QR pairing flow
-    TransferController.php   — upload, download, ack, sent-status, FCM wake
+    TransferController.php   — HTTP adapter for /api/transfers/*; delegates to Services/
     DashboardController.php  — HTML dashboard
     FcmController.php        — FCM config endpoint
     FasttrackController.php  — encrypted message relay (send, pending, ack)
+  src/Services/              — transfer business logic (refactor-1)
+    TransferService.php          — init, upload, download, ack, listPending
+    TransferStatusService.php    — status / delivery_state mapping (single source of truth)
+    TransferNotifyService.php    — long-poll loop (25s / 500ms tick)
+    TransferWakeService.php      — silent FCM wake on upload completion
+    TransferCleanupService.php   — expiry, chunk/file deletion
   src/FcmSender.php          — FCM HTTP v1 API sender (JWT + OAuth2)
   migrations/001_initial.sql
 
