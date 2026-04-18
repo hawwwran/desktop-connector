@@ -230,6 +230,7 @@ android/app/src/main/kotlin/com/desktopconnector/
 test_loop.sh                 — automated integration test
 version.json                 — version tracking for all three components
 temp/                        — numbered install scripts (dev only, run with sudo)
+docs/plans/                  — refactoring and bugfix plans (gitignored, local working notes)
 ```
 
 ## Config locations

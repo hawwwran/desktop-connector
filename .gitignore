@@ -22,6 +22,7 @@ android/.idea/
 
 # Temp / dev
 temp/
+docs/plans/
 *.log
 __pycache__/
 .env
