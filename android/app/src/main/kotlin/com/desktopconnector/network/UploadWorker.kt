@@ -2,19 +2,23 @@ package com.desktopconnector.network
 
 import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
 import android.util.Log
 import androidx.work.*
+import com.desktopconnector.crypto.CryptoUtils
 import com.desktopconnector.crypto.KeyManager
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.data.AppDatabase
 import com.desktopconnector.data.TransferStatus
+import java.io.File
+import java.io.InputStream
 import java.util.UUID
+import kotlin.math.max
 
 /**
  * WorkManager worker for background file uploads.
- * Processes the transfer queue: encrypts, chunks, uploads each file.
+ * Streams each file chunk-by-chunk: read → encrypt → upload. Never holds the
+ * whole file in memory.
  */
 class UploadWorker(
     context: Context,
@@ -59,38 +63,67 @@ class UploadWorker(
 
         val api = ApiClient(serverUrl, deviceId, authToken)
         val symmetricKey = android.util.Base64.decode(paired.symmetricKeyB64, android.util.Base64.NO_WRAP)
+        val uri = Uri.parse(transfer.contentUri)
 
-        // Update status + show blue dot
+        db.transferDao().updateStatus(transferDbId, TransferStatus.PREPARING)
+
+        // Resolve a real file size; spool to cache if URI doesn't expose one.
+        var spoolFile: File? = null
+        val sourceSize: Long
+        val sourceOpener: () -> InputStream
+        try {
+            if (transfer.sizeBytes > 0L) {
+                sourceSize = transfer.sizeBytes
+                sourceOpener = {
+                    applicationContext.contentResolver.openInputStream(uri)
+                        ?: throw java.io.IOException("Cannot open source URI")
+                }
+            } else {
+                val spool = spoolUriToCache(uri, transferDbId)
+                spoolFile = spool
+                sourceSize = spool.length()
+                sourceOpener = { spool.inputStream() }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Prepare failed: ${e.message}", e)
+            AppLog.log("Upload", "Prepare failed: ${transfer.displayName} - ${e.message}")
+            db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Cannot read source: ${e.message}")
+            return Result.failure()
+        }
+
+        val chunkCount = max(1, ((sourceSize + CryptoUtils.CHUNK_SIZE - 1) / CryptoUtils.CHUNK_SIZE).toInt())
+        val baseNonce = keyManager.generateBaseNonce()
+        val encryptedMeta = keyManager.buildEncryptedMetadata(
+            fileName = transfer.displayName,
+            mimeType = transfer.mimeType,
+            fileSize = sourceSize,
+            chunkCount = chunkCount,
+            baseNonce = baseNonce,
+            symmetricKey = symmetricKey,
+        )
+        val transferId = UUID.randomUUID().toString()
+
+        if (!api.initTransfer(transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount)) {
+            AppLog.log("Upload", "initTransfer failed: ${transfer.displayName}")
+            db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Failed to initialize transfer on server")
+            spoolFile?.delete()
+            return Result.retry()
+        }
+
         db.transferDao().updateStatus(transferDbId, TransferStatus.UPLOADING)
+        db.transferDao().updateProgress(transferDbId, 0, chunkCount)
 
         try {
-            // Read file
-            val uri = Uri.parse(transfer.contentUri)
-            val inputStream = applicationContext.contentResolver.openInputStream(uri)
-                ?: throw Exception("Cannot open file: ${transfer.contentUri}")
-
-            // Encrypt
-            val result = keyManager.encryptFileToChunks(
-                inputStream = inputStream,
-                fileSize = transfer.sizeBytes,
-                fileName = transfer.displayName,
-                mimeType = transfer.mimeType,
-                symmetricKey = symmetricKey,
-            )
-            inputStream.close()
-
-            // Init transfer on server
-            val transferId = UUID.randomUUID().toString()
-            if (!api.initTransfer(transferId, transfer.recipientDeviceId, result.encryptedMeta, result.encryptedChunks.size)) {
-                throw Exception("Failed to init transfer on server")
-            }
-
-            // Upload chunks
-            for ((index, chunk) in result.encryptedChunks.withIndex()) {
-                Log.d(TAG, "Uploading chunk ${index + 1}/${result.encryptedChunks.size}")
-                val chunkResult = api.uploadChunk(transferId, index, chunk)
-                    ?: throw Exception("Failed to upload chunk $index")
-                db.transferDao().updateProgress(transferDbId, index + 1, result.encryptedChunks.size)
+            sourceOpener().use { input ->
+                val buf = ByteArray(CryptoUtils.CHUNK_SIZE)
+                for (index in 0 until chunkCount) {
+                    val plaintext = readFullChunk(input, buf, sourceSize, index, chunkCount)
+                    val encrypted = keyManager.encryptChunk(plaintext, baseNonce, index, symmetricKey)
+                    Log.d(TAG, "Uploading chunk ${index + 1}/$chunkCount (${plaintext.size} B)")
+                    api.uploadChunk(transferId, index, encrypted)
+                        ?: throw java.io.IOException("Failed to upload chunk $index")
+                    db.transferDao().updateProgress(transferDbId, index + 1, chunkCount)
+                }
             }
 
             db.transferDao().setTransferId(transferDbId, transferId)
@@ -99,13 +132,50 @@ class UploadWorker(
             db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
             AppLog.log("Upload", "Complete: ${transfer.displayName}")
             return Result.success()
-
         } catch (e: Exception) {
             Log.e(TAG, "Upload failed: ${e.message}", e)
             AppLog.log("Upload", "Failed: ${transfer.displayName} - ${e.message}")
             db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, e.message)
             return Result.retry()
+        } finally {
+            spoolFile?.delete()
         }
     }
 
+    /** Read exactly one chunk worth of bytes (last chunk may be shorter). */
+    private fun readFullChunk(
+        input: InputStream,
+        buf: ByteArray,
+        totalSize: Long,
+        index: Int,
+        chunkCount: Int,
+    ): ByteArray {
+        val remaining = totalSize - index.toLong() * CryptoUtils.CHUNK_SIZE
+        val target = if (index == chunkCount - 1) {
+            // Last chunk: whatever remains, clamped to CHUNK_SIZE. Empty file → one empty chunk.
+            max(0L, remaining).coerceAtMost(CryptoUtils.CHUNK_SIZE.toLong()).toInt()
+        } else {
+            CryptoUtils.CHUNK_SIZE
+        }
+        if (target == 0) return ByteArray(0)
+        var read = 0
+        while (read < target) {
+            val n = input.read(buf, read, target - read)
+            if (n < 0) break
+            read += n
+        }
+        return if (read == buf.size) buf.copyOf() else buf.copyOf(read)
+    }
+
+    /** Copy a URI stream to a cache file so we can determine its size and re-read deterministically. */
+    private fun spoolUriToCache(uri: Uri, transferDbId: Long): File {
+        val spool = File(applicationContext.cacheDir, "upload_spool_$transferDbId.tmp")
+        spool.delete()
+        val input = applicationContext.contentResolver.openInputStream(uri)
+            ?: throw java.io.IOException("Cannot open source URI for spooling")
+        input.use { src ->
+            spool.outputStream().use { dst -> src.copyTo(dst) }
+        }
+        return spool
+    }
 }

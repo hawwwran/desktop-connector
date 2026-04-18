@@ -263,6 +263,7 @@ fun HomeScreen(
 private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
     val statusColor = when {
         transfer.status == TransferStatus.QUEUED -> Color(0xFF94A3B8)
+        transfer.status == TransferStatus.PREPARING -> Color(0xFF94A3B8)
         transfer.status == TransferStatus.UPLOADING && transfer.direction == TransferDirection.INCOMING -> Color(0xFF22C55E)
         transfer.status == TransferStatus.UPLOADING -> Color(0xFFF59E0B)
         transfer.status == TransferStatus.COMPLETE && transfer.direction == TransferDirection.INCOMING -> Color(0xFF22C55E)
@@ -275,6 +276,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
     val dirLabel = if (transfer.direction == TransferDirection.INCOMING) "\u2193 " else "\u2191 "
     val statusText = when (transfer.status) {
         TransferStatus.QUEUED -> "Queued"
+        TransferStatus.PREPARING -> "Preparing"
         TransferStatus.UPLOADING -> when (transfer.direction) {
             TransferDirection.INCOMING -> if (transfer.totalChunks > 0) "Downloading ${transfer.chunksUploaded}/${transfer.totalChunks}" else "Downloading"
             TransferDirection.OUTGOING -> if (transfer.totalChunks > 0) "Uploading ${transfer.chunksUploaded}/${transfer.totalChunks}" else "Uploading"

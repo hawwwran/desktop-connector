@@ -465,21 +465,22 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                     prefs.serverUrl ?: "", prefs.deviceId ?: "", prefs.authToken ?: ""
                 )
 
-                // Encrypt a tiny .fn.unpair payload
+                // Encrypt a tiny .fn.unpair payload (one chunk)
                 val data = "unpair".toByteArray()
-                val result = keyManager.encryptFileToChunks(
-                    inputStream = data.inputStream(),
-                    fileSize = data.size.toLong(),
+                val baseNonce = keyManager.generateBaseNonce()
+                val encryptedMeta = keyManager.buildEncryptedMetadata(
                     fileName = ".fn.unpair",
                     mimeType = "application/octet-stream",
+                    fileSize = data.size.toLong(),
+                    chunkCount = 1,
+                    baseNonce = baseNonce,
                     symmetricKey = symmetricKey,
                 )
+                val encryptedChunk = keyManager.encryptChunk(data, baseNonce, 0, symmetricKey)
 
                 val transferId = java.util.UUID.randomUUID().toString()
-                if (api.initTransfer(transferId, pairedDeviceId, result.encryptedMeta, result.encryptedChunks.size)) {
-                    for ((i, chunk) in result.encryptedChunks.withIndex()) {
-                        api.uploadChunk(transferId, i, chunk)
-                    }
+                if (api.initTransfer(transferId, pairedDeviceId, encryptedMeta, 1)) {
+                    api.uploadChunk(transferId, 0, encryptedChunk)
                 }
             } catch (e: Exception) {
                 Log.w("TransferVM", "Failed to send unpair notification: ${e.message}")

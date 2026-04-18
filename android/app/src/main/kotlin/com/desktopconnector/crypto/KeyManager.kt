@@ -5,7 +5,6 @@ import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import org.json.JSONObject
-import java.io.InputStream
 
 /**
  * Manages device identity keys and paired device keys.
@@ -100,46 +99,42 @@ class KeyManager(context: Context) {
         securePrefs.edit().remove("paired_$deviceId").apply()
     }
 
-    // --- File encryption ---
+    // --- File encryption (streaming) ---
 
-    fun encryptFileToChunks(
-        inputStream: InputStream,
-        fileSize: Long,
+    /** Generate a random 12-byte base nonce for a transfer. */
+    fun generateBaseNonce(): ByteArray =
+        ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+
+    /** Build and encrypt the transfer metadata blob (base64). */
+    fun buildEncryptedMetadata(
         fileName: String,
         mimeType: String,
+        fileSize: Long,
+        chunkCount: Int,
+        baseNonce: ByteArray,
         symmetricKey: ByteArray,
-    ): EncryptedFileResult {
-        val data = inputStream.readBytes()
-        val baseNonce = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
-
-        val chunks = mutableListOf<ByteArray>()
-        var offset = 0
-        var chunkIndex = 0
-        while (offset < data.size) {
-            val end = minOf(offset + CryptoUtils.CHUNK_SIZE, data.size)
-            val chunkData = data.copyOfRange(offset, end)
-            val nonce = CryptoUtils.makeChunkNonce(baseNonce, chunkIndex)
-            chunks.add(CryptoUtils.encryptBlob(chunkData, symmetricKey, nonce))
-            offset = end
-            chunkIndex++
-        }
-        if (chunks.isEmpty()) {
-            val nonce = CryptoUtils.makeChunkNonce(baseNonce, 0)
-            chunks.add(CryptoUtils.encryptBlob(ByteArray(0), symmetricKey, nonce))
-        }
-
+    ): String {
         val metadata = JSONObject().apply {
             put("filename", fileName)
             put("mime_type", mimeType)
             put("size", fileSize)
-            put("chunk_count", chunks.size)
+            put("chunk_count", chunkCount)
             put("chunk_size", CryptoUtils.CHUNK_SIZE)
             put("base_nonce", Base64.encodeToString(baseNonce, Base64.NO_WRAP))
         }
         val metaBlob = CryptoUtils.encryptBlob(metadata.toString().toByteArray(), symmetricKey)
-        val encryptedMeta = Base64.encodeToString(metaBlob, Base64.NO_WRAP)
+        return Base64.encodeToString(metaBlob, Base64.NO_WRAP)
+    }
 
-        return EncryptedFileResult(encryptedMeta, chunks)
+    /** Encrypt a single plaintext chunk using the per-chunk derived nonce. */
+    fun encryptChunk(
+        plaintext: ByteArray,
+        baseNonce: ByteArray,
+        chunkIndex: Int,
+        symmetricKey: ByteArray,
+    ): ByteArray {
+        val nonce = CryptoUtils.makeChunkNonce(baseNonce, chunkIndex)
+        return CryptoUtils.encryptBlob(plaintext, symmetricKey, nonce)
     }
 }
 
@@ -149,9 +144,4 @@ data class PairedDeviceInfo(
     val symmetricKeyB64: String,
     val name: String,
     val pairedAt: Long,
-)
-
-data class EncryptedFileResult(
-    val encryptedMeta: String,
-    val encryptedChunks: List<ByteArray>,
 )
