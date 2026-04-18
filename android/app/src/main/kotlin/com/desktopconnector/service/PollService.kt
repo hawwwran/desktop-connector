@@ -419,73 +419,123 @@ class PollService : Service() {
         wakeLock: PowerManager.WakeLock,
     ) {
         val db = AppDatabase.getInstance(this)
+        if (isFnTransfer) {
+            receiveFnTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db)
+        } else {
+            receiveFileTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
+        }
+    }
 
-        // Reuse existing DB row on retry (prevents duplicates after transient failures)
-        var dbRowId: Long = 0
-        if (!isFnTransfer) {
-            val existing = db.transferDao().getByTransferId(transferId)
-            if (existing != null) {
-                dbRowId = existing.id
-                db.transferDao().updateStatus(dbRowId, TransferStatus.UPLOADING)
-                db.transferDao().updateProgress(dbRowId, 0, chunkCount)
-                AppLog.log("Recv", "Resuming transfer $transferId (reusing row $dbRowId)")
-            } else {
-                dbRowId = db.transferDao().insert(QueuedTransfer(
-                    contentUri = "",
-                    displayName = fileName,
-                    displayLabel = fileName,
-                    mimeType = mimeType,
-                    sizeBytes = 0,
-                    recipientDeviceId = prefs.deviceId ?: "",
-                    direction = TransferDirection.INCOMING,
-                    status = TransferStatus.UPLOADING,
-                    totalChunks = chunkCount,
-                    chunksUploaded = 0,
-                    transferId = transferId,
-                ))
+    /**
+     * Receive a `.fn.*` command transfer. Payloads are tiny by design
+     * (clipboard text, unpair signal, small clipboard images), so the tiny
+     * in-memory path is kept for them — streaming to disk would be overkill.
+     */
+    private suspend fun receiveFnTransfer(
+        transferId: String, chunkCount: Int, symmetricKey: ByteArray,
+        fileName: String, mimeType: String, api: ApiClient, prefs: AppPreferences, db: AppDatabase,
+    ) {
+        val chunks = ArrayList<ByteArray>(chunkCount)
+        for (i in 0 until chunkCount) {
+            val chunk = downloadChunkWithRetry(api, transferId, i) ?: run {
+                Log.w(TAG, ".fn transfer $transferId aborted: chunk $i unavailable")
+                return
             }
+            chunks.add(chunk)
         }
 
-        // Download all chunks with progress updates and retry
-        val chunks = mutableListOf<ByteArray>()
+        val data = try {
+            val decrypted = chunks.map { CryptoUtils.decryptBlob(it, symmetricKey) }
+            decrypted.fold(ByteArray(0)) { acc, part -> acc + part }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decrypt .fn payload for $transferId: ${e.message}")
+            return
+        }
+        AppLog.log("Recv", "Decrypted .fn: $fileName (${data.size} bytes)")
+
+        val displayLabel = handleFnTransfer(fileName, data)
+        AppLog.log("Recv", "Fn transfer: $fileName -> $displayLabel")
+
+        api.ackTransfer(transferId)
+        AppLog.log("Recv", "Acked $transferId")
+
+        if (fileName != ".fn.unpair") {
+            db.transferDao().insert(QueuedTransfer(
+                contentUri = "",
+                displayName = fileName,
+                displayLabel = displayLabel,
+                mimeType = mimeType,
+                sizeBytes = data.size.toLong(),
+                recipientDeviceId = prefs.deviceId ?: "",
+                direction = TransferDirection.INCOMING,
+                status = TransferStatus.COMPLETE,
+            ))
+            db.transferDao().trimHistory()
+            showTransferNotification(displayLabel)
+        }
+    }
+
+    /**
+     * Receive a normal file transfer.
+     *
+     * NOTE: this still buffers all chunks in memory before writing. Commit 4
+     * of the streaming-receive refactor replaces this with a temp-file writer
+     * that appends each decrypted chunk directly to disk.
+     */
+    private suspend fun receiveFileTransfer(
+        transferId: String, chunkCount: Int, symmetricKey: ByteArray,
+        fileName: String, mimeType: String, api: ApiClient, prefs: AppPreferences,
+        db: AppDatabase, wakeLock: PowerManager.WakeLock,
+    ) {
+        // Reuse existing DB row on retry (prevents duplicates after transient failures)
+        val existing = db.transferDao().getByTransferId(transferId)
+        val dbRowId: Long = if (existing != null) {
+            db.transferDao().updateStatus(existing.id, TransferStatus.UPLOADING)
+            db.transferDao().updateProgress(existing.id, 0, chunkCount)
+            AppLog.log("Recv", "Resuming transfer $transferId (reusing row ${existing.id})")
+            existing.id
+        } else {
+            db.transferDao().insert(QueuedTransfer(
+                contentUri = "",
+                displayName = fileName,
+                displayLabel = fileName,
+                mimeType = mimeType,
+                sizeBytes = 0,
+                recipientDeviceId = prefs.deviceId ?: "",
+                direction = TransferDirection.INCOMING,
+                status = TransferStatus.UPLOADING,
+                totalChunks = chunkCount,
+                chunksUploaded = 0,
+                transferId = transferId,
+            ))
+        }
+
+        val chunks = ArrayList<ByteArray>(chunkCount)
         for (i in 0 until chunkCount) {
-            var chunk: ByteArray? = null
-            for (attempt in 1..3) {
-                chunk = api.downloadChunk(transferId, i)
-                if (chunk != null) break
-                AppLog.log("Recv", "Chunk $i failed (attempt $attempt/3), retrying...")
-                delay(2000L * attempt)
-            }
+            val chunk = downloadChunkWithRetry(api, transferId, i)
             if (chunk == null) {
-                Log.e(TAG, "Failed to download chunk $i of $transferId after 3 attempts")
-                if (dbRowId > 0) {
-                    db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
-                }
+                Log.e(TAG, "Failed to download chunk $i of $transferId")
+                db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Download failed at chunk ${i + 1}/$chunkCount")
                 return
             }
             chunks.add(chunk)
             wakeLock.acquire(2 * 60 * 1000L)  // refresh: 2 min from last chunk
-            if (dbRowId > 0) {
-                // Check if user deleted the item — stop downloading if so
-                if (db.transferDao().exists(dbRowId) == 0) {
-                    AppLog.log("Recv", "Download cancelled by user at chunk ${i + 1}/$chunkCount")
-                    api.ackTransfer(transferId)
-                    return
-                }
-                db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
+            // Check if user deleted the item — stop downloading if so
+            if (db.transferDao().exists(dbRowId) == 0) {
+                AppLog.log("Recv", "Download cancelled by user at chunk ${i + 1}/$chunkCount")
+                api.ackTransfer(transferId)
+                return
             }
+            db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
         }
 
-        // Decrypt chunks
-        val plainParts = mutableListOf<ByteArray>()
+        val plainParts = ArrayList<ByteArray>(chunks.size)
         for ((i, chunk) in chunks.withIndex()) {
             try {
                 plainParts.add(CryptoUtils.decryptBlob(chunk, symmetricKey))
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to decrypt chunk $i: ${e.message}")
-                if (dbRowId > 0) {
-                    db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Decryption failed")
-                }
+                db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Decryption failed")
                 return
             }
         }
@@ -493,51 +543,32 @@ class PollService : Service() {
         val data = plainParts.fold(ByteArray(0)) { acc, part -> acc + part }
         AppLog.log("Recv", "Decrypted: $fileName (${data.size} bytes)")
 
-        // Handle .fn. transfers
-        val displayLabel: String
-        var savedUri = ""
-        if (isFnTransfer) {
-            displayLabel = handleFnTransfer(fileName, data)
-            AppLog.log("Recv", "Fn transfer: $fileName -> $displayLabel")
-        } else {
-            displayLabel = fileName
-            val savedFile = saveFile(fileName, data)
-            if (savedFile != null) {
-                savedUri = Uri.fromFile(savedFile).toString()
-            }
-            AppLog.log("Recv", "Saved file: $fileName")
-        }
+        val savedFile = saveFile(fileName, data)
+        val savedUri = savedFile?.let { Uri.fromFile(it).toString() } ?: ""
+        AppLog.log("Recv", "Saved file: $fileName")
 
         api.ackTransfer(transferId)
         AppLog.log("Recv", "Acked $transferId")
 
-        // Finalize in history
-        if (isFnTransfer) {
-            if (fileName != ".fn.unpair") {
-                db.transferDao().insert(QueuedTransfer(
-                    contentUri = savedUri,
-                    displayName = fileName,
-                    displayLabel = displayLabel,
-                    mimeType = mimeType,
-                    sizeBytes = data.size.toLong(),
-                    recipientDeviceId = prefs.deviceId ?: "",
-                    direction = TransferDirection.INCOMING,
-                    status = TransferStatus.COMPLETE,
-                ))
-                db.transferDao().trimHistory()
-                showTransferNotification(displayLabel)
-            }
-        } else {
-            // Check if user deleted the row while downloading — if so, skip notification
-            val stillExists = db.transferDao().exists(dbRowId) > 0
-            db.transferDao().completeDownload(
-                dbRowId, TransferStatus.COMPLETE, savedUri, displayLabel, data.size.toLong()
-            )
-            db.transferDao().trimHistory()
-            if (stillExists) {
-                showTransferNotification(displayLabel)
-            }
+        val stillExists = db.transferDao().exists(dbRowId) > 0
+        db.transferDao().completeDownload(
+            dbRowId, TransferStatus.COMPLETE, savedUri, fileName, data.size.toLong()
+        )
+        db.transferDao().trimHistory()
+        if (stillExists) {
+            showTransferNotification(fileName)
         }
+    }
+
+    /** Download one chunk with the existing 3-attempt backoff policy. Returns null on terminal failure. */
+    private suspend fun downloadChunkWithRetry(api: ApiClient, transferId: String, index: Int): ByteArray? {
+        for (attempt in 1..3) {
+            val chunk = api.downloadChunk(transferId, index)
+            if (chunk != null) return chunk
+            AppLog.log("Recv", "Chunk $index failed (attempt $attempt/3), retrying...")
+            delay(2000L * attempt)
+        }
+        return null
     }
 
     /**
