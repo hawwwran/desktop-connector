@@ -274,38 +274,11 @@ class TransferController
 
     public static function sentStatus(Database $db, string $deviceId): void
     {
-        // Return delivery status of transfers sent by this device
-        $transfers = $db->queryAll(
-            'SELECT id as transfer_id, recipient_id, complete, downloaded, chunk_count, chunks_downloaded, created_at
-             FROM transfers
-             WHERE sender_id = :sid
-             ORDER BY created_at DESC
-             LIMIT 50',
-            [':sid' => $deviceId]
-        );
-
-        $result = [];
-        foreach ($transfers as $t) {
-            $status = 'uploading';
-            $deliveryState = 'not_started';
-            if ($t['downloaded']) {
-                $status = 'delivered';
-                $deliveryState = 'delivered';
-            } elseif ($t['complete']) {
-                $status = 'pending';  // uploaded but not yet downloaded by recipient
-                $deliveryState = ((int)$t['chunks_downloaded'] > 0) ? 'in_progress' : 'not_started';
-            }
-            $result[] = [
-                'transfer_id' => $t['transfer_id'],
-                'status' => $status,
-                'delivery_state' => $deliveryState,
-                'chunks_downloaded' => (int)($t['chunks_downloaded'] ?? 0),
-                'chunk_count' => (int)$t['chunk_count'],
-                'created_at' => (int)$t['created_at'],
-            ];
-        }
-
-        Router::json(['transfers' => $result]);
+        $rows = TransferStatusService::loadSentForDevice($db, $deviceId);
+        Router::json(['transfers' => array_map(
+            [TransferStatusService::class, 'formatSent'],
+            $rows
+        )]);
     }
 
     /**
@@ -371,30 +344,11 @@ class TransferController
 
         // Include sent transfer progress inline so clients don't need a second request
         if ($hasDownloadProgress || $hasDelivered) {
-            $sent = $db->queryAll(
-                'SELECT id as transfer_id, complete, downloaded, chunk_count, chunks_downloaded
-                 FROM transfers WHERE sender_id = :sid AND complete = 1
-                 ORDER BY created_at DESC LIMIT 50',
-                [':sid' => $deviceId]
+            $sent = TransferStatusService::loadSentForDevice($db, $deviceId, 50, true);
+            $response['sent_status'] = array_map(
+                [TransferStatusService::class, 'formatSentBrief'],
+                $sent
             );
-            $sentStatus = [];
-            foreach ($sent as $t) {
-                if ($t['downloaded']) {
-                    $status = 'delivered';
-                    $deliveryState = 'delivered';
-                } else {
-                    $status = 'pending';
-                    $deliveryState = ((int)$t['chunks_downloaded'] > 0) ? 'in_progress' : 'not_started';
-                }
-                $sentStatus[] = [
-                    'transfer_id' => $t['transfer_id'],
-                    'status' => $status,
-                    'delivery_state' => $deliveryState,
-                    'chunks_downloaded' => (int)($t['chunks_downloaded'] ?? 0),
-                    'chunk_count' => (int)$t['chunk_count'],
-                ];
-            }
-            $response['sent_status'] = $sentStatus;
         }
 
         Router::json($response);

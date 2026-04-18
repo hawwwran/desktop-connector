@@ -13,6 +13,9 @@ require_once __DIR__ . '/../src/Controllers/FasttrackController.php';
 require_once __DIR__ . '/../src/FcmSender.php';
 require_once __DIR__ . '/../src/AppLog.php';
 
+// --- Services ---
+require_once __DIR__ . '/../src/Services/TransferStatusService.php';
+
 // Initialize database
 $db = Database::getInstance();
 $db->migrate();
