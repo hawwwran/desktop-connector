@@ -3,9 +3,13 @@ Server poller: checks for pending transfers, downloads, decrypts, and saves.
 """
 
 import base64
+import errno
 import logging
+import os
+import shutil
 import threading
 import time
+from pathlib import Path
 
 import requests as _raw_requests
 
@@ -22,6 +26,13 @@ log = logging.getLogger(__name__)
 # stop fast-polling a given transfer. Transfer stays as sent/undelivered; long-poll
 # inline sent_status and app-restart delivery check still catch eventual delivery.
 DELIVERY_STALL_TIMEOUT = 2 * 60
+
+# Orphan partials (.incoming_*.part) older than this are swept on poller start.
+# Matches Android's STALE_PART_TTL_MS.
+STALE_PART_TTL_S = 24 * 60 * 60
+
+# Per-chunk download retry policy (kept simple and local; mirrors current behavior).
+CHUNK_DOWNLOAD_ATTEMPTS = 3
 
 
 class Poller:
@@ -84,6 +95,10 @@ class Poller:
     def run(self) -> None:
         """Main polling loop. Uses long polling after connection is confirmed."""
         log.info("Poller started")
+        try:
+            self._sweep_stale_parts(self.config.save_directory)
+        except OSError:
+            log.warning("Could not sweep stale parts on startup", exc_info=True)
         threading.Thread(target=self._delivery_tracker_loop, daemon=True).start()
         last_check_time = 0
         long_poll_available = None  # None = untested, True/False = tested
@@ -196,86 +211,270 @@ class Poller:
 
         symmetric_key = base64.b64decode(paired["symmetric_key_b64"])
 
-        # Decrypt metadata early to get filename for progress display
+        # Decrypt metadata early to get filename and base nonce
         meta_json = self.crypto.decrypt_metadata(encrypted_meta, symmetric_key)
         if meta_json is None:
             log.error("Failed to decrypt metadata for %s", transfer_id[:12])
             return
         filename = meta_json["filename"]
-        is_fn = filename.startswith(".fn.")
+        base_nonce = base64.b64decode(meta_json["base_nonce"])
 
         log.info("Downloading transfer %s from %s (%d chunks): %s",
                  transfer_id[:12], sender_id[:12], chunk_count, filename)
 
-        # Insert into history before downloading (skip .fn. system transfers)
-        if not is_fn:
-            self.history.add(
-                filename=filename,
-                display_label=filename,
-                direction="received",
-                size=0,
-                transfer_id=transfer_id,
-                sender_id=sender_id,
-                status="downloading",
-                chunks_downloaded=0,
-                chunks_total=chunk_count,
-            )
+        if filename.startswith(".fn."):
+            self._receive_fn_transfer(
+                transfer_id, filename, chunk_count, symmetric_key)
+        else:
+            self._receive_file_transfer(
+                transfer_id, sender_id, filename, chunk_count,
+                base_nonce, symmetric_key)
 
-        # Download all chunks with progress updates
-        encrypted_chunks = []
+    def _receive_fn_transfer(self, transfer_id: str, filename: str,
+                             chunk_count: int, symmetric_key: bytes) -> None:
+        """Handle command-style .fn.* transfers: tiny payloads, in-memory path,
+        write to a tmp file under the save_dir, dispatch, ACK."""
+        plaintext_parts: list[bytes] = []
         for i in range(chunk_count):
-            log.info("Downloading chunk %d/%d", i + 1, chunk_count)
             chunk_data = self.api.download_chunk(transfer_id, i)
             if chunk_data is None:
-                log.error("Failed to download chunk %d of transfer %s", i, transfer_id[:12])
-                if not is_fn:
-                    self.history.update(transfer_id, status="failed")
+                log.error("Failed to download .fn chunk %d/%d of transfer %s",
+                          i + 1, chunk_count, transfer_id[:12])
                 return
-            encrypted_chunks.append(chunk_data)
-            if not is_fn:
-                self.history.update(transfer_id, chunks_downloaded=i + 1)
+            try:
+                plaintext_parts.append(KeyManager.decrypt_chunk(chunk_data, symmetric_key))
+            except Exception:
+                log.exception("Failed to decrypt .fn chunk %d of transfer %s",
+                              i, transfer_id[:12])
+                return
 
-        # Decrypt and save
+        save_dir = Path(self.config.save_directory)
         try:
-            save_path = self.crypto.decrypt_chunks_to_file(
-                encrypted_meta, encrypted_chunks, symmetric_key, self.config.save_directory
-            )
-            log.info("Saved: %s", save_path)
-        except Exception:
-            log.exception("Failed to decrypt transfer %s", transfer_id[:12])
-            if not is_fn:
-                self.history.update(transfer_id, status="failed")
+            save_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            log.exception("Cannot create save directory for .fn transfer")
             return
 
-        # Check for special .fn. transfers
-        if is_fn:
-            self._handle_fn_transfer(save_path)
+        # .fn payload is consumed and unlinked immediately by _handle_fn_transfer.
+        save_path = save_dir / filename
+        try:
+            save_path.write_bytes(b"".join(plaintext_parts))
+        except OSError:
+            log.exception("Failed to write .fn payload for %s", transfer_id[:12])
+            return
 
-        # Acknowledge
+        self._handle_fn_transfer(save_path)
+
         if self.api.ack_transfer(transfer_id):
             log.info("Transfer %s acknowledged", transfer_id[:12])
         else:
             log.warning("Failed to acknowledge transfer %s", transfer_id[:12])
 
-        # Finalize history
-        if is_fn:
-            pass  # .fn. transfers are logged in _handle_fn_transfer
+    def _receive_file_transfer(self, transfer_id: str, sender_id: str,
+                               filename: str, chunk_count: int,
+                               base_nonce: bytes, symmetric_key: bytes) -> None:
+        """Stream chunks to a temp file under {save_dir}/.parts/, then
+        atomic-finalize to the destination via os.link (race-free) +
+        unlink. Memory bounded by CHUNK_SIZE. ACK is sent only after the
+        durable finalize; the file is kept on ACK failure (sender will
+        eventually time out delivery)."""
+        # History row first, with 0/N progress so the bar appears immediately.
+        self.history.add(
+            filename=filename,
+            display_label=filename,
+            direction="received",
+            size=0,
+            transfer_id=transfer_id,
+            sender_id=sender_id,
+            status="downloading",
+            chunks_downloaded=0,
+            chunks_total=chunk_count,
+        )
+
+        try:
+            save_dir = self.config.save_directory  # property mkdirs the dir
+            parts_dir = save_dir / ".parts"
+            parts_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            log.exception("Cannot prepare save / .parts directories")
+            self.history.update(transfer_id, status="failed",
+                                chunks_downloaded=0, chunks_total=0)
+            return
+
+        temp_path = parts_dir / f".incoming_{transfer_id}.part"
+
+        success = False
+        try:
+            # `wb` truncates any stale partial from a prior aborted attempt.
+            with open(temp_path, "wb") as out:
+                for i in range(chunk_count):
+                    encrypted = self._download_chunk_with_retry(transfer_id, i, chunk_count)
+                    if encrypted is None:
+                        self.history.update(transfer_id, status="failed",
+                                            chunks_downloaded=0, chunks_total=0)
+                        return
+                    try:
+                        plaintext = KeyManager.decrypt_chunk(encrypted, symmetric_key)
+                    except Exception:
+                        log.exception("Failed to decrypt chunk %d/%d of %s",
+                                      i + 1, chunk_count, transfer_id[:12])
+                        self.history.update(transfer_id, status="failed",
+                                            chunks_downloaded=0, chunks_total=0)
+                        return
+                    out.write(plaintext)
+                    self.history.update(transfer_id, chunks_downloaded=i + 1)
+                out.flush()
+                os.fsync(out.fileno())
+            success = True
+        except OSError:
+            log.exception("Streaming write failed for %s", transfer_id[:12])
+            self.history.update(transfer_id, status="failed",
+                                chunks_downloaded=0, chunks_total=0)
+            return
+        finally:
+            if not success:
+                self._delete_quietly(temp_path)
+
+        final_path = self._finalize_temp_to_unique(temp_path, save_dir, filename)
+        if final_path is None:
+            self.history.update(transfer_id, status="failed",
+                                chunks_downloaded=0, chunks_total=0)
+            return
+
+        final_size = final_path.stat().st_size
+        log.info("Saved: %s (%d bytes)", final_path, final_size)
+
+        # ACK-after-durable-write: the file is on disk under its final name.
+        # If ACK fails the sender will eventually stop seeing "delivering",
+        # but we MUST NOT delete a fully received file just because the
+        # network hiccupped before we could tell the server.
+        ack_ok = self.api.ack_transfer(transfer_id)
+        if ack_ok:
+            log.info("Transfer %s acknowledged", transfer_id[:12])
         else:
-            # Download logic cleans up its own progress fields on completion.
-            self.history.update(
-                transfer_id,
-                status="complete",
-                size=save_path.stat().st_size,
-                content_path=str(save_path),
-                delivered=True,
-                chunks_downloaded=0,
-                chunks_total=0,
-            )
-            for cb in self._on_file_received:
+            log.warning("ACK failed for %s after durable write — keeping file",
+                        transfer_id[:12])
+
+        # Download logic cleans up its own progress fields on completion.
+        self.history.update(
+            transfer_id,
+            status="complete",
+            size=final_size,
+            content_path=str(final_path),
+            delivered=True,
+            chunks_downloaded=0,
+            chunks_total=0,
+        )
+        for cb in self._on_file_received:
+            try:
+                cb(final_path)
+            except Exception:
+                log.exception("File received callback error")
+
+    @classmethod
+    def _finalize_temp_to_unique(cls, temp_path: Path, save_dir: Path,
+                                 filename: str) -> Path | None:
+        """Atomically link temp_path under save_dir using the first
+        non-colliding name (filename, filename_1, ...), then unlink the
+        temp source. os.link is atomic and FileExistsError-safe, so no
+        TOCTOU race with another writer claiming the same name.
+
+        Falls back to a probe + shutil.move on cross-FS or when the FS
+        does not support hard links (FAT, exFAT). The fallback retains
+        the small unique-name race, accepted as the degenerate case."""
+        base = save_dir / filename
+        stem = base.stem
+        suffix = base.suffix
+        counter = 0
+        while True:
+            candidate = base if counter == 0 else save_dir / f"{stem}_{counter}{suffix}"
+            try:
+                os.link(temp_path, candidate)
+            except FileExistsError:
+                counter += 1
+                continue
+            except OSError as e:
+                if e.errno in (errno.EXDEV, errno.EPERM, errno.ENOSYS):
+                    return cls._fallback_move_unique(temp_path, save_dir, filename)
+                log.exception("os.link finalize failed for %s", temp_path)
+                cls._delete_quietly(temp_path)
+                return None
+            cls._delete_quietly(temp_path)
+            return candidate
+
+    @classmethod
+    def _fallback_move_unique(cls, temp_path: Path, save_dir: Path,
+                              filename: str) -> Path | None:
+        """Cross-FS finalize fallback: probe for a free name, then move.
+        Small TOCTOU race accepted (cross-FS deployments are rare and
+        single-user)."""
+        base = save_dir / filename
+        stem = base.stem
+        suffix = base.suffix
+        counter = 0
+        while True:
+            candidate = base if counter == 0 else save_dir / f"{stem}_{counter}{suffix}"
+            if not candidate.exists():
+                break
+            counter += 1
+        try:
+            shutil.move(str(temp_path), str(candidate))
+            return candidate
+        except OSError:
+            log.exception("Cross-FS finalize failed for %s", temp_path)
+            cls._delete_quietly(temp_path)
+            return None
+
+    @staticmethod
+    def _delete_quietly(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            log.warning("Failed to delete %s", path, exc_info=True)
+
+    def _download_chunk_with_retry(self, transfer_id: str, index: int,
+                                    chunk_count: int) -> bytes | None:
+        """Download one chunk with the existing 3-attempt backoff. Returns
+        None on terminal failure."""
+        for attempt in range(1, CHUNK_DOWNLOAD_ATTEMPTS + 1):
+            chunk = self.api.download_chunk(transfer_id, index)
+            if chunk is not None:
+                return chunk
+            log.warning("Chunk %d/%d failed (attempt %d/%d), retrying",
+                        index + 1, chunk_count, attempt, CHUNK_DOWNLOAD_ATTEMPTS)
+            time.sleep(2.0 * attempt)
+        log.error("Chunk %d/%d failed after %d attempts on %s",
+                  index + 1, chunk_count, CHUNK_DOWNLOAD_ATTEMPTS,
+                  transfer_id[:12])
+        return None
+
+    def _sweep_stale_parts(self, save_dir: Path) -> None:
+        """Delete orphaned .incoming_*.part files left behind by aborted
+        receives (force-quit, OOM, power loss). Runs once on poller start."""
+        parts_dir = save_dir / ".parts"
+        if not parts_dir.is_dir():
+            return
+        cutoff = time.time() - STALE_PART_TTL_S
+        removed = 0
+        try:
+            for entry in parts_dir.iterdir():
+                if not entry.name.startswith(".incoming_"):
+                    continue
+                if not entry.name.endswith(".part"):
+                    continue
                 try:
-                    cb(save_path)
-                except Exception:
-                    log.exception("File received callback error")
+                    if entry.stat().st_mtime < cutoff:
+                        entry.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+        except OSError:
+            log.warning("Parts sweep failed", exc_info=True)
+            return
+        if removed:
+            log.info("Cleaned up %d stale .part file(s)", removed)
 
     def _handle_fn_transfer(self, filepath) -> None:
         """Handle special .fn. transfers (clipboard, etc.)."""

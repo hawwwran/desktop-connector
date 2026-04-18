@@ -127,82 +127,42 @@ class KeyManager:
         plaintext = KeyManager.decrypt_blob(blob, key)
         return json.loads(plaintext)
 
-    def encrypt_file_to_chunks(self, filepath: Path, key: bytes,
-                               filename_override: str | None = None) -> tuple[str, bytes, list[bytes]]:
-        """
-        Encrypt a file into chunks.
-        Returns: (encrypted_meta_b64, base_nonce, list_of_encrypted_chunks)
-        """
-        data = filepath.read_bytes()
-        base_nonce = os.urandom(12)
+    # --- Streaming file encryption / decryption ---
 
-        chunks = []
-        offset = 0
-        chunk_index = 0
-        while offset < len(data):
-            chunk_data = data[offset:offset + CHUNK_SIZE]
-            nonce = self.make_chunk_nonce(base_nonce, chunk_index)
-            encrypted_chunk = self.encrypt_blob(chunk_data, key, nonce)
-            chunks.append(encrypted_chunk)
-            offset += CHUNK_SIZE
-            chunk_index += 1
+    @staticmethod
+    def generate_base_nonce() -> bytes:
+        """Generate a random 12-byte base nonce for a transfer."""
+        return os.urandom(12)
 
-        if not chunks:
-            nonce = self.make_chunk_nonce(base_nonce, 0)
-            chunks.append(self.encrypt_blob(b"", key, nonce))
-
-        actual_name = filename_override or filepath.name
+    @classmethod
+    def build_encrypted_metadata(cls, filename: str, mime_type: str, size: int,
+                                 chunk_count: int, base_nonce: bytes,
+                                 key: bytes) -> str:
+        """Build and encrypt the per-transfer metadata blob."""
         metadata = {
-            "filename": actual_name,
-            "mime_type": self._guess_mime(Path(actual_name)),
-            "size": len(data),
-            "chunk_count": len(chunks),
+            "filename": filename,
+            "mime_type": mime_type,
+            "size": size,
+            "chunk_count": chunk_count,
             "chunk_size": CHUNK_SIZE,
             "base_nonce": base64.b64encode(base_nonce).decode(),
         }
-        encrypted_meta = self.encrypt_metadata(metadata, key)
+        return cls.encrypt_metadata(metadata, key)
 
-        return encrypted_meta, base_nonce, chunks
+    @classmethod
+    def encrypt_chunk(cls, plaintext: bytes, base_nonce: bytes,
+                      index: int, key: bytes) -> bytes:
+        """Encrypt a single plaintext chunk using the per-chunk derived nonce."""
+        nonce = cls.make_chunk_nonce(base_nonce, index)
+        return cls.encrypt_blob(plaintext, key, nonce)
 
-    def decrypt_chunks_to_file(self, encrypted_meta_b64: str, encrypted_chunks: list[bytes],
-                                key: bytes, save_dir: Path) -> Path:
-        """
-        Decrypt chunks and save to file.
-        Returns the path of the saved file.
-        """
-        metadata = self.decrypt_metadata(encrypted_meta_b64, key)
-        base_nonce = base64.b64decode(metadata["base_nonce"])
-        filename = metadata["filename"]
-
-        # Decrypt and reassemble
-        plaintext_parts = []
-        for i, chunk_blob in enumerate(encrypted_chunks):
-            nonce = self.make_chunk_nonce(base_nonce, i)
-            # The blob from server includes the nonce prefix, but when we encrypted,
-            # we prepended the nonce. When downloading from server, the blob IS the
-            # full nonce+ciphertext+tag as stored. So decrypt_blob handles it.
-            # However, during encryption we used a specific nonce and encrypt_blob
-            # prepended it. For chunks, we used a deterministic nonce, so the blob
-            # has that nonce prepended. decrypt_blob will extract and use it.
-            plaintext_parts.append(self.decrypt_blob(chunk_blob, key))
-
-        data = b"".join(plaintext_parts)
-
-        # Avoid overwriting existing files
-        save_path = save_dir / filename
-        if save_path.exists():
-            stem = save_path.stem
-            suffix = save_path.suffix
-            counter = 1
-            while save_path.exists():
-                save_path = save_dir / f"{stem}_{counter}{suffix}"
-                counter += 1
-
-        save_path.write_bytes(data)
-        return save_path
+    @classmethod
+    def decrypt_chunk(cls, blob: bytes, key: bytes) -> bytes:
+        """Decrypt a single encrypted chunk. The blob carries its nonce prefix."""
+        return cls.decrypt_blob(blob, key)
 
     @staticmethod
-    def _guess_mime(filepath: Path) -> str:
+    def guess_mime(filename: str) -> str:
         import mimetypes
-        mime, _ = mimetypes.guess_type(filepath.name)
+        mime, _ = mimetypes.guess_type(filename)
         return mime or "application/octet-stream"

@@ -4,13 +4,19 @@ API client for communicating with the PHP relay server.
 
 import base64
 import logging
+import math
+import time
 import uuid
 from pathlib import Path
 
 import requests
 
 from .connection import ConnectionManager
-from .crypto import KeyManager
+from .crypto import KeyManager, CHUNK_SIZE
+
+
+CHUNK_RETRY_DELAY_S = 5.0
+CHUNK_MAX_FAILURE_WINDOW_S = 120.0
 
 log = logging.getLogger(__name__)
 
@@ -109,36 +115,87 @@ class ApiClient:
                   filename_override: str | None = None,
                   on_progress: callable = None) -> str | None:
         """
-        Encrypt and upload a file to a recipient.
+        Encrypt and upload a file to a recipient using a streaming pipeline:
+        read one chunk → encrypt → upload → repeat. Memory is bounded by
+        CHUNK_SIZE regardless of file size.
+
+        Per-chunk retry: on failure, retry every 5 s. If the same chunk
+        keeps failing for 120 s continuously, the transfer is aborted and
+        send_file returns None. The retry timer resets on each success.
+
         filename_override: use this name in metadata instead of the actual file name.
         on_progress: callback(transfer_id, chunks_uploaded, total_chunks) called per chunk.
         Returns transfer_id on success, None on failure.
         """
         display = filename_override or filepath.name
-        log.info("Sending file: %s (%d bytes)", display, filepath.stat().st_size)
+        file_size = filepath.stat().st_size
+        log.info("Sending file: %s (%d bytes)", display, file_size)
 
-        encrypted_meta, base_nonce, chunks = self.crypto.encrypt_file_to_chunks(
-            filepath, symmetric_key, filename_override=filename_override)
+        chunk_count = max(1, math.ceil(file_size / CHUNK_SIZE))
+        base_nonce = KeyManager.generate_base_nonce()
+        encrypted_meta = KeyManager.build_encrypted_metadata(
+            filename=display,
+            mime_type=KeyManager.guess_mime(display),
+            size=file_size,
+            chunk_count=chunk_count,
+            base_nonce=base_nonce,
+            key=symmetric_key,
+        )
         transfer_id = str(uuid.uuid4())
 
-        if not self.init_transfer(transfer_id, recipient_id, encrypted_meta, len(chunks)):
+        if not self.init_transfer(transfer_id, recipient_id, encrypted_meta, chunk_count):
             log.error("Failed to init transfer")
             return None
 
         if on_progress:
-            on_progress(transfer_id, 0, len(chunks))
+            on_progress(transfer_id, 0, chunk_count)
 
-        for i, chunk_data in enumerate(chunks):
-            log.info("Uploading chunk %d/%d", i + 1, len(chunks))
-            result = self.upload_chunk(transfer_id, i, chunk_data)
-            if result is None:
-                log.error("Failed to upload chunk %d", i)
-                return None
-            if on_progress:
-                on_progress(transfer_id, i + 1, len(chunks))
+        try:
+            with open(filepath, "rb") as f:
+                for index in range(chunk_count):
+                    plaintext = f.read(CHUNK_SIZE)  # last chunk may be short; empty file → b""
+                    encrypted = KeyManager.encrypt_chunk(
+                        plaintext, base_nonce, index, symmetric_key)
+                    err = self._upload_chunk_with_retry(
+                        transfer_id, index, chunk_count, encrypted)
+                    if err is not None:
+                        log.error("Upload failed: %s", err)
+                        return None
+                    if on_progress:
+                        on_progress(transfer_id, index + 1, chunk_count)
+        except OSError as e:
+            log.error("Cannot read source file %s: %s", filepath, e)
+            return None
 
-        log.info("File sent successfully: %s (transfer_id=%s)", filepath.name, transfer_id)
+        log.info("File sent successfully: %s (transfer_id=%s)", display, transfer_id)
         return transfer_id
+
+    def _upload_chunk_with_retry(self, transfer_id: str, index: int,
+                                  chunk_count: int, encrypted: bytes) -> str | None:
+        """Upload one chunk with 5 s retry cadence. Returns None on success,
+        or an error string if the same chunk has been failing continuously
+        for longer than CHUNK_MAX_FAILURE_WINDOW_S."""
+        # Connection errors surface as upload_chunk returning None (handled
+        # by ConnectionManager.request). The narrow except below covers
+        # the residual transient set: socket-level OSError that escapes
+        # requests, JSON parse failures from a malformed 200 response.
+        first_failure_at: float | None = None
+        while True:
+            try:
+                if self.upload_chunk(transfer_id, index, encrypted) is not None:
+                    log.debug("Uploaded chunk %d/%d", index + 1, chunk_count)
+                    return None
+            except (requests.RequestException, OSError, ValueError) as e:
+                log.warning("upload_chunk %d threw: %s", index, e)
+            now = time.monotonic()
+            if first_failure_at is None:
+                first_failure_at = now
+                log.warning("Chunk %d/%d failed, retrying in %.0fs",
+                            index + 1, chunk_count, CHUNK_RETRY_DELAY_S)
+            elif now - first_failure_at >= CHUNK_MAX_FAILURE_WINDOW_S:
+                return (f"Chunk {index + 1}/{chunk_count} failed continuously "
+                        f"for {int(CHUNK_MAX_FAILURE_WINDOW_S)}s")
+            time.sleep(CHUNK_RETRY_DELAY_S)
 
     def get_stats(self, paired_with: str | None = None) -> dict | None:
         """Get connection statistics from the server."""

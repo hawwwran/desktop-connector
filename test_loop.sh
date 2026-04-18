@@ -214,9 +214,9 @@ assert 'pending' in html.lower() or 'ready' in html.lower() or 'Pending' in html
 print('Dashboard shows transfer data')
 " || echo "(Dashboard check skipped - non-critical)"
 
-step "Receiving: receiver polls, downloads, decrypts"
+step "Receiving: receiver polls, downloads, decrypts (streamed)"
 python3 -c "
-import sys, base64
+import sys, os, base64
 sys.path.insert(0, '.')
 from pathlib import Path
 from src.config import Config
@@ -240,22 +240,35 @@ paired = config.paired_devices.get(sender_id)
 assert paired, f'Sender {sender_id} not in paired devices'
 sym_key = base64.b64decode(paired['symmetric_key_b64'])
 
-# Download chunks
-chunks = []
-for i in range(t['chunk_count']):
-    data = api.download_chunk(t['transfer_id'], i)
-    assert data, f'Failed to download chunk {i}'
-    chunks.append(data)
-    print(f'Downloaded chunk {i+1}/{t[\"chunk_count\"]}')
+# Decrypt metadata first (matches new poller flow)
+meta = crypto.decrypt_metadata(t['encrypted_meta'], sym_key)
+filename = meta['filename']
 
-# Decrypt and save
+# Stream chunks: download → decrypt → append to .parts/.incoming_<tid>.part
 save_dir = Path('$SAVE_DIR')
-save_path = crypto.decrypt_chunks_to_file(t['encrypted_meta'], chunks, sym_key, save_dir)
-print(f'Saved to: {save_path}')
+save_dir.mkdir(parents=True, exist_ok=True)
+parts_dir = save_dir / '.parts'
+parts_dir.mkdir(parents=True, exist_ok=True)
+final_path = save_dir / filename
+temp_path = parts_dir / f'.incoming_{t[\"transfer_id\"]}.part'
+if temp_path.exists():
+    temp_path.unlink()
+
+with open(temp_path, 'wb') as out:
+    for i in range(t['chunk_count']):
+        data = api.download_chunk(t['transfer_id'], i)
+        assert data, f'Failed to download chunk {i}'
+        out.write(KeyManager.decrypt_chunk(data, sym_key))
+        print(f'Downloaded+decrypted chunk {i+1}/{t[\"chunk_count\"]}')
+    out.flush()
+    os.fsync(out.fileno())
+
+os.replace(temp_path, final_path)
+print(f'Saved to: {final_path}')
 
 # Verify file content matches
 original = Path('$TEST_PHOTO').read_bytes()
-received = save_path.read_bytes()
+received = final_path.read_bytes()
 assert original == received, f'File content mismatch! Original: {len(original)} bytes, Received: {len(received)} bytes'
 print(f'Content verified: {len(received)} bytes match')
 
@@ -267,6 +280,80 @@ pass "Photo received and decrypted correctly"
 
 step "Verifying cleanup: transfer should be marked as downloaded"
 curl -sf "$SERVER_URL/api/health" > /dev/null && pass "Server still healthy"
+
+step "Streaming large file (10 MB → 5 chunks)"
+LARGE_SRC="$LOG_DIR/test_large.bin"
+LARGE_DST_DIR=$(mktemp -d /tmp/dc-large-XXXXX)
+python3 -c "
+import os
+with open('$LARGE_SRC', 'wb') as f:
+    f.write(os.urandom(10 * 1024 * 1024))
+"
+SRC_SHA=$(sha256sum "$LARGE_SRC" | cut -d' ' -f1)
+
+# Send via the streamed send_file path
+python3 -c "
+import sys
+sys.path.insert(0, '.')
+from pathlib import Path
+from src.main import run_send_file
+from src.config import Config
+from src.crypto import KeyManager
+
+config = Config(config_dir=Path('$SENDER_CONFIG'))
+crypto = KeyManager(config.config_dir)
+result = run_send_file(config, crypto, Path('$LARGE_SRC'))
+assert result == 0, f'Send failed with code {result}'
+" || fail "Large file upload"
+
+# Receive via the streamed download → decrypt → atomic-link path
+python3 -c "
+import sys, os, base64
+sys.path.insert(0, '.')
+from pathlib import Path
+from src.config import Config
+from src.crypto import KeyManager
+from src.connection import ConnectionManager
+from src.api_client import ApiClient
+
+config = Config(config_dir=Path('$RECEIVER_CONFIG'))
+config.save_directory = '$LARGE_DST_DIR'
+crypto = KeyManager(config.config_dir)
+conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
+api = ApiClient(conn, crypto)
+
+transfers = api.get_pending_transfers()
+assert transfers, 'No pending transfers'
+t = transfers[0]
+sym_key = base64.b64decode(config.paired_devices[t['sender_id']]['symmetric_key_b64'])
+meta = crypto.decrypt_metadata(t['encrypted_meta'], sym_key)
+print(f'metadata chunk_count={meta[\"chunk_count\"]} size={meta[\"size\"]}')
+assert meta['chunk_count'] >= 5, f'expected >=5 chunks, got {meta[\"chunk_count\"]}'
+
+save_dir = Path('$LARGE_DST_DIR')
+parts_dir = save_dir / '.parts'
+parts_dir.mkdir(parents=True, exist_ok=True)
+temp = parts_dir / f'.incoming_{t[\"transfer_id\"]}.part'
+final = save_dir / meta['filename']
+with open(temp, 'wb') as out:
+    for i in range(meta['chunk_count']):
+        data = api.download_chunk(t['transfer_id'], i)
+        assert data, f'chunk {i} download failed'
+        out.write(KeyManager.decrypt_chunk(data, sym_key))
+    out.flush(); os.fsync(out.fileno())
+os.link(str(temp), str(final))
+os.unlink(str(temp))
+api.ack_transfer(t['transfer_id'])
+print(f'received {final.stat().st_size} bytes')
+" || fail "Large file receive"
+
+DST_SHA=$(sha256sum "$LARGE_DST_DIR/test_large.bin" | cut -d' ' -f1)
+if [ "$SRC_SHA" = "$DST_SHA" ]; then
+    pass "10 MB streaming roundtrip — SHA-256 matches ($SRC_SHA)"
+else
+    fail "SHA-256 mismatch: src=$SRC_SHA dst=$DST_SHA"
+fi
+rm -rf "$LARGE_DST_DIR" "$LARGE_SRC"
 
 step "Ping/pong: auth + pairing + rate-limit gates"
 # We hit /api/devices/ping directly with curl to exercise each path.
