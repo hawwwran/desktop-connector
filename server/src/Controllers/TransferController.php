@@ -3,8 +3,6 @@
 class TransferController
 {
     private const MAX_PENDING_BYTES = 500 * 1024 * 1024; // 500 MB per recipient
-    private const TRANSFER_EXPIRY = 7 * 24 * 3600;       // 7 days
-    private const INCOMPLETE_EXPIRY = 24 * 3600;          // 24 hours
 
     public static function init(Database $db, string $deviceId): void
     {
@@ -156,7 +154,7 @@ class TransferController
     {
         // Run garbage collection ~5% of requests (expiry is hours/days, no rush)
         if (random_int(1, 20) === 1) {
-            self::cleanup($db);
+            TransferCleanupService::run($db);
         }
 
         $transfers = $db->queryAll(
@@ -243,26 +241,12 @@ class TransferController
             [':bytes' => $totalBytes['total'], ':a' => $ids[0], ':b' => $ids[1]]
         );
 
-        // Delete chunk files
-        $chunks = $db->queryAll(
-            'SELECT blob_path FROM chunks WHERE transfer_id = :tid',
-            [':tid' => $transferId]
-        );
-        foreach ($chunks as $chunk) {
-            $path = __DIR__ . '/../../storage/' . $chunk['blob_path'];
-            if (file_exists($path)) {
-                unlink($path);
-            }
-        }
-        // Remove directory
-        $dir = __DIR__ . '/../../storage/' . $transferId;
-        if (is_dir($dir)) {
-            rmdir($dir);
-        }
+        // Delete chunk files and chunk rows; transfer row is preserved so the
+        // sender's /sent-status still reports delivered status.
+        TransferCleanupService::deleteChunkFilesAndRows($db, $transferId);
 
-        // Delete chunk records and mark downloaded with timestamp.
+        // Mark downloaded with timestamp.
         // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
-        $db->execute('DELETE FROM chunks WHERE transfer_id = :tid', [':tid' => $transferId]);
         $db->execute(
             'UPDATE transfers SET downloaded = 1, delivered_at = :now, chunks_downloaded = chunk_count WHERE id = :id',
             [':now' => time(), ':id' => $transferId]
@@ -287,52 +271,4 @@ class TransferController
         Router::json(TransferNotifyService::longPoll($db, $deviceId, $since, $isTest));
     }
 
-    private static function cleanup(Database $db): void
-    {
-        $now = time();
-
-        // Delete transfers older than 7 days
-        $old = $db->queryAll(
-            'SELECT id FROM transfers WHERE created_at < :cutoff',
-            [':cutoff' => $now - self::TRANSFER_EXPIRY]
-        );
-        foreach ($old as $t) {
-            self::deleteTransferFiles($db, $t['id']);
-        }
-
-        // Delete incomplete transfers older than 24 hours
-        $incomplete = $db->queryAll(
-            'SELECT id FROM transfers WHERE complete = 0 AND created_at < :cutoff',
-            [':cutoff' => $now - self::INCOMPLETE_EXPIRY]
-        );
-        foreach ($incomplete as $t) {
-            self::deleteTransferFiles($db, $t['id']);
-        }
-
-        // Delete old pairing requests (> 1 hour)
-        $db->execute(
-            'DELETE FROM pairing_requests WHERE created_at < :cutoff',
-            [':cutoff' => $now - 3600]
-        );
-    }
-
-    private static function deleteTransferFiles(Database $db, string $transferId): void
-    {
-        $chunks = $db->queryAll(
-            'SELECT blob_path FROM chunks WHERE transfer_id = :tid',
-            [':tid' => $transferId]
-        );
-        foreach ($chunks as $chunk) {
-            $path = __DIR__ . '/../../storage/' . $chunk['blob_path'];
-            if (file_exists($path)) {
-                unlink($path);
-            }
-        }
-        $dir = __DIR__ . '/../../storage/' . $transferId;
-        if (is_dir($dir)) {
-            @rmdir($dir);
-        }
-        $db->execute('DELETE FROM chunks WHERE transfer_id = :tid', [':tid' => $transferId]);
-        $db->execute('DELETE FROM transfers WHERE id = :tid', [':tid' => $transferId]);
-    }
 }
