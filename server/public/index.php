@@ -18,6 +18,7 @@ require_once __DIR__ . '/../src/Services/TransferStatusService.php';
 require_once __DIR__ . '/../src/Services/TransferNotifyService.php';
 require_once __DIR__ . '/../src/Services/TransferWakeService.php';
 require_once __DIR__ . '/../src/Services/TransferCleanupService.php';
+require_once __DIR__ . '/../src/Services/TransferService.php';
 
 // Initialize database
 $db = Database::getInstance();
