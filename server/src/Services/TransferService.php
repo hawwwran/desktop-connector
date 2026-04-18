@@ -16,6 +16,12 @@ class TransferService
 {
     private const MAX_PENDING_BYTES = 500 * 1024 * 1024;   // 500 MB per recipient
     private const MAX_CHUNK_COUNT = 500;
+    // transfer_id is concatenated into a filesystem path (server/storage/{id}/...).
+    // Restrict to alphanumeric + hyphen with a length cap so "../" and friends
+    // can never escape the storage directory. Matches Android's defense-in-depth
+    // check in PollService.SAFE_TRANSFER_ID; both desktop and Android generate
+    // UUIDs which fit comfortably under 64 chars.
+    private const TRANSFER_ID_PATTERN = '/^[a-zA-Z0-9-]{1,64}$/';
 
     public static function init(Database $db, string $senderId, array $body): array
     {
@@ -29,6 +35,9 @@ class TransferService
         $encryptedMeta = $body['encrypted_meta'];
         $chunkCount = (int)$body['chunk_count'];
 
+        if ($err = self::validateTransferId($transferId)) {
+            return $err;
+        }
         if ($chunkCount < 1 || $chunkCount > self::MAX_CHUNK_COUNT) {
             return [['error' => 'Invalid chunk_count'], 400];
         }
@@ -70,6 +79,9 @@ class TransferService
 
     public static function uploadChunk(Database $db, string $deviceId, string $transferId, int $chunkIndex, string $blobData): array
     {
+        if ($err = self::validateTransferId($transferId)) {
+            return $err;
+        }
         $transfer = $db->querySingle(
             'SELECT id, sender_id, chunk_count, chunks_received, complete
              FROM transfers WHERE id = :id',
@@ -155,6 +167,9 @@ class TransferService
 
     public static function downloadChunk(Database $db, string $deviceId, string $transferId, int $chunkIndex): array
     {
+        if ($err = self::validateTransferId($transferId)) {
+            return $err;
+        }
         $transfer = $db->querySingle(
             'SELECT recipient_id, chunk_count FROM transfers WHERE id = :id',
             [':id' => $transferId]
@@ -192,6 +207,9 @@ class TransferService
 
     public static function ack(Database $db, string $deviceId, string $transferId): array
     {
+        if ($err = self::validateTransferId($transferId)) {
+            return $err;
+        }
         $transfer = $db->querySingle(
             'SELECT id, sender_id, recipient_id FROM transfers WHERE id = :id',
             [':id' => $transferId]
@@ -225,5 +243,14 @@ class TransferService
         );
 
         return [['status' => 'deleted'], 200];
+    }
+
+    /** Returns [errorResponse, 400] if the id is unsafe, or null if OK. */
+    private static function validateTransferId(string $transferId): ?array
+    {
+        if (!preg_match(self::TRANSFER_ID_PATTERN, $transferId)) {
+            return [['error' => 'Invalid transfer_id format'], 400];
+        }
+        return null;
     }
 }

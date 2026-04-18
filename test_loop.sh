@@ -317,6 +317,16 @@ assert r.get('delivered') is True, f'delivered should be true: {r}'
 assert r['sent_status'][0]['delivery_state'] == 'delivered', f'inline sent_status mismatch: {r}'
 " && pass "/notify inline sent_status agrees with /sent-status" || fail "/notify inline sent_status mismatch: $RESP"
 
+step "transfer_id format validation (path-traversal guard)"
+# transfer_id is concatenated into a filesystem path. A malicious paired device
+# could escape the storage directory without this validator. Reject anything
+# containing path separators, dots, or non-alphanumeric characters.
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$SERVER_URL/api/transfers/init" \
+  -H "X-Device-ID: $SENDER_ID_CHECK" -H "Authorization: Bearer $SENDER_TOKEN_CHECK" \
+  -H 'Content-Type: application/json' \
+  -d '{"transfer_id":"../../etc","recipient_id":"abc","encrypted_meta":"m","chunk_count":1}')
+[ "$CODE" = "400" ] && pass "Malicious transfer_id rejected → 400" || fail "Expected 400, got $CODE"
+
 step "Streaming large file (10 MB → 5 chunks)"
 LARGE_SRC="$LOG_DIR/test_large.bin"
 LARGE_DST_DIR=$(mktemp -d /tmp/dc-large-XXXXX)
