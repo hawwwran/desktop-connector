@@ -1,5 +1,10 @@
 <?php
 
+/**
+ * HTTP adapter for /api/transfers/*. Each method parses inputs, dispatches
+ * to a service in src/Services/, and translates the result to a response
+ * via Router::json or Router::binary. Business logic lives in the services.
+ */
 class TransferController
 {
     public static function init(Database $db, string $deviceId): void
