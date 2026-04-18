@@ -102,8 +102,13 @@ class TransferController
         if (!is_dir($storageDir)) {
             mkdir($storageDir, 0700, true);
         }
+        // Atomic write: temp file + rename so a concurrent downloader cannot
+        // observe a partially-written chunk (AES-GCM would fail auth on short bytes).
         $blobPath = $transferId . '/' . $chunkIndex . '.bin';
-        file_put_contents(__DIR__ . '/../../storage/' . $blobPath, $blobData);
+        $fullPath = __DIR__ . '/../../storage/' . $blobPath;
+        $tmpPath = $fullPath . '.tmp';
+        file_put_contents($tmpPath, $blobData);
+        rename($tmpPath, $fullPath);
 
         // Check if chunk already exists (idempotent upload)
         $existingChunk = $db->querySingle(
