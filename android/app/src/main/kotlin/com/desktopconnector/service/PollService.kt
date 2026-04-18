@@ -456,8 +456,12 @@ class PollService : Service() {
         val displayLabel = handleFnTransfer(fileName, data)
         AppLog.log("Recv", "Fn transfer: $fileName -> $displayLabel")
 
-        api.ackTransfer(transferId)
-        AppLog.log("Recv", "Acked $transferId")
+        try {
+            if (api.ackTransfer(transferId)) AppLog.log("Recv", "Acked $transferId")
+            else AppLog.log("Recv", "ACK failed for $transferId (.fn) — command already executed")
+        } catch (e: Exception) {
+            AppLog.log("Recv", "ACK threw for $transferId (.fn): ${e.message}")
+        }
 
         if (fileName != ".fn.unpair") {
             db.transferDao().insert(QueuedTransfer(
@@ -575,8 +579,22 @@ class PollService : Service() {
             this, arrayOf(finalFile.absolutePath), null, null
         )
 
-        api.ackTransfer(transferId)
-        AppLog.log("Recv", "Acked $transferId")
+        // ACK-after-durable-write: once the file is on disk under its final
+        // name, the receive is locally successful. If ACK fails here the
+        // sender will eventually stop seeing "delivering", but we must NOT
+        // delete a fully received file just because the network hiccupped
+        // before we could tell the server.
+        val ackOk = try {
+            api.ackTransfer(transferId)
+        } catch (e: Exception) {
+            Log.w(TAG, "ACK threw after durable write of $transferId: ${e.message}")
+            false
+        }
+        if (ackOk) {
+            AppLog.log("Recv", "Acked $transferId")
+        } else {
+            AppLog.log("Recv", "ACK failed for $transferId after durable write — keeping file")
+        }
 
         val stillExists = db.transferDao().exists(dbRowId) > 0
         db.transferDao().completeDownload(
