@@ -119,6 +119,7 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 ## Key design decisions
 
 - **PHP single-threaded**: The built-in PHP server handles one request at a time. Dashboard auto-refresh can block API calls. For production, use nginx + php-fpm or Apache + mod_php.
+- **Server request pipeline**: Every HTTP handler takes `(Database $db, RequestContext $ctx)`. The `Router` builds the `RequestContext` (route params, query, lazy body) and — for routes registered via `authGet`/`authPost` — resolves identity through `AuthService::requireAuth` before dispatch. Controllers validate inputs with `Validators::*` and throw `ApiError` subclasses; the `Router`'s top-level `try/catch` hands them to `ErrorResponder` for serialization. Net effect: no controller touches `$_SERVER`, `$_GET`, or `php://input` directly, and no controller hand-writes `Router::json(['error'=>…], 4xx)`. The path-traversal guard on `{transfer_id}` is a pipeline validator, so every endpoint that accepts that param is protected, not just the ones that reach `TransferService`.
 - **Chunked transfers**: 2MB chunks for resume capability and memory efficiency.
 - **Delivery ACK**: Server tracks `downloaded` flag. Sender polls `GET /api/transfers/sent-status` to update "Sent" → "Delivered" in history.
 - **Battery**: Android app pauses polling when screen is off. With FCM configured, the server sends a silent push on new transfers, waking the app to poll immediately. Without FCM, polls resume on screen wake. Zero server traffic while idle — phone sends nothing, server pings on demand (see "Liveness probe" below).
@@ -161,17 +162,25 @@ server/
   public/index.php          — front controller, all routes
   public/.htaccess           — URL rewriting
   .htaccess                  — root rewrite + directory protection
-  src/Router.php             — URL routing + auth + base path detection
+  src/Router.php             — URL routing + base path detection; builds RequestContext and catches ApiError in dispatch
   src/Database.php           — SQLite wrapper
   src/AppLog.php             — file-based server logger (2-file rotation, 1MB each)
-  src/Controllers/
-    DeviceController.php     — register, health, stats, FCM token
+  src/Http/                  — request pipeline (refactor-2)
+    RequestContext.php           — per-request object: method, params, query, lazy json/raw body, deviceId
+    ApiError.php                 — ApiError + Validation/Unauthorized/Forbidden/NotFound/Conflict/RateLimit/StorageLimit
+    ErrorResponder.php           — single point that serializes ApiError → JSON + headers
+    Validators.php               — requireNonEmptyString, requireInt, requireNullableString, requireIntParam, requireSafeTransferId
+  src/Auth/                  — authentication layer (refactor-2)
+    AuthIdentity.php             — value object: { deviceId }
+    AuthService.php              — requireAuth() / optional(); bumps last_seen_at on successful lookup
+  src/Controllers/           — thin HTTP adapters; each method takes (Database $db, RequestContext $ctx)
+    DeviceController.php     — register, health (via AuthService::optional), stats, FCM token, ping, pong
     PairingController.php    — QR pairing flow
     TransferController.php   — HTTP adapter for /api/transfers/*; delegates to Services/
     DashboardController.php  — HTML dashboard
     FcmController.php        — FCM config endpoint
     FasttrackController.php  — encrypted message relay (send, pending, ack)
-  src/Services/              — transfer business logic (refactor-1)
+  src/Services/              — transfer business logic (refactor-1); throws ApiError subclasses on failure
     TransferService.php          — init, upload, download, ack, listPending
     TransferStatusService.php    — status / delivery_state mapping (single source of truth)
     TransferNotifyService.php    — long-poll loop (25s / 500ms tick)
