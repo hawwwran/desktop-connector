@@ -82,6 +82,14 @@ class TransferHistory:
             "timestamp": int(time.time()),
         }
         def do_add(items):
+            # Upsert: if a row with this transfer_id already exists (e.g. a prior
+            # failed attempt of the same transfer being retried), replace it in
+            # place instead of creating a duplicate.
+            if transfer_id:
+                for i, item in enumerate(items):
+                    if item.get("transfer_id") == transfer_id:
+                        items[i] = new_item
+                        return True
             items.insert(0, new_item)
             del items[MAX_HISTORY:]
             return True

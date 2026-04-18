@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import requests as _raw_requests
+from cryptography.exceptions import InvalidTag
 
 from .api_client import ApiClient
 from .clipboard import write_clipboard_text, write_clipboard_image
@@ -308,16 +309,9 @@ class Poller:
             # `wb` truncates any stale partial from a prior aborted attempt.
             with open(temp_path, "wb") as out:
                 for i in range(chunk_count):
-                    encrypted = self._download_chunk_with_retry(transfer_id, i, chunk_count)
-                    if encrypted is None:
-                        self.history.update(transfer_id, status="failed",
-                                            chunks_downloaded=0, chunks_total=0)
-                        return
-                    try:
-                        plaintext = KeyManager.decrypt_chunk(encrypted, symmetric_key)
-                    except Exception:
-                        log.exception("Failed to decrypt chunk %d/%d of %s",
-                                      i + 1, chunk_count, transfer_id[:12])
+                    plaintext = self._download_and_decrypt_chunk(
+                        transfer_id, i, chunk_count, symmetric_key)
+                    if plaintext is None:
                         self.history.update(transfer_id, status="failed",
                                             chunks_downloaded=0, chunks_total=0)
                         return
@@ -434,17 +428,28 @@ class Poller:
         except OSError:
             log.warning("Failed to delete %s", path, exc_info=True)
 
-    def _download_chunk_with_retry(self, transfer_id: str, index: int,
-                                    chunk_count: int) -> bytes | None:
-        """Download one chunk with the existing 3-attempt backoff. Returns
-        None on terminal failure."""
+    def _download_and_decrypt_chunk(self, transfer_id: str, index: int,
+                                     chunk_count: int, symmetric_key: bytes) -> bytes | None:
+        """Download + decrypt one chunk. Retries the download on either a
+        missing body (None) or an AES-GCM auth failure (InvalidTag). The
+        latter defends against server-side races where a concurrent upload
+        causes the reader to see partial bytes — the server's atomic rename
+        is the primary fix; this is belt-and-suspenders. Returns plaintext
+        bytes or None if the chunk cannot be recovered after 3 attempts."""
         for attempt in range(1, CHUNK_DOWNLOAD_ATTEMPTS + 1):
-            chunk = self.api.download_chunk(transfer_id, index)
-            if chunk is not None:
-                return chunk
-            log.warning("Chunk %d/%d failed (attempt %d/%d), retrying",
-                        index + 1, chunk_count, attempt, CHUNK_DOWNLOAD_ATTEMPTS)
-            time.sleep(2.0 * attempt)
+            encrypted = self.api.download_chunk(transfer_id, index)
+            if encrypted is None:
+                log.warning("Chunk %d/%d download returned no body (attempt %d/%d)",
+                            index + 1, chunk_count, attempt, CHUNK_DOWNLOAD_ATTEMPTS)
+            else:
+                try:
+                    return KeyManager.decrypt_chunk(encrypted, symmetric_key)
+                except InvalidTag:
+                    log.warning("Chunk %d/%d decrypt failed (attempt %d/%d), "
+                                "re-downloading", index + 1, chunk_count,
+                                attempt, CHUNK_DOWNLOAD_ATTEMPTS)
+            if attempt < CHUNK_DOWNLOAD_ATTEMPTS:
+                time.sleep(2.0 * attempt)
         log.error("Chunk %d/%d failed after %d attempts on %s",
                   index + 1, chunk_count, CHUNK_DOWNLOAD_ATTEMPTS,
                   transfer_id[:12])
