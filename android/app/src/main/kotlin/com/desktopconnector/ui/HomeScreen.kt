@@ -712,6 +712,7 @@ private fun RecentFileDialog(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val context = LocalContext.current
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -725,17 +726,16 @@ private fun RecentFileDialog(
                 .padding(bottom = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // Large thumbnail
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(280.dp)
                     .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable { openUriExternally(context, file.uri, file.mimeType) },
                 contentAlignment = Alignment.Center,
             ) {
                 if (file.hasThumb) {
-                    val context = LocalContext.current
                     val bitmap = remember(file.uri) {
                         try {
                             context.contentResolver.loadThumbnail(
