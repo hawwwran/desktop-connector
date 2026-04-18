@@ -143,7 +143,7 @@ class TransferController
 
         if ($complete) {
             $db->execute('UPDATE transfers SET complete = 1 WHERE id = :id', [':id' => $transferId]);
-            self::sendFcmWake($db, $transferId);
+            TransferWakeService::wake($db, $transferId);
         }
 
         Router::json([
@@ -285,38 +285,6 @@ class TransferController
         $since = isset($_GET['since']) ? (int)$_GET['since'] : 0;
         $isTest = !empty($_GET['test']);
         Router::json(TransferNotifyService::longPoll($db, $deviceId, $since, $isTest));
-    }
-
-    private static function sendFcmWake(Database $db, string $transferId): void
-    {
-        try {
-            if (!FcmSender::isAvailable()) {
-                return;
-            }
-
-            $transfer = $db->querySingle(
-                'SELECT recipient_id FROM transfers WHERE id = :id',
-                [':id' => $transferId]
-            );
-            if (!$transfer) {
-                return;
-            }
-
-            $device = $db->querySingle(
-                'SELECT fcm_token FROM devices WHERE device_id = :id',
-                [':id' => $transfer['recipient_id']]
-            );
-            if (!$device || empty($device['fcm_token'])) {
-                return;
-            }
-
-            FcmSender::sendDataMessage($device['fcm_token'], [
-                'type' => 'transfer_ready',
-                'transfer_id' => $transferId,
-            ]);
-        } catch (\Throwable $e) {
-            // FCM failure must never break the transfer flow
-        }
     }
 
     private static function cleanup(Database $db): void
