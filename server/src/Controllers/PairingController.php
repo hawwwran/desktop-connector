@@ -2,16 +2,11 @@
 
 class PairingController
 {
-    public static function request(Database $db, string $deviceId): void
+    public static function request(Database $db, RequestContext $ctx): void
     {
-        $body = Router::getJsonBody();
-        if (!$body || empty($body['desktop_id']) || empty($body['phone_pubkey'])) {
-            Router::json(['error' => 'Missing desktop_id or phone_pubkey'], 400);
-            return;
-        }
-
-        $desktopId = $body['desktop_id'];
-        $phonePubkey = $body['phone_pubkey'];
+        $body = $ctx->jsonBody();
+        $desktopId = Validators::requireNonEmptyString($body, 'desktop_id');
+        $phonePubkey = Validators::requireNonEmptyString($body, 'phone_pubkey');
 
         // Verify desktop device exists
         $desktop = $db->querySingle(
@@ -19,14 +14,13 @@ class PairingController
             [':id' => $desktopId]
         );
         if (!$desktop) {
-            Router::json(['error' => 'Desktop device not found'], 404);
-            return;
+            throw new NotFoundError('Desktop device not found');
         }
 
         // Remove any existing unclaimed requests from this phone to this desktop
         $db->execute(
             'DELETE FROM pairing_requests WHERE phone_id = :phone AND desktop_id = :desktop AND claimed = 0',
-            [':phone' => $deviceId, ':desktop' => $desktopId]
+            [':phone' => $ctx->deviceId, ':desktop' => $desktopId]
         );
 
         $db->execute(
@@ -34,7 +28,7 @@ class PairingController
              VALUES (:desktop, :phone, :pubkey, :now)',
             [
                 ':desktop' => $desktopId,
-                ':phone' => $deviceId,
+                ':phone' => $ctx->deviceId,
                 ':pubkey' => $phonePubkey,
                 ':now' => time(),
             ]
@@ -43,16 +37,15 @@ class PairingController
         Router::json(['status' => 'ok'], 201);
     }
 
-    public static function poll(Database $db, string $deviceId): void
+    public static function poll(Database $db, RequestContext $ctx): void
     {
         $requests = $db->queryAll(
             'SELECT id, phone_id, phone_pubkey FROM pairing_requests
              WHERE desktop_id = :desktop AND claimed = 0
              ORDER BY created_at ASC',
-            [':desktop' => $deviceId]
+            [':desktop' => $ctx->deviceId]
         );
 
-        // Mark as claimed
         foreach ($requests as $req) {
             $db->execute(
                 'UPDATE pairing_requests SET claimed = 1 WHERE id = :id',
@@ -63,18 +56,12 @@ class PairingController
         Router::json(['requests' => $requests]);
     }
 
-    public static function confirm(Database $db, string $deviceId): void
+    public static function confirm(Database $db, RequestContext $ctx): void
     {
-        $body = Router::getJsonBody();
-        if (!$body || empty($body['phone_id'])) {
-            Router::json(['error' => 'Missing phone_id'], 400);
-            return;
-        }
+        $body = $ctx->jsonBody();
+        $phoneId = Validators::requireNonEmptyString($body, 'phone_id');
 
-        $phoneId = $body['phone_id'];
-
-        // Store the pairing (normalize order for uniqueness)
-        $ids = [$deviceId, $phoneId];
+        $ids = [$ctx->deviceId, $phoneId];
         sort($ids);
 
         $existing = $db->querySingle(

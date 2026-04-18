@@ -6,7 +6,7 @@ class FcmController
      * GET /api/fcm/config — return Firebase client config for dynamic initialization.
      * Public endpoint (no auth needed — values are non-secret client identifiers).
      */
-    public static function config(): void
+    public static function config(Database $db, RequestContext $ctx): void
     {
         $path = __DIR__ . '/../../google-services.json';
         if (!file_exists($path)) {

@@ -1,75 +1,85 @@
 <?php
 
 /**
- * HTTP adapter for /api/transfers/*. Each method parses inputs, dispatches
- * to a service in src/Services/, and translates the result to a response
- * via Router::json or Router::binary. Business logic lives in the services.
+ * HTTP adapter for /api/transfers/*. Validates input off the RequestContext,
+ * dispatches to a service in src/Services/, and serializes the result via
+ * Router::json / Router::binary. Business-level errors surface as ApiError
+ * exceptions from the service layer and are caught by the Router.
  */
 class TransferController
 {
-    public static function init(Database $db, string $deviceId): void
+    public static function init(Database $db, RequestContext $ctx): void
     {
-        $body = Router::getJsonBody() ?? [];
-        [$resp, $status] = TransferService::init($db, $deviceId, $body);
-        Router::json($resp, $status);
-    }
+        $body = $ctx->jsonBody();
+        $transferId = Validators::requireSafeTransferId($body, 'transfer_id');
+        $recipientId = Validators::requireNonEmptyString($body, 'recipient_id');
+        $encryptedMeta = Validators::requireNonEmptyString($body, 'encrypted_meta');
+        $chunkCount = Validators::requireInt($body, 'chunk_count');
 
-    public static function uploadChunk(Database $db, string $deviceId, array $params): void
-    {
-        [$resp, $status] = TransferService::uploadChunk(
+        $result = TransferService::init(
             $db,
-            $deviceId,
-            $params['transfer_id'],
-            (int)$params['chunk_index'],
-            Router::getRawBody()
+            $ctx->deviceId,
+            $transferId,
+            $recipientId,
+            $encryptedMeta,
+            $chunkCount,
         );
-        Router::json($resp, $status);
+        Router::json($result, 201);
     }
 
-    public static function pending(Database $db, string $deviceId): void
+    public static function uploadChunk(Database $db, RequestContext $ctx): void
+    {
+        $transferId = Validators::requireSafeTransferId($ctx->params);
+        $chunkIndex = Validators::requireIntParam($ctx->params, 'chunk_index', min: 0);
+
+        $result = TransferService::uploadChunk(
+            $db,
+            $ctx->deviceId,
+            $transferId,
+            $chunkIndex,
+            $ctx->rawBody(),
+        );
+        Router::json($result);
+    }
+
+    public static function pending(Database $db, RequestContext $ctx): void
     {
         // 1-in-20 sampling of cleanup attached to an HTTP request path; policy
         // stays here so the cleanup service itself is deterministic/reusable.
         if (random_int(1, 20) === 1) {
             TransferCleanupService::run($db);
         }
-        Router::json(['transfers' => TransferService::listPending($db, $deviceId)]);
+        Router::json(['transfers' => TransferService::listPending($db, $ctx->deviceId)]);
     }
 
-    public static function downloadChunk(Database $db, string $deviceId, array $params): void
+    public static function downloadChunk(Database $db, RequestContext $ctx): void
     {
-        [$resp, $status] = TransferService::downloadChunk(
-            $db,
-            $deviceId,
-            $params['transfer_id'],
-            (int)$params['chunk_index']
-        );
-        if (isset($resp['binary'])) {
-            Router::binary($resp['binary'], $status);
-        } else {
-            Router::json($resp, $status);
-        }
+        $transferId = Validators::requireSafeTransferId($ctx->params);
+        $chunkIndex = Validators::requireIntParam($ctx->params, 'chunk_index', min: 0);
+
+        $bytes = TransferService::downloadChunk($db, $ctx->deviceId, $transferId, $chunkIndex);
+        Router::binary($bytes);
     }
 
-    public static function ack(Database $db, string $deviceId, array $params): void
+    public static function ack(Database $db, RequestContext $ctx): void
     {
-        [$resp, $status] = TransferService::ack($db, $deviceId, $params['transfer_id']);
-        Router::json($resp, $status);
+        $transferId = Validators::requireSafeTransferId($ctx->params);
+        Router::json(TransferService::ack($db, $ctx->deviceId, $transferId));
     }
 
-    public static function sentStatus(Database $db, string $deviceId): void
+    public static function sentStatus(Database $db, RequestContext $ctx): void
     {
-        $rows = TransferStatusService::loadSentForDevice($db, $deviceId);
+        $rows = TransferStatusService::loadSentForDevice($db, $ctx->deviceId);
         Router::json(['transfers' => array_map(
             [TransferStatusService::class, 'formatSent'],
             $rows
         )]);
     }
 
-    public static function notify(Database $db, string $deviceId): void
+    public static function notify(Database $db, RequestContext $ctx): void
     {
-        $since = isset($_GET['since']) ? (int)$_GET['since'] : 0;
-        $isTest = !empty($_GET['test']);
-        Router::json(TransferNotifyService::longPoll($db, $deviceId, $since, $isTest));
+        $since = isset($ctx->query['since']) ? (int)$ctx->query['since'] : 0;
+        $isTest = !empty($ctx->query['test']);
+        Router::json(TransferNotifyService::longPoll($db, $ctx->deviceId, $since, $isTest));
     }
 }

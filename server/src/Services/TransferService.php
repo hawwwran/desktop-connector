@@ -3,10 +3,14 @@
 /**
  * Core transfer orchestration: init, upload, pending list, download, ack.
  *
- * Each method returns a [data, httpStatus] tuple so the controller stays a
- * thin HTTP adapter and the service is free of HTTP concerns. Downloads
- * return ['binary' => bytes] for the happy path so the adapter knows to
- * emit a binary response instead of JSON.
+ * Business-level failures throw ApiError subclasses (NotFoundError,
+ * ForbiddenError, …); the Router catches these and serializes uniformly.
+ * Success paths return plain data — downloadChunk returns raw bytes so
+ * the controller can emit them via Router::binary.
+ *
+ * Input-shape and path-safety validation happens at the HTTP boundary
+ * (Validators::requireSafeTransferId, requireNonEmptyString, requireInt)
+ * before calling these methods; the service assumes its inputs are shaped.
  *
  * Side effects route through sibling services: upload completion fires
  * TransferWakeService::wake; ack removes chunk storage via
@@ -16,30 +20,17 @@ class TransferService
 {
     private const MAX_PENDING_BYTES = 500 * 1024 * 1024;   // 500 MB per recipient
     private const MAX_CHUNK_COUNT = 500;
-    // transfer_id is concatenated into a filesystem path (server/storage/{id}/...).
-    // Restrict to alphanumeric + hyphen with a length cap so "../" and friends
-    // can never escape the storage directory. Matches Android's defense-in-depth
-    // check in PollService.SAFE_TRANSFER_ID; both desktop and Android generate
-    // UUIDs which fit comfortably under 64 chars.
-    private const TRANSFER_ID_PATTERN = '/^[a-zA-Z0-9-]{1,64}$/';
 
-    public static function init(Database $db, string $senderId, array $body): array
-    {
-        if (empty($body) || empty($body['transfer_id']) || empty($body['recipient_id'])
-            || empty($body['encrypted_meta']) || !isset($body['chunk_count'])) {
-            return [['error' => 'Missing required fields'], 400];
-        }
-
-        $transferId = $body['transfer_id'];
-        $recipientId = $body['recipient_id'];
-        $encryptedMeta = $body['encrypted_meta'];
-        $chunkCount = (int)$body['chunk_count'];
-
-        if ($err = self::validateTransferId($transferId)) {
-            return $err;
-        }
+    public static function init(
+        Database $db,
+        string $senderId,
+        string $transferId,
+        string $recipientId,
+        string $encryptedMeta,
+        int $chunkCount,
+    ): array {
         if ($chunkCount < 1 || $chunkCount > self::MAX_CHUNK_COUNT) {
-            return [['error' => 'Invalid chunk_count'], 400];
+            throw new ValidationError('Invalid chunk_count');
         }
 
         $usage = $db->querySingle(
@@ -50,7 +41,7 @@ class TransferService
             [':rid' => $recipientId]
         );
         if ($usage && $usage['total_bytes'] >= self::MAX_PENDING_BYTES) {
-            return [['error' => 'Recipient storage limit exceeded'], 507];
+            throw new StorageLimitError('Recipient storage limit exceeded');
         }
 
         $existing = $db->querySingle(
@@ -58,7 +49,7 @@ class TransferService
             [':id' => $transferId]
         );
         if ($existing) {
-            return [['error' => 'Transfer ID already exists'], 409];
+            throw new ConflictError('Transfer ID already exists');
         }
 
         $db->execute(
@@ -74,31 +65,32 @@ class TransferService
             ]
         );
 
-        return [['transfer_id' => $transferId, 'status' => 'awaiting_chunks'], 201];
+        return ['transfer_id' => $transferId, 'status' => 'awaiting_chunks'];
     }
 
-    public static function uploadChunk(Database $db, string $deviceId, string $transferId, int $chunkIndex, string $blobData): array
-    {
-        if ($err = self::validateTransferId($transferId)) {
-            return $err;
-        }
+    public static function uploadChunk(
+        Database $db,
+        string $deviceId,
+        string $transferId,
+        int $chunkIndex,
+        string $blobData,
+    ): array {
         $transfer = $db->querySingle(
             'SELECT id, sender_id, chunk_count, chunks_received, complete
              FROM transfers WHERE id = :id',
             [':id' => $transferId]
         );
-
         if (!$transfer) {
-            return [['error' => 'Transfer not found'], 404];
+            throw new NotFoundError('Transfer not found');
         }
         if ($transfer['sender_id'] !== $deviceId) {
-            return [['error' => 'Not the sender of this transfer'], 403];
+            throw new ForbiddenError('Not the sender of this transfer');
         }
         if ($chunkIndex < 0 || $chunkIndex >= $transfer['chunk_count']) {
-            return [['error' => 'Invalid chunk_index'], 400];
+            throw new ValidationError('Invalid chunk_index');
         }
         if ($blobData === '') {
-            return [['error' => 'Empty chunk data'], 400];
+            throw new ValidationError('Empty chunk data');
         }
 
         $storageDir = __DIR__ . '/../../storage/' . $transferId;
@@ -148,10 +140,10 @@ class TransferService
             TransferWakeService::wake($db, $transferId);
         }
 
-        return [[
+        return [
             'chunks_received' => (int)$updated['chunks_received'],
             'complete' => $complete,
-        ], 200];
+        ];
     }
 
     public static function listPending(Database $db, string $deviceId): array
@@ -165,17 +157,15 @@ class TransferService
         );
     }
 
-    public static function downloadChunk(Database $db, string $deviceId, string $transferId, int $chunkIndex): array
+    /** Returns the chunk's raw bytes. Controller emits them via Router::binary. */
+    public static function downloadChunk(Database $db, string $deviceId, string $transferId, int $chunkIndex): string
     {
-        if ($err = self::validateTransferId($transferId)) {
-            return $err;
-        }
         $transfer = $db->querySingle(
             'SELECT recipient_id, chunk_count FROM transfers WHERE id = :id',
             [':id' => $transferId]
         );
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
-            return [['error' => 'Transfer not found or not for you'], 404];
+            throw new NotFoundError('Transfer not found or not for you');
         }
 
         $chunk = $db->querySingle(
@@ -183,12 +173,12 @@ class TransferService
             [':tid' => $transferId, ':idx' => $chunkIndex]
         );
         if (!$chunk) {
-            return [['error' => 'Chunk not found'], 404];
+            throw new NotFoundError('Chunk not found');
         }
 
         $fullPath = __DIR__ . '/../../storage/' . $chunk['blob_path'];
         if (!file_exists($fullPath)) {
-            return [['error' => 'Chunk file missing from storage'], 500];
+            throw new ApiError(500, 'Chunk file missing from storage');
         }
 
         // Track download progress, capped at chunk_count - 1 until ack.
@@ -202,20 +192,17 @@ class TransferService
             [':progress' => $newProgress, ':id' => $transferId]
         );
 
-        return [['binary' => file_get_contents($fullPath)], 200];
+        return file_get_contents($fullPath);
     }
 
     public static function ack(Database $db, string $deviceId, string $transferId): array
     {
-        if ($err = self::validateTransferId($transferId)) {
-            return $err;
-        }
         $transfer = $db->querySingle(
             'SELECT id, sender_id, recipient_id FROM transfers WHERE id = :id',
             [':id' => $transferId]
         );
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
-            return [['error' => 'Transfer not found'], 404];
+            throw new NotFoundError('Transfer not found');
         }
 
         // Pairing-stats SUM must run BEFORE chunk deletion (chunks table still holds sizes here).
@@ -242,15 +229,6 @@ class TransferService
             [':now' => time(), ':id' => $transferId]
         );
 
-        return [['status' => 'deleted'], 200];
-    }
-
-    /** Returns [errorResponse, 400] if the id is unsafe, or null if OK. */
-    private static function validateTransferId(string $transferId): ?array
-    {
-        if (!preg_match(self::TRANSFER_ID_PATTERN, $transferId)) {
-            return [['error' => 'Invalid transfer_id format'], 400];
-        }
-        return null;
+        return ['status' => 'deleted'];
     }
 }

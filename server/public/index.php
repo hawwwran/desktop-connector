@@ -3,13 +3,27 @@
 // Desktop Connector - PHP Relay Server
 
 require_once __DIR__ . '/../src/Database.php';
+
+// --- Http pipeline ---
+require_once __DIR__ . '/../src/Http/RequestContext.php';
+require_once __DIR__ . '/../src/Http/ApiError.php';
+require_once __DIR__ . '/../src/Http/ErrorResponder.php';
+require_once __DIR__ . '/../src/Http/Validators.php';
+
+// --- Auth ---
+require_once __DIR__ . '/../src/Auth/AuthIdentity.php';
+require_once __DIR__ . '/../src/Auth/AuthService.php';
+
 require_once __DIR__ . '/../src/Router.php';
+
+// --- Controllers ---
 require_once __DIR__ . '/../src/Controllers/DeviceController.php';
 require_once __DIR__ . '/../src/Controllers/PairingController.php';
 require_once __DIR__ . '/../src/Controllers/TransferController.php';
 require_once __DIR__ . '/../src/Controllers/DashboardController.php';
 require_once __DIR__ . '/../src/Controllers/FcmController.php';
 require_once __DIR__ . '/../src/Controllers/FasttrackController.php';
+
 require_once __DIR__ . '/../src/FcmSender.php';
 require_once __DIR__ . '/../src/AppLog.php';
 
@@ -24,136 +38,102 @@ require_once __DIR__ . '/../src/Services/TransferService.php';
 $db = Database::getInstance();
 $db->migrate();
 
-$router = new Router();
+$router = new Router($db);
 
 // --- Public routes (no auth) ---
 
-$router->get('/api/health', function () use ($db) {
-    DeviceController::health($db);
+$router->get('/api/health', function (RequestContext $ctx) use ($db) {
+    DeviceController::health($db, $ctx);
 });
 
-$router->post('/api/devices/register', function () use ($db) {
-    DeviceController::register($db);
+$router->post('/api/devices/register', function (RequestContext $ctx) use ($db) {
+    DeviceController::register($db, $ctx);
 });
 
-$router->get('/api/fcm/config', function () {
-    FcmController::config();
+$router->get('/api/fcm/config', function (RequestContext $ctx) use ($db) {
+    FcmController::config($db, $ctx);
 });
 
-$router->get('/api/devices/stats', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    DeviceController::stats($db, $deviceId);
-});
-
-$router->get('/dashboard', function () use ($db) {
+$router->get('/dashboard', function (RequestContext $ctx) use ($db) {
     DashboardController::show($db);
 });
 
 // Redirect root to dashboard
-$router->get('/', function () {
+$router->get('/', function (RequestContext $ctx) {
     header('Location: dashboard');
     exit;
 });
 
 // --- Authenticated routes ---
 
-$router->post('/api/devices/fcm-token', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    DeviceController::updateFcmToken($db, $deviceId);
+$router->authGet('/api/devices/stats', function (RequestContext $ctx) use ($db) {
+    DeviceController::stats($db, $ctx);
 });
 
-$router->post('/api/devices/ping', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    DeviceController::ping($db, $deviceId);
+$router->authPost('/api/devices/fcm-token', function (RequestContext $ctx) use ($db) {
+    DeviceController::updateFcmToken($db, $ctx);
 });
 
-$router->post('/api/devices/pong', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    DeviceController::pong($db, $deviceId);
+$router->authPost('/api/devices/ping', function (RequestContext $ctx) use ($db) {
+    DeviceController::ping($db, $ctx);
 });
 
-$router->post('/api/pairing/request', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    PairingController::request($db, $deviceId);
+$router->authPost('/api/devices/pong', function (RequestContext $ctx) use ($db) {
+    DeviceController::pong($db, $ctx);
 });
 
-$router->get('/api/pairing/poll', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    PairingController::poll($db, $deviceId);
+$router->authPost('/api/pairing/request', function (RequestContext $ctx) use ($db) {
+    PairingController::request($db, $ctx);
 });
 
-$router->post('/api/pairing/confirm', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    PairingController::confirm($db, $deviceId);
+$router->authGet('/api/pairing/poll', function (RequestContext $ctx) use ($db) {
+    PairingController::poll($db, $ctx);
 });
 
-$router->post('/api/transfers/init', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    TransferController::init($db, $deviceId);
+$router->authPost('/api/pairing/confirm', function (RequestContext $ctx) use ($db) {
+    PairingController::confirm($db, $ctx);
 });
 
-$router->post('/api/transfers/{transfer_id}/chunks/{chunk_index}', function ($params) use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    TransferController::uploadChunk($db, $deviceId, $params);
+$router->authPost('/api/transfers/init', function (RequestContext $ctx) use ($db) {
+    TransferController::init($db, $ctx);
 });
 
-$router->get('/api/transfers/pending', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    TransferController::pending($db, $deviceId);
+$router->authPost('/api/transfers/{transfer_id}/chunks/{chunk_index}', function (RequestContext $ctx) use ($db) {
+    TransferController::uploadChunk($db, $ctx);
 });
 
-$router->get('/api/transfers/{transfer_id}/chunks/{chunk_index}', function ($params) use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    TransferController::downloadChunk($db, $deviceId, $params);
+$router->authGet('/api/transfers/pending', function (RequestContext $ctx) use ($db) {
+    TransferController::pending($db, $ctx);
 });
 
-$router->post('/api/transfers/{transfer_id}/ack', function ($params) use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    TransferController::ack($db, $deviceId, $params);
+$router->authGet('/api/transfers/{transfer_id}/chunks/{chunk_index}', function (RequestContext $ctx) use ($db) {
+    TransferController::downloadChunk($db, $ctx);
 });
 
-$router->get('/api/transfers/sent-status', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    TransferController::sentStatus($db, $deviceId);
+$router->authPost('/api/transfers/{transfer_id}/ack', function (RequestContext $ctx) use ($db) {
+    TransferController::ack($db, $ctx);
 });
 
-$router->get('/api/transfers/notify', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    TransferController::notify($db, $deviceId);
+$router->authGet('/api/transfers/sent-status', function (RequestContext $ctx) use ($db) {
+    TransferController::sentStatus($db, $ctx);
+});
+
+$router->authGet('/api/transfers/notify', function (RequestContext $ctx) use ($db) {
+    TransferController::notify($db, $ctx);
 });
 
 // --- Fasttrack: lightweight encrypted message relay ---
 
-$router->post('/api/fasttrack/send', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    FasttrackController::send($db, $deviceId);
+$router->authPost('/api/fasttrack/send', function (RequestContext $ctx) use ($db) {
+    FasttrackController::send($db, $ctx);
 });
 
-$router->get('/api/fasttrack/pending', function () use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    FasttrackController::pending($db, $deviceId);
+$router->authGet('/api/fasttrack/pending', function (RequestContext $ctx) use ($db) {
+    FasttrackController::pending($db, $ctx);
 });
 
-$router->post('/api/fasttrack/{id}/ack', function ($params) use ($db) {
-    $deviceId = Router::authenticate($db);
-    if ($deviceId === null) return;
-    FasttrackController::ack($db, $deviceId, $params);
+$router->authPost('/api/fasttrack/{id}/ack', function (RequestContext $ctx) use ($db) {
+    FasttrackController::ack($db, $ctx);
 });
 
 // Dispatch

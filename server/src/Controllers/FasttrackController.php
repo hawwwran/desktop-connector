@@ -15,16 +15,13 @@ class FasttrackController
      * Body: {recipient_id, encrypted_data}
      * Validates pairing, stores message, sends FCM wake.
      */
-    public static function send(Database $db, string $deviceId): void
+    public static function send(Database $db, RequestContext $ctx): void
     {
-        $body = Router::getJsonBody();
-        if (!$body || empty($body['recipient_id']) || empty($body['encrypted_data'])) {
-            Router::json(['error' => 'Missing required fields'], 400);
-            return;
-        }
+        $body = $ctx->jsonBody();
+        $recipientId = Validators::requireNonEmptyString($body, 'recipient_id');
+        $encryptedData = Validators::requireNonEmptyString($body, 'encrypted_data');
 
-        $recipientId = $body['recipient_id'];
-        $encryptedData = $body['encrypted_data'];
+        $deviceId = $ctx->deviceId;
 
         // Validate pairing exists (check both orderings)
         $pairing = $db->querySingle(
@@ -35,8 +32,7 @@ class FasttrackController
              ':a2' => $deviceId, ':b2' => $recipientId]
         );
         if (!$pairing) {
-            Router::json(['error' => 'Devices are not paired'], 403);
-            return;
+            throw new ForbiddenError('Devices are not paired');
         }
 
         // Clean up expired messages for this recipient
@@ -51,13 +47,13 @@ class FasttrackController
             [':rid' => $recipientId]
         );
         if ($count && $count['cnt'] >= self::MAX_PENDING) {
-            Router::json(['error' => 'Too many pending messages'], 429);
-            return;
+            // Plain 429 without Retry-After to match the pre-refactor wire shape;
+            // ping's 429 is the one that carries the header.
+            throw new ApiError(429, 'Too many pending messages');
         }
 
         AppLog::log('Fasttrack', "send from={$deviceId} to={$recipientId} size=" . strlen($encryptedData));
 
-        // Insert message
         $db->execute(
             'INSERT INTO fasttrack_messages (sender_id, recipient_id, encrypted_data, created_at)
              VALUES (:sid, :rid, :data, :now)',
@@ -91,8 +87,10 @@ class FasttrackController
      * GET /api/fasttrack/pending — fetch all pending messages for this device.
      * Returns: {messages: [{id, sender_id, encrypted_data, created_at}, ...]}
      */
-    public static function pending(Database $db, string $deviceId): void
+    public static function pending(Database $db, RequestContext $ctx): void
     {
+        $deviceId = $ctx->deviceId;
+
         // Clean up expired messages first
         $db->execute(
             'DELETE FROM fasttrack_messages WHERE recipient_id = :rid AND created_at < :cutoff',
@@ -117,25 +115,19 @@ class FasttrackController
      * POST /api/fasttrack/{id}/ack — acknowledge and delete a message.
      * Validates that the caller is the recipient.
      */
-    public static function ack(Database $db, string $deviceId, array $params): void
+    public static function ack(Database $db, RequestContext $ctx): void
     {
-        $messageId = (int)($params['id'] ?? 0);
-        if ($messageId <= 0) {
-            Router::json(['error' => 'Invalid message ID'], 400);
-            return;
-        }
+        $messageId = Validators::requireIntParam($ctx->params, 'id');
 
         $msg = $db->querySingle(
             'SELECT recipient_id FROM fasttrack_messages WHERE id = :id',
             [':id' => $messageId]
         );
         if (!$msg) {
-            Router::json(['error' => 'Message not found'], 404);
-            return;
+            throw new NotFoundError('Message not found');
         }
-        if ($msg['recipient_id'] !== $deviceId) {
-            Router::json(['error' => 'Not authorized'], 403);
-            return;
+        if ($msg['recipient_id'] !== $ctx->deviceId) {
+            throw new ForbiddenError('Not authorized');
         }
 
         $db->execute(
@@ -143,7 +135,7 @@ class FasttrackController
             [':id' => $messageId]
         );
 
-        AppLog::log('Fasttrack', "ack id={$messageId} by={$deviceId}");
+        AppLog::log('Fasttrack', "ack id={$messageId} by={$ctx->deviceId}");
         Router::json(['status' => 'ok']);
     }
 }

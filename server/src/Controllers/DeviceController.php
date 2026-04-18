@@ -2,34 +2,28 @@
 
 class DeviceController
 {
-    public static function register(Database $db): void
+    public static function register(Database $db, RequestContext $ctx): void
     {
-        $body = Router::getJsonBody();
-        if (!$body || empty($body['public_key'])) {
-            Router::json(['error' => 'Missing public_key'], 400);
-            return;
-        }
-
-        $publicKey = $body['public_key'];
-        $deviceType = $body['device_type'] ?? 'unknown';
+        $body = $ctx->jsonBody();
+        $publicKey = Validators::requireNonEmptyString($body, 'public_key');
+        $deviceType = isset($body['device_type']) && is_string($body['device_type'])
+            ? $body['device_type']
+            : 'unknown';
 
         // Compute device_id: first 32 hex chars of SHA-256 of raw public key bytes
         $rawKey = base64_decode($publicKey, true);
         if ($rawKey === false || strlen($rawKey) !== 32) {
-            Router::json(['error' => 'Invalid public_key: must be 32 bytes base64-encoded'], 400);
-            return;
+            throw new ValidationError('Invalid public_key: must be 32 bytes base64-encoded');
         }
 
         $deviceId = substr(hash('sha256', $rawKey), 0, 32);
 
-        // Check if already registered
+        // Check if already registered — return existing credentials
         $existing = $db->querySingle(
             'SELECT device_id, auth_token FROM devices WHERE device_id = :id',
             [':id' => $deviceId]
         );
-
         if ($existing) {
-            // Return existing credentials
             Router::json([
                 'device_id' => $existing['device_id'],
                 'auth_token' => $existing['auth_token'],
@@ -37,7 +31,6 @@ class DeviceController
             return;
         }
 
-        // Generate auth token
         $authToken = bin2hex(random_bytes(32));
         $now = time();
 
@@ -59,15 +52,15 @@ class DeviceController
         ], 201);
     }
 
-    public static function stats(Database $db, string $deviceId): void
+    public static function stats(Database $db, RequestContext $ctx): void
     {
-        // Get this device info
+        $deviceId = $ctx->deviceId;
+
         $device = $db->querySingle(
             'SELECT * FROM devices WHERE device_id = :id',
             [':id' => $deviceId]
         );
 
-        // Get pairing stats
         $pairings = $db->queryAll(
             'SELECT * FROM pairings WHERE device_a_id = :id OR device_b_id = :id',
             [':id' => $deviceId]
@@ -91,8 +84,8 @@ class DeviceController
             ];
         }
 
-        // Pending transfers for this device (only to/from currently paired device)
-        $pairedId = $_GET['paired_with'] ?? null;
+        // Pending transfers — narrow to the currently paired device when caller supplies it.
+        $pairedId = $ctx->query['paired_with'] ?? null;
 
         if ($pairedId) {
             $pendingIn = $db->querySingle(
@@ -129,18 +122,15 @@ class DeviceController
         ]);
     }
 
-    public static function updateFcmToken(Database $db, string $deviceId): void
+    public static function updateFcmToken(Database $db, RequestContext $ctx): void
     {
-        $body = Router::getJsonBody();
-        if (!$body || !array_key_exists('fcm_token', $body)) {
-            Router::json(['error' => 'Missing fcm_token'], 400);
-            return;
-        }
+        $body = $ctx->jsonBody();
+        // Null is a valid value — clears the stored token.
+        $token = Validators::requireNullableString($body, 'fcm_token');
 
-        $token = $body['fcm_token']; // string or null (to clear)
         $db->execute(
             'UPDATE devices SET fcm_token = :token WHERE device_id = :id',
-            [':token' => $token, ':id' => $deviceId]
+            [':token' => $token, ':id' => $ctx->deviceId]
         );
 
         Router::json(['status' => 'ok']);
@@ -161,14 +151,11 @@ class DeviceController
     private const PING_COOLDOWN_SEC = 30;
     private const PING_MAX_WAIT_SEC = 5;
 
-    public static function ping(Database $db, string $deviceId): void
+    public static function ping(Database $db, RequestContext $ctx): void
     {
-        $body = Router::getJsonBody();
-        if (!$body || empty($body['recipient_id'])) {
-            Router::json(['error' => 'Missing recipient_id'], 400);
-            return;
-        }
-        $recipientId = $body['recipient_id'];
+        $body = $ctx->jsonBody();
+        $recipientId = Validators::requireNonEmptyString($body, 'recipient_id');
+        $deviceId = $ctx->deviceId;
 
         $pairing = $db->querySingle(
             'SELECT id FROM pairings
@@ -178,8 +165,7 @@ class DeviceController
              ':a2' => $deviceId, ':b2' => $recipientId]
         );
         if (!$pairing) {
-            Router::json(['error' => 'Devices are not paired'], 403);
-            return;
+            throw new ForbiddenError('Devices are not paired');
         }
 
         // Atomic rate-limit + concurrent-ping claim.
@@ -204,12 +190,10 @@ class DeviceController
                 [':s' => $deviceId, ':r' => $recipientId]
             );
             $retryAfter = $row ? max(1, (int)$row['cooldown_until'] - $now) : 1;
-            header('Retry-After: ' . $retryAfter);
-            Router::json([
-                'error' => 'Rate limit: ping already in flight or too recent',
-                'retry_after' => $retryAfter,
-            ], 429);
-            return;
+            throw new RateLimitError(
+                'Rate limit: ping already in flight or too recent',
+                retryAfter: $retryAfter,
+            );
         }
 
         $recipient = $db->querySingle(
@@ -217,8 +201,7 @@ class DeviceController
             [':id' => $recipientId]
         );
         if (!$recipient) {
-            Router::json(['error' => 'Recipient not found'], 404);
-            return;
+            throw new NotFoundError('Recipient not found');
         }
 
         $baseline = $now;
@@ -284,34 +267,21 @@ class DeviceController
 
     /**
      * POST /api/devices/pong — phone calls this when it receives a ping FCM.
-     * Router::authenticate already bumps last_seen_at; this just acks.
+     * Router auth already bumps last_seen_at; this just acks.
      */
-    public static function pong(Database $db, string $deviceId): void
+    public static function pong(Database $db, RequestContext $ctx): void
     {
         Router::json(['ok' => true, 't' => time()]);
     }
 
-    public static function health(Database $db = null): void
+    /**
+     * GET /api/health — public, but doubles as a heartbeat when auth headers
+     * are sent. AuthService::optional bumps `last_seen_at` on a successful
+     * lookup; missing or invalid credentials silently return unauth'd.
+     */
+    public static function health(Database $db, RequestContext $ctx): void
     {
-        // If auth headers present, update last_seen (acts as heartbeat)
-        if ($db !== null) {
-            $deviceId = $_SERVER['HTTP_X_DEVICE_ID'] ?? null;
-            $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-            if ($deviceId && str_starts_with($authHeader, 'Bearer ')) {
-                $token = substr($authHeader, 7);
-                $device = $db->querySingle(
-                    'SELECT device_id FROM devices WHERE device_id = :id AND auth_token = :token',
-                    [':id' => $deviceId, ':token' => $token]
-                );
-                if ($device) {
-                    $db->execute(
-                        'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
-                        [':now' => time(), ':id' => $deviceId]
-                    );
-                }
-            }
-        }
-
+        AuthService::optional($db);
         Router::json([
             'status' => 'ok',
             'time' => time(),
