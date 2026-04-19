@@ -37,6 +37,8 @@ object FindPhoneManager {
     private const val CHANNEL_ID = "dc_find_phone"
     private const val GPS_INTERVAL_MS = 5000L
     private const val MAX_TIMEOUT_SECONDS = 300 // 5 minutes
+    // Brand accent (DcBlue700 = #2058F0) — tints notifications in the shade header.
+    private val BRAND_ACCENT = android.graphics.Color.rgb(0x20, 0x58, 0xF0)
 
     @Volatile var isRinging = false
         private set
@@ -406,6 +408,7 @@ object FindPhoneManager {
 
         val notification = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setColor(BRAND_ACCENT)
             .setContentTitle("Find My Phone")
             .setContentText("Your phone is being located")
             .setOngoing(true)

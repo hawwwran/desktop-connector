@@ -47,6 +47,8 @@ class PollService : Service() {
         private const val DELIVERY_STALL_TIMEOUT_MS = 2 * 60 * 1000L
         private const val STALE_PART_TTL_MS = 60 * 60 * 1000L
         private val SAFE_TRANSFER_ID = Regex("^[a-zA-Z0-9-]+$")
+        // Brand accent (DcBlue700 = #2058F0) — tints notifications in the shade header.
+        private val BRAND_ACCENT = android.graphics.Color.rgb(0x20, 0x58, 0xF0)
 
         // Shared state for UI — "active", "unavailable", "testing", "offline"
         @Volatile var longPollStatus: String = "offline"
@@ -181,6 +183,7 @@ class PollService : Service() {
 
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(icon)
+            .setColor(BRAND_ACCENT)
             .setContentTitle("Desktop Connector")
             .setContentText(statusText)
             .setContentIntent(pending)
@@ -188,6 +191,14 @@ class PollService : Service() {
             .build()
     }
 
+
+    private fun markDisconnected(reason: String) {
+        if (!isConnected) return
+        isConnected = false
+        longPollStatus = "offline"
+        updateNotification(buildIdleNotification(false))
+        AppLog.log("Poll", "connection.lost.detected reason=$reason", "warning")
+    }
 
     private fun updateNotification(notification: Notification) {
         val mgr = getSystemService(NotificationManager::class.java)
@@ -253,6 +264,11 @@ class PollService : Service() {
                 if (longPollAvailable == null) {
                     longPollStatus = "testing"
                     val testResult = api.longPollNotify(0, test = true)
+                    if (testResult == null && !api.healthCheck()) {
+                        markDisconnected("probe_null")
+                        if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
+                        continue
+                    }
                     longPollAvailable = testResult != null
                     longPollStatus = if (longPollAvailable == true) "active" else "unavailable"
                     if (longPollAvailable == true) {
@@ -286,6 +302,11 @@ class PollService : Service() {
                         longPollAvailable = null
                         longPollStatus = "unavailable"
                         AppLog.log("Poll", "poll.notify.failed reason=will_re_test_next_cycle", "warning")
+                        if (!api.healthCheck()) {
+                            markDisconnected("long_poll_null")
+                            if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
+                            continue
+                        }
                         val transfers = api.getPendingTransfers()
                         for (t in transfers) {
                             if (!running) break
@@ -295,6 +316,11 @@ class PollService : Service() {
                         if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
                     }
                 } else {
+                    if (!api.healthCheck()) {
+                        markDisconnected("poll_fallback")
+                        if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
+                        continue
+                    }
                     val transfers = api.getPendingTransfers()
                     for (t in transfers) {
                         if (!running) break
@@ -933,6 +959,7 @@ class PollService : Service() {
 
         val notification = Notification.Builder(this, CHANNEL_TRANSFER)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setColor(BRAND_ACCENT)
             .setContentTitle("Received")
             .setContentText(label)
             .setContentIntent(pending)

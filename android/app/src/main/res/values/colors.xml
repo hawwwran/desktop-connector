@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Splash background — light mode (DcWhiteSoft). Dark variant in values-night/. -->
+    <color name="splash_bg">#E8EEFD</color>
+</resources>

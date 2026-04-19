@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.desktopconnector.crypto.KeyManager
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.ui.AppNavigation
@@ -18,6 +19,7 @@ import com.desktopconnector.ui.theme.DesktopConnectorTheme
 class ShareReceiverActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
 
         val prefs = AppPreferences(this)
@@ -39,10 +41,11 @@ class ShareReceiverActivity : ComponentActivity() {
         }
 
         setContent {
-            DesktopConnectorTheme {
+            DesktopConnectorTheme(themeMode = prefs.themeMode) {
                 AppNavigation(
                     prefs = prefs,
                     keyManager = keyManager,
+                    themeMode = prefs.themeMode,
                     initialUris = uris,
                     initialClipboardText = sharedText,
                 )

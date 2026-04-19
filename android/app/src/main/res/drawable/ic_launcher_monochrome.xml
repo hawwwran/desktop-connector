@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome launcher layer for Android 13+ themed icons. 108x108 canvas with a 4-point sparkle
+     star sized to sit inside the adaptive icon's safe zone. The system tints the fillColor. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,18 Q58,50 90,54 Q58,58 54,90 Q50,58 18,54 Q50,50 54,18 Z" />
+</vector>

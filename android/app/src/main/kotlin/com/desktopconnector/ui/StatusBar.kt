@@ -8,9 +8,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.desktopconnector.network.ConnectionState
+import com.desktopconnector.ui.theme.brandColors
 
 @Composable
 fun StatusBar(
@@ -19,10 +19,11 @@ fun StatusBar(
     onTryAgain: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val brand = MaterialTheme.brandColors
     val dotColor = when (connectionState) {
-        ConnectionState.CONNECTED -> Color(0xFF22C55E)
-        ConnectionState.RECONNECTING -> Color(0xFFF59E0B)
-        ConnectionState.DISCONNECTED -> Color(0xFFEF4444)
+        ConnectionState.CONNECTED -> brand.connectionConnected
+        ConnectionState.RECONNECTING -> brand.connectionReconnecting
+        ConnectionState.DISCONNECTED -> brand.connectionDisconnected
     }
 
     Row(

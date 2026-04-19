@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Splash background — dark mode (DcBlue970, matches app dark theme background). -->
+    <color name="splash_bg">#000733</color>
+</resources>

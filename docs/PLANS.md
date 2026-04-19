@@ -20,6 +20,12 @@ haven't yet.
 | [hardening-plan.md](plans/hardening-plan.md) | Improve at-rest secret storage on the desktop — `auth_token`, paired-device symmetric keys, private key currently sit in `~/.config/desktop-connector/`. | Draft |
 | [appimage-distro-support-plan.md](plans/appimage-distro-support-plan.md) | Ship the desktop client as an AppImage per architecture, define a realistic tested-distro list vs. expected-to-work vs. unsupported. | Draft |
 
+## Brand / visual identity
+
+| Plan | Intent | Status |
+|------|--------|--------|
+| [brand-rollout.md](plans/brand-rollout.md) | Apply `visual-identity-guide.md` across all three components. | Android **Done** (v0.2.0) · Desktop Draft · Server Draft |
+
 ## Protocol & docs
 
 | Plan | Intent | Status |

@@ -15,7 +15,6 @@ import androidx.compose.runtime.*
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -23,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import com.desktopconnector.ui.theme.brandColors
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
@@ -67,7 +67,7 @@ fun PairingScreen(
                 verificationCode,
                 fontSize = 36.sp,
                 fontFamily = FontFamily.Monospace,
-                color = Color(0xFF22C55E),
+                color = MaterialTheme.brandColors.accentYellow,
             )
             Spacer(Modifier.height(32.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {

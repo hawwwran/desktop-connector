@@ -47,6 +47,7 @@ import com.desktopconnector.data.QueuedTransfer
 import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
 import com.desktopconnector.network.ConnectionState
+import com.desktopconnector.ui.theme.brandColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,10 +73,11 @@ fun HomeScreen(
 
     Scaffold(
         topBar = {
+            val brand = MaterialTheme.brandColors
             val dotColor = when (connectionState) {
-                ConnectionState.CONNECTED -> Color(0xFF22C55E)
-                ConnectionState.RECONNECTING -> Color(0xFFF59E0B)
-                ConnectionState.DISCONNECTED -> Color(0xFFEF4444)
+                ConnectionState.CONNECTED -> brand.connectionConnected
+                ConnectionState.RECONNECTING -> brand.connectionReconnecting
+                ConnectionState.DISCONNECTED -> brand.connectionDisconnected
             }
             TopAppBar(
                 title = {
@@ -261,17 +263,19 @@ fun HomeScreen(
 
 @Composable
 private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
+    val brand = MaterialTheme.brandColors
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
     val statusColor = when {
-        transfer.status == TransferStatus.QUEUED -> Color(0xFF94A3B8)
-        transfer.status == TransferStatus.PREPARING -> Color(0xFF94A3B8)
-        transfer.status == TransferStatus.UPLOADING && transfer.direction == TransferDirection.INCOMING -> Color(0xFF22C55E)
-        transfer.status == TransferStatus.UPLOADING -> Color(0xFFF59E0B)
-        transfer.status == TransferStatus.COMPLETE && transfer.direction == TransferDirection.INCOMING -> Color(0xFF22C55E)
-        transfer.status == TransferStatus.COMPLETE && transfer.delivered -> Color(0xFF22C55E)
-        transfer.status == TransferStatus.COMPLETE && transfer.deliveryTotal > 0 -> Color(0xFF22C55E)
-        transfer.status == TransferStatus.COMPLETE -> Color(0xFF93C5FD)
-        transfer.status == TransferStatus.FAILED -> Color(0xFFEF4444)
-        else -> Color(0xFF94A3B8)
+        transfer.status == TransferStatus.QUEUED -> dim
+        transfer.status == TransferStatus.PREPARING -> dim
+        transfer.status == TransferStatus.UPLOADING && transfer.direction == TransferDirection.INCOMING -> brand.transferIncoming
+        transfer.status == TransferStatus.UPLOADING -> brand.transferOutgoing
+        transfer.status == TransferStatus.COMPLETE && transfer.direction == TransferDirection.INCOMING -> brand.connectionConnected
+        transfer.status == TransferStatus.COMPLETE && transfer.delivered -> dim
+        transfer.status == TransferStatus.COMPLETE && transfer.deliveryTotal > 0 -> brand.transferDelivering
+        transfer.status == TransferStatus.COMPLETE -> dim
+        transfer.status == TransferStatus.FAILED -> MaterialTheme.colorScheme.error
+        else -> dim
     }
     val dirLabel = if (transfer.direction == TransferDirection.INCOMING) "\u2193 " else "\u2191 "
     val statusText = when (transfer.status) {
@@ -317,7 +321,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                         painter = androidx.compose.ui.res.painterResource(R.drawable.ic_link),
                         contentDescription = null,
                         modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else if (isClipboard) {
                     Icon(
@@ -333,7 +337,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                         painter = androidx.compose.ui.res.painterResource(R.drawable.ic_apk),
                         contentDescription = null,
                         modifier = Modifier.size(28.dp),
-                        tint = Color.Unspecified,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
                     Icon(
@@ -372,9 +376,9 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                 }
             }
         }
-        // Progress bar: uploading (orange), downloading (green), delivering-to-desktop (green)
+        // Progress bars: upload = bright blue, download = sky blue, delivering = light accent blue.
         if (transfer.status == TransferStatus.UPLOADING && transfer.totalChunks > 0) {
-            val barColor = if (transfer.direction == TransferDirection.INCOMING) Color(0xFF22C55E) else Color(0xFFF59E0B)
+            val barColor = if (transfer.direction == TransferDirection.INCOMING) brand.transferIncoming else brand.transferOutgoing
             LinearProgressIndicator(
                 progress = { transfer.chunksUploaded.toFloat() / transfer.totalChunks },
                 modifier = Modifier
@@ -393,7 +397,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp)
                     .padding(bottom = 6.dp),
-                color = Color(0xFF22C55E),
+                color = brand.transferDelivering,
             )
         }
     }
@@ -463,13 +467,14 @@ internal fun SwipeToDeleteItem(
             animationSpec = androidx.compose.animation.core.tween(150),
         ),
     ) {
+        val errorColor = MaterialTheme.colorScheme.error
         SwipeToDismissBox(
             state = dismissState,
             backgroundContent = {
                 val color by animateColorAsState(
                     when (dismissState.targetValue) {
                         SwipeToDismissBoxValue.Settled -> Color.Transparent
-                        else -> Color(0xFFEF4444)
+                        else -> errorColor
                     },
                     label = "swipe-bg",
                 )
@@ -782,10 +787,6 @@ private fun RecentFileDialog(
             Button(
                 onClick = onSend,
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF22C55E),
-                    contentColor = Color.White,
-                ),
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))

@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Ring/outline: disconnected -->
+<!-- 4-point sparkle star (outline; inner hollow cut via evenOdd). Foreground-service notification icon when disconnected. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="24dp" android:height="24dp"
-    android:viewportWidth="24" android:viewportHeight="24">
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M12,5a7,7 0,1 0,0 14a7,7 0,1 0,0 -14zM12,3a9,9 0,1 1,0 18a9,9 0,1 1,0 -18z"/>
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,0 Q13,11 24,12 Q13,13 12,24 Q11,13 0,12 Q11,11 12,0 Z M12,6 Q12.5,11.5 18,12 Q12.5,12.5 12,18 Q11.5,12.5 6,12 Q11.5,11.5 12,6 Z" />
 </vector>

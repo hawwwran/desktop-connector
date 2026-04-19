@@ -47,6 +47,21 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean("battery_prompt_dismissed", false)
         set(value) = prefs.edit().putBoolean("battery_prompt_dismissed", value).apply()
 
+    var themeMode: ThemeMode
+        get() = when (prefs.getString("theme_mode", "system")) {
+            "light" -> ThemeMode.LIGHT
+            "dark" -> ThemeMode.DARK
+            else -> ThemeMode.SYSTEM
+        }
+        set(value) = prefs.edit().putString(
+            "theme_mode",
+            when (value) {
+                ThemeMode.LIGHT -> "light"
+                ThemeMode.DARK -> "dark"
+                ThemeMode.SYSTEM -> "system"
+            }
+        ).apply()
+
     fun clear() {
         prefs.edit().clear().apply()
     }

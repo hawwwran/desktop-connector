@@ -157,6 +157,38 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 - **History clear**: Both platforms have "Clear all" with confirmation dialog. Android preserves active uploads/downloads. Desktop removes all entries. Swipe-to-delete animated (250ms shrink+fade).
 - **Logging**: Opt-in file logging on both desktop and Android (off by default, "Allow logging" toggle in Settings). Desktop uses Python `RotatingFileHandler` (1MB + 1 backup = 2MB max) at `~/.config/desktop-connector/logs/`. Android gates `AppLog` writes on preference. Server logs to `data/logs/server.log` with 2-file rotation (1MB each). Desktop settings has "Download Logs" button that copies to `~/Downloads/` and opens the folder.
 
+## Visual identity
+
+Brand palette, icons, and UI theming follow [`docs/visual-identity-guide.md`](docs/visual-identity-guide.md). The visual language: blue-dominant (70%), neutral/soft-white (20%), warm accents (10%); 4-point sparkle star as the status/spark mark; monitor + phone + orbital arc as the full brand symbol.
+
+**Palette (brand tokens, theme-agnostic):**
+- Blues: `DcBlue970` `#000733` (dark-theme bg), `DcBlue950` `#00146C` (dark surface tier), `DcBlue900` `#0920AC` (surfaceVariant / launcher bg), `DcBlue800` `#1032D0` (primary structural), `DcBlue700` `#2058F0` (notification accent), `DcBlue500` `#3986FC` (success / outline), `DcBlue400` `#5898FB` (sky), `DcBlue200` `#A4D0FB` (pale)
+- Yellows: `DcYellow500` `#FDD00C` (uploading / spark in dark), `DcYellow600` `#FAA602` (light-theme amber)
+- Orange: `DcOrange700` `#EA7601` (destructive, `error` slot — replaces red entirely)
+- Neutral: `DcWhiteSoft` `#E8EEFD` (body text on dark, bg on light)
+
+**Semantic mapping (cross-component):**
+
+| Role | Dark | Light |
+|---|---|---|
+| Background | `#000733` | `#E8EEFD` |
+| Surface (cards, top bar) | `#00146C` | `#FFFFFF` |
+| Connected / Received / Delivered (success) | `#3986FC` | `#3986FC` |
+| Reconnecting | `#FDD00C` | `#FAA602` |
+| Disconnected (muted) | `#A4D0FB` | `#5898FB` |
+| Uploading (bar + text) | `#FDD00C` | `#FAA602` |
+| Delivering (bar + text) | `#3986FC` | `#3986FC` |
+| Downloading (bar) | `#5898FB` | `#1032D0` |
+| Verification code / spark accent | `#FDD00C` | `#FAA602` |
+| Failed / destructive / error | `#EA7601` | `#EA7601` |
+
+Notifications (monochrome) carry state via shape: full sparkle = connected, outline sparkle = disconnected. `Notification.Builder.setColor(#2058F0)` tints the shade header brand blue.
+
+**Rollout status:**
+- **Android** (v0.2.0) — complete. `ThemeMode` pref (system/light/dark) in Settings, brand `ColorScheme` with custom `BrandColors` CompositionLocal, star notification icons, adaptive launcher icon (`master-spark.png` foreground on `#0920AC`, monochrome themed-icon layer), splash screen (`core-splashscreen` backport) showing `master.png` on theme-aware bg, system bars tinted to theme.
+- **Desktop** — NOT STARTED. GTK4/libadwaita windows and pystray tray icon still use default styling. See `docs/plans/brand-rollout.md`.
+- **Server** — NOT STARTED. Dashboard (`server/public/index.php` HTML), pairing pages, and error envelopes use browser defaults. See `docs/plans/brand-rollout.md`.
+
 ## Project structure
 
 ```

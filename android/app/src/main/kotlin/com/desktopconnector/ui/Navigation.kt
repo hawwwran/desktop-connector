@@ -26,6 +26,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.desktopconnector.crypto.KeyManager
 import com.desktopconnector.data.AppPreferences
+import com.desktopconnector.data.ThemeMode
 import com.desktopconnector.network.FcmManager
 import com.desktopconnector.service.FindPhoneManager
 import com.desktopconnector.ui.pairing.PairingScreen
@@ -37,6 +38,8 @@ import com.desktopconnector.ui.transfer.TransferViewModel
 fun AppNavigation(
     prefs: AppPreferences,
     keyManager: KeyManager,
+    themeMode: ThemeMode = ThemeMode.SYSTEM,
+    onThemeModeChange: (ThemeMode) -> Unit = {},
     initialUris: List<Uri> = emptyList(),
     initialClipboardText: String? = null,
 ) {
@@ -272,6 +275,8 @@ fun AppNavigation(
                 deviceId = keyManager.deviceId,
                 pairedDeviceName = paired?.name ?: "",
                 pairedDeviceId = paired?.deviceId ?: "",
+                themeMode = themeMode,
+                onThemeModeChange = onThemeModeChange,
                 onUnpair = {
                     paired?.let {
                         // Notify desktop before removing pairing

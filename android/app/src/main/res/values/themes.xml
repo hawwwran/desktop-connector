@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.DesktopConnector" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- Splash theme used as the launcher theme; installSplashScreen() swaps to the main theme. -->
+    <style name="Theme.DesktopConnector.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_splash</item>
+        <item name="postSplashScreenTheme">@style/Theme.DesktopConnector</item>
+    </style>
 </resources>

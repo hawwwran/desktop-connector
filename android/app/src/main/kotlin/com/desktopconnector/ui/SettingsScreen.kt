@@ -13,14 +13,17 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
+import com.desktopconnector.data.ThemeMode
 import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
+import com.desktopconnector.ui.theme.DcBlue950
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,6 +36,8 @@ fun SettingsScreen(
     deviceId: String,
     pairedDeviceName: String,
     pairedDeviceId: String,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
     onUnpair: () -> Unit,
     onSendLogs: (String, Boolean) -> Unit,
     onDownloadLogs: (String, Boolean) -> Unit,
@@ -86,6 +91,37 @@ fun SettingsScreen(
                 singleLine = true,
             )
 
+            // Appearance
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            ) {
+                Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                    Text("Appearance", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(8.dp))
+                    val options = listOf(
+                        ThemeMode.SYSTEM to "System",
+                        ThemeMode.LIGHT to "Light",
+                        ThemeMode.DARK to "Dark",
+                    )
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        options.forEachIndexed { index, (mode, label) ->
+                            SegmentedButton(
+                                selected = themeMode == mode,
+                                onClick = { onThemeModeChange(mode) },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index, count = options.size,
+                                ),
+                                colors = SegmentedButtonDefaults.colors(
+                                    activeContainerColor = MaterialTheme.colorScheme.outline,
+                                    activeContentColor = DcBlue950,
+                                ),
+                            ) { Text(label) }
+                        }
+                    }
+                }
+            }
+
             // Long poll status
             val lpStatus = com.desktopconnector.service.PollService.longPollStatus
             val lpLabel = when (lpStatus) {
@@ -95,6 +131,11 @@ fun SettingsScreen(
                 "offline" -> "Offline"
                 else -> "Unknown"
             }
+            val lpColor = when (lpStatus) {
+                "active" -> MaterialTheme.colorScheme.onSurfaceVariant
+                "unavailable", "offline" -> MaterialTheme.colorScheme.error
+                else -> Color.Unspecified
+            }
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -102,10 +143,10 @@ fun SettingsScreen(
                 Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                     Text("Long Polling", style = MaterialTheme.typography.titleSmall)
                     Spacer(Modifier.height(4.dp))
-                    SettingsRow("Status", lpLabel)
+                    SettingsRow("Status", lpLabel, lpColor)
                     if (lpStatus != "active") {
                         Spacer(Modifier.height(8.dp))
-                        OutlinedButton(onClick = {
+                        SettingsActionButton(onClick = {
                             com.desktopconnector.service.PollService.retryLongPoll = true
                         }) {
                             Text("Retry")
@@ -125,10 +166,19 @@ fun SettingsScreen(
                 Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                     Text("FCM Push Wake", style = MaterialTheme.typography.titleSmall)
                     Spacer(Modifier.height(4.dp))
-                    SettingsRow("Status", if (fcmChecking) "Checking..." else if (fcmActive) "Active" else "Not available")
+                    val fcmColor = when {
+                        fcmChecking -> Color.Unspecified
+                        fcmActive -> MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> MaterialTheme.colorScheme.error
+                    }
+                    SettingsRow(
+                        "Status",
+                        if (fcmChecking) "Checking..." else if (fcmActive) "Active" else "Not available",
+                        fcmColor,
+                    )
                     if (!fcmActive) {
                         Spacer(Modifier.height(8.dp))
-                        OutlinedButton(
+                        SettingsActionButton(
                             onClick = {
                                 fcmChecking = true
                                 scope.launch(Dispatchers.IO) {
@@ -172,10 +222,15 @@ fun SettingsScreen(
                     Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                         Text("Find My Phone", style = MaterialTheme.typography.titleSmall)
                         Spacer(Modifier.height(4.dp))
-                        SettingsRow("GPS Permission", if (hasLocation) "Granted" else "Not granted")
+                        SettingsRow(
+                            "GPS Permission",
+                            if (hasLocation) "Granted" else "Not granted",
+                            if (hasLocation) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.error,
+                        )
                         if (!hasLocation) {
                             Spacer(Modifier.height(8.dp))
-                            OutlinedButton(onClick = {
+                            SettingsActionButton(onClick = {
                                 locationLauncher.launch(arrayOf(
                                     Manifest.permission.ACCESS_FINE_LOCATION,
                                     Manifest.permission.ACCESS_COARSE_LOCATION,
@@ -219,10 +274,15 @@ fun SettingsScreen(
                     Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                         Text("Background Downloads", style = MaterialTheme.typography.titleSmall)
                         Spacer(Modifier.height(4.dp))
-                        SettingsRow("Battery optimization", if (batteryOptimized) "Restricted" else "Unrestricted")
+                        SettingsRow(
+                            "Battery optimization",
+                            if (batteryOptimized) "Restricted" else "Unrestricted",
+                            if (batteryOptimized) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         if (batteryOptimized) {
                             Spacer(Modifier.height(8.dp))
-                            OutlinedButton(onClick = {
+                            SettingsActionButton(onClick = {
                                 @Suppress("BatteryLife")
                                 val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                                 intent.data = android.net.Uri.parse("package:${context.packageName}")
@@ -281,17 +341,47 @@ fun SettingsScreen(
                                     }
                                 } else "Offline"
                             }
-                            SettingsRow("Status", statusStr)
+                            SettingsRow(
+                                "Status",
+                                statusStr,
+                                if (online) MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.error,
+                            )
                         }
 
                         Spacer(Modifier.height(12.dp))
-                        OutlinedButton(
-                            onClick = onUnpair,
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error,
+                        var showUnpairDialog by remember { mutableStateOf(false) }
+                        Button(
+                            onClick = { showUnpairDialog = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error,
+                                contentColor = DcBlue950,
                             ),
                         ) {
                             Text("Unpair")
+                        }
+
+                        if (showUnpairDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showUnpairDialog = false },
+                                title = { Text("Unpair device?") },
+                                text = {
+                                    Text("This will disconnect the paired desktop. You'll need to pair again to send or receive files.")
+                                },
+                                confirmButton = {
+                                    TextButton(onClick = {
+                                        showUnpairDialog = false
+                                        onUnpair()
+                                    }) {
+                                        Text("Unpair", color = MaterialTheme.colorScheme.error)
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showUnpairDialog = false }) {
+                                        Text("Cancel")
+                                    }
+                                },
+                            )
                         }
                     }
                 }
@@ -353,10 +443,10 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { AppLog.clear() }) {
+                        SettingsActionButton(onClick = { AppLog.clear() }) {
                             Text("Clear")
                         }
-                        OutlinedButton(onClick = { showLogsDialog = true }) {
+                        SettingsActionButton(onClick = { showLogsDialog = true }) {
                             Text("Download Logs")
                         }
                     }
@@ -479,7 +569,24 @@ private fun LogsDialog(
 }
 
 @Composable
-private fun SettingsRow(label: String, value: String) {
+private fun SettingsActionButton(
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.outline,
+            contentColor = DcBlue950,
+        ),
+        content = content,
+    )
+}
+
+@Composable
+private fun SettingsRow(label: String, value: String, valueColor: Color = Color.Unspecified) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -493,6 +600,7 @@ private fun SettingsRow(label: String, value: String) {
             value,
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
+            color = valueColor,
         )
     }
 }
