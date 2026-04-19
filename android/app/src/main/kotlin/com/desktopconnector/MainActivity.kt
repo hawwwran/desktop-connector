@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.ui.AppNavigation
 import com.desktopconnector.ui.theme.DesktopConnectorTheme
@@ -21,7 +22,16 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { _ -> }
+    ) { results ->
+        for ((perm, granted) in results) {
+            val short = perm.substringAfterLast('.')
+            if (granted) {
+                AppLog.log("Platform", "platform.permission.granted permission=$short")
+            } else {
+                AppLog.log("Platform", "platform.permission.denied permission=$short", "warning")
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,6 +67,7 @@ class MainActivity : ComponentActivity() {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (needed.isNotEmpty()) {
+            AppLog.log("Platform", "platform.permission.requested permissions=${needed.joinToString(",") { it.substringAfterLast('.') }}")
             permissionLauncher.launch(needed.toTypedArray())
         }
 

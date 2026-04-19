@@ -24,9 +24,11 @@ def notify(title: str, body: str, icon: str = "dialog-information") -> None:
             capture_output=True,
         )
     except FileNotFoundError:
-        log.debug("notify-send not available")
+        log.warning("notification.tool.missing")
     except subprocess.TimeoutExpired:
-        pass
+        log.warning("notification.send.failed reason=timeout")
+    except Exception as e:
+        log.warning("notification.send.failed error_kind=%s", type(e).__name__)
 
 
 def notify_file_received(filepath: Path) -> None:

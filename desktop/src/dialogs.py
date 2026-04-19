@@ -22,8 +22,8 @@ def pick_files(title: str = "Select files to send") -> list[Path]:
             )
             if result.returncode == 0 and result.stdout.strip():
                 return [Path(p) for p in result.stdout.strip().split("\n") if p]
-        except Exception:
-            log.exception("zenity file picker failed")
+        except Exception as e:
+            log.warning("platform.dialog.failed kind=file_picker error_kind=%s", type(e).__name__)
         return []
 
     # Fallback to tkinter
@@ -46,8 +46,8 @@ def confirm(title: str, message: str) -> bool:
                 timeout=120,
             )
             return result.returncode == 0
-        except Exception:
-            log.exception("zenity confirm failed")
+        except Exception as e:
+            log.warning("platform.dialog.failed kind=confirm error_kind=%s", type(e).__name__)
         return False
 
     import tkinter as tk

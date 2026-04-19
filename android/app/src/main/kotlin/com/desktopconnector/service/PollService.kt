@@ -852,7 +852,7 @@ class PollService : Service() {
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         val clip = ClipData.newPlainText("Desktop Connector", text)
         clipboard.setPrimaryClip(clip)
-        Log.i(TAG, "Text pushed to clipboard (${text.length} chars)")
+        AppLog.log("Clipboard", "clipboard.write_text.succeeded length=${text.length}")
     }
 
     private fun pushImageToClipboard(data: ByteArray) {
@@ -866,9 +866,9 @@ class PollService : Service() {
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             val clip = ClipData.newUri(contentResolver, "Clipboard image", uri)
             clipboard.setPrimaryClip(clip)
-            Log.i(TAG, "Image pushed to clipboard")
+            AppLog.log("Clipboard", "clipboard.write_image.succeeded size=${data.size}")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to push image to clipboard: ${e.message}")
+            AppLog.log("Clipboard", "clipboard.write_image.failed error_kind=${e.javaClass.simpleName}", "warning")
             // Fallback: just save the file
             saveFile("clipboard_image.png", data)
         }

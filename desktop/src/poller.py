@@ -502,7 +502,7 @@ class Poller:
                 if subtype == "text":
                     text = filepath.read_text(errors="replace")
                     if write_clipboard_text(text):
-                        log.info("Clipboard text set (%d chars)", len(text))
+                        log.info("clipboard.write_text.succeeded length=%d", len(text))
                         from .notifications import notify
                         import re
                         urls = re.findall(r'https?://\S+', text)
@@ -519,24 +519,24 @@ class Poller:
                         if len(urls) == 1 and self.config.auto_open_links:
                             import subprocess
                             # Never log the URL itself — it's decrypted clipboard content.
-                            log.info("Auto-opening link (len=%d)", len(urls[0]))
+                            log.info("platform.open_url.succeeded length=%d", len(urls[0]))
                             subprocess.Popen(["xdg-open", urls[0]])
                     else:
-                        log.warning("Failed to set clipboard text")
+                        log.warning("clipboard.write_text.failed")
                 elif subtype == "image":
                     data = filepath.read_bytes()
                     if write_clipboard_image(data):
-                        log.info("Clipboard image set (%d bytes)", len(data))
+                        log.info("clipboard.write_image.succeeded size=%d", len(data))
                         from .notifications import notify
                         notify("Clipboard received", "Image copied to clipboard")
                         self.history.add(filename=filepath.name, display_label="Clipboard image",
                                          direction="received", size=len(data))
                     else:
-                        log.warning("Failed to set clipboard image")
+                        log.warning("clipboard.write_image.failed")
                 else:
-                    log.warning("Unknown clipboard subtype: %s", subtype)
-            except Exception:
-                log.exception("Error handling clipboard transfer")
+                    log.warning("clipboard.subtype.unknown subtype=%s", subtype)
+            except Exception as e:
+                log.error("clipboard.write.failed error_kind=%s", type(e).__name__)
             finally:
                 filepath.unlink(missing_ok=True)
         elif fn == "unpair":

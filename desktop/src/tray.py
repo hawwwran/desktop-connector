@@ -254,6 +254,7 @@ class TrayApp:
     # --- GTK4 windows (subprocess to avoid GTK3/4 conflict) ---
 
     def _open_gtk4_window(self, window_name: str) -> None:
+        log.info("platform.subprocess.spawned window=%s", window_name)
         subprocess.Popen(
             [sys.executable, "-m", "src.windows", window_name,
              f"--config-dir={self.config.config_dir}"],
@@ -347,8 +348,9 @@ class TrayApp:
     def _open_folder(self, *_) -> None:
         try:
             subprocess.Popen(["xdg-open", str(self.save_dir)])
-        except Exception:
-            log.exception("Failed to open folder")
+            log.info("platform.open_folder.succeeded")
+        except Exception as e:
+            log.warning("platform.open_folder.failed error_kind=%s", type(e).__name__)
 
     def _try_now(self, *_) -> None:
         self.conn.try_now()

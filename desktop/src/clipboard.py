@@ -32,13 +32,13 @@ def read_clipboard_text() -> str | None:
         elif _has_cmd("xsel"):
             result = subprocess.run(["xsel", "--clipboard", "--output"], capture_output=True, timeout=5)
         else:
-            log.warning("No clipboard tool found (xclip, xsel, or wl-paste)")
+            log.warning("clipboard.tool.missing direction=read_text")
             return None
 
         if result.returncode == 0 and result.stdout:
             return result.stdout.decode("utf-8", errors="replace")
-    except Exception:
-        log.exception("Failed to read clipboard")
+    except Exception as e:
+        log.error("clipboard.read.failed kind=text error_kind=%s", type(e).__name__)
     return None
 
 
@@ -57,8 +57,8 @@ def read_clipboard_image() -> bytes | None:
 
         if result.returncode == 0 and result.stdout and len(result.stdout) > 8:
             return result.stdout
-    except Exception:
-        log.exception("Failed to read clipboard image")
+    except Exception as e:
+        log.error("clipboard.read.failed kind=image error_kind=%s", type(e).__name__)
     return None
 
 
@@ -91,13 +91,13 @@ def write_clipboard_text(text: str) -> bool:
         elif _has_cmd("xsel"):
             proc = subprocess.Popen(["xsel", "--clipboard", "--input"], stdin=subprocess.PIPE)
         else:
-            log.warning("No clipboard tool found")
+            log.warning("clipboard.tool.missing direction=write_text")
             return False
 
         proc.communicate(input=text.encode("utf-8"), timeout=5)
         return proc.returncode == 0
-    except Exception:
-        log.exception("Failed to write clipboard text")
+    except Exception as e:
+        log.warning("clipboard.write_text.failed error_kind=%s", type(e).__name__)
         return False
 
 
@@ -112,13 +112,13 @@ def write_clipboard_image(data: bytes, mime_type: str = "image/png") -> bool:
                 stdin=subprocess.PIPE,
             )
         else:
-            log.warning("No clipboard tool found for image")
+            log.warning("clipboard.tool.missing direction=write_image")
             return False
 
         proc.communicate(input=data, timeout=5)
         return proc.returncode == 0
-    except Exception:
-        log.exception("Failed to write clipboard image")
+    except Exception as e:
+        log.warning("clipboard.write_image.failed error_kind=%s", type(e).__name__)
         return False
 
 
