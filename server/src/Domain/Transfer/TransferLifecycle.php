@@ -6,6 +6,10 @@
  */
 class TransferLifecycle
 {
+    /**
+     * Derive an internal state from a persisted row. Never returns EXPIRED —
+     * that is a terminal state set only by cleanup paths via onTransferExpired().
+     */
     public static function deriveState(array $transfer): string
     {
         $complete = (int)($transfer['complete'] ?? 0);
@@ -101,7 +105,7 @@ class TransferLifecycle
             TransferState::UPLOADING => [TransferState::UPLOADING, TransferState::UPLOADED, TransferState::EXPIRED],
             TransferState::UPLOADED => [TransferState::DELIVERING, TransferState::DELIVERED, TransferState::EXPIRED],
             TransferState::DELIVERING => [TransferState::DELIVERING, TransferState::DELIVERED, TransferState::EXPIRED],
-            TransferState::DELIVERED => [],
+            TransferState::DELIVERED => [TransferState::EXPIRED],
             TransferState::EXPIRED => [],
         ];
 

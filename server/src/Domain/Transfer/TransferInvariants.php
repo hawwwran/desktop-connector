@@ -41,6 +41,11 @@ class TransferInvariants
                 $deliveredAt > 0,
                 'Invalid transfer invariant: downloaded=1 requires delivered_at > 0'
             );
+        } else {
+            self::ensure(
+                $deliveredAt === 0,
+                'Invalid transfer invariant: delivered_at set without downloaded=1'
+            );
         }
 
         // Safety invariant: final delivery equivalence only after ACK.
