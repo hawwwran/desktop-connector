@@ -77,6 +77,16 @@ class Router
 
             throw new NotFoundError();
         } catch (ApiError $e) {
+            // 5xx and unexpected 4xx are worth a warning; routine 404/401/403
+            // stay at info. NotFound routes come from typos or probes — info.
+            $level = $e->status >= 500 ? 'error' : 'warning';
+            AppLog::log('Api', sprintf(
+                'apierror.caught status=%d method=%s uri=%s reason=%s',
+                $e->status,
+                $_SERVER['REQUEST_METHOD'] ?? '-',
+                $_SERVER['REQUEST_URI'] ?? '-',
+                $e->getMessage()
+            ), $level);
             ErrorResponder::send($e);
         }
     }

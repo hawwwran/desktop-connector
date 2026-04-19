@@ -15,7 +15,7 @@ class FcmService : FirebaseMessagingService() {
 
     override fun onMessageReceived(remoteMessage: RemoteMessage) {
         val type = remoteMessage.data["type"] ?: "unknown"
-        AppLog.log("FCM", "Message received: $type")
+        AppLog.log("FCM", "fcm.message.received type=$type")
         Log.i("FcmService", "FCM message: $type")
 
         when (type) {
@@ -24,7 +24,10 @@ class FcmService : FirebaseMessagingService() {
                 // Cancel any blocking long poll so PollService processes fasttrack immediately
                 PollService.activeApi?.cancelLongPoll()
             }
-            "ping" -> sendPong()
+            "ping" -> {
+                AppLog.log("FCM", "ping.request.received")
+                sendPong()
+            }
             else -> PollService.fcmWakeSignal = true
         }
     }
@@ -43,13 +46,15 @@ class FcmService : FirebaseMessagingService() {
         val token = prefs.authToken ?: return
         try {
             ApiClient(server, id, token).pong()
+            AppLog.log("FCM", "ping.pong.sent")
         } catch (e: Exception) {
+            AppLog.log("FCM", "ping.pong.failed error_kind=${e.javaClass.simpleName}", "warning")
             Log.w("FcmService", "Pong failed: ${e.message}")
         }
     }
 
     override fun onNewToken(token: String) {
-        AppLog.log("FCM", "Token refreshed")
+        AppLog.log("FCM", "fcm.token.refreshed")
         Log.i("FcmService", "New FCM token")
         val prefs = AppPreferences(this)
         if (prefs.isRegistered && prefs.serverUrl != null) {

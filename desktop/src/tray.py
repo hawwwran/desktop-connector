@@ -234,18 +234,18 @@ class TrayApp:
 
         def run():
             try:
+                log.debug("ping.request.sent recipient=%s", target_id[:12])
                 result = self.api.ping_device(target_id)
                 if result is None:
                     return
                 online = bool(result.get("online"))
                 if online != self._remote_online:
-                    log.info("Phone %s (via %s, rtt=%sms)",
-                             "online" if online else "offline",
-                             result.get("via"), result.get("rtt_ms"))
+                    log.info("ping.response.received recipient=%s online=%s via=%s rtt_ms=%s",
+                             target_id[:12], online, result.get("via"), result.get("rtt_ms"))
                     self._remote_online = online
                     self._update_icon()
             except Exception as e:
-                log.warning("Ping failed: %s", e)
+                log.warning("ping.request.failed error_kind=%s", type(e).__name__)
             finally:
                 with self._ping_lock:
                     self._ping_in_flight = False

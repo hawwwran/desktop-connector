@@ -111,7 +111,7 @@ class Poller:
                     import json
                     status = json.loads(self._poll_status_file.read_text())
                     if status.get("long_poll") == "testing":
-                        log.info("Long poll retry requested")
+                        log.info("poll.notify.retry_requested")
                         long_poll_available = None
             except Exception:
                 pass
@@ -123,7 +123,10 @@ class Poller:
                         self._write_poll_status("testing")
                         long_poll_available = self._test_long_poll()
                         self._write_poll_status("active" if long_poll_available else "unavailable")
-                        log.info("Long poll %s", "available" if long_poll_available else "not available")
+                        if long_poll_available:
+                            log.info("poll.notify.available")
+                        else:
+                            log.warning("poll.notify.unavailable")
 
                     # Skip long poll while outgoing transfers in progress (avoids blocking single-threaded PHP server)
                     upload_active = (self.config.config_dir / "upload_active.json").exists()

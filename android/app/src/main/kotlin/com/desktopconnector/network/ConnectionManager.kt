@@ -1,5 +1,6 @@
 package com.desktopconnector.network
 
+import com.desktopconnector.data.AppLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,22 +62,26 @@ class ConnectionManager(
                     onSuccess()
                     true
                 } else {
-                    onFailure()
+                    onFailure("http_${it.code}")
                     false
                 }
             }
         } catch (e: Exception) {
-            onFailure()
+            onFailure(e.javaClass.simpleName)
             false
         }
     }
 
     fun onSuccess() {
+        val wasReconnecting = _state.value != ConnectionState.CONNECTED
         _retryInfo.value = RetryInfo()
         _state.value = ConnectionState.CONNECTED
+        if (wasReconnecting) {
+            AppLog.log("Connection", "connection.check.succeeded")
+        }
     }
 
-    fun onFailure() {
+    fun onFailure(errorKind: String = "unknown") {
         val info = _retryInfo.value
         val newCount = info.retryCount + 1
         val raw = min(INITIAL_BACKOFF * Math.pow(BACKOFF_MULTIPLIER, (newCount - 1).toDouble()), MAX_BACKOFF)
@@ -88,6 +93,11 @@ class ConnectionManager(
             nextRetryAt = System.currentTimeMillis() + (backoff * 1000).toLong(),
         )
         _state.value = ConnectionState.DISCONNECTED
+        val level = if (newCount > 3) "warning" else "info"
+        AppLog.log("Connection",
+            "connection.backoff.retry attempt=$newCount delay_seconds=%.1f error_kind=$errorKind".format(backoff),
+            level,
+        )
     }
 
     fun tryNow() {

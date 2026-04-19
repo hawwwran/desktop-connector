@@ -112,10 +112,13 @@ class ConnectionManager:
             self._next_retry_at = time.time() + self._current_backoff
         self._set_state(ConnectionState.DISCONNECTED)
         with self._lock:
-            log.info(
-                "Connection failed (attempt #%d). Next retry in %.1fs",
-                self._retry_count, self._current_backoff,
-            )
+            attempt = self._retry_count
+            delay = self._current_backoff
+        level = log.warning if attempt > 3 else log.info
+        level(
+            "connection.backoff.retry attempt=%d delay_seconds=%.1f",
+            attempt, delay,
+        )
 
     def wait_for_retry(self) -> bool:
         """Sleep until next retry time. Returns False if interrupted by try_now()."""

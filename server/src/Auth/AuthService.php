@@ -22,8 +22,16 @@ class AuthService
             $deviceId = $_SERVER['HTTP_X_DEVICE_ID'] ?? null;
             $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
             if (!$deviceId || !str_starts_with($authHeader, 'Bearer ')) {
+                AppLog::log('Auth', sprintf(
+                    'auth.missing uri=%s',
+                    $_SERVER['REQUEST_URI'] ?? '-'
+                ), 'warning');
                 throw new UnauthorizedError('Missing authentication');
             }
+            AppLog::log('Auth', sprintf(
+                'auth.invalid device_id=%s uri=%s',
+                AppLog::shortId($deviceId), $_SERVER['REQUEST_URI'] ?? '-'
+            ), 'warning');
             throw new UnauthorizedError('Invalid credentials');
         }
         return $identity;

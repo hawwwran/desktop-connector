@@ -199,7 +199,7 @@ class PollService : Service() {
             if (retryLongPoll) {
                 retryLongPoll = false
                 longPollAvailable = null
-                AppLog.log("Poll", "Long poll retry requested")
+                AppLog.log("Poll", "poll.notify.retry_requested")
             }
 
             val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
@@ -212,7 +212,7 @@ class PollService : Service() {
                     if (reachable) {
                         isConnected = true
                         longPollAvailable = null
-                        AppLog.log("Poll", "Connected to ${prefs.serverUrl}")
+                        AppLog.log("Poll", "connection.check.succeeded")
                         updateNotification(buildIdleNotification(true))
                     } else {
                         delay(POLL_INTERVAL)
@@ -233,7 +233,11 @@ class PollService : Service() {
                     val testResult = api.longPollNotify(0, test = true)
                     longPollAvailable = testResult != null
                     longPollStatus = if (longPollAvailable == true) "active" else "unavailable"
-                    AppLog.log("Poll", "Long poll ${if (longPollAvailable == true) "available" else "not available"}")
+                    if (longPollAvailable == true) {
+                        AppLog.log("Poll", "poll.notify.available")
+                    } else {
+                        AppLog.log("Poll", "poll.notify.unavailable", "warning")
+                    }
                 }
 
                 if (longPollAvailable == true) {
@@ -259,7 +263,7 @@ class PollService : Service() {
                     } else {
                         longPollAvailable = null
                         longPollStatus = "unavailable"
-                        AppLog.log("Poll", "Long poll failed, will re-test next cycle")
+                        AppLog.log("Poll", "poll.notify.failed reason=will_re_test_next_cycle", "warning")
                         val transfers = api.getPendingTransfers()
                         for (t in transfers) {
                             if (!running) break
@@ -279,7 +283,7 @@ class PollService : Service() {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Poll failed: ${e.message}")
-                AppLog.log("Poll", "Failed: ${e.message}")
+                AppLog.log("Poll", "connection.check.failed error_kind=${e.javaClass.simpleName}", "warning")
                 if (isConnected) {
                     isConnected = false
                     longPollAvailable = null
@@ -292,32 +296,32 @@ class PollService : Service() {
                 if (FcmManager.isInitialized) {
                     // FCM available — pure wait for push wake or screen on.
                     // Server learns liveness on-demand via ping/pong, not heartbeats.
-                    AppLog.log("Poll", "Screen off, waiting for FCM wake")
+                    AppLog.log("Poll", "poll.loop.screen_off reason=waiting_fcm")
                     while (!isScreenOn() && !fcmWakeSignal && !fasttrackWakeSignal && running) {
                         delay(500)
                     }
                     if (fcmWakeSignal) {
                         fcmWakeSignal = false
                         longPollAvailable = null  // re-test after wake
-                        AppLog.log("Poll", "FCM wake, polling")
+                        AppLog.log("Poll", "poll.loop.fcm_wake type=transfer")
                         continue
                     }
                     if (fasttrackWakeSignal) {
                         // Don't clear — let the fasttrack check at top of loop consume it
                         longPollAvailable = null  // re-test after wake
-                        AppLog.log("Poll", "Fasttrack FCM wake")
+                        AppLog.log("Poll", "poll.loop.fcm_wake type=fasttrack")
                         continue
                     }
                 } else {
                     // No FCM — pause until screen on
-                    AppLog.log("Poll", "Screen off, pausing")
+                    AppLog.log("Poll", "poll.loop.screen_off reason=paused")
                     while (!isScreenOn() && running) {
                         delay(500)
                     }
                 }
                 if (running) {
                     longPollAvailable = null  // re-test after screen wake
-                    AppLog.log("Poll", "Screen on, resuming")
+                    AppLog.log("Poll", "poll.loop.screen_on")
                     continue
                 }
             }
