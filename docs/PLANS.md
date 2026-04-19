@@ -16,7 +16,6 @@ haven't yet.
 
 | Plan | Intent | Status |
 |------|--------|--------|
-| [android-streaming-upload-plan.md](plans/android-streaming-upload-plan.md) | Stream every outgoing file chunk-by-chunk (no whole-file buffering), add `PREPARING` state, 5 s / 120 s per-chunk retry. | **Done** |
 | [android-streaming-receive-plan.md](plans/android-streaming-receive-plan.md) | Stream incoming file chunks directly to a temp file, atomic-rename on finalize, keep `.fn.*` on the tiny in-memory path. | **Done** |
 | [android-pipelining-plan.md](plans/android-pipelining-plan.md) | Overlap chunk read/encrypt with upload (and download with decrypt/write) via a bounded `Channel`. Explicitly rejects request-level parallelism. | **Deferred** — only build once a 500 MB benchmark shows CPU, not network, is the bottleneck |
 
