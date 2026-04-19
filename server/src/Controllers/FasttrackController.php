@@ -28,18 +28,12 @@ class FasttrackController
             throw new ForbiddenError('Devices are not paired');
         }
 
+        $messages = new FasttrackRepository($db);
         // Clean up expired messages for this recipient
-        $db->execute(
-            'DELETE FROM fasttrack_messages WHERE recipient_id = :rid AND created_at < :cutoff',
-            [':rid' => $recipientId, ':cutoff' => time() - self::MESSAGE_EXPIRY]
-        );
+        $messages->deleteExpiredForRecipient($recipientId, time() - self::MESSAGE_EXPIRY);
 
         // Enforce max pending limit
-        $count = $db->querySingle(
-            'SELECT COUNT(*) as cnt FROM fasttrack_messages WHERE recipient_id = :rid',
-            [':rid' => $recipientId]
-        );
-        if ($count && $count['cnt'] >= self::MAX_PENDING) {
+        if ($messages->countPendingForRecipient($recipientId) >= self::MAX_PENDING) {
             // Plain 429 without Retry-After to match the pre-refactor wire shape;
             // ping's 429 is the one that carries the header.
             throw new ApiError(429, 'Too many pending messages');
@@ -47,13 +41,7 @@ class FasttrackController
 
         AppLog::log('Fasttrack', "send from={$deviceId} to={$recipientId} size=" . strlen($encryptedData));
 
-        $db->execute(
-            'INSERT INTO fasttrack_messages (sender_id, recipient_id, encrypted_data, created_at)
-             VALUES (:sid, :rid, :data, :now)',
-            [':sid' => $deviceId, ':rid' => $recipientId,
-             ':data' => $encryptedData, ':now' => time()]
-        );
-        $messageId = $db->lastInsertId();
+        $messageId = $messages->insertMessage($deviceId, $recipientId, $encryptedData, time());
 
         // Send FCM wake to recipient (fire-and-forget, no content leaked)
         $fcmSent = 'no_fcm';
@@ -78,25 +66,16 @@ class FasttrackController
     public static function pending(Database $db, RequestContext $ctx): void
     {
         $deviceId = $ctx->deviceId;
+        $messages = new FasttrackRepository($db);
 
         // Clean up expired messages first
-        $db->execute(
-            'DELETE FROM fasttrack_messages WHERE recipient_id = :rid AND created_at < :cutoff',
-            [':rid' => $deviceId, ':cutoff' => time() - self::MESSAGE_EXPIRY]
-        );
+        $messages->deleteExpiredForRecipient($deviceId, time() - self::MESSAGE_EXPIRY);
+        $pending = $messages->listPendingForRecipient($deviceId);
 
-        $messages = $db->queryAll(
-            'SELECT id, sender_id, encrypted_data, created_at
-             FROM fasttrack_messages
-             WHERE recipient_id = :rid
-             ORDER BY created_at ASC',
-            [':rid' => $deviceId]
-        );
-
-        if (!empty($messages)) {
-            AppLog::log('Fasttrack', "pending for={$deviceId} count=" . count($messages));
+        if (!empty($pending)) {
+            AppLog::log('Fasttrack', "pending for={$deviceId} count=" . count($pending));
         }
-        Router::json(['messages' => $messages]);
+        Router::json(['messages' => $pending]);
     }
 
     /**
@@ -106,11 +85,9 @@ class FasttrackController
     public static function ack(Database $db, RequestContext $ctx): void
     {
         $messageId = Validators::requireIntParam($ctx->params, 'id');
+        $messages = new FasttrackRepository($db);
 
-        $msg = $db->querySingle(
-            'SELECT recipient_id FROM fasttrack_messages WHERE id = :id',
-            [':id' => $messageId]
-        );
+        $msg = $messages->findById($messageId);
         if (!$msg) {
             throw new NotFoundError('Message not found');
         }
@@ -118,10 +95,7 @@ class FasttrackController
             throw new ForbiddenError('Not authorized');
         }
 
-        $db->execute(
-            'DELETE FROM fasttrack_messages WHERE id = :id',
-            [':id' => $messageId]
-        );
+        $messages->deleteById($messageId);
 
         AppLog::log('Fasttrack', "ack id={$messageId} by={$ctx->deviceId}");
         Router::json(['status' => 'ok']);
