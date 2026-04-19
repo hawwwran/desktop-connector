@@ -573,7 +573,7 @@ class Poller:
 
         Symmetric with Android's PollService.deliveryTrackerLoop.
         """
-        log.info("Delivery tracker started")
+        log.info("delivery.tracker.started")
         in_flight = threading.Lock()
 
         def run_poll():
@@ -604,9 +604,9 @@ class Poller:
                         if in_flight.acquire(blocking=False):
                             threading.Thread(target=run_poll, daemon=True).start()
                         else:
-                            log.info("Delivery tracker: skip tick — previous poll still in flight")
+                            log.debug("delivery.tracker.skipped reason=previous_in_flight")
             except Exception:
-                log.exception("Delivery tracker error")
+                log.exception("delivery.tracker.failed")
             elapsed = time.monotonic() - tick_start
             time.sleep(max(0.0, 0.5 - elapsed))
 
