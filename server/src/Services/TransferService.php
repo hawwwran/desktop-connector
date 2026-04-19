@@ -86,22 +86,32 @@ class TransferService
         rename($tmpPath, $fullPath);
 
         $chunks = new ChunkRepository($db);
-        $storedNewChunk = false;
         if (!$chunks->chunkExists($transferId, $chunkIndex)) {
             $chunks->insertChunk($transferId, $chunkIndex, $blobPath, strlen($blobData), time());
             $transfers->incrementChunksReceived($transferId);
-            $storedNewChunk = true;
             AppLog::log('Transfer', sprintf(
                 'transfer.chunk.uploaded transfer_id=%s chunk_index=%d size=%d',
                 AppLog::shortId($transferId), $chunkIndex, strlen($blobData)
             ), 'debug');
         }
 
-        $transition = TransferLifecycle::onChunkStored($transfer, $storedNewChunk);
+        $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new ApiError(500, 'Transfer row missing after chunk upload');
+        }
+
+        if ((int)$updated['chunks_received'] >= (int)$updated['chunk_count'] && (int)$updated['complete'] === 0) {
+            $transfers->markComplete($transferId);
+            $updated = $transfers->findById($transferId);
+            if (!$updated) {
+                throw new ApiError(500, 'Transfer row missing after completion update');
+            }
+        }
+
+        $transition = TransferLifecycle::onChunkStored($transfer, $updated);
         $complete = $transition['is_complete'];
 
-        if ($complete) {
-            $transfers->markComplete($transferId);
+        if ($complete && (int)$transfer['complete'] === 0) {
             AppLog::log('Transfer', sprintf(
                 'transfer.upload.completed transfer_id=%s sender=%s recipient=%s chunks=%d',
                 AppLog::shortId($transferId),
@@ -145,12 +155,16 @@ class TransferService
         // chunks_downloaded == chunk_count iff downloaded == 1 — gives the sender's
         // delivery tracker a rock-solid "done" signal that can't be faked by serving
         // the last chunk (which might still fail client-side before ack).
-        $transition = TransferLifecycle::onRecipientProgress($transfer, $chunkIndex);
-        $newProgress = $transition['next_progress'];
+        $newProgress = TransferLifecycle::recipientProgressTarget($transfer, $chunkIndex);
         $transfers->updateDownloadProgress($transferId, $newProgress);
+        $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new ApiError(500, 'Transfer row missing after download progress update');
+        }
+        $transition = TransferLifecycle::onRecipientProgress($transfer, $updated);
         AppLog::log('Transfer', sprintf(
             'transfer.chunk.served transfer_id=%s chunk_index=%d progress=%d/%d',
-            AppLog::shortId($transferId), $chunkIndex, $newProgress, (int)$transfer['chunk_count']
+            AppLog::shortId($transferId), $chunkIndex, $transition['next_progress'], (int)$transfer['chunk_count']
         ), 'debug');
 
         return file_get_contents($fullPath);
@@ -163,8 +177,6 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found');
         }
-        TransferLifecycle::onAckReceived($transfer);
-
         // Pairing-stats SUM must run BEFORE chunk deletion (chunks table still holds sizes here).
         $senderId = $transfer['sender_id'];
         $totalBytes = (new ChunkRepository($db))->sumChunkBytesForTransfer($transferId);
@@ -177,6 +189,11 @@ class TransferService
 
         // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
         $transfers->markDelivered($transferId, time());
+        $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new ApiError(500, 'Transfer row missing after delivery ACK');
+        }
+        TransferLifecycle::onAckReceived($transfer, $updated);
         AppLog::log('Delivery', sprintf(
             'delivery.acked transfer_id=%s recipient=%s total_bytes=%d',
             AppLog::shortId($transferId), AppLog::shortId($deviceId), $totalBytes

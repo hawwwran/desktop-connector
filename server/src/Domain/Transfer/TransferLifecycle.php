@@ -22,58 +22,60 @@ class TransferLifecycle
         return $chunksReceived > 0 ? TransferState::UPLOADING : TransferState::INITIALIZED;
     }
 
-    /**
-     * Transition helper for "chunk stored" upload events.
-     * $storedNewChunk indicates whether chunks_received was incremented.
-     */
-    public static function onChunkStored(array $transfer, bool $storedNewChunk): array
+    /** Transition helper for "chunk stored" upload events. */
+    public static function onChunkStored(array $before, array $after): array
     {
-        TransferInvariants::assertValid($transfer);
-        $from = self::deriveState($transfer);
-        $chunkCount = (int)$transfer['chunk_count'];
-        $chunksReceived = (int)$transfer['chunks_received'] + ($storedNewChunk ? 1 : 0);
-
-        $isComplete = $chunksReceived >= $chunkCount;
-        $to = $isComplete
-            ? TransferState::UPLOADED
-            : ($chunksReceived > 0 ? TransferState::UPLOADING : TransferState::INITIALIZED);
+        TransferInvariants::assertValid($before);
+        TransferInvariants::assertValid($after);
+        $from = self::deriveState($before);
+        $to = self::deriveState($after);
 
         self::assertTransitionAllowed($from, $to);
 
         return [
             'from' => $from,
             'to' => $to,
-            'is_complete' => $isComplete,
-            'chunks_received' => $chunksReceived,
+            'is_complete' => (int)($after['complete'] ?? 0) === 1,
+            'chunks_received' => (int)($after['chunks_received'] ?? 0),
         ];
     }
 
-    /** Transition helper for recipient download progress updates. */
-    public static function onRecipientProgress(array $transfer, int $chunkIndex): array
+    /** Compute recipient download progress target (capped below ack-complete). */
+    public static function recipientProgressTarget(array $transfer, int $chunkIndex): int
     {
-        TransferInvariants::assertValid($transfer);
-        $from = self::deriveState($transfer);
         $chunkCount = (int)$transfer['chunk_count'];
         $cap = max(0, $chunkCount - 1);
         $requestedProgress = min($chunkIndex + 1, $cap);
-        $nextProgress = max((int)$transfer['chunks_downloaded'], $requestedProgress);
+        return max((int)$transfer['chunks_downloaded'], $requestedProgress);
+    }
 
-        $to = $nextProgress > 0 ? TransferState::DELIVERING : TransferState::UPLOADED;
+    /** Transition helper for recipient download progress updates. */
+    public static function onRecipientProgress(array $before, array $after): array
+    {
+        TransferInvariants::assertValid($before);
+        TransferInvariants::assertValid($after);
+        $from = self::deriveState($before);
+        $to = self::deriveState($after);
+
         self::assertTransitionAllowed($from, $to);
 
         return [
             'from' => $from,
             'to' => $to,
-            'next_progress' => $nextProgress,
+            'next_progress' => (int)($after['chunks_downloaded'] ?? 0),
         ];
     }
 
     /** Transition helper for final ACK. */
-    public static function onAckReceived(array $transfer): array
+    public static function onAckReceived(array $before, array $after): array
     {
-        TransferInvariants::assertValid($transfer);
-        $from = self::deriveState($transfer);
-        $to = TransferState::DELIVERED;
+        TransferInvariants::assertValid($before);
+        TransferInvariants::assertValid($after);
+        $from = self::deriveState($before);
+        $to = self::deriveState($after);
+        if ($to !== TransferState::DELIVERED) {
+            throw new ApiError(500, 'Invalid transfer lifecycle transition: ACK must end in delivered state');
+        }
         self::assertTransitionAllowed($from, $to);
         return ['from' => $from, 'to' => $to];
     }
