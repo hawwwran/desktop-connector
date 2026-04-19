@@ -35,13 +35,3 @@ haven't yet.
 | [protocol.md](plans/protocol.md) | Formal spec of the HTTP + encrypted-envelope protocol between desktop, phone, relay. Reverse-specified from `main`. | Reference (living doc) |
 | [explain.protocol.md](plans/explain.protocol.md) | Rationale for why `protocol.md` exists, how to extend it, how to use it during change design. | Reference |
 | [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Draft |
-
-## Server / structural refactor sequence
-
-A 10-step ordered refactor plan. The overview lives in
-[refactor.md](plans/refactor.md); each step is its own file. Order matters —
-later steps assume earlier ones.
-
-| # | Plan | Intent | Status |
-|---|------|--------|--------|
-| 0 | [refactor.md](plans/refactor.md) | Overview of the 10-step sequence and the reasoning behind its order. | Reference |
