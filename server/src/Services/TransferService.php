@@ -96,7 +96,10 @@ class TransferService
         }
 
         $updated = $transfers->findById($transferId);
-        $complete = $updated['chunks_received'] >= $updated['chunk_count'];
+        $state = TransferLifecycle::deriveState($updated);
+        $complete = $state === TransferState::UPLOADED
+            || $state === TransferState::DELIVERING
+            || $state === TransferState::DELIVERED;
 
         if ($complete) {
             $transfers->markComplete($transferId);

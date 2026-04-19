@@ -13,19 +13,19 @@ class TransferStatusService
      */
     public static function computeStatus(array $row): array
     {
-        $complete = (int)($row['complete'] ?? 0);
-        $downloaded = (int)($row['downloaded'] ?? 0);
-        $chunksDownloaded = (int)($row['chunks_downloaded'] ?? 0);
+        $state = TransferLifecycle::deriveState($row);
 
-        if ($downloaded) {
+        if ($state === TransferState::DELIVERED) {
             return ['status' => 'delivered', 'delivery_state' => 'delivered'];
         }
-        if ($complete) {
+
+        if ($state === TransferState::UPLOADED || $state === TransferState::DELIVERING) {
             return [
                 'status' => 'pending',
-                'delivery_state' => $chunksDownloaded > 0 ? 'in_progress' : 'not_started',
+                'delivery_state' => $state === TransferState::DELIVERING ? 'in_progress' : 'not_started',
             ];
         }
+
         return ['status' => 'uploading', 'delivery_state' => 'not_started'];
     }
 
