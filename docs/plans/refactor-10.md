@@ -1,5 +1,7 @@
 # refactor-10.md
 
+> **Status: Done** — landed on `main` in commit `46e423e` (PR #16). New `desktop/src/platform/contract/` (`DesktopPlatform` + `PlatformCapabilities`) as the first-class boundary; `desktop/src/platform/compose.py` with `compose_desktop_platform()` that raises `NotImplementedError` on non-Linux (no silent fallback); `desktop/src/platform/linux/compose.py` returns a `DesktopPlatform(name="linux", …)` directly — no subclass layer. `StartupContext.platform`, `Poller`, `TrayApp`, `run_receiver`, and `dependency_check` all consume the contract instead of backend bundles. `PlatformCapabilities` is load-bearing: `Poller` gates auto-open-URL on `capabilities.auto_open_urls`; tray menu gates "Send Clipboard" on `capabilities.clipboard_text` and "Open Save Folder" on `capabilities.open_folder`. `platform/__init__.py` re-exports only the contract so importing `DesktopPlatform` does not transitively load Linux backends (pinned by `test_contract_import_does_not_load_linux_impl`). `docs/ROADMAP-windows-client.md` carries the refactor-10 gap map as the leading status section with the concrete phase 4–8 Windows implementation plan preserved underneath. 17/17 protocol tests pass; smoke-tested `clipboard.text` with a URL from android → desktop auto-opens in the browser.
+
 ## Refactor 10 / 10
 # Prepare for a Windows desktop client through a platform abstraction boundary
 

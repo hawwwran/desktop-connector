@@ -210,22 +210,26 @@ desktop/
       args.py                — CLI parsing + StartupArgs + StartupMode Literal + resolve_startup_mode
       dependency_check.py    — dep detection + GTK4/Tkinter install UI (intentionally Linux-scoped)
       logging_setup.py       — console + optional rotating file logging
-      startup_context.py     — StartupContext (carries DesktopBackends) + build_startup_context + rebuild_authenticated_api
+      startup_context.py     — StartupContext (carries DesktopPlatform) + build_startup_context + rebuild_authenticated_api
     runners/             — per-mode startup flows (refactor-5)
       registration_runner.py — register_device
       pairing_runner.py      — run_pairing_flow
       send_runner.py         — run_send_file (one-shot --send)
-      receiver_runner.py     — run_receiver (tray or headless; takes DesktopBackends)
+      receiver_runner.py     — run_receiver (tray or headless; takes DesktopPlatform)
     interfaces/          — platform capability Protocols (refactor-6)
-      backends.py            — DesktopBackends composition dataclass (clipboard/notifications/dialogs/shell)
       clipboard.py           — ClipboardBackend (read_clipboard, write_text, write_image)
       dialogs.py             — DialogBackend (pick_files, confirm, show_info)
       notifications.py       — NotificationBackend (notify + convenience helpers)
       shell.py               — ShellBackend (open_url, open_folder, launch_installer_terminal)
     backends/linux/      — Linux backend implementations (refactor-6); wraps existing helper modules
       clipboard_backend.py, dialog_backend.py, notification_backend.py, shell_backend.py
-    platform/linux/      — composition point (refactor-6)
-      compose.py             — compose_linux_backends() -> DesktopBackends
+    platform/             — desktop platform boundary (refactor-10)
+      contract/
+        desktop_platform.py  — DesktopPlatform dataclass (name + 4 backends + capabilities)
+        capabilities.py      — PlatformCapabilities flags (clipboard_text, auto_open_urls, tray, open_folder, ...)
+      compose.py             — compose_desktop_platform(): raises NotImplementedError on non-Linux
+      linux/
+        compose.py           — compose_linux_platform() -> DesktopPlatform(name="linux", ...)
     messaging/           — shared command/message model (refactor-7)
       message_types.py       — MessageType + MessageTransport enums
       message_model.py       — DeviceMessage dataclass (type + transport + payload + metadata)
@@ -236,11 +240,11 @@ desktop/
     connection.py        — exponential backoff state machine
     config.py            — persistent config (~/.config/desktop-connector/)
     api_client.py        — server API wrapper
-    poller.py            — poll, download, decrypt, delivery status check (platform calls via self.backends.*)
+    poller.py            — poll, download, decrypt, delivery status check (platform calls via self.platform.*; auto-open-URL gated on capabilities.auto_open_urls)
     clipboard.py         — wl-copy/xclip read/write (wrapped by LinuxClipboardBackend)
     history.py           — JSON-based transfer history (50 items)
     pairing.py           — QR code generation + tkinter pairing window
-    tray.py              — pystray tray icon, spawns GTK4 windows as subprocesses (platform calls via self.backends.*)
+    tray.py              — pystray tray icon, spawns GTK4 windows as subprocesses (platform calls via self.platform.*; menu items gated on capabilities.clipboard_text / capabilities.open_folder)
     windows.py           — GTK4/libadwaita windows (send-files, settings, history, find-phone)
     dialogs.py           — zenity file picker + confirmation dialogs (wrapped by LinuxDialogBackend)
     notifications.py     — notify-send wrapper (wrapped by LinuxNotificationBackend)
@@ -284,9 +288,10 @@ android/app/src/main/kotlin/com/desktopconnector/
       TransferViewModel.kt   — uploads, clipboard, history, delivery tracking
 
 test_loop.sh                 — automated integration test
-tests/protocol/              — executable protocol contract tests (refactor-8)
+tests/protocol/              — executable protocol + platform contract tests (refactor-8, -10)
   test_desktop_message_contract.py — FnTransferAdapter/FasttrackAdapter pinning
   test_server_contract.py    — hermetic PHP server + HTTP surface + error envelope
+  test_platform_contract.py  — DesktopPlatform / PlatformCapabilities shape + compose behavior
   README.md                  — run command + PHP prereq
 docs/protocol.compatibility.md — preserving/extending/breaking classification (refactor-8)
 docs/protocol.examples.md    — canonical request/response examples (refactor-8)
