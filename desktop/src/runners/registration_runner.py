@@ -6,12 +6,11 @@ import logging
 
 from ..api_client import ApiClient
 from ..config import Config
-from ..crypto import KeyManager
 
 log = logging.getLogger("desktop-connector")
 
 
-def register_device(config: Config, _crypto: KeyManager, api: ApiClient) -> bool:
+def register_device(config: Config, api: ApiClient) -> bool:
     """Register device with server if not already registered."""
     if config.is_registered:
         log.info("Already registered as %s", config.device_id)

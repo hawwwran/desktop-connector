@@ -40,7 +40,12 @@ def build_startup_context(args: StartupArgs) -> StartupContext:
 
 
 def rebuild_authenticated_api(context: StartupContext) -> None:
-    """Recreate API client with freshly registered credentials."""
+    """Recreate API client with freshly registered credentials.
+
+    Mutates ``context.api`` in place; callers rely on this because the
+    initial context is built with placeholder credentials before
+    ``register_device`` runs.
+    """
     conn = ConnectionManager(
         context.config.server_url,
         context.config.device_id,

@@ -17,7 +17,7 @@ log = logging.getLogger("desktop-connector")
 def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
     """Send a single file and exit. Returns 0 on success, 1 on failure."""
     if not config.is_registered:
-        log.error("Not registered. Run without --send-photo first to register and pair.")
+        log.error("Not registered. Run without --send first to register and pair.")
         return 1
     if not config.is_paired:
         log.error("No paired device. Run with --pair first.")

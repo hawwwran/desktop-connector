@@ -44,30 +44,30 @@ def main() -> int:
         return 1
 
     args = parse_startup_args()
+    # Configure logging before any services are constructed so constructor-time
+    # log lines aren't dropped or emitted under the default logging config.
+    setup_logging(args.verbose, Path(args.config_dir) if args.config_dir else None)
 
     context = build_startup_context(args)
-    setup_logging(args.verbose, context.config.config_dir)
 
-    if not register_device(context.config, context.crypto, context.api):
+    if not register_device(context.config, context.api):
         return 1
 
     rebuild_authenticated_api(context)
 
-    mode = resolve_startup_mode(args, context.config)
-
-    if mode == "pairing":
-        pairing_result = run_pairing_flow(
+    if args.pair or not context.config.is_paired:
+        if args.send:
+            log.error("Not paired yet. Run with --pair first.")
+            return 1
+        if run_pairing_flow(
             context.config,
             context.crypto,
             context.api,
             headless=args.headless,
-            send=args.send,
-        )
-        if pairing_result != 0:
-            return pairing_result
+        ) != 0:
+            return 1
 
-        mode = "send_file" if args.send else ("headless_receive" if args.headless else "tray_receive")
-
+    mode = resolve_startup_mode(args)
     if mode == "send_file":
         return run_send_file(context.config, context.crypto, Path(args.send))
 

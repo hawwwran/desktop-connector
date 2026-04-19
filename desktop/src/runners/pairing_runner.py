@@ -20,13 +20,8 @@ def run_pairing_flow(
     api: ApiClient,
     *,
     headless: bool,
-    send: str | None,
 ) -> int:
     """Execute pairing flow, preserving existing CLI behavior."""
-    if send:
-        log.error("Not paired yet. Run with --pair first.")
-        return 1
-
     log.info("Starting pairing flow...")
 
     if headless:

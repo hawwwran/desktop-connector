@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-
-from ..config import Config
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -19,7 +18,7 @@ class StartupArgs:
     verbose: bool
 
 
-StartupMode = str
+StartupMode = Literal["send_file", "headless_receive", "tray_receive"]
 
 
 def parse_startup_args() -> StartupArgs:
@@ -45,10 +44,8 @@ def parse_startup_args() -> StartupArgs:
     )
 
 
-def resolve_startup_mode(args: StartupArgs, config: Config) -> StartupMode:
-    """Resolve a single startup mode before runtime branching."""
-    if args.pair or not config.is_paired:
-        return "pairing"
+def resolve_startup_mode(args: StartupArgs) -> StartupMode:
+    """Resolve the final startup mode (what to do after any pairing step)."""
     if args.send:
         return "send_file"
     if args.headless:
