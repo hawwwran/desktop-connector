@@ -48,6 +48,9 @@ require_once __DIR__ . '/../src/Services/TransferWakeService.php';
 require_once __DIR__ . '/../src/Services/TransferCleanupService.php';
 require_once __DIR__ . '/../src/Services/TransferService.php';
 
+// --- Messaging ---
+require_once __DIR__ . '/../src/Messaging/MessageTransportPolicy.php';
+
 // Initialize database
 $db = Database::getInstance();
 $db->migrate();
