@@ -9,10 +9,12 @@ class TransferStatusService
 {
     /**
      * Map a transfers row to {status, delivery_state}.
-     * Required row fields: chunk_count, complete, downloaded, chunks_downloaded.
+     * Required row fields: chunk_count, chunks_received, complete, downloaded,
+     * chunks_downloaded, delivered_at.
      */
     public static function computeStatus(array $row): array
     {
+        TransferInvariants::assertRow($row, 'TransferStatusService::computeStatus');
         $complete = (int)($row['complete'] ?? 0);
         $downloaded = (int)($row['downloaded'] ?? 0);
         $chunksDownloaded = (int)($row['chunks_downloaded'] ?? 0);
@@ -32,6 +34,7 @@ class TransferStatusService
     /** Full per-transfer dict for /sent-status (includes created_at). */
     public static function formatSent(array $row): array
     {
+        TransferInvariants::assertRow($row, 'TransferStatusService::formatSent');
         $s = self::computeStatus($row);
         return [
             'transfer_id' => $row['transfer_id'],
@@ -58,6 +61,10 @@ class TransferStatusService
      */
     public static function loadSentForDevice(Database $db, string $deviceId, int $limit = 50, bool $onlyComplete = false): array
     {
-        return (new TransferRepository($db))->loadSentForDevice($deviceId, $limit, $onlyComplete);
+        $rows = (new TransferRepository($db))->loadSentForDevice($deviceId, $limit, $onlyComplete);
+        foreach ($rows as $row) {
+            TransferInvariants::assertRow($row, 'TransferStatusService::loadSentForDevice');
+        }
+        return $rows;
     }
 }

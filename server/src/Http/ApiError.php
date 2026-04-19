@@ -84,3 +84,11 @@ class StorageLimitError extends ApiError
         parent::__construct(507, $message);
     }
 }
+
+class TransferInvariantViolation extends ApiError
+{
+    public function __construct(string $message = 'Transfer state invariant violation')
+    {
+        parent::__construct(500, $message);
+    }
+}

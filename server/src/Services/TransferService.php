@@ -129,6 +129,7 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found or not for you');
         }
+        TransferInvariants::assertRow($transfer, 'TransferService::downloadChunk.preProgress');
 
         $chunk = (new ChunkRepository($db))->findChunk($transferId, $chunkIndex);
         if (!$chunk) {
@@ -147,6 +148,11 @@ class TransferService
         $cap = (int)$transfer['chunk_count'] - 1;
         $newProgress = min($chunkIndex + 1, max(0, $cap));
         $transfers->updateDownloadProgress($transferId, $newProgress);
+        $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new NotFoundError('Transfer not found');
+        }
+        TransferInvariants::assertRow($updated, 'TransferService::downloadChunk.postProgress');
         AppLog::log('Transfer', sprintf(
             'transfer.chunk.served transfer_id=%s chunk_index=%d progress=%d/%d',
             AppLog::shortId($transferId), $chunkIndex, $newProgress, (int)$transfer['chunk_count']
@@ -162,6 +168,7 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found');
         }
+        TransferInvariants::assertRow($transfer, 'TransferService::ack.preAck');
 
         // Pairing-stats SUM must run BEFORE chunk deletion (chunks table still holds sizes here).
         $senderId = $transfer['sender_id'];
@@ -175,6 +182,11 @@ class TransferService
 
         // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
         $transfers->markDelivered($transferId, time());
+        $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new NotFoundError('Transfer not found');
+        }
+        TransferInvariants::assertRow($updated, 'TransferService::ack.postAck');
         AppLog::log('Delivery', sprintf(
             'delivery.acked transfer_id=%s recipient=%s total_bytes=%d',
             AppLog::shortId($transferId), AppLog::shortId($deviceId), $totalBytes
