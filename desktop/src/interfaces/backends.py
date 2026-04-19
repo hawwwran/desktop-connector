@@ -1,16 +1,12 @@
+"""Compatibility shim for older imports.
+
+Refactor #10 promotes ``DesktopPlatform`` as the first-class boundary.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from ..platform.contract import DesktopPlatform
 
-from .clipboard import ClipboardBackend
-from .dialogs import DialogBackend
-from .notifications import NotificationBackend
-from .shell import ShellBackend
+DesktopBackends = DesktopPlatform
 
-
-@dataclass(frozen=True)
-class DesktopBackends:
-    clipboard: ClipboardBackend
-    notifications: NotificationBackend
-    dialogs: DialogBackend
-    shell: ShellBackend
+__all__ = ["DesktopBackends"]

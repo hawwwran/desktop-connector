@@ -75,7 +75,7 @@ def main() -> int:
         context.config,
         context.crypto,
         mode == "headless_receive",
-        context.backends,
+        context.platform,
     )
     return 0
 

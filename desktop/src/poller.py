@@ -20,7 +20,7 @@ from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
 from .history import TransferHistory
 from .messaging import FnTransferAdapter, MessageDispatcher, MessageType
-from .interfaces.backends import DesktopBackends
+from .platform import DesktopPlatform
 
 log = logging.getLogger(__name__)
 
@@ -42,13 +42,13 @@ class Poller:
 
     def __init__(self, config: Config, connection: ConnectionManager,
                  api: ApiClient, crypto: KeyManager, history: TransferHistory,
-                 backends: DesktopBackends):
+                 platform: DesktopPlatform):
         self.config = config
         self.conn = connection
         self.api = api
         self.crypto = crypto
         self.history = history
-        self.backends = backends
+        self.platform = platform
         self._message_dispatcher = MessageDispatcher()
         self._message_dispatcher.register(MessageType.CLIPBOARD_TEXT, self._handle_message_clipboard_text)
         self._message_dispatcher.register(MessageType.CLIPBOARD_IMAGE, self._handle_message_clipboard_image)
@@ -511,7 +511,7 @@ class Poller:
 
     def _handle_message_clipboard_text(self, message) -> None:
         text = str(message.payload.get("text", ""))
-        if not self.backends.clipboard.write_text(text):
+        if not self.platform.clipboard.write_text(text):
             log.warning("clipboard.write_text.failed")
             return
 
@@ -519,11 +519,11 @@ class Poller:
         import re
         urls = re.findall(r'https?://\S+', text)
         preview = text if len(urls) == 1 else (text[:60] + "..." if len(text) > 60 else text)
-        self.backends.notifications.notify("Clipboard received", preview[:60])
+        self.platform.notifications.notify("Clipboard received", preview[:60])
         self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.text"),
                          display_label=preview, direction="received", size=len(text))
         if len(urls) == 1 and self.config.auto_open_links:
-            if self.backends.shell.open_url(urls[0]):
+            if self.platform.shell.open_url(urls[0]):
                 log.info("platform.open_url.succeeded length=%d", len(urls[0]))
 
     def _handle_message_clipboard_image(self, message) -> None:
@@ -531,9 +531,9 @@ class Poller:
         if not isinstance(data, (bytes, bytearray)):
             log.warning("clipboard.write_image.failed reason=invalid_payload")
             return
-        if self.backends.clipboard.write_image(bytes(data)):
+        if self.platform.clipboard.write_image(bytes(data)):
             log.info("clipboard.write_image.succeeded size=%d", len(data))
-            self.backends.notifications.notify("Clipboard received", "Image copied to clipboard")
+            self.platform.notifications.notify("Clipboard received", "Image copied to clipboard")
             self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.image"),
                              display_label="Clipboard image", direction="received", size=len(data))
         else:
@@ -546,7 +546,7 @@ class Poller:
             del devices[did]
         self.config._data["paired_devices"] = devices
         self.config.save()
-        self.backends.notifications.notify("Unpaired", "Paired device disconnected")
+        self.platform.notifications.notify("Unpaired", "Paired device disconnected")
 
     def _delivery_tracker_loop(self) -> None:
         """Paints per-chunk "Delivering X/Y" progress for OUTGOING transfers while

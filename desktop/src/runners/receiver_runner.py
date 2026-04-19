@@ -10,7 +10,7 @@ from ..api_client import ApiClient
 from ..config import Config
 from ..connection import ConnectionManager, ConnectionState
 from ..crypto import KeyManager
-from ..interfaces.backends import DesktopBackends
+from ..platform import DesktopPlatform
 from ..poller import Poller
 
 log = logging.getLogger("desktop-connector")
@@ -20,7 +20,7 @@ def run_receiver(
     config: Config,
     crypto: KeyManager,
     headless: bool,
-    backends: DesktopBackends,
+    platform: DesktopPlatform,
 ) -> None:
     """Run the receiver loop (with tray or headless)."""
     from ..history import TransferHistory
@@ -28,24 +28,24 @@ def run_receiver(
     conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
     api = ApiClient(conn, crypto)
     history = TransferHistory(config.config_dir)
-    poller = Poller(config, conn, api, crypto, history, backends)
+    poller = Poller(config, conn, api, crypto, history, platform)
 
     # Wire up notifications
-    poller.on_file_received(backends.notifications.notify_file_received)
+    poller.on_file_received(platform.notifications.notify_file_received)
 
     last_notified = [None]  # "connected", "disconnected", or None (never notified)
 
     def on_state_change(state):
         if state == ConnectionState.CONNECTED and last_notified[0] != "connected":
             if last_notified[0] == "disconnected":
-                backends.notifications.notify_connection_restored()
+                platform.notifications.notify_connection_restored()
             last_notified[0] = "connected"
         elif (
             state == ConnectionState.DISCONNECTED
             and last_notified[0] != "disconnected"
         ):
             if last_notified[0] == "connected":
-                backends.notifications.notify_connection_lost()
+                platform.notifications.notify_connection_lost()
             last_notified[0] = "disconnected"
 
     conn.on_state_change(on_state_change)
@@ -82,7 +82,7 @@ def run_receiver(
         crypto,
         history,
         config.save_directory,
-        backends,
+        platform,
     )
     log.info("Starting tray icon. Saving to: %s", config.save_directory)
 

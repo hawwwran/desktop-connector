@@ -1,14 +1,13 @@
 """Dependency checks and fallback install UI for desktop bootstrap.
 
-Runs before the backend composition point exists, and the missing-deps
-UI *is* the GTK4/Tkinter installer dialog itself — so the Linux shell
-backend is imported directly. Port to other platforms by branching on
-``sys.platform`` inside ``show_missing_deps_dialog``.
+The missing-deps UI itself is platform-sensitive. We route installer
+launch through the composed platform shell backend so the flow remains
+platform-neutral as additional desktop runtimes are introduced.
 """
 
 from __future__ import annotations
 
-from ..backends.linux.shell_backend import LinuxShellBackend
+from ..platform import compose_desktop_platform
 
 def check_dependencies() -> list[tuple[str, str]]:
     """Check all required dependencies. Returns list of missing ones."""
@@ -128,7 +127,7 @@ def _show_deps_gtk4(missing: list[tuple[str, str]]) -> None:
             box.append(row)
 
         def on_install(_btn):
-            LinuxShellBackend().launch_installer_terminal(
+            compose_desktop_platform().shell.launch_installer_terminal(
                 "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'"
             )
             win.close()
@@ -174,7 +173,7 @@ def _show_deps_tkinter(missing: list[tuple[str, str]]) -> None:
         ).pack(anchor=tk.W, pady=2)
 
     def on_install():
-        LinuxShellBackend().launch_installer_terminal(
+        compose_desktop_platform().shell.launch_installer_terminal(
             "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'"
         )
         root.destroy()
