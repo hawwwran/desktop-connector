@@ -251,16 +251,18 @@ class ApiClient:
 
     def fasttrack_send(self, recipient_id: str, encrypted_data: str) -> int | None:
         """Send an encrypted fasttrack message. Returns message_id or None."""
-        log.info("Fasttrack send to %s (%d bytes)", recipient_id[:12], len(encrypted_data))
+        log.info("fasttrack.message.send_started recipient=%s size=%d",
+                 recipient_id[:12], len(encrypted_data))
         resp = self.conn.request("POST", "/api/fasttrack/send", json={
             "recipient_id": recipient_id,
             "encrypted_data": encrypted_data,
         })
         if resp and resp.status_code == 201:
             msg_id = resp.json().get("message_id")
-            log.info("Fasttrack sent, message_id=%s", msg_id)
+            log.info("fasttrack.message.send_succeeded message_id=%s", msg_id)
             return msg_id
-        log.error("Fasttrack send failed: %s", resp.status_code if resp else "no response")
+        log.error("fasttrack.message.send_failed status=%s",
+                  resp.status_code if resp else "no_response")
         return None
 
     def fasttrack_pending(self) -> list[dict]:
@@ -269,7 +271,7 @@ class ApiClient:
         if resp and resp.status_code == 200:
             msgs = resp.json().get("messages", [])
             if msgs:
-                log.info("Fasttrack pending: %d message(s)", len(msgs))
+                log.debug("fasttrack.message.pending_listed count=%d", len(msgs))
             return msgs
         return []
 
@@ -277,5 +279,6 @@ class ApiClient:
         """Acknowledge and delete a fasttrack message."""
         resp = self.conn.request("POST", f"/api/fasttrack/{message_id}/ack")
         ok = resp is not None and resp.status_code == 200
-        log.debug("Fasttrack ack %d: %s", message_id, "ok" if ok else "failed")
+        log.debug("fasttrack.message.acked message_id=%d outcome=%s",
+                  message_id, "succeeded" if ok else "failed")
         return ok

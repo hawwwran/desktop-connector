@@ -33,13 +33,21 @@ class FasttrackController
         $messages->deleteExpiredForRecipient($recipientId, time() - self::MESSAGE_EXPIRY);
 
         // Enforce max pending limit
-        if ($messages->countPendingForRecipient($recipientId) >= self::MAX_PENDING) {
+        $pendingCount = $messages->countPendingForRecipient($recipientId);
+        if ($pendingCount >= self::MAX_PENDING) {
+            AppLog::log('Fasttrack', sprintf(
+                'fasttrack.message.rate_limited sender=%s recipient=%s pending_count=%d',
+                AppLog::shortId($deviceId), AppLog::shortId($recipientId), $pendingCount
+            ), 'warning');
             // Plain 429 without Retry-After to match the pre-refactor wire shape;
             // ping's 429 is the one that carries the header.
             throw new ApiError(429, 'Too many pending messages');
         }
 
-        AppLog::log('Fasttrack', "send from={$deviceId} to={$recipientId} size=" . strlen($encryptedData));
+        AppLog::log('Fasttrack', sprintf(
+            'fasttrack.message.send_received sender=%s recipient=%s size=%d',
+            AppLog::shortId($deviceId), AppLog::shortId($recipientId), strlen($encryptedData)
+        ));
 
         $messageId = $messages->insertMessage($deviceId, $recipientId, $encryptedData, time());
 
@@ -55,7 +63,10 @@ class FasttrackController
             }
         }
 
-        AppLog::log('Fasttrack', "stored message_id={$messageId}, FCM={$fcmSent}");
+        AppLog::log('Fasttrack', sprintf(
+            'fasttrack.message.stored message_id=%d fcm_result=%s',
+            $messageId, $fcmSent
+        ));
         Router::json(['message_id' => $messageId], 201);
     }
 
@@ -73,7 +84,10 @@ class FasttrackController
         $pending = $messages->listPendingForRecipient($deviceId);
 
         if (!empty($pending)) {
-            AppLog::log('Fasttrack', "pending for={$deviceId} count=" . count($pending));
+            AppLog::log('Fasttrack', sprintf(
+                'fasttrack.message.pending_listed recipient=%s count=%d',
+                AppLog::shortId($deviceId), count($pending)
+            ), 'debug');
         }
         Router::json(['messages' => $pending]);
     }
@@ -97,7 +111,10 @@ class FasttrackController
 
         $messages->deleteById($messageId);
 
-        AppLog::log('Fasttrack', "ack id={$messageId} by={$ctx->deviceId}");
+        AppLog::log('Fasttrack', sprintf(
+            'fasttrack.message.acked message_id=%d by=%s',
+            $messageId, AppLog::shortId($ctx->deviceId)
+        ));
         Router::json(['status' => 'ok']);
     }
 }

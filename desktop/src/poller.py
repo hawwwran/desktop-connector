@@ -537,7 +537,7 @@ class Poller:
             finally:
                 filepath.unlink(missing_ok=True)
         elif fn == "unpair":
-            log.info("Received unpair request from paired device")
+            log.info("pairing.unpair.received")
             # Remove the sender from paired devices
             devices = self.config.paired_devices
             # Find and remove the device that sent this
@@ -549,7 +549,7 @@ class Poller:
             from .notifications import notify
             notify("Unpaired", "Paired device disconnected")
         else:
-            log.warning("Unknown .fn function: %s", fn)
+            log.warning("fasttrack.command.unknown fn=%s", fn)
 
     def _delivery_tracker_loop(self) -> None:
         """Paints per-chunk "Delivering X/Y" progress for OUTGOING transfers while

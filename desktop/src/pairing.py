@@ -113,6 +113,7 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
                 name=f"Phone-{info['phone_id'][:8]}",
             )
             api.confirm_pairing(info["phone_id"])
+            log.info("pairing.confirm.accepted peer=%s", info["phone_id"][:12])
             paired[0] = True
             root.destroy()
 
@@ -169,7 +170,8 @@ def run_pairing_headless(config: Config, crypto: KeyManager, api: ApiClient,
             req = requests_list[0]
             sym_key = crypto.derive_shared_key(req["phone_pubkey"])
             code = KeyManager.get_verification_code(sym_key)
-            log.info("Phone connected: %s. Verification code: %s", req["phone_id"][:12], code)
+            # Verification code is shown to user; never logged (it's a secret).
+            log.info("pairing.request.received phone_id=%s", req["phone_id"][:12])
 
             config.add_paired_device(
                 device_id=req["phone_id"],
@@ -178,9 +180,9 @@ def run_pairing_headless(config: Config, crypto: KeyManager, api: ApiClient,
                 name=f"Phone-{req['phone_id'][:8]}",
             )
             api.confirm_pairing(req["phone_id"])
-            log.info("Pairing confirmed")
+            log.info("pairing.confirm.accepted peer=%s", req["phone_id"][:12])
             return True
         time.sleep(2)
 
-    log.error("Pairing timed out")
+    log.error("pairing.confirm.failed reason=timeout")
     return False

@@ -8,6 +8,13 @@ import java.util.Locale
 
 /**
  * Simple file-based log, capped at MAX_LINES. Viewable in Settings.
+ *
+ * Privacy rule (must never be violated):
+ *   Never log confidential fields — symmetric or private keys, auth_token,
+ *   FCM token, decrypted clipboard text/images, decrypted file bytes,
+ *   fasttrack payloads, or GPS coordinates. Log only non-sensitive
+ *   metadata: transfer_id / message_id / device_id (first 12 chars),
+ *   sizes, outcomes, and error_kind.
  */
 object AppLog {
     private const val MAX_LINES = 2000
@@ -21,10 +28,10 @@ object AppLog {
         enabled = AppPreferences(context).loggingEnabled
     }
 
-    fun log(tag: String, message: String) {
+    fun log(tag: String, message: String, level: String = "info") {
         if (!::logFile.isInitialized || !enabled) return
         val ts = dateFormat.format(Date())
-        val line = "$ts [$tag] $message\n"
+        val line = "$ts [$level] [$tag] $message\n"
         try {
             logFile.appendText(line)
             trimIfNeeded()

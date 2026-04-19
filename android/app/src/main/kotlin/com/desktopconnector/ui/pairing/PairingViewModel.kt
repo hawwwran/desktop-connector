@@ -5,6 +5,7 @@ import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
@@ -35,6 +36,7 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
     private val keyManager = KeyManager(application)
 
     fun onQrScanned(serverUrl: String, desktopId: String, desktopPubkey: String, desktopName: String) {
+        AppLog.log("Pairing", "pairing.qr.scanned desktop_id=${desktopId.take(12)}")
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 // Save server URL
@@ -47,14 +49,17 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
                         ?: throw Exception("Registration failed")
                     prefs.deviceId = result.getString("device_id")
                     prefs.authToken = result.getString("auth_token")
+                    AppLog.log("Pairing", "startup.device.registered device_id=${prefs.deviceId?.take(12)}")
                 }
 
                 val api = ApiClient(serverUrl, prefs.deviceId!!, prefs.authToken!!)
 
                 // Send pairing request
                 if (!api.sendPairingRequest(desktopId, keyManager.publicKeyB64)) {
+                    AppLog.log("Pairing", "pairing.request.sent desktop_id=${desktopId.take(12)} outcome=failed", "error")
                     throw Exception("Failed to send pairing request")
                 }
+                AppLog.log("Pairing", "pairing.request.sent desktop_id=${desktopId.take(12)} outcome=succeeded")
 
                 // Derive shared key and verification code
                 val sharedKey = keyManager.deriveSharedKey(desktopPubkey)
@@ -89,6 +94,7 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         )
 
         _state.value = current.copy(stage = PairingStage.COMPLETE)
+        AppLog.log("Pairing", "pairing.confirm.accepted peer=${current.desktopId.take(12)}")
 
         // Trigger FCM init now that we have a paired device
         FcmManager.reset()

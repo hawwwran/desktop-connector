@@ -17,6 +17,10 @@ class PairingController
         // Remove any existing unclaimed requests from this phone to this desktop
         $pairings->deleteUnclaimedRequests($ctx->deviceId, $desktopId);
         $pairings->insertPairingRequest($desktopId, $ctx->deviceId, $phonePubkey, time());
+        AppLog::log('Pairing', sprintf(
+            'pairing.request.received desktop_id=%s phone_id=%s',
+            AppLog::shortId($desktopId), AppLog::shortId($ctx->deviceId)
+        ));
 
         Router::json(['status' => 'ok'], 201);
     }
@@ -28,6 +32,13 @@ class PairingController
 
         foreach ($requests as $req) {
             $pairings->markRequestClaimed((int)$req['id']);
+        }
+
+        if (!empty($requests)) {
+            AppLog::log('Pairing', sprintf(
+                'pairing.request.claimed desktop_id=%s count=%d',
+                AppLog::shortId($ctx->deviceId), count($requests)
+            ));
         }
 
         Router::json(['requests' => $requests]);
@@ -44,6 +55,10 @@ class PairingController
         $pairings = new PairingRepository($db);
         if (!$pairings->findSortedPairing($ids[0], $ids[1])) {
             $pairings->createPairing($ids[0], $ids[1], time());
+            AppLog::log('Pairing', sprintf(
+                'pairing.confirm.accepted device_a=%s device_b=%s',
+                AppLog::shortId($ids[0]), AppLog::shortId($ids[1])
+            ));
         }
 
         Router::json(['status' => 'ok']);

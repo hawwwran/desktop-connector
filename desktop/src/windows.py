@@ -1464,7 +1464,7 @@ function updatePos(lat,lng,acc) {
             payload = json.dumps({"fn": "find-phone", "action": "stop"}).encode()
             encrypted = crypto.encrypt_blob(payload, symmetric_key)
             encrypted_b64 = base64.b64encode(encrypted).decode()
-            log.info("Sending find-phone stop to %s", target_id[:12])
+            log.info("fasttrack.command.sent fn=find-phone action=stop recipient=%s", target_id[:12])
             api.fasttrack_send(target_id, encrypted_b64)
 
         def on_start(btn):
@@ -1507,17 +1507,17 @@ function updatePos(lat,lng,acc) {
                     if mid:
                         api.fasttrack_ack(mid)
                 if stale:
-                    log.info("Flushed %d stale message(s)", len(stale))
+                    log.info("fasttrack.message.flushed_stale count=%d", len(stale))
 
-                log.info("Sending start (volume=%d, silent=%s) to %s",
+                log.info("fasttrack.command.sent fn=find-phone action=start volume=%d silent=%s recipient=%s",
                          volume, is_silent[0], target_id[:12])
                 msg_id = api.fasttrack_send(target_id, encrypted_b64)
                 if msg_id is None:
-                    log.error("Failed to send fasttrack message")
+                    log.error("fasttrack.command.send_failed fn=find-phone")
                     GLib.idle_add(set_ui, "Failed to reach phone", True, True, False)
                     return
 
-                log.info("Sent msg_id=%s, polling...", msg_id)
+                log.debug("fasttrack.command.polling message_id=%s", msg_id)
                 last_heartbeat = time.time()
                 comms_lost_shown = False
 

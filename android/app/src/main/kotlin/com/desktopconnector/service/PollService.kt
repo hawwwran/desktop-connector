@@ -222,7 +222,7 @@ class PollService : Service() {
 
                 // Process fasttrack messages before long poll (which blocks 25s)
                 if (fasttrackWakeSignal || FindPhoneManager.isRinging) {
-                    AppLog.log("Fasttrack", "Processing (wake=$fasttrackWakeSignal, ringing=${FindPhoneManager.isRinging})")
+                    AppLog.log("Fasttrack", "fasttrack.message.processing wake=$fasttrackWakeSignal ringing=${FindPhoneManager.isRinging}", "debug")
                     fasttrackWakeSignal = false
                     handleFasttrackMessages(api, keyManager)
                 }
@@ -326,14 +326,14 @@ class PollService : Service() {
     }
 
     private suspend fun handleFasttrackMessages(api: ApiClient, keyManager: KeyManager) {
-        AppLog.log("Fasttrack", "Fetching pending messages...")
+        AppLog.log("Fasttrack", "fasttrack.message.pending_fetching", "debug")
         val messages = api.fasttrackPending()
         if (messages.isEmpty()) {
-            AppLog.log("Fasttrack", "No pending messages")
+            // count=0 → skip emission (noise reduction)
             return
         }
 
-        AppLog.log("Fasttrack", "Processing ${messages.size} message(s)")
+        AppLog.log("Fasttrack", "fasttrack.message.pending_listed count=${messages.size}")
 
         for (msg in messages) {
             val messageId = msg.getInt("id")
@@ -342,7 +342,7 @@ class PollService : Service() {
 
             val paired = keyManager.getPairedDevice(senderId)
             if (paired == null) {
-                AppLog.log("Fasttrack", "Message $messageId from unknown device ${senderId.take(12)}, skipping")
+                AppLog.log("Fasttrack", "fasttrack.message.skipped message_id=$messageId sender=${senderId.take(12)} reason=unknown_device", "warning")
                 api.fasttrackAck(messageId)
                 continue
             }
@@ -355,26 +355,26 @@ class PollService : Service() {
 
                 val fn = payload.optString("fn", "")
                 // Never log `payload` — it's decrypted user data.
-                AppLog.log("Fasttrack", "Message $messageId: fn=$fn")
+                AppLog.log("Fasttrack", "fasttrack.message.processed message_id=$messageId fn=$fn")
 
                 when (fn) {
                     "find-phone" -> {
                         val action = payload.optString("action", "")
-                        AppLog.log("Fasttrack", "Find-phone action=$action")
+                        AppLog.log("Fasttrack", "fasttrack.command.received fn=find-phone action=$action")
                         FindPhoneManager.handleCommand(
                             applicationContext, action, payload,
                             senderId, api, symmetricKey
                         )
                     }
-                    else -> AppLog.log("Fasttrack", "Unknown fn: $fn")
+                    else -> AppLog.log("Fasttrack", "fasttrack.command.unknown fn=$fn", "warning")
                 }
             } catch (e: Exception) {
-                AppLog.log("Fasttrack", "Failed to process message $messageId: ${e.message}")
+                AppLog.log("Fasttrack", "fasttrack.message.processing_failed message_id=$messageId error_kind=${e.javaClass.simpleName}", "error")
                 Log.e(TAG, "Failed to process fasttrack message $messageId: ${e.message}")
             }
 
             api.fasttrackAck(messageId)
-            AppLog.log("Fasttrack", "Acked message $messageId")
+            AppLog.log("Fasttrack", "fasttrack.message.acked message_id=$messageId", "debug")
         }
     }
 
@@ -833,7 +833,7 @@ class PollService : Service() {
                 else -> fileName
             }
         } else if (fn == "unpair") {
-            Log.i(TAG, "Received unpair request from desktop")
+            AppLog.log("Pairing", "pairing.unpair.received")
             val keyManager = KeyManager(this)
             keyManager.getFirstPairedDevice()?.let {
                 keyManager.removePairedDevice(it.deviceId)
