@@ -45,7 +45,6 @@ later steps assume earlier ones.
 | # | Plan | Intent | Status |
 |---|------|--------|--------|
 | 0 | [refactor.md](plans/refactor.md) | Overview of the 10-step sequence and the reasoning behind its order. | Reference |
-| 1 | [refactor-1.md](plans/refactor-1.md) | Split `TransferController` into smaller server services (init, chunks, ack, status, wake, cleanup) without changing the protocol. | **Done** |
 | 2 | [refactor-2.md](plans/refactor-2.md) | Add an explicit server-side pipeline layer for auth, request context, and input validation. | **Done** |
 | 3 | [refactor-3.md](plans/refactor-3.md) | Introduce a repository layer above direct SQLite access. | **Done** |
 | 4 | [refactor-4.md](plans/refactor-4.md) | Formalize internal transfer states and state transitions (replace implicit boolean combos). | Draft |
