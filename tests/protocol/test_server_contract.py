@@ -6,6 +6,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -13,14 +14,26 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(__file__))
+from _paths import REPO_ROOT  # noqa: E402
+
 
 class _ServerHarness:
+    """Spins up a hermetic PHP server: fresh tempdir copy of server/ source,
+    skipping ``data/`` and ``storage/`` so any stray dev-run state doesn't leak
+    into tests. Each test method registers fresh device credentials, so
+    state sharing across tests in the same class is benign.
+    """
+
     def __init__(self) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="dc-protocol-")
-        self._repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        self._server_src = os.path.join(self._repo_root, "server")
+        self._server_src = os.path.join(REPO_ROOT, "server")
         self._server_copy = os.path.join(self._tmpdir, "server")
-        shutil.copytree(self._server_src, self._server_copy)
+        shutil.copytree(
+            self._server_src,
+            self._server_copy,
+            ignore=shutil.ignore_patterns("data", "storage", "__pycache__", ".*"),
+        )
 
         self._port = self._pick_port()
         self.base_url = f"http://127.0.0.1:{self._port}"
@@ -271,6 +284,63 @@ class ServerProtocolContractTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
+
+    # ---- Error-envelope contract -------------------------------------------------
+    #
+    # The server surfaces ApiError subclasses via ErrorResponder as JSON with
+    # a top-level "error" string. These paths are as much a part of the
+    # contract as the happy paths.
+
+    def test_auth_errors_contract(self):
+        # No auth at all -> 401
+        status, _headers, body = self.h.request("GET", "/api/devices/stats")
+        self.assertEqual(status, 401)
+        self.assertIn("error", body)
+
+        # Device-id present but bearer token wrong -> 401
+        desktop_id, _good_token, _ = self._register_device("desktop")
+        status, _headers, body = self.h.request(
+            "GET", "/api/devices/stats", token="wrong" * 16, device_id=desktop_id
+        )
+        self.assertEqual(status, 401)
+        self.assertIn("error", body)
+
+    def test_not_found_contract(self):
+        # Transfer ids are path-safe-checked at the pipeline; unknown IDs 404.
+        desktop_id, desktop_token, _ = self._register_device("desktop")
+        status, _headers, body = self.h.request(
+            "POST",
+            "/api/transfers/nonexistent-id/ack",
+            token=desktop_token,
+            device_id=desktop_id,
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+
+    def test_validation_error_contract(self):
+        # Missing required field -> 400 with "error".
+        desktop_id, desktop_token, _ = self._register_device("desktop")
+        status, _headers, body = self.h.request(
+            "POST",
+            "/api/transfers/init",
+            token=desktop_token,
+            device_id=desktop_id,
+            json_body={"recipient_id": "phone-id"},  # missing transfer_id, encrypted_meta, chunk_count
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
+
+    def test_path_traversal_rejected(self):
+        # Pipeline-level transfer_id guard: path traversal must 400, not 200.
+        desktop_id, desktop_token, _ = self._register_device("desktop")
+        status, _headers, body = self.h.request(
+            "POST",
+            "/api/transfers/..%2F..%2Fetc/ack",
+            token=desktop_token,
+            device_id=desktop_id,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", body)
 
 
 if __name__ == "__main__":

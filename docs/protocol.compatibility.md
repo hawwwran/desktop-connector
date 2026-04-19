@@ -44,3 +44,40 @@ Examples:
 - `docs/plans/protocol.md` remains the source of truth.
 - Contract tests operationalize the protocol; they do not replace it.
 - Avoid encoding accidental implementation quirks as mandatory protocol rules.
+
+## Concrete classification (as of refactor-8)
+
+Use this table when judging specific edits. "Breaking" means a pre-existing
+release build of the desktop or Android client could start misbehaving.
+
+| Area | Edit | Category |
+|---|---|---|
+| `/api/transfers/sent-status` — `status` value | Rename `"delivered"` → anything else | breaking |
+| `/api/transfers/sent-status` — `status` value | Add a fourth status (e.g. `"archived"`) | extending — old clients must ignore unknowns |
+| `/api/transfers/sent-status` — `delivery_state` | Rename `"in_progress"` or `"delivered"` | breaking |
+| `/api/transfers/sent-status` row | Add new optional field | extending |
+| `/api/transfers/sent-status` row | Remove existing field (e.g. `chunk_count`) | breaking |
+| `/api/transfers/init` request | Add required field | breaking |
+| `/api/transfers/init` request | Add optional field with a default | extending |
+| Chunk upload/download URL shape | Change `/chunks/{i}` path format | breaking |
+| Chunk download body | Wrap raw bytes in a JSON envelope | breaking |
+| `/api/transfers/notify` | Add `test=2` mode | extending |
+| `/api/transfers/notify` | Drop inline `sent_status` from the payload | breaking |
+| `/api/fasttrack/send` | Tighten payload ceiling below current 128 KB | breaking (for any client relying on the old cap) |
+| `/api/fasttrack/send` | Raise ceiling above 128 KB | extending |
+| Auth: accept additional header name (e.g. `X-Auth-Token`) | Add as alternative | extending |
+| Auth: require a new header on an existing endpoint | Add requirement | breaking |
+| Error envelope | Change the top-level key from `"error"` to `"message"` | breaking |
+| Error envelope | Add extra context fields (e.g. `"retry_after"`) | extending |
+| `.fn.*` naming convention | Remove support for `.fn.unpair` / `.fn.clipboard.*` | breaking |
+| `.fn.*` naming convention | Add `.fn.newthing.*` | extending |
+| Fasttrack payload `{fn, action}` shape | Reuse existing `fn` with new semantics | breaking |
+| Fasttrack payload `{fn, action}` shape | Add a new `fn` value | extending |
+| `DeviceMessage.payload` shape for existing `MessageType` | Change the key set or types | breaking |
+| `DeviceMessage.payload` shape for existing `MessageType` | Add a new optional key | extending |
+| New `MessageType` enum value | Add on both Android + desktop + adapters | extending |
+| Ping/pong | Drop the `via:"fresh"` short-circuit | breaking (clients rely on the shape) |
+| Ping/pong | Add a new `via` value | extending |
+
+When in doubt, assume **breaking** until you can show that a pre-existing release
+build keeps working against the edit.

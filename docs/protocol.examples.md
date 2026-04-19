@@ -4,6 +4,19 @@ This document captures canonical request/response examples for protocol-critical
 flows. It is intentionally compact and pairs with contract tests under
 `tests/protocol/`.
 
+## 0) Authentication headers
+
+Every endpoint below, except `POST /api/devices/register`, `GET /api/fcm/config`,
+and `GET /dashboard`, requires both headers on every request:
+
+```
+X-Device-Id: 3c32f6854f2ac1305f6d14d4d95591f2
+Authorization: Bearer df8a9fca7fd32f7374efda2df28ee7cf7c4ef11255d5cf188f4156f9683a09ca
+```
+
+`GET /api/health` accepts them optionally; when supplied it doubles as a heartbeat
+(bumps `last_seen_at`).
+
 ## 1) Device registration
 
 ### Request
@@ -72,8 +85,16 @@ flows. It is intentionally compact and pairs with contract tests under
 }
 ```
 
-### Confirm response
+### Confirm request (from desktop)
 `POST /api/pairing/confirm`
+
+```json
+{
+  "phone_id": "phone-device-id"
+}
+```
+
+### Confirm response (200)
 
 ```json
 {
@@ -103,6 +124,40 @@ flows. It is intentionally compact and pairs with contract tests under
   "status": "awaiting_chunks"
 }
 ```
+
+### Chunk upload
+`POST /api/transfers/tx-abc-123/chunks/0`
+
+Body: raw encrypted chunk bytes (`Content-Type` is irrelevant; server reads the raw body).
+
+Response (200):
+
+```json
+{
+  "chunks_received": 1,
+  "complete": false
+}
+```
+
+`"complete": true` once the last chunk lands.
+
+### Chunk download
+`GET /api/transfers/tx-abc-123/chunks/0`
+
+Response (200, `Content-Type: application/octet-stream`): raw encrypted chunk bytes. No JSON envelope; decrypt client-side.
+
+### Ack (recipient finalizes delivery)
+`POST /api/transfers/tx-abc-123/ack`
+
+Response (200):
+
+```json
+{
+  "status": "deleted"
+}
+```
+
+After ack the server deletes chunk files and flips `downloaded=1`, `chunks_downloaded=chunk_count`, `delivered_at=<timestamp>`.
 
 ### Pending response
 `GET /api/transfers/pending`
@@ -226,3 +281,67 @@ These map to unified message types:
 - `FIND_PHONE_START`
 - `FIND_PHONE_STOP`
 - `FIND_PHONE_LOCATION_UPDATE`
+
+## 6) Liveness probe (ping/pong)
+
+### Desktop asks server to probe phone
+`POST /api/devices/ping`
+
+```json
+{
+  "target_device_id": "phone-device-id"
+}
+```
+
+Response (200):
+
+```json
+{
+  "online": true,
+  "rtt_ms": 612,
+  "via": "fcm"
+}
+```
+
+`via` is one of `"fcm"` (FCM HIGH-priority wake + pong received), `"fresh"` (server
+skipped FCM because `last_seen_at` was already recent), or `"timeout"` (no pong in
+the 5 s window). Rate-limited to 1 call / 30 s per (sender, recipient) pair via an
+atomic cooldown UPSERT — rejected pings get `429` with `Retry-After`.
+
+### Phone acknowledges ping
+`POST /api/devices/pong`
+
+Empty body. Response (200): `{"status": "ok"}`. Auth middleware's
+`last_seen_at` bump is the load-bearing side effect.
+
+## 7) Error envelope
+
+Every 4xx/5xx response is JSON of this shape, produced by `ErrorResponder`:
+
+```json
+{
+  "error": "human-readable message"
+}
+```
+
+For rate-limited pings the body also includes the retry hint (mirrored in a
+`Retry-After` header):
+
+```json
+{
+  "error": "Too many pings",
+  "retry_after": 27
+}
+```
+
+Canonical status codes:
+
+| Status | When |
+|---|---|
+| 400 | Missing/invalid field, malformed JSON, path-traversal `transfer_id`, invalid chunk index |
+| 401 | Missing or invalid credentials |
+| 403 | Authenticated but not authorized (e.g. not the sender of a transfer) |
+| 404 | Unknown transfer / chunk / resource |
+| 409 | Conflict (transfer id already exists) |
+| 429 | Too many pings (includes `retry_after`) |
+| 500 | Server-side invariant violation or storage failure |

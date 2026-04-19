@@ -2,12 +2,14 @@ import os
 import sys
 import unittest
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, os.path.join(REPO_ROOT, "desktop", "src"))
+sys.path.insert(0, os.path.dirname(__file__))
+from _paths import ensure_desktop_src_on_path  # noqa: E402
 
-from messaging.fasttrack_adapter import FasttrackAdapter
-from messaging.fn_transfer_adapter import FnTransferAdapter
-from messaging.message_types import MessageTransport, MessageType
+ensure_desktop_src_on_path()
+
+from messaging.fasttrack_adapter import FasttrackAdapter  # noqa: E402
+from messaging.fn_transfer_adapter import FnTransferAdapter  # noqa: E402
+from messaging.message_types import MessageTransport, MessageType  # noqa: E402
 
 
 class DesktopMessageContractTests(unittest.TestCase):
