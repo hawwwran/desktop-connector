@@ -522,7 +522,11 @@ class Poller:
         self.platform.notifications.notify("Clipboard received", preview[:60])
         self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.text"),
                          display_label=preview, direction="received", size=len(text))
-        if len(urls) == 1 and self.config.auto_open_links:
+        if (
+            len(urls) == 1
+            and self.config.auto_open_links
+            and self.platform.capabilities.auto_open_urls
+        ):
             if self.platform.shell.open_url(urls[0]):
                 log.info("platform.open_url.succeeded length=%d", len(urls[0]))
 

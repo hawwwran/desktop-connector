@@ -7,7 +7,8 @@ platform-neutral as additional desktop runtimes are introduced.
 
 from __future__ import annotations
 
-from ..platform import compose_desktop_platform
+from ..interfaces.shell import ShellBackend
+from ..platform.compose import compose_desktop_platform
 
 def check_dependencies() -> list[tuple[str, str]]:
     """Check all required dependencies. Returns list of missing ones."""
@@ -65,6 +66,10 @@ def check_dependencies() -> list[tuple[str, str]]:
 
 def show_missing_deps_dialog(missing: list[tuple[str, str]]) -> None:
     """Show a dialog about missing dependencies with install button."""
+    # Compose the platform once; pass only the shell backend to the UI
+    # helpers so the installer button can be fired without rebuilding
+    # every backend on each click.
+    shell = compose_desktop_platform().shell
     try:
         import gi
 
@@ -72,10 +77,10 @@ def show_missing_deps_dialog(missing: list[tuple[str, str]]) -> None:
         gi.require_version("Adw", "1")
         from gi.repository import Adw, Gtk  # noqa: F401
 
-        _show_deps_gtk4(missing)
+        _show_deps_gtk4(missing, shell)
     except Exception:
         try:
-            _show_deps_tkinter(missing)
+            _show_deps_tkinter(missing, shell)
         except Exception:
             # Last resort: print to terminal
             print("\nMissing dependencies:")
@@ -87,7 +92,7 @@ def show_missing_deps_dialog(missing: list[tuple[str, str]]) -> None:
             )
 
 
-def _show_deps_gtk4(missing: list[tuple[str, str]]) -> None:
+def _show_deps_gtk4(missing: list[tuple[str, str]], shell: ShellBackend) -> None:
     import gi
 
     gi.require_version("Gtk", "4.0")
@@ -127,7 +132,7 @@ def _show_deps_gtk4(missing: list[tuple[str, str]]) -> None:
             box.append(row)
 
         def on_install(_btn):
-            compose_desktop_platform().shell.launch_installer_terminal(
+            shell.launch_installer_terminal(
                 "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'"
             )
             win.close()
@@ -143,7 +148,7 @@ def _show_deps_gtk4(missing: list[tuple[str, str]]) -> None:
     app.run(None)
 
 
-def _show_deps_tkinter(missing: list[tuple[str, str]]) -> None:
+def _show_deps_tkinter(missing: list[tuple[str, str]], shell: ShellBackend) -> None:
     import tkinter as tk
 
     root = tk.Tk()
@@ -173,7 +178,7 @@ def _show_deps_tkinter(missing: list[tuple[str, str]]) -> None:
         ).pack(anchor=tk.W, pady=2)
 
     def on_install():
-        compose_desktop_platform().shell.launch_installer_terminal(
+        shell.launch_installer_terminal(
             "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'"
         )
         root.destroy()

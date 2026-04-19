@@ -10,7 +10,7 @@ from ..config import Config
 from ..connection import ConnectionManager
 from ..crypto import KeyManager
 from ..platform import DesktopPlatform
-from ..platform import compose_desktop_platform
+from ..platform.compose import compose_desktop_platform
 from .args import StartupArgs
 
 

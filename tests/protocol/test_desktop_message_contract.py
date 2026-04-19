@@ -3,13 +3,13 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _paths import ensure_desktop_src_on_path  # noqa: E402
+from _paths import ensure_desktop_on_path  # noqa: E402
 
-ensure_desktop_src_on_path()
+ensure_desktop_on_path()
 
-from messaging.fasttrack_adapter import FasttrackAdapter  # noqa: E402
-from messaging.fn_transfer_adapter import FnTransferAdapter  # noqa: E402
-from messaging.message_types import MessageTransport, MessageType  # noqa: E402
+from src.messaging.fasttrack_adapter import FasttrackAdapter  # noqa: E402
+from src.messaging.fn_transfer_adapter import FnTransferAdapter  # noqa: E402
+from src.messaging.message_types import MessageTransport, MessageType  # noqa: E402
 
 
 class DesktopMessageContractTests(unittest.TestCase):
