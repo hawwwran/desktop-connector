@@ -129,22 +129,10 @@ class DeviceController
         //   - expired slot  → UPDATE wins, changes()==1
         //   - live slot     → UPDATE's WHERE fails, changes()==0 → reject
         $now = time();
-        $claimUntil = $now + self::PING_COOLDOWN_SEC;
-        $db->execute(
-            'INSERT INTO ping_rate (sender_id, recipient_id, cooldown_until)
-             VALUES (:s, :r, :until)
-             ON CONFLICT(sender_id, recipient_id) DO UPDATE
-             SET cooldown_until = excluded.cooldown_until
-             WHERE ping_rate.cooldown_until <= :now',
-            [':s' => $deviceId, ':r' => $recipientId,
-             ':until' => $claimUntil, ':now' => $now]
-        );
-        if ($db->changes() === 0) {
-            $row = $db->querySingle(
-                'SELECT cooldown_until FROM ping_rate WHERE sender_id = :s AND recipient_id = :r',
-                [':s' => $deviceId, ':r' => $recipientId]
-            );
-            $retryAfter = $row ? max(1, (int)$row['cooldown_until'] - $now) : 1;
+        $pingRate = new PingRateRepository($db);
+        if (!$pingRate->tryClaimCooldown($deviceId, $recipientId, $now + self::PING_COOLDOWN_SEC, $now)) {
+            $cooldown = $pingRate->findCooldown($deviceId, $recipientId);
+            $retryAfter = $cooldown !== null ? max(1, $cooldown - $now) : 1;
             throw new RateLimitError(
                 'Rate limit: ping already in flight or too recent',
                 retryAfter: $retryAfter,
