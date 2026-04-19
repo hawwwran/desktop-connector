@@ -45,4 +45,3 @@ later steps assume earlier ones.
 | # | Plan | Intent | Status |
 |---|------|--------|--------|
 | 0 | [refactor.md](plans/refactor.md) | Overview of the 10-step sequence and the reasoning behind its order. | Reference |
-| 10 | [refactor-10.md](plans/refactor-10.md) | Prepare for a Windows desktop client via a platform-abstraction boundary (last, deliberately). | Draft |
