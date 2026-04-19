@@ -247,7 +247,7 @@ class PollService : Service() {
                         if (hasPending) {
                             val transfers = api.getPendingTransfers()
                             if (transfers.isNotEmpty()) {
-                                AppLog.log("Poll", "Found ${transfers.size} pending transfer(s)")
+                                AppLog.log("Poll", "transfer.pending.found count=${transfers.size}")
                             }
                             for (t in transfers) {
                                 if (!running) break
@@ -477,16 +477,18 @@ class PollService : Service() {
             parts.add(plain)
         }
         val data = parts.fold(ByteArray(0)) { acc, part -> acc + part }
-        AppLog.log("Recv", "Decrypted .fn: $fileName (${data.size} bytes)")
+        AppLog.log("Recv", "fasttrack.command.received fn=$fileName bytes=${data.size}")
 
         val displayLabel = handleFnTransfer(fileName, data)
-        AppLog.log("Recv", "Fn transfer: $fileName -> $displayLabel")
+        AppLog.log("Recv", "fasttrack.command.handled fn=$fileName label=$displayLabel")
 
         try {
-            if (api.ackTransfer(transferId)) AppLog.log("Recv", "Acked $transferId")
-            else AppLog.log("Recv", "ACK failed for $transferId (.fn) — command already executed")
+            if (api.ackTransfer(transferId))
+                AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)}")
+            else
+                AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} reason=already_executed")
         } catch (e: Exception) {
-            AppLog.log("Recv", "ACK threw for $transferId (.fn): ${e.message}")
+            AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} error_kind=${e.javaClass.simpleName}")
         }
 
         if (fileName != ".fn.unpair") {
@@ -521,7 +523,7 @@ class PollService : Service() {
         val dbRowId: Long = if (existing != null) {
             db.transferDao().updateStatus(existing.id, TransferStatus.UPLOADING)
             db.transferDao().updateProgress(existing.id, 0, chunkCount)
-            AppLog.log("Recv", "Resuming transfer $transferId (reusing row ${existing.id})")
+            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)}")
             existing.id
         } else {
             db.transferDao().insert(QueuedTransfer(
@@ -572,7 +574,7 @@ class PollService : Service() {
                     wakeLock.acquire(2 * 60 * 1000L)  // refresh: 2 min from last chunk
 
                     if (db.transferDao().exists(dbRowId) == 0) {
-                        AppLog.log("Recv", "Download cancelled by user at chunk ${i + 1}/$chunkCount")
+                        AppLog.log("Recv", "transfer.download.cancelled transfer_id=${transferId.take(12)} chunk_index=${i + 1}/$chunkCount")
                         cancelled = true
                         api.ackTransfer(transferId)
                         return
@@ -600,7 +602,7 @@ class PollService : Service() {
             return
         }
         val finalSize = finalFile.length()
-        AppLog.log("Recv", "Saved file: ${finalFile.name} ($finalSize bytes)")
+        AppLog.log("Recv", "transfer.download.completed transfer_id=${transferId.take(12)} bytes=$finalSize name=${finalFile.name}")
 
         // Notify MediaStore so the file appears in gallery/pickers
         android.media.MediaScannerConnection.scanFile(
@@ -619,9 +621,9 @@ class PollService : Service() {
             false
         }
         if (ackOk) {
-            AppLog.log("Recv", "Acked $transferId")
+            AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)}")
         } else {
-            AppLog.log("Recv", "ACK failed for $transferId after durable write — keeping file")
+            AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} reason=keeping_file_after_ack_failure")
         }
 
         val stillExists = db.transferDao().exists(dbRowId) > 0
@@ -664,10 +666,10 @@ class PollService : Service() {
                 try {
                     return CryptoUtils.decryptBlob(encrypted, symmetricKey)
                 } catch (e: Exception) {
-                    AppLog.log("Recv", "Chunk $index decrypt failed (attempt $attempt/3): ${e.message}")
+                    AppLog.log("Recv", "transfer.chunk.failed chunk_index=$index attempt=$attempt/3 error_kind=${e.javaClass.simpleName}")
                 }
             } else {
-                AppLog.log("Recv", "Chunk $index download returned no body (attempt $attempt/3)")
+                AppLog.log("Recv", "transfer.chunk.failed chunk_index=$index attempt=$attempt/3 reason=no_body")
             }
             if (attempt < 3) delay(2000L * attempt)
         }
@@ -722,14 +724,14 @@ class PollService : Service() {
                 }
 
                 if (inFlightJob?.isActive == true) {
-                    AppLog.log("Delivery", "Skip tick — previous poll still in flight")
+                    AppLog.log("Delivery", "delivery.tracker.skipped reason=previous_in_flight")
                 } else {
                     val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
                     inFlightJob = scope.launch {
                         try {
                             withTimeout(750) { runDeliveryPoll(api, trackedIds, db) }
                         } catch (_: TimeoutCancellationException) {
-                            AppLog.log("Delivery", "Poll timed out (>750ms), aborted")
+                            AppLog.log("Delivery", "delivery.tracker.skipped reason=poll_timeout_750ms")
                         } catch (_: Exception) {
                             // transient — next tick retries
                         }
@@ -778,7 +780,7 @@ class PollService : Service() {
                 val dbValue = if (state == "in_progress") downloaded else 0
                 db.transferDao().updateDeliveryProgress(tid, dbValue, total)
             } else if (now - prev!!.second > DELIVERY_STALL_TIMEOUT_MS) {
-                AppLog.log("Delivery", "Stall on $tid after ${(now - prev.second) / 1000}s — giving up")
+                AppLog.log("Delivery", "delivery.tracker.stall transfer_id=${tid.take(12)} stall_seconds=${(now - prev.second) / 1000}")
                 db.transferDao().clearDeliveryProgress(tid)
                 trackerGaveUp.add(tid)
                 trackerLastProgress.remove(tid)

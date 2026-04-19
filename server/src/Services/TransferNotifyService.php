@@ -23,6 +23,10 @@ class TransferNotifyService
         $baseline = $transfers->sumSentChunksDownloaded($deviceId);
         $state = ['pending' => false, 'delivered' => false, 'downloadProgress' => false];
         $start = time();
+        AppLog::log('Poll', sprintf(
+            'poll.notify.started device_id=%s since=%d is_test=%s',
+            AppLog::shortId($deviceId), $since, $isTest ? 'true' : 'false'
+        ), 'debug');
 
         do {
             $state = self::sampleState($transfers, $deviceId, $since, $baseline);
@@ -31,6 +35,25 @@ class TransferNotifyService
             }
             usleep(self::TICK_MICROSECONDS);
         } while (time() - $start < self::LONG_POLL_TIMEOUT);
+
+        $elapsed = time() - $start;
+        $woken = $state['pending'] || $state['delivered'] || $state['downloadProgress'];
+        if (!$isTest) {
+            if ($woken) {
+                AppLog::log('Poll', sprintf(
+                    'poll.notify.event device_id=%s elapsed=%ds pending=%s delivered=%s progress=%s',
+                    AppLog::shortId($deviceId), $elapsed,
+                    $state['pending'] ? 'true' : 'false',
+                    $state['delivered'] ? 'true' : 'false',
+                    $state['downloadProgress'] ? 'true' : 'false'
+                ));
+            } elseif ($elapsed >= self::LONG_POLL_TIMEOUT) {
+                AppLog::log('Poll', sprintf(
+                    'poll.notify.timeout device_id=%s',
+                    AppLog::shortId($deviceId)
+                ));
+            }
+        }
 
         return self::buildResponse($db, $deviceId, $state, $isTest);
     }

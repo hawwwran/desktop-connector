@@ -190,7 +190,7 @@ class Poller:
         if not transfers:
             return
 
-        log.info("Found %d pending transfer(s)", len(transfers))
+        log.info("transfer.pending.found count=%d", len(transfers))
         self._fast_poll_until = time.time() + FAST_POLL_DURATION
 
         for transfer in transfers:
@@ -220,7 +220,7 @@ class Poller:
         filename = meta_json["filename"]
         base_nonce = base64.b64decode(meta_json["base_nonce"])
 
-        log.info("Downloading transfer %s from %s (%d chunks): %s",
+        log.info("transfer.download.started transfer_id=%s sender=%s chunks=%d name=%s",
                  transfer_id[:12], sender_id[:12], chunk_count, filename)
 
         if filename.startswith(".fn."):
@@ -267,9 +267,10 @@ class Poller:
         self._handle_fn_transfer(save_path)
 
         if self.api.ack_transfer(transfer_id):
-            log.info("Transfer %s acknowledged", transfer_id[:12])
+            log.info("delivery.acked transfer_id=%s", transfer_id[:12])
         else:
-            log.warning("Failed to acknowledge transfer %s", transfer_id[:12])
+            log.warning("delivery.acked transfer_id=%s reason=server_rejected",
+                        transfer_id[:12])
 
     def _receive_file_transfer(self, transfer_id: str, sender_id: str,
                                filename: str, chunk_count: int,
@@ -336,7 +337,8 @@ class Poller:
             return
 
         final_size = final_path.stat().st_size
-        log.info("Saved: %s (%d bytes)", final_path, final_size)
+        log.info("transfer.download.completed transfer_id=%s bytes=%d name=%s",
+                 transfer_id[:12], final_size, final_path.name)
 
         # ACK-after-durable-write: the file is on disk under its final name.
         # If ACK fails the sender will eventually stop seeing "delivering",
@@ -344,9 +346,9 @@ class Poller:
         # network hiccupped before we could tell the server.
         ack_ok = self.api.ack_transfer(transfer_id)
         if ack_ok:
-            log.info("Transfer %s acknowledged", transfer_id[:12])
+            log.info("delivery.acked transfer_id=%s", transfer_id[:12])
         else:
-            log.warning("ACK failed for %s after durable write — keeping file",
+            log.warning("delivery.acked transfer_id=%s reason=keeping_file_after_ack_failure",
                         transfer_id[:12])
 
         # Download logic cleans up its own progress fields on completion.
@@ -649,7 +651,7 @@ class Poller:
                     recipient_chunks_downloaded=0,
                     recipient_chunks_total=0,
                     delivered=True)
-                log.info("Transfer %s delivered", tid[:12])
+                log.info("delivery.acked transfer_id=%s", tid[:12])
             elif state == "in_progress":
                 self.history.update(tid,
                     recipient_chunks_downloaded=chunks_dl,
@@ -709,8 +711,8 @@ class Poller:
 
             # I/O outside the lock.
             if action == "stalled":
-                log.info("Delivery tracker: stall on %s after %.0fs — giving up",
-                         tid[:12], stall_seconds)
+                log.warning("delivery.tracker.stall transfer_id=%s stall_seconds=%.0f",
+                            tid[:12], stall_seconds)
                 self.history.update(tid,
                     recipient_chunks_downloaded=0,
                     recipient_chunks_total=0)

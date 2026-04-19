@@ -129,7 +129,8 @@ class ApiClient:
         """
         display = filename_override or filepath.name
         file_size = filepath.stat().st_size
-        log.info("Sending file: %s (%d bytes)", display, file_size)
+        log.info("transfer.upload.started name=%s bytes=%d recipient=%s",
+                 display, file_size, recipient_id[:12])
 
         chunk_count = max(1, math.ceil(file_size / CHUNK_SIZE))
         base_nonce = KeyManager.generate_base_nonce()
@@ -144,8 +145,10 @@ class ApiClient:
         transfer_id = str(uuid.uuid4())
 
         if not self.init_transfer(transfer_id, recipient_id, encrypted_meta, chunk_count):
-            log.error("Failed to init transfer")
+            log.error("transfer.init.failed transfer_id=%s", transfer_id[:12])
             return None
+        log.info("transfer.init.accepted transfer_id=%s recipient=%s chunks=%d",
+                 transfer_id[:12], recipient_id[:12], chunk_count)
 
         if on_progress:
             on_progress(transfer_id, 0, chunk_count)
@@ -159,15 +162,18 @@ class ApiClient:
                     err = self._upload_chunk_with_retry(
                         transfer_id, index, chunk_count, encrypted)
                     if err is not None:
-                        log.error("Upload failed: %s", err)
+                        log.error("transfer.upload.failed transfer_id=%s reason=%s",
+                                  transfer_id[:12], err)
                         return None
                     if on_progress:
                         on_progress(transfer_id, index + 1, chunk_count)
         except OSError as e:
-            log.error("Cannot read source file %s: %s", filepath, e)
+            log.error("transfer.upload.failed transfer_id=%s error_kind=%s",
+                      transfer_id[:12], type(e).__name__)
             return None
 
-        log.info("File sent successfully: %s (transfer_id=%s)", display, transfer_id)
+        log.info("transfer.upload.completed transfer_id=%s name=%s",
+                 transfer_id[:12], display)
         return transfer_id
 
     def _upload_chunk_with_retry(self, transfer_id: str, index: int,
@@ -183,15 +189,17 @@ class ApiClient:
         while True:
             try:
                 if self.upload_chunk(transfer_id, index, encrypted) is not None:
-                    log.debug("Uploaded chunk %d/%d", index + 1, chunk_count)
+                    log.debug("transfer.chunk.uploaded transfer_id=%s chunk_index=%d/%d",
+                              transfer_id[:12], index + 1, chunk_count)
                     return None
             except (requests.RequestException, OSError, ValueError) as e:
-                log.warning("upload_chunk %d threw: %s", index, e)
+                log.warning("transfer.chunk.failed transfer_id=%s chunk_index=%d error_kind=%s",
+                            transfer_id[:12], index, type(e).__name__)
             now = time.monotonic()
             if first_failure_at is None:
                 first_failure_at = now
-                log.warning("Chunk %d/%d failed, retrying in %.0fs",
-                            index + 1, chunk_count, CHUNK_RETRY_DELAY_S)
+                log.warning("transfer.chunk.failed transfer_id=%s chunk_index=%d/%d reason=retry_in_%ds",
+                            transfer_id[:12], index + 1, chunk_count, int(CHUNK_RETRY_DELAY_S))
             elif now - first_failure_at >= CHUNK_MAX_FAILURE_WINDOW_S:
                 return (f"Chunk {index + 1}/{chunk_count} failed continuously "
                         f"for {int(CHUNK_MAX_FAILURE_WINDOW_S)}s")

@@ -43,6 +43,10 @@ class TransferService
         }
 
         $transfers->insertTransfer($transferId, $senderId, $recipientId, $encryptedMeta, $chunkCount, time());
+        AppLog::log('Transfer', sprintf(
+            'transfer.init.accepted transfer_id=%s sender=%s recipient=%s chunks=%d',
+            AppLog::shortId($transferId), AppLog::shortId($senderId), AppLog::shortId($recipientId), $chunkCount
+        ));
 
         return ['transfer_id' => $transferId, 'status' => 'awaiting_chunks'];
     }
@@ -85,6 +89,10 @@ class TransferService
         if (!$chunks->chunkExists($transferId, $chunkIndex)) {
             $chunks->insertChunk($transferId, $chunkIndex, $blobPath, strlen($blobData), time());
             $transfers->incrementChunksReceived($transferId);
+            AppLog::log('Transfer', sprintf(
+                'transfer.chunk.uploaded transfer_id=%s chunk_index=%d size=%d',
+                AppLog::shortId($transferId), $chunkIndex, strlen($blobData)
+            ), 'debug');
         }
 
         $updated = $transfers->findById($transferId);
@@ -92,6 +100,13 @@ class TransferService
 
         if ($complete) {
             $transfers->markComplete($transferId);
+            AppLog::log('Transfer', sprintf(
+                'transfer.upload.completed transfer_id=%s sender=%s recipient=%s chunks=%d',
+                AppLog::shortId($transferId),
+                AppLog::shortId($transfer['sender_id']),
+                AppLog::shortId($transfer['recipient_id']),
+                (int)$transfer['chunk_count']
+            ));
             TransferWakeService::wake($db, $transferId);
         }
 
@@ -132,6 +147,10 @@ class TransferService
         $cap = (int)$transfer['chunk_count'] - 1;
         $newProgress = min($chunkIndex + 1, max(0, $cap));
         $transfers->updateDownloadProgress($transferId, $newProgress);
+        AppLog::log('Transfer', sprintf(
+            'transfer.chunk.served transfer_id=%s chunk_index=%d progress=%d/%d',
+            AppLog::shortId($transferId), $chunkIndex, $newProgress, (int)$transfer['chunk_count']
+        ), 'debug');
 
         return file_get_contents($fullPath);
     }
@@ -156,6 +175,10 @@ class TransferService
 
         // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
         $transfers->markDelivered($transferId, time());
+        AppLog::log('Delivery', sprintf(
+            'delivery.acked transfer_id=%s recipient=%s total_bytes=%d',
+            AppLog::shortId($transferId), AppLog::shortId($deviceId), $totalBytes
+        ));
 
         return ['status' => 'deleted'];
     }

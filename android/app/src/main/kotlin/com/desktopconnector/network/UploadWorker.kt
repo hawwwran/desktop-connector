@@ -90,7 +90,7 @@ class UploadWorker(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Prepare failed: ${e.message}", e)
-            AppLog.log("Upload", "Prepare failed: ${transfer.displayName} - ${e.message}")
+            AppLog.log("Upload", "transfer.init.failed name=${transfer.displayName} error_kind=${e.javaClass.simpleName}")
             db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Cannot read source: ${e.message}")
             return Result.failure()
         }
@@ -108,7 +108,7 @@ class UploadWorker(
         val transferId = UUID.randomUUID().toString()
 
         if (!api.initTransfer(transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount)) {
-            AppLog.log("Upload", "initTransfer failed (attempt ${runAttemptCount + 1}/$INIT_MAX_ATTEMPTS): ${transfer.displayName}")
+            AppLog.log("Upload", "transfer.init.failed transfer_id=${transferId.take(12)} attempt=${runAttemptCount + 1}/$INIT_MAX_ATTEMPTS")
             spoolFile?.delete()
             // Keep status at PREPARING during WorkManager back-off retries so the
             // user doesn't see a brief FAILED that then silently un-fails. Only
@@ -123,6 +123,7 @@ class UploadWorker(
 
         db.transferDao().updateStatus(transferDbId, TransferStatus.UPLOADING)
         db.transferDao().updateProgress(transferDbId, 0, chunkCount)
+        AppLog.log("Upload", "transfer.init.accepted transfer_id=${transferId.take(12)} recipient=${transfer.recipientDeviceId.take(12)} chunks=$chunkCount")
 
         try {
             sourceOpener().use { input ->
@@ -132,7 +133,7 @@ class UploadWorker(
                     val encrypted = keyManager.encryptChunk(plaintext, baseNonce, index, symmetricKey)
                     val terminal = uploadChunkWithRetry(api, transferId, index, chunkCount, encrypted)
                     if (terminal != null) {
-                        AppLog.log("Upload", "Failed: ${transfer.displayName} - $terminal")
+                        AppLog.log("Upload", "transfer.upload.failed transfer_id=${transferId.take(12)} reason=$terminal")
                         db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, terminal)
                         return Result.failure()
                     }
@@ -144,11 +145,11 @@ class UploadWorker(
             // Upload logic cleans up its own progress fields; DeliveryTracker owns deliveryChunks/deliveryTotal from here.
             db.transferDao().updateProgress(transferDbId, 0, 0)
             db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
-            AppLog.log("Upload", "Complete: ${transfer.displayName}")
+            AppLog.log("Upload", "transfer.upload.completed transfer_id=${transferId.take(12)} name=${transfer.displayName}")
             return Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "Upload failed: ${e.message}", e)
-            AppLog.log("Upload", "Failed: ${transfer.displayName} - ${e.message}")
+            AppLog.log("Upload", "transfer.upload.failed transfer_id=${transferId.take(12)} error_kind=${e.javaClass.simpleName}")
             db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, e.message ?: "Upload error")
             return Result.failure()
         } finally {

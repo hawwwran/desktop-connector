@@ -25,15 +25,25 @@ class TransferCleanupService
         $now = time();
         $transfers = new TransferRepository($db);
 
-        foreach ($transfers->findExpired($now - self::TRANSFER_EXPIRY) as $t) {
+        $expired = $transfers->findExpired($now - self::TRANSFER_EXPIRY);
+        foreach ($expired as $t) {
             self::deleteTransferFiles($db, $t['id']);
         }
 
-        foreach ($transfers->findExpiredIncomplete($now - self::INCOMPLETE_EXPIRY) as $t) {
+        $incomplete = $transfers->findExpiredIncomplete($now - self::INCOMPLETE_EXPIRY);
+        foreach ($incomplete as $t) {
             self::deleteTransferFiles($db, $t['id']);
         }
 
         (new PairingRepository($db))->deleteExpiredRequests($now - self::PAIRING_REQUEST_EXPIRY);
+
+        $total = count($expired) + count($incomplete);
+        if ($total > 0) {
+            AppLog::log('Transfer', sprintf(
+                'transfer.cleanup.expired count=%d expired=%d incomplete=%d',
+                $total, count($expired), count($incomplete)
+            ));
+        }
     }
 
     /** Full delete: chunk files, directory, chunk rows, AND transfer row. */

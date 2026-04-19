@@ -19,7 +19,7 @@ class AppLog
     private const LOG_DIR = __DIR__ . '/../data/logs';
     private const LOG_FILE = 'server.log';
 
-    public static function log(string $tag, string $message): void
+    public static function log(string $tag, string $message, string $level = 'info'): void
     {
         $dir = self::LOG_DIR;
         if (!is_dir($dir)) {
@@ -38,7 +38,13 @@ class AppLog
         }
 
         $ts = date('Y-m-d H:i:s');
-        $line = "[$ts] [$tag] $message\n";
+        $line = "[$ts] [$level] [$tag] $message\n";
         file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
+    }
+
+    /** Correlation IDs are always truncated to the first 12 chars across runtimes. */
+    public static function shortId(?string $id): string
+    {
+        return $id === null ? '-' : substr($id, 0, 12);
     }
 }
