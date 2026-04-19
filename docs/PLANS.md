@@ -18,6 +18,7 @@ haven't yet.
 |------|--------|--------|
 | [desktop-client-migration-plan.md](plans/desktop-client-migration-plan.md) | Migrate desktop off pystray + GTK-subprocess to PySide6 (pragmatic path) or Rust core + Qt shell (long term). | Draft |
 | [hardening-plan.md](plans/hardening-plan.md) | Improve at-rest secret storage on the desktop — `auth_token`, paired-device symmetric keys, private key currently sit in `~/.config/desktop-connector/`. | Draft |
+| [secrets-and-signing-plan.md](plans/secrets-and-signing-plan.md) | Move Android signing passwords out of `build.gradle.kts`; define keystore backup, machine-migration, and server Firebase service-account hygiene. | Draft |
 | [appimage-distro-support-plan.md](plans/appimage-distro-support-plan.md) | Ship the desktop client as an AppImage per architecture, define a realistic tested-distro list vs. expected-to-work vs. unsupported. | Draft |
 
 ## Brand / visual identity
