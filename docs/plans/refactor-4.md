@@ -1,5 +1,7 @@
 # refactor-4.md
 
+> **Status: Done** — landed on `main` in commit `25a405b` (PR #10). New `server/src/Domain/Transfer/` with `TransferState`, `TransferInvariants`, `TransferLifecycle`, and `TransferStatusMapper`. `TransferService` upload/download/ack paths and `TransferCleanupService::deleteTransferFiles` now route through named transition helpers (`onChunkStored`, `onRecipientProgress`, `onAckReceived`, `onTransferExpired`) with an explicit transition table. Invariants throw `ApiError(500)` on violation. Wire contract unchanged — `status` and `delivery_state` values preserved via `TransferStatusMapper`. `test_loop.sh` passes end-to-end.
+
 ## Refactor 4 / 10
 # Formalize internal transfer states and state transitions
 
