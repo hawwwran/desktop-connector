@@ -509,6 +509,29 @@ def show_settings(config_dir: Path):
 
         download_btn.connect("clicked", on_download_logs)
         log_row.add_suffix(download_btn)
+
+        clear_btn = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
+        clear_btn.add_css_class("destructive-action")
+
+        def on_clear_logs(btn):
+            cleared = 0
+            # Truncate (don't unlink) so any running logger keeps its file handle.
+            for f in (log_dir.glob("desktop-connector.log*") if log_dir.exists() else []):
+                try:
+                    f.open("w").close()
+                    cleared += 1
+                except OSError:
+                    pass
+            log_row.set_subtitle("No logs")
+            if cleared > 0:
+                btn.set_label("\u2713 Cleared")
+            else:
+                btn.set_label("No logs found")
+            btn.set_sensitive(False)
+            GLib.timeout_add(2000, lambda: (btn.set_label("Clear"), btn.set_sensitive(True), False)[-1])
+
+        clear_btn.connect("clicked", on_clear_logs)
+        log_row.add_suffix(clear_btn)
         logs_group.add(log_row)
 
         # This device
