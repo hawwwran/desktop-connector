@@ -87,6 +87,7 @@ class TransferService
 
         $chunks = new ChunkRepository($db);
         if (!$chunks->chunkExists($transferId, $chunkIndex)) {
+            TransferLifecycle::onChunkStored($transfer);
             $chunks->insertChunk($transferId, $chunkIndex, $blobPath, strlen($blobData), time());
             $transfers->incrementChunksReceived($transferId);
             AppLog::log('Transfer', sprintf(
@@ -98,7 +99,8 @@ class TransferService
         $updated = $transfers->findById($transferId);
         $complete = $updated['chunks_received'] >= $updated['chunk_count'];
 
-        if ($complete) {
+        if (!$transfer['complete'] && $complete) {
+            TransferLifecycle::onUploadCompleted($transfer, $updated);
             $transfers->markComplete($transferId);
             AppLog::log('Transfer', sprintf(
                 'transfer.upload.completed transfer_id=%s sender=%s recipient=%s chunks=%d',
@@ -146,6 +148,7 @@ class TransferService
         // the last chunk (which might still fail client-side before ack).
         $cap = (int)$transfer['chunk_count'] - 1;
         $newProgress = min($chunkIndex + 1, max(0, $cap));
+        TransferLifecycle::onRecipientProgress($transfer, $newProgress);
         $transfers->updateDownloadProgress($transferId, $newProgress);
         AppLog::log('Transfer', sprintf(
             'transfer.chunk.served transfer_id=%s chunk_index=%d progress=%d/%d',
@@ -162,6 +165,8 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found');
         }
+
+        TransferLifecycle::onAckReceived($transfer);
 
         // Pairing-stats SUM must run BEFORE chunk deletion (chunks table still holds sizes here).
         $senderId = $transfer['sender_id'];

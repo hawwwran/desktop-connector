@@ -38,6 +38,7 @@ require_once __DIR__ . '/../src/AppLog.php';
 // --- Services ---
 require_once __DIR__ . '/../src/Services/TransferStatusService.php';
 require_once __DIR__ . '/../src/Services/TransferNotifyService.php';
+require_once __DIR__ . '/../src/Services/TransferLifecycle.php';
 require_once __DIR__ . '/../src/Services/TransferWakeService.php';
 require_once __DIR__ . '/../src/Services/TransferCleanupService.php';
 require_once __DIR__ . '/../src/Services/TransferService.php';
