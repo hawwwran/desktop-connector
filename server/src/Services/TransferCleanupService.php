@@ -46,11 +46,8 @@ class TransferCleanupService
     /** Partial delete: chunk files, directory, chunk rows. Transfer row preserved. */
     public static function deleteChunkFilesAndRows(Database $db, string $transferId): void
     {
-        $chunks = $db->queryAll(
-            'SELECT blob_path FROM chunks WHERE transfer_id = :tid',
-            [':tid' => $transferId]
-        );
-        foreach ($chunks as $chunk) {
+        $chunks = new ChunkRepository($db);
+        foreach ($chunks->listChunksForTransfer($transferId) as $chunk) {
             $path = __DIR__ . '/../../storage/' . $chunk['blob_path'];
             if (file_exists($path)) {
                 unlink($path);
@@ -60,6 +57,6 @@ class TransferCleanupService
         if (is_dir($dir)) {
             @rmdir($dir);
         }
-        $db->execute('DELETE FROM chunks WHERE transfer_id = :tid', [':tid' => $transferId]);
+        $chunks->deleteChunksForTransfer($transferId);
     }
 }

@@ -244,4 +244,14 @@ class TransferRepository
             'SELECT * FROM transfers WHERE downloaded = 0 ORDER BY created_at DESC'
         );
     }
+
+    /** Dashboard stats helper: count transfers by complete/downloaded flags. */
+    public function countPendingByCompleteDownloaded(int $complete, int $downloaded): int
+    {
+        $row = $this->db->querySingle(
+            'SELECT COUNT(*) as count FROM transfers WHERE complete = :c AND downloaded = :d',
+            [':c' => $complete, ':d' => $downloaded]
+        );
+        return (int)($row['count'] ?? 0);
+    }
 }

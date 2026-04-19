@@ -6,21 +6,22 @@ class DashboardController
     {
         $devices = (new DeviceRepository($db))->findAll();
         $pairings = (new PairingRepository($db))->findAll();
-        $pendingTransfers = $db->queryAll(
-            'SELECT t.*,
-                    (SELECT COALESCE(SUM(c.blob_size), 0) FROM chunks c WHERE c.transfer_id = t.id) as total_bytes
-             FROM transfers t
-             WHERE t.downloaded = 0
-             ORDER BY t.created_at DESC'
-        );
-        $stats = $db->querySingle(
-            'SELECT
-                (SELECT COUNT(*) FROM devices) as device_count,
-                (SELECT COUNT(*) FROM pairings) as pairing_count,
-                (SELECT COUNT(*) FROM transfers WHERE complete = 1 AND downloaded = 0) as pending_count,
-                (SELECT COUNT(*) FROM transfers WHERE complete = 0 AND downloaded = 0) as uploading_count,
-                (SELECT COALESCE(SUM(blob_size), 0) FROM chunks) as storage_bytes'
-        );
+        $transfers = new TransferRepository($db);
+        $chunks = new ChunkRepository($db);
+
+        $pendingTransfers = $transfers->listPendingForDashboard();
+        foreach ($pendingTransfers as &$t) {
+            $t['total_bytes'] = $chunks->sumChunkBytesForTransfer($t['id']);
+        }
+        unset($t);
+
+        $stats = [
+            'device_count' => count($devices),
+            'pairing_count' => count($pairings),
+            'pending_count' => $transfers->countPendingByCompleteDownloaded(1, 0),
+            'uploading_count' => $transfers->countPendingByCompleteDownloaded(0, 0),
+            'storage_bytes' => $chunks->sumAllBytes(),
+        ];
 
         http_response_code(200);
         header('Content-Type: text/html; charset=utf-8');

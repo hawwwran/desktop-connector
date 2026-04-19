@@ -33,14 +33,7 @@ class TransferService
             throw new ValidationError('Invalid chunk_count');
         }
 
-        $usage = $db->querySingle(
-            'SELECT COALESCE(SUM(c.blob_size), 0) as total_bytes
-             FROM chunks c
-             JOIN transfers t ON c.transfer_id = t.id
-             WHERE t.recipient_id = :rid AND t.downloaded = 0',
-            [':rid' => $recipientId]
-        );
-        if ($usage && $usage['total_bytes'] >= self::MAX_PENDING_BYTES) {
+        if ((new ChunkRepository($db))->sumPendingBytesForRecipient($recipientId) >= self::MAX_PENDING_BYTES) {
             throw new StorageLimitError('Recipient storage limit exceeded');
         }
 
@@ -88,24 +81,9 @@ class TransferService
         file_put_contents($tmpPath, $blobData);
         rename($tmpPath, $fullPath);
 
-        $existingChunk = $db->querySingle(
-            'SELECT chunk_index FROM chunks WHERE transfer_id = :tid AND chunk_index = :idx',
-            [':tid' => $transferId, ':idx' => $chunkIndex]
-        );
-
-        if (!$existingChunk) {
-            $db->execute(
-                'INSERT INTO chunks (transfer_id, chunk_index, blob_path, blob_size, created_at)
-                 VALUES (:tid, :idx, :path, :size, :now)',
-                [
-                    ':tid' => $transferId,
-                    ':idx' => $chunkIndex,
-                    ':path' => $blobPath,
-                    ':size' => strlen($blobData),
-                    ':now' => time(),
-                ]
-            );
-
+        $chunks = new ChunkRepository($db);
+        if (!$chunks->chunkExists($transferId, $chunkIndex)) {
+            $chunks->insertChunk($transferId, $chunkIndex, $blobPath, strlen($blobData), time());
             $transfers->incrementChunksReceived($transferId);
         }
 
@@ -137,10 +115,7 @@ class TransferService
             throw new NotFoundError('Transfer not found or not for you');
         }
 
-        $chunk = $db->querySingle(
-            'SELECT blob_path FROM chunks WHERE transfer_id = :tid AND chunk_index = :idx',
-            [':tid' => $transferId, ':idx' => $chunkIndex]
-        );
+        $chunk = (new ChunkRepository($db))->findChunk($transferId, $chunkIndex);
         if (!$chunk) {
             throw new NotFoundError('Chunk not found');
         }
@@ -171,14 +146,11 @@ class TransferService
 
         // Pairing-stats SUM must run BEFORE chunk deletion (chunks table still holds sizes here).
         $senderId = $transfer['sender_id'];
-        $totalBytes = $db->querySingle(
-            'SELECT COALESCE(SUM(blob_size), 0) as total FROM chunks WHERE transfer_id = :tid',
-            [':tid' => $transferId]
-        );
+        $totalBytes = (new ChunkRepository($db))->sumChunkBytesForTransfer($transferId);
 
         $ids = [$senderId, $deviceId];
         sort($ids);
-        (new PairingRepository($db))->incrementPairingStats($ids[0], $ids[1], (int)$totalBytes['total']);
+        (new PairingRepository($db))->incrementPairingStats($ids[0], $ids[1], $totalBytes);
 
         TransferCleanupService::deleteChunkFilesAndRows($db, $transferId);
 

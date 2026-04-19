@@ -18,6 +18,7 @@ require_once __DIR__ . '/../src/Auth/AuthService.php';
 require_once __DIR__ . '/../src/Repositories/DeviceRepository.php';
 require_once __DIR__ . '/../src/Repositories/PairingRepository.php';
 require_once __DIR__ . '/../src/Repositories/TransferRepository.php';
+require_once __DIR__ . '/../src/Repositories/ChunkRepository.php';
 
 require_once __DIR__ . '/../src/Router.php';
 
