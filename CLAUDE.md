@@ -120,6 +120,7 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 
 - **PHP single-threaded**: The built-in PHP server handles one request at a time. Dashboard auto-refresh can block API calls. For production, use nginx + php-fpm or Apache + mod_php.
 - **Server request pipeline**: Every HTTP handler takes `(Database $db, RequestContext $ctx)`. The `Router` builds the `RequestContext` (route params, query, lazy body) and — for routes registered via `authGet`/`authPost` — resolves identity through `AuthService::requireAuth` before dispatch. Controllers validate inputs with `Validators::*` and throw `ApiError` subclasses; the `Router`'s top-level `try/catch` hands them to `ErrorResponder` for serialization. Net effect: no controller touches `$_SERVER`, `$_GET`, or `php://input` directly, and no controller hand-writes `Router::json(['error'=>…], 4xx)`. The path-traversal guard on `{transfer_id}` is a pipeline validator, so every endpoint that accepts that param is protected, not just the ones that reach `TransferService`.
+- **Server persistence layer**: All SQL against SQLite lives in `server/src/Repositories/` (`DeviceRepository`, `PairingRepository`, `TransferRepository`, `ChunkRepository`, `FasttrackRepository`, `PingRateRepository`). Services and controllers express intent (`markTransferDelivered`, `tryClaimCooldown`, `sumPendingBytesForRecipient`); repositories hold the queries and own row-shape assumptions. The atomic UPSERT behind ping rate-limit and the `MAX(chunks_downloaded, :progress)` idiom in download progress both sit behind named repository methods but keep their exact SQL shape — the WAL serialization and the `chunks_downloaded == chunk_count ⇔ downloaded == 1` invariant both depend on it. Controllers and services no longer issue raw `$db->query*` / `$db->execute` calls.
 - **Chunked transfers**: 2MB chunks for resume capability and memory efficiency.
 - **Delivery ACK**: Server tracks `downloaded` flag. Sender polls `GET /api/transfers/sent-status` to update "Sent" → "Delivered" in history.
 - **Battery**: Android app pauses polling when screen is off. With FCM configured, the server sends a silent push on new transfers, waking the app to poll immediately. Without FCM, polls resume on screen wake. Zero server traffic while idle — phone sends nothing, server pings on demand (see "Liveness probe" below).
@@ -186,6 +187,13 @@ server/
     TransferNotifyService.php    — long-poll loop (25s / 500ms tick)
     TransferWakeService.php      — silent FCM wake on upload completion
     TransferCleanupService.php   — expiry, chunk/file deletion
+  src/Repositories/          — persistence layer; all SQL lives here (refactor-3)
+    DeviceRepository.php         — devices table: find/insert/update last_seen + fcm_token
+    PairingRepository.php        — pairings + pairing_requests: find/create, stats, request lifecycle
+    TransferRepository.php       — transfers table: create, progress, delivery, listings, stats counts
+    ChunkRepository.php          — chunks table: metadata, byte aggregation (incl. chunks⋈transfers JOIN)
+    FasttrackRepository.php      — fasttrack_messages table: insert, list pending, ack, expiry cleanup
+    PingRateRepository.php       — atomic UPSERT cooldown slot + retry-after lookup
   src/FcmSender.php          — FCM HTTP v1 API sender (JWT + OAuth2)
   migrations/001_initial.sql
 
