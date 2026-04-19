@@ -49,8 +49,13 @@ class TransferCleanupService
     /** Full delete: chunk files, directory, chunk rows, AND transfer row. */
     public static function deleteTransferFiles(Database $db, string $transferId): void
     {
+        $transfers = new TransferRepository($db);
+        $row = $transfers->findById($transferId);
+        if ($row !== null) {
+            TransferLifecycle::onTransferExpired($row);
+        }
         self::deleteChunkFilesAndRows($db, $transferId);
-        (new TransferRepository($db))->delete($transferId);
+        $transfers->delete($transferId);
     }
 
     /** Partial delete: chunk files, directory, chunk rows. Transfer row preserved. */
