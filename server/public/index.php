@@ -35,6 +35,12 @@ require_once __DIR__ . '/../src/Controllers/FasttrackController.php';
 require_once __DIR__ . '/../src/FcmSender.php';
 require_once __DIR__ . '/../src/AppLog.php';
 
+// --- Domain (transfer lifecycle model) ---
+require_once __DIR__ . '/../src/Domain/Transfer/TransferState.php';
+require_once __DIR__ . '/../src/Domain/Transfer/TransferInvariants.php';
+require_once __DIR__ . '/../src/Domain/Transfer/TransferLifecycle.php';
+require_once __DIR__ . '/../src/Domain/Transfer/TransferStatusMapper.php';
+
 // --- Services ---
 require_once __DIR__ . '/../src/Services/TransferStatusService.php';
 require_once __DIR__ . '/../src/Services/TransferNotifyService.php';

@@ -13,20 +13,8 @@ class TransferStatusService
      */
     public static function computeStatus(array $row): array
     {
-        $complete = (int)($row['complete'] ?? 0);
-        $downloaded = (int)($row['downloaded'] ?? 0);
-        $chunksDownloaded = (int)($row['chunks_downloaded'] ?? 0);
-
-        if ($downloaded) {
-            return ['status' => 'delivered', 'delivery_state' => 'delivered'];
-        }
-        if ($complete) {
-            return [
-                'status' => 'pending',
-                'delivery_state' => $chunksDownloaded > 0 ? 'in_progress' : 'not_started',
-            ];
-        }
-        return ['status' => 'uploading', 'delivery_state' => 'not_started'];
+        $internalState = TransferLifecycle::deriveState($row);
+        return TransferStatusMapper::toProtocolStatus($internalState);
     }
 
     /** Full per-transfer dict for /sent-status (includes created_at). */

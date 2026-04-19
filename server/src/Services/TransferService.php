@@ -63,6 +63,7 @@ class TransferService
         if (!$transfer) {
             throw new NotFoundError('Transfer not found');
         }
+        TransferInvariants::assertValid($transfer);
         if ($transfer['sender_id'] !== $deviceId) {
             throw new ForbiddenError('Not the sender of this transfer');
         }
@@ -86,17 +87,19 @@ class TransferService
         rename($tmpPath, $fullPath);
 
         $chunks = new ChunkRepository($db);
+        $storedNewChunk = false;
         if (!$chunks->chunkExists($transferId, $chunkIndex)) {
             $chunks->insertChunk($transferId, $chunkIndex, $blobPath, strlen($blobData), time());
             $transfers->incrementChunksReceived($transferId);
+            $storedNewChunk = true;
             AppLog::log('Transfer', sprintf(
                 'transfer.chunk.uploaded transfer_id=%s chunk_index=%d size=%d',
                 AppLog::shortId($transferId), $chunkIndex, strlen($blobData)
             ), 'debug');
         }
 
-        $updated = $transfers->findById($transferId);
-        $complete = $updated['chunks_received'] >= $updated['chunk_count'];
+        $transition = TransferLifecycle::onChunkStored($transfer, $storedNewChunk);
+        $complete = $transition['is_complete'];
 
         if ($complete) {
             $transfers->markComplete($transferId);
@@ -111,7 +114,7 @@ class TransferService
         }
 
         return [
-            'chunks_received' => (int)$updated['chunks_received'],
+            'chunks_received' => $transition['chunks_received'],
             'complete' => $complete,
         ];
     }
@@ -129,6 +132,7 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found or not for you');
         }
+        TransferInvariants::assertValid($transfer);
 
         $chunk = (new ChunkRepository($db))->findChunk($transferId, $chunkIndex);
         if (!$chunk) {
@@ -144,8 +148,8 @@ class TransferService
         // chunks_downloaded == chunk_count iff downloaded == 1 — gives the sender's
         // delivery tracker a rock-solid "done" signal that can't be faked by serving
         // the last chunk (which might still fail client-side before ack).
-        $cap = (int)$transfer['chunk_count'] - 1;
-        $newProgress = min($chunkIndex + 1, max(0, $cap));
+        $transition = TransferLifecycle::onRecipientProgress($transfer, $chunkIndex);
+        $newProgress = $transition['next_progress'];
         $transfers->updateDownloadProgress($transferId, $newProgress);
         AppLog::log('Transfer', sprintf(
             'transfer.chunk.served transfer_id=%s chunk_index=%d progress=%d/%d',
@@ -162,6 +166,8 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found');
         }
+        TransferInvariants::assertValid($transfer);
+        TransferLifecycle::onAckReceived($transfer);
 
         // Pairing-stats SUM must run BEFORE chunk deletion (chunks table still holds sizes here).
         $senderId = $transfer['sender_id'];
