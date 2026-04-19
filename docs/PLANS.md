@@ -45,7 +45,6 @@ later steps assume earlier ones.
 | # | Plan | Intent | Status |
 |---|------|--------|--------|
 | 0 | [refactor.md](plans/refactor.md) | Overview of the 10-step sequence and the reasoning behind its order. | Reference |
-| 4 | [refactor-4.md](plans/refactor-4.md) | Formalize internal transfer states and state transitions (replace implicit boolean combos). | Draft |
 | 5 | [refactor-5.md](plans/refactor-5.md) | Thin desktop `main.py` down to a clean entrypoint; extract bootstrap responsibilities. | Draft |
 | 6 | [refactor-6.md](plans/refactor-6.md) | Separate desktop core from Linux-specific backends (clipboard, notifications, tray, dialogs, file-manager). | Draft |
 | 7 | [refactor-7.md](plans/refactor-7.md) | Unify the command/message model behind `.fn.*` transfers and fasttrack messages. | Draft |
