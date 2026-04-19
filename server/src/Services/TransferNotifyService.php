@@ -19,12 +19,13 @@ class TransferNotifyService
 
     public static function longPoll(Database $db, string $deviceId, int $since, bool $isTest): array
     {
-        $baseline = self::sumSentChunksDownloaded($db, $deviceId);
+        $transfers = new TransferRepository($db);
+        $baseline = $transfers->sumSentChunksDownloaded($deviceId);
         $state = ['pending' => false, 'delivered' => false, 'downloadProgress' => false];
         $start = time();
 
         do {
-            $state = self::sampleState($db, $deviceId, $since, $baseline);
+            $state = self::sampleState($transfers, $deviceId, $since, $baseline);
             if ($isTest || $state['pending'] || $state['delivered'] || $state['downloadProgress']) {
                 break;
             }
@@ -34,34 +35,12 @@ class TransferNotifyService
         return self::buildResponse($db, $deviceId, $state, $isTest);
     }
 
-    private static function sumSentChunksDownloaded(Database $db, string $deviceId): int
+    private static function sampleState(TransferRepository $transfers, string $deviceId, int $since, int $baseline): array
     {
-        $row = $db->querySingle(
-            'SELECT COALESCE(SUM(chunks_downloaded), 0) as total FROM transfers
-             WHERE sender_id = :sid AND complete = 1 AND downloaded = 0',
-            [':sid' => $deviceId]
-        );
-        return (int)($row['total'] ?? 0);
-    }
-
-    private static function sampleState(Database $db, string $deviceId, int $since, int $baseline): array
-    {
-        $pending = $db->querySingle(
-            'SELECT COUNT(*) as count FROM transfers
-             WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0',
-            [':rid' => $deviceId]
-        );
-        $delivered = $db->querySingle(
-            'SELECT COUNT(*) as count FROM transfers
-             WHERE sender_id = :sid AND delivered_at >= :since',
-            [':sid' => $deviceId, ':since' => $since]
-        );
-        $currentProgress = self::sumSentChunksDownloaded($db, $deviceId);
-
         return [
-            'pending' => ($pending['count'] ?? 0) > 0,
-            'delivered' => ($delivered['count'] ?? 0) > 0,
-            'downloadProgress' => $currentProgress !== $baseline,
+            'pending' => $transfers->countPendingForRecipient($deviceId) > 0,
+            'delivered' => $transfers->countDeliveredSinceForSender($deviceId, $since) > 0,
+            'downloadProgress' => $transfers->sumSentChunksDownloaded($deviceId) !== $baseline,
         ];
     }
 

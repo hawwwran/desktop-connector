@@ -66,29 +66,14 @@ class DeviceController
 
         // Pending transfers — narrow to the currently paired device when caller supplies it.
         $pairedId = $ctx->query['paired_with'] ?? null;
+        $transfers = new TransferRepository($db);
 
         if ($pairedId) {
-            $pendingIn = $db->querySingle(
-                'SELECT COUNT(*) as count, COALESCE(SUM(chunk_count), 0) as chunks
-                 FROM transfers WHERE recipient_id = :id AND sender_id = :paired AND complete = 1 AND downloaded = 0',
-                [':id' => $deviceId, ':paired' => $pairedId]
-            );
-            $pendingOut = $db->querySingle(
-                'SELECT COUNT(*) as count FROM transfers
-                 WHERE sender_id = :id AND recipient_id = :paired AND downloaded = 0',
-                [':id' => $deviceId, ':paired' => $pairedId]
-            );
+            $pendingIn = $transfers->countPendingIncomingForPair($deviceId, $pairedId);
+            $pendingOutCount = $transfers->countPendingOutgoingForPair($deviceId, $pairedId);
         } else {
-            $pendingIn = $db->querySingle(
-                'SELECT COUNT(*) as count, COALESCE(SUM(chunk_count), 0) as chunks
-                 FROM transfers WHERE recipient_id = :id AND complete = 1 AND downloaded = 0',
-                [':id' => $deviceId]
-            );
-            $pendingOut = $db->querySingle(
-                'SELECT COUNT(*) as count FROM transfers
-                 WHERE sender_id = :id AND downloaded = 0',
-                [':id' => $deviceId]
-            );
+            $pendingIn = $transfers->countPendingIncomingForDevice($deviceId);
+            $pendingOutCount = $transfers->countPendingOutgoingForDevice($deviceId);
         }
 
         Router::json([
@@ -98,7 +83,7 @@ class DeviceController
             'last_seen_at' => $device ? (int)$device['last_seen_at'] : 0,
             'paired_devices' => $pairedDevices,
             'pending_incoming' => (int)($pendingIn['count'] ?? 0),
-            'pending_outgoing' => (int)($pendingOut['count'] ?? 0),
+            'pending_outgoing' => $pendingOutCount,
         ]);
     }
 

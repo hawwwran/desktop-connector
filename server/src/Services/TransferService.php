@@ -44,26 +44,12 @@ class TransferService
             throw new StorageLimitError('Recipient storage limit exceeded');
         }
 
-        $existing = $db->querySingle(
-            'SELECT id FROM transfers WHERE id = :id',
-            [':id' => $transferId]
-        );
-        if ($existing) {
+        $transfers = new TransferRepository($db);
+        if ($transfers->existsById($transferId)) {
             throw new ConflictError('Transfer ID already exists');
         }
 
-        $db->execute(
-            'INSERT INTO transfers (id, sender_id, recipient_id, encrypted_meta, chunk_count, created_at)
-             VALUES (:id, :sender, :recipient, :meta, :chunks, :now)',
-            [
-                ':id' => $transferId,
-                ':sender' => $senderId,
-                ':recipient' => $recipientId,
-                ':meta' => $encryptedMeta,
-                ':chunks' => $chunkCount,
-                ':now' => time(),
-            ]
-        );
+        $transfers->insertTransfer($transferId, $senderId, $recipientId, $encryptedMeta, $chunkCount, time());
 
         return ['transfer_id' => $transferId, 'status' => 'awaiting_chunks'];
     }
@@ -75,11 +61,8 @@ class TransferService
         int $chunkIndex,
         string $blobData,
     ): array {
-        $transfer = $db->querySingle(
-            'SELECT id, sender_id, chunk_count, chunks_received, complete
-             FROM transfers WHERE id = :id',
-            [':id' => $transferId]
-        );
+        $transfers = new TransferRepository($db);
+        $transfer = $transfers->findById($transferId);
         if (!$transfer) {
             throw new NotFoundError('Transfer not found');
         }
@@ -123,20 +106,14 @@ class TransferService
                 ]
             );
 
-            $db->execute(
-                'UPDATE transfers SET chunks_received = chunks_received + 1 WHERE id = :id',
-                [':id' => $transferId]
-            );
+            $transfers->incrementChunksReceived($transferId);
         }
 
-        $updated = $db->querySingle(
-            'SELECT chunks_received, chunk_count FROM transfers WHERE id = :id',
-            [':id' => $transferId]
-        );
+        $updated = $transfers->findById($transferId);
         $complete = $updated['chunks_received'] >= $updated['chunk_count'];
 
         if ($complete) {
-            $db->execute('UPDATE transfers SET complete = 1 WHERE id = :id', [':id' => $transferId]);
+            $transfers->markComplete($transferId);
             TransferWakeService::wake($db, $transferId);
         }
 
@@ -148,22 +125,14 @@ class TransferService
 
     public static function listPending(Database $db, string $deviceId): array
     {
-        return $db->queryAll(
-            'SELECT id as transfer_id, sender_id, encrypted_meta, chunk_count, created_at
-             FROM transfers
-             WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0
-             ORDER BY created_at ASC',
-            [':rid' => $deviceId]
-        );
+        return (new TransferRepository($db))->listPendingForRecipient($deviceId);
     }
 
     /** Returns the chunk's raw bytes. Controller emits them via Router::binary. */
     public static function downloadChunk(Database $db, string $deviceId, string $transferId, int $chunkIndex): string
     {
-        $transfer = $db->querySingle(
-            'SELECT recipient_id, chunk_count FROM transfers WHERE id = :id',
-            [':id' => $transferId]
-        );
+        $transfers = new TransferRepository($db);
+        $transfer = $transfers->findById($transferId);
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found or not for you');
         }
@@ -187,20 +156,15 @@ class TransferService
         // the last chunk (which might still fail client-side before ack).
         $cap = (int)$transfer['chunk_count'] - 1;
         $newProgress = min($chunkIndex + 1, max(0, $cap));
-        $db->execute(
-            'UPDATE transfers SET chunks_downloaded = MAX(chunks_downloaded, :progress) WHERE id = :id',
-            [':progress' => $newProgress, ':id' => $transferId]
-        );
+        $transfers->updateDownloadProgress($transferId, $newProgress);
 
         return file_get_contents($fullPath);
     }
 
     public static function ack(Database $db, string $deviceId, string $transferId): array
     {
-        $transfer = $db->querySingle(
-            'SELECT id, sender_id, recipient_id FROM transfers WHERE id = :id',
-            [':id' => $transferId]
-        );
+        $transfers = new TransferRepository($db);
+        $transfer = $transfers->findById($transferId);
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found');
         }
@@ -219,10 +183,7 @@ class TransferService
         TransferCleanupService::deleteChunkFilesAndRows($db, $transferId);
 
         // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
-        $db->execute(
-            'UPDATE transfers SET downloaded = 1, delivered_at = :now, chunks_downloaded = chunk_count WHERE id = :id',
-            [':now' => time(), ':id' => $transferId]
-        );
+        $transfers->markDelivered($transferId, time());
 
         return ['status' => 'deleted'];
     }

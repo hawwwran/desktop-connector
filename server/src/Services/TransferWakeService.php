@@ -15,10 +15,7 @@ class TransferWakeService
                 return;
             }
 
-            $transfer = $db->querySingle(
-                'SELECT recipient_id FROM transfers WHERE id = :id',
-                [':id' => $transferId]
-            );
+            $transfer = (new TransferRepository($db))->findById($transferId);
             if (!$transfer) {
                 return;
             }

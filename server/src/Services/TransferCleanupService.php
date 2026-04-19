@@ -23,20 +23,13 @@ class TransferCleanupService
     public static function run(Database $db): void
     {
         $now = time();
+        $transfers = new TransferRepository($db);
 
-        $old = $db->queryAll(
-            'SELECT id FROM transfers WHERE created_at < :cutoff',
-            [':cutoff' => $now - self::TRANSFER_EXPIRY]
-        );
-        foreach ($old as $t) {
+        foreach ($transfers->findExpired($now - self::TRANSFER_EXPIRY) as $t) {
             self::deleteTransferFiles($db, $t['id']);
         }
 
-        $incomplete = $db->queryAll(
-            'SELECT id FROM transfers WHERE complete = 0 AND created_at < :cutoff',
-            [':cutoff' => $now - self::INCOMPLETE_EXPIRY]
-        );
-        foreach ($incomplete as $t) {
+        foreach ($transfers->findExpiredIncomplete($now - self::INCOMPLETE_EXPIRY) as $t) {
             self::deleteTransferFiles($db, $t['id']);
         }
 
@@ -47,7 +40,7 @@ class TransferCleanupService
     public static function deleteTransferFiles(Database $db, string $transferId): void
     {
         self::deleteChunkFilesAndRows($db, $transferId);
-        $db->execute('DELETE FROM transfers WHERE id = :tid', [':tid' => $transferId]);
+        (new TransferRepository($db))->delete($transferId);
     }
 
     /** Partial delete: chunk files, directory, chunk rows. Transfer row preserved. */

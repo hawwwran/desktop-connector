@@ -58,11 +58,6 @@ class TransferStatusService
      */
     public static function loadSentForDevice(Database $db, string $deviceId, int $limit = 50, bool $onlyComplete = false): array
     {
-        $where = 'sender_id = :sid' . ($onlyComplete ? ' AND complete = 1' : '');
-        return $db->queryAll(
-            "SELECT id AS transfer_id, recipient_id, complete, downloaded, chunk_count, chunks_downloaded, created_at
-             FROM transfers WHERE $where ORDER BY created_at DESC LIMIT " . (int)$limit,
-            [':sid' => $deviceId]
-        );
+        return (new TransferRepository($db))->loadSentForDevice($deviceId, $limit, $onlyComplete);
     }
 }
