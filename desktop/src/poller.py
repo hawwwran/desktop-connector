@@ -15,11 +15,11 @@ import requests as _raw_requests
 from cryptography.exceptions import InvalidTag
 
 from .api_client import ApiClient
-from .clipboard import write_clipboard_text, write_clipboard_image
 from .config import Config, FAST_POLL_INTERVAL, DEFAULT_POLL_INTERVAL, FAST_POLL_DURATION
 from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
 from .history import TransferHistory
+from .interfaces.backends import DesktopBackends
 
 log = logging.getLogger(__name__)
 
@@ -40,12 +40,14 @@ class Poller:
     """Polls server for pending transfers and downloads them."""
 
     def __init__(self, config: Config, connection: ConnectionManager,
-                 api: ApiClient, crypto: KeyManager, history: TransferHistory):
+                 api: ApiClient, crypto: KeyManager, history: TransferHistory,
+                 backends: DesktopBackends):
         self.config = config
         self.conn = connection
         self.api = api
         self.crypto = crypto
         self.history = history
+        self.backends = backends
         self._running = True
         self._wake_event = threading.Event()
         self._poll_interval = DEFAULT_POLL_INTERVAL
@@ -501,9 +503,8 @@ class Poller:
             try:
                 if subtype == "text":
                     text = filepath.read_text(errors="replace")
-                    if write_clipboard_text(text):
+                    if self.backends.clipboard.write_text(text):
                         log.info("clipboard.write_text.succeeded length=%d", len(text))
-                        from .notifications import notify
                         import re
                         urls = re.findall(r'https?://\S+', text)
                         if len(urls) == 1:
@@ -512,23 +513,21 @@ class Poller:
                             preview = text[:60] + "..."
                         else:
                             preview = text
-                        notify("Clipboard received", preview[:60])
+                        self.backends.notifications.notify("Clipboard received", preview[:60])
                         self.history.add(filename=filepath.name, display_label=preview,
                                          direction="received", size=len(text))
                         # Auto-open link if enabled
                         if len(urls) == 1 and self.config.auto_open_links:
-                            import subprocess
                             # Never log the URL itself — it's decrypted clipboard content.
-                            log.info("platform.open_url.succeeded length=%d", len(urls[0]))
-                            subprocess.Popen(["xdg-open", urls[0]])
+                            if self.backends.shell.open_url(urls[0]):
+                                log.info("platform.open_url.succeeded length=%d", len(urls[0]))
                     else:
                         log.warning("clipboard.write_text.failed")
                 elif subtype == "image":
                     data = filepath.read_bytes()
-                    if write_clipboard_image(data):
+                    if self.backends.clipboard.write_image(data):
                         log.info("clipboard.write_image.succeeded size=%d", len(data))
-                        from .notifications import notify
-                        notify("Clipboard received", "Image copied to clipboard")
+                        self.backends.notifications.notify("Clipboard received", "Image copied to clipboard")
                         self.history.add(filename=filepath.name, display_label="Clipboard image",
                                          direction="received", size=len(data))
                     else:
@@ -549,8 +548,7 @@ class Poller:
             self.config._data["paired_devices"] = devices
             self.config.save()
             filepath.unlink(missing_ok=True)
-            from .notifications import notify
-            notify("Unpaired", "Paired device disconnected")
+            self.backends.notifications.notify("Unpaired", "Paired device disconnected")
         else:
             log.warning("fasttrack.command.unknown fn=%s", fn)
 

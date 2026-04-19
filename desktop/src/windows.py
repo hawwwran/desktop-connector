@@ -36,11 +36,14 @@ def show_send_files(config_dir: Path):
     from .connection import ConnectionManager
     from .api_client import ApiClient
     from .history import TransferHistory
-    from .dialogs import pick_files
+    # windows.py runs as a GTK4 subprocess — Linux-scoped by construction,
+    # so instantiate the Linux backend directly instead of composing all four.
+    from .backends.linux.dialog_backend import LinuxDialogBackend
 
     config = Config(config_dir)
     crypto = KeyManager(config_dir)
     history = TransferHistory(config_dir)
+    dialogs = LinuxDialogBackend()
 
     file_list: list[Path] = []
 
@@ -338,7 +341,7 @@ def show_send_files(config_dir: Path):
         action_bar.pack_end(send_btn)
 
         def on_browse(b):
-            paths = pick_files("Select files to send")
+            paths = dialogs.pick_files("Select files to send")
             for p in paths:
                 if p not in file_list:
                     file_list.append(p)

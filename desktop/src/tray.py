@@ -13,11 +13,11 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from .api_client import ApiClient
-from .clipboard import read_clipboard
 from .config import Config
 from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
 from .history import TransferHistory
+from .interfaces.backends import DesktopBackends
 from .poller import Poller
 
 log = logging.getLogger(__name__)
@@ -61,7 +61,8 @@ class TrayApp:
 
     def __init__(self, connection: ConnectionManager, poller: Poller,
                  api: ApiClient, config: Config, crypto: KeyManager,
-                 history: TransferHistory, save_dir: Path):
+                 history: TransferHistory, save_dir: Path,
+                 backends: DesktopBackends):
         self.conn = connection
         self.poller = poller
         self.api = api
@@ -69,6 +70,7 @@ class TrayApp:
         self.crypto = crypto
         self.history = history
         self.save_dir = save_dir
+        self.backends = backends
         self._icon = None
         self._should_quit = threading.Event()
         self._was_uploading = False
@@ -284,10 +286,9 @@ class TrayApp:
         threading.Thread(target=self._do_send_clipboard, daemon=True).start()
 
     def _do_send_clipboard(self) -> None:
-        result = read_clipboard()
+        result = self.backends.clipboard.read_clipboard()
         if result is None:
-            from .notifications import notify
-            notify("Clipboard empty", "Nothing to send")
+            self.backends.notifications.notify("Clipboard empty", "Nothing to send")
             return
 
         filename, data, mime_type = result
@@ -333,24 +334,19 @@ class TrayApp:
         if tid:
             # Never log the preview — it's decrypted clipboard content.
             log.info("Clipboard sent (len=%d)", len(preview))
-            from .notifications import notify
-            notify("Clipboard sent", preview)
+            self.backends.notifications.notify("Clipboard sent", preview)
             # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.
             self.history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
         else:
             if progress_tid[0]:
                 self.history.update(progress_tid[0], status="failed")
-            from .notifications import notify
-            notify("Send failed", "Could not send clipboard")
+            self.backends.notifications.notify("Send failed", "Could not send clipboard")
 
     # --- Misc ---
 
     def _open_folder(self, *_) -> None:
-        try:
-            subprocess.Popen(["xdg-open", str(self.save_dir)])
+        if self.backends.shell.open_folder(self.save_dir):
             log.info("platform.open_folder.succeeded")
-        except Exception as e:
-            log.warning("platform.open_folder.failed error_kind=%s", type(e).__name__)
 
     def _try_now(self, *_) -> None:
         self.conn.try_now()

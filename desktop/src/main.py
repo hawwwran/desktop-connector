@@ -71,7 +71,12 @@ def main() -> int:
     if mode == "send_file":
         return run_send_file(context.config, context.crypto, Path(args.send))
 
-    run_receiver(context.config, context.crypto, mode == "headless_receive")
+    run_receiver(
+        context.config,
+        context.crypto,
+        mode == "headless_receive",
+        context.backends,
+    )
     return 0
 
 if __name__ == "__main__":
