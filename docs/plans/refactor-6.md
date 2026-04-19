@@ -1,5 +1,7 @@
 # refactor-6.md
 
+> **Status: Done** — landed on `main` in commit `79e9c31` (PR #13). New `desktop/src/interfaces/` (capability `Protocol`s for clipboard/dialogs/notifications/shell + `DesktopBackends` composition shape), `desktop/src/backends/linux/` (Linux implementations wrapping existing helpers), and `desktop/src/platform/linux/compose.py` (single composition point). `Poller`, `TrayApp`, and `run_receiver` now take `backends: DesktopBackends` as a required positional and route all platform calls through `self.backends.*` — core modules no longer import anything from `backends/linux/`. `dependency_check.py` documents its intentional pre-composition Linux scope; `windows.py` (GTK4 subprocess) instantiates `LinuxDialogBackend` directly. Behavior preserved; verified desktop ↔ android roundtrips.
+
 ## Refactor 6 / 10
 # Separate desktop core from Linux-specific backends
 

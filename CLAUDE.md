@@ -203,19 +203,39 @@ desktop/
   uninstall.sh     — clean removal
   nautilus-send-to-phone.py — file manager "Send to Phone" script (Nautilus/Nemo/Dolphin)
   src/
-    main.py          — entry point (--headless, --send, --pair) + dependency checker
-  crypto.py        — X25519 + AES-256-GCM + HKDF
-  connection.py    — exponential backoff state machine
-  config.py        — persistent config (~/.config/desktop-connector/)
-  api_client.py    — server API wrapper
-  poller.py        — poll, download, decrypt, delivery status check
-  clipboard.py     — wl-copy/xclip read/write
-  history.py       — JSON-based transfer history (50 items)
-  pairing.py       — QR code generation + tkinter pairing window
-  tray.py          — pystray tray icon, spawns GTK4 windows as subprocesses
-  windows.py       — GTK4/libadwaita windows (send-files, settings, history, find-phone)
-  dialogs.py       — zenity file picker + confirmation dialogs
-  notifications.py — notify-send wrapper
+    main.py              — thin entrypoint (refactor-5): deps → args → logging → context → register → pair? → dispatch
+    bootstrap/           — startup wiring (refactor-5)
+      args.py                — CLI parsing + StartupArgs + StartupMode Literal + resolve_startup_mode
+      dependency_check.py    — dep detection + GTK4/Tkinter install UI (intentionally Linux-scoped)
+      logging_setup.py       — console + optional rotating file logging
+      startup_context.py     — StartupContext (carries DesktopBackends) + build_startup_context + rebuild_authenticated_api
+    runners/             — per-mode startup flows (refactor-5)
+      registration_runner.py — register_device
+      pairing_runner.py      — run_pairing_flow
+      send_runner.py         — run_send_file (one-shot --send)
+      receiver_runner.py     — run_receiver (tray or headless; takes DesktopBackends)
+    interfaces/          — platform capability Protocols (refactor-6)
+      backends.py            — DesktopBackends composition dataclass (clipboard/notifications/dialogs/shell)
+      clipboard.py           — ClipboardBackend (read_clipboard, write_text, write_image)
+      dialogs.py             — DialogBackend (pick_files, confirm, show_info)
+      notifications.py       — NotificationBackend (notify + convenience helpers)
+      shell.py               — ShellBackend (open_url, open_folder, launch_installer_terminal)
+    backends/linux/      — Linux backend implementations (refactor-6); wraps existing helper modules
+      clipboard_backend.py, dialog_backend.py, notification_backend.py, shell_backend.py
+    platform/linux/      — composition point (refactor-6)
+      compose.py             — compose_linux_backends() -> DesktopBackends
+    crypto.py            — X25519 + AES-256-GCM + HKDF
+    connection.py        — exponential backoff state machine
+    config.py            — persistent config (~/.config/desktop-connector/)
+    api_client.py        — server API wrapper
+    poller.py            — poll, download, decrypt, delivery status check (platform calls via self.backends.*)
+    clipboard.py         — wl-copy/xclip read/write (wrapped by LinuxClipboardBackend)
+    history.py           — JSON-based transfer history (50 items)
+    pairing.py           — QR code generation + tkinter pairing window
+    tray.py              — pystray tray icon, spawns GTK4 windows as subprocesses (platform calls via self.backends.*)
+    windows.py           — GTK4/libadwaita windows (send-files, settings, history, find-phone)
+    dialogs.py           — zenity file picker + confirmation dialogs (wrapped by LinuxDialogBackend)
+    notifications.py     — notify-send wrapper (wrapped by LinuxNotificationBackend)
 
 android/app/src/main/kotlin/com/desktopconnector/
   DesktopConnectorApp.kt     — application init, Bouncy Castle, service start
