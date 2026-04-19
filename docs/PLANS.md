@@ -12,11 +12,6 @@ haven't yet.
 
 ---
 
-## Android client
-
-| Plan | Intent | Status |
-|------|--------|--------|
-
 ## Desktop client
 
 | Plan | Intent | Status |
