@@ -79,11 +79,7 @@ class TransferNotifyService
             $response['test'] = true;
         }
         if ($state['downloadProgress'] || $state['delivered']) {
-            $sent = TransferStatusService::loadSentForDevice($db, $deviceId, 50, true);
-            $response['sent_status'] = array_map(
-                [TransferStatusService::class, 'formatSentBrief'],
-                $sent
-            );
+            $response['sent_status'] = TransferStatusService::buildNotifySentStatus($db, $deviceId);
         }
         return $response;
     }

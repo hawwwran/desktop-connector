@@ -69,11 +69,7 @@ class TransferController
 
     public static function sentStatus(Database $db, RequestContext $ctx): void
     {
-        $rows = TransferStatusService::loadSentForDevice($db, $ctx->deviceId);
-        Router::json(['transfers' => array_map(
-            [TransferStatusService::class, 'formatSent'],
-            $rows
-        )]);
+        Router::json(TransferStatusService::buildSentStatusResponse($db, $ctx->deviceId));
     }
 
     public static function notify(Database $db, RequestContext $ctx): void

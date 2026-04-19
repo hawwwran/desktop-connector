@@ -9,24 +9,14 @@ class TransferStatusService
 {
     /**
      * Map a transfers row to {status, delivery_state}.
-     * Required row fields: chunk_count, complete, downloaded, chunks_downloaded.
+     * Mapping flow:
+     *   1) TransferLifecycle::deriveState($row)
+     *   2) TransferStatusMapper::toProtocol($state, $row)
      */
     public static function computeStatus(array $row): array
     {
-        $complete = (int)($row['complete'] ?? 0);
-        $downloaded = (int)($row['downloaded'] ?? 0);
-        $chunksDownloaded = (int)($row['chunks_downloaded'] ?? 0);
-
-        if ($downloaded) {
-            return ['status' => 'delivered', 'delivery_state' => 'delivered'];
-        }
-        if ($complete) {
-            return [
-                'status' => 'pending',
-                'delivery_state' => $chunksDownloaded > 0 ? 'in_progress' : 'not_started',
-            ];
-        }
-        return ['status' => 'uploading', 'delivery_state' => 'not_started'];
+        $state = TransferLifecycle::deriveState($row);
+        return TransferStatusMapper::toProtocol($state, $row);
     }
 
     /** Full per-transfer dict for /sent-status (includes created_at). */
@@ -59,5 +49,19 @@ class TransferStatusService
     public static function loadSentForDevice(Database $db, string $deviceId, int $limit = 50, bool $onlyComplete = false): array
     {
         return (new TransferRepository($db))->loadSentForDevice($deviceId, $limit, $onlyComplete);
+    }
+
+    /** Response body for /api/transfers/sent-status. */
+    public static function buildSentStatusResponse(Database $db, string $deviceId): array
+    {
+        $rows = self::loadSentForDevice($db, $deviceId);
+        return ['transfers' => array_map([self::class, 'formatSent'], $rows)];
+    }
+
+    /** Inline sent_status payload for /api/transfers/notify responses. */
+    public static function buildNotifySentStatus(Database $db, string $deviceId): array
+    {
+        $rows = self::loadSentForDevice($db, $deviceId, 50, true);
+        return array_map([self::class, 'formatSentBrief'], $rows);
     }
 }

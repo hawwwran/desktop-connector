@@ -36,6 +36,8 @@ require_once __DIR__ . '/../src/FcmSender.php';
 require_once __DIR__ . '/../src/AppLog.php';
 
 // --- Services ---
+require_once __DIR__ . '/../src/Services/TransferLifecycle.php';
+require_once __DIR__ . '/../src/Services/TransferStatusMapper.php';
 require_once __DIR__ . '/../src/Services/TransferStatusService.php';
 require_once __DIR__ . '/../src/Services/TransferNotifyService.php';
 require_once __DIR__ . '/../src/Services/TransferWakeService.php';
