@@ -18,15 +18,15 @@ class TransferStatusService
         $chunksDownloaded = (int)($row['chunks_downloaded'] ?? 0);
 
         if ($downloaded) {
-            return ['status' => 'delivered', 'delivery_state' => 'delivered'];
+            return ['status' => TransferState::DELIVERED, 'delivery_state' => 'delivered'];
         }
         if ($complete) {
             return [
-                'status' => 'pending',
+                'status' => $chunksDownloaded > 0 ? TransferState::DELIVERING : TransferState::UPLOADED,
                 'delivery_state' => $chunksDownloaded > 0 ? 'in_progress' : 'not_started',
             ];
         }
-        return ['status' => 'uploading', 'delivery_state' => 'not_started'];
+        return ['status' => TransferState::UPLOADING, 'delivery_state' => 'not_started'];
     }
 
     /** Full per-transfer dict for /sent-status (includes created_at). */
