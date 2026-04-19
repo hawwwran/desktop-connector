@@ -14,6 +14,10 @@ require_once __DIR__ . '/../src/Http/Validators.php';
 require_once __DIR__ . '/../src/Auth/AuthIdentity.php';
 require_once __DIR__ . '/../src/Auth/AuthService.php';
 
+// --- Transfer domain ---
+require_once __DIR__ . '/../src/Domain/Transfer/TransferState.php';
+require_once __DIR__ . '/../src/Domain/Transfer/TransferLifecycle.php';
+
 // --- Repositories ---
 require_once __DIR__ . '/../src/Repositories/DeviceRepository.php';
 require_once __DIR__ . '/../src/Repositories/PairingRepository.php';

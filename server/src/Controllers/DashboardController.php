@@ -82,8 +82,10 @@ class DashboardController
             $chunks = (int)$t['chunks_received'] . '/' . (int)$t['chunk_count'];
             $bytes = self::formatBytes($t['total_bytes']);
             $age = self::timeAgo($now - $t['created_at']);
-            $status = $t['complete'] ? 'ready' : 'uploading';
-            $statusColor = $t['complete'] ? '#22c55e' : '#f59e0b';
+            $state = TransferLifecycle::deriveState($t);
+            $isReady = $state->is(TransferState::UPLOADED) || $state->is(TransferState::DELIVERING);
+            $status = $isReady ? 'ready' : 'uploading';
+            $statusColor = $isReady ? '#22c55e' : '#f59e0b';
             $transferRows .= "<tr>
                 <td>{$tid}</td>
                 <td>{$from}</td>

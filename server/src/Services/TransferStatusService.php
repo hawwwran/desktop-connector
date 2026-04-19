@@ -9,23 +9,22 @@ class TransferStatusService
 {
     /**
      * Map a transfers row to {status, delivery_state}.
-     * Required row fields: chunk_count, complete, downloaded, chunks_downloaded.
+     * Required row fields: chunk_count, chunks_received, complete, downloaded, chunks_downloaded, delivered_at.
      */
     public static function computeStatus(array $row): array
     {
-        $complete = (int)($row['complete'] ?? 0);
-        $downloaded = (int)($row['downloaded'] ?? 0);
-        $chunksDownloaded = (int)($row['chunks_downloaded'] ?? 0);
+        $state = TransferLifecycle::deriveState($row);
 
-        if ($downloaded) {
+        if ($state->is(TransferState::DELIVERED)) {
             return ['status' => 'delivered', 'delivery_state' => 'delivered'];
         }
-        if ($complete) {
-            return [
-                'status' => 'pending',
-                'delivery_state' => $chunksDownloaded > 0 ? 'in_progress' : 'not_started',
-            ];
+        if ($state->is(TransferState::DELIVERING)) {
+            return ['status' => 'pending', 'delivery_state' => 'in_progress'];
         }
+        if ($state->is(TransferState::UPLOADED)) {
+            return ['status' => 'pending', 'delivery_state' => 'not_started'];
+        }
+
         return ['status' => 'uploading', 'delivery_state' => 'not_started'];
     }
 
