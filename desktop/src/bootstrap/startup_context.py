@@ -9,6 +9,7 @@ from ..api_client import ApiClient
 from ..config import Config
 from ..connection import ConnectionManager
 from ..crypto import KeyManager
+from ..platform.linux.compose import DesktopBackends, compose_linux_backends
 from .args import StartupArgs
 
 
@@ -18,6 +19,7 @@ class StartupContext:
     config: Config
     crypto: KeyManager
     api: ApiClient
+    backends: DesktopBackends
 
 
 def build_startup_context(args: StartupArgs) -> StartupContext:
@@ -35,8 +37,9 @@ def build_startup_context(args: StartupArgs) -> StartupContext:
         config.auth_token or "none",
     )
     api = ApiClient(conn, crypto)
+    backends = compose_linux_backends()
 
-    return StartupContext(args=args, config=config, crypto=crypto, api=api)
+    return StartupContext(args=args, config=config, crypto=crypto, api=api, backends=backends)
 
 
 def rebuild_authenticated_api(context: StartupContext) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..backends.linux.shell_backend import LinuxShellBackend
 
 def check_dependencies() -> list[tuple[str, str]]:
     """Check all required dependencies. Returns list of missing ones."""
@@ -82,8 +83,6 @@ def show_missing_deps_dialog(missing: list[tuple[str, str]]) -> None:
 
 
 def _show_deps_gtk4(missing: list[tuple[str, str]]) -> None:
-    import subprocess
-
     import gi
 
     gi.require_version("Gtk", "4.0")
@@ -123,14 +122,8 @@ def _show_deps_gtk4(missing: list[tuple[str, str]]) -> None:
             box.append(row)
 
         def on_install(_btn):
-            subprocess.Popen(
-                [
-                    "gnome-terminal",
-                    "--",
-                    "bash",
-                    "-c",
-                    "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'",
-                ]
+            LinuxShellBackend().launch_installer_terminal(
+                "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'"
             )
             win.close()
 
@@ -146,7 +139,6 @@ def _show_deps_gtk4(missing: list[tuple[str, str]]) -> None:
 
 
 def _show_deps_tkinter(missing: list[tuple[str, str]]) -> None:
-    import subprocess
     import tkinter as tk
 
     root = tk.Tk()
@@ -176,14 +168,8 @@ def _show_deps_tkinter(missing: list[tuple[str, str]]) -> None:
         ).pack(anchor=tk.W, pady=2)
 
     def on_install():
-        subprocess.Popen(
-            [
-                "x-terminal-emulator",
-                "-e",
-                "bash",
-                "-c",
-                "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'",
-            ]
+        LinuxShellBackend().launch_installer_terminal(
+            "curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash; echo; read -p 'Press Enter to close...'"
         )
         root.destroy()
 
