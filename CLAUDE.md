@@ -284,9 +284,15 @@ android/app/src/main/kotlin/com/desktopconnector/
       TransferViewModel.kt   — uploads, clipboard, history, delivery tracking
 
 test_loop.sh                 — automated integration test
+tests/protocol/              — executable protocol contract tests (refactor-8)
+  test_desktop_message_contract.py — FnTransferAdapter/FasttrackAdapter pinning
+  test_server_contract.py    — hermetic PHP server + HTTP surface + error envelope
+  README.md                  — run command + PHP prereq
+docs/protocol.compatibility.md — preserving/extending/breaking classification (refactor-8)
+docs/protocol.examples.md    — canonical request/response examples (refactor-8)
 version.json                 — version tracking for all three components
 temp/                        — numbered install scripts (dev only, run with sudo)
-docs/plans/                  — refactoring and bugfix plans (gitignored, local working notes)
+docs/plans/                  — refactoring and bugfix plans (local working notes)
 ```
 
 ## Config locations

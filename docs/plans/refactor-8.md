@@ -1,5 +1,7 @@
 # refactor-8.md
 
+> **Status: Done** — landed on `main` in commit `06b3f0b` (PR #15). New `docs/protocol.compatibility.md` (preserving / extending / breaking classification + concrete edit-to-category table) and `docs/protocol.examples.md` (canonical request/response examples for auth headers, registration, pairing, transfers + chunks + ack, fasttrack, `.fn.*` mappings, ping/pong, error envelope). Executable contract tests at `tests/protocol/`: `test_desktop_message_contract.py` pins `FnTransferAdapter`/`FasttrackAdapter` in-process, `test_server_contract.py` spawns a hermetic PHP server (copies source without `data/`/`storage/`) and exercises the HTTP surface including 401/404/400/path-traversal error envelopes. All 11 tests pass under `python3 -m unittest discover tests/protocol`. No production code changes.
+
 ## Refactor 8 / 10
 # Introduce a compatibility layer between `protocol.md` and the implementation
 
