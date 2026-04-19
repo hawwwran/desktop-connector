@@ -20,6 +20,7 @@ class FasttrackController
         $body = $ctx->jsonBody();
         $recipientId = Validators::requireNonEmptyString($body, 'recipient_id');
         $encryptedData = Validators::requireNonEmptyString($body, 'encrypted_data');
+        $payloadSize = strlen($encryptedData);
 
         $deviceId = $ctx->deviceId;
 
@@ -44,9 +45,16 @@ class FasttrackController
             throw new ApiError(429, 'Too many pending messages');
         }
 
+        if (!MessageTransportPolicy::isFasttrackPayloadSizeAllowed($payloadSize)) {
+            throw new ValidationError(sprintf(
+                'Encrypted payload too large for fasttrack (max %d bytes)',
+                MessageTransportPolicy::fasttrackMaxEncryptedBytes()
+            ));
+        }
+
         AppLog::log('Fasttrack', sprintf(
             'fasttrack.message.send_received sender=%s recipient=%s size=%d',
-            AppLog::shortId($deviceId), AppLog::shortId($recipientId), strlen($encryptedData)
+            AppLog::shortId($deviceId), AppLog::shortId($recipientId), $payloadSize
         ));
 
         $messageId = $messages->insertMessage($deviceId, $recipientId, $encryptedData, time());

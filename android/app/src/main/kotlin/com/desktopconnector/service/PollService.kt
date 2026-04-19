@@ -27,6 +27,10 @@ import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
 import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
+import com.desktopconnector.messaging.DeviceMessage
+import com.desktopconnector.messaging.MessageAdapters
+import com.desktopconnector.messaging.MessageDispatcher
+import com.desktopconnector.messaging.MessageType
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import java.util.Collections
@@ -64,6 +68,24 @@ class PollService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var running = true
+    private val messageDispatcher = MessageDispatcher().apply {
+        register(MessageType.CLIPBOARD_TEXT) { msg ->
+            val textPayload = msg.payload["text"] as? String ?: return@register
+            pushTextToClipboard(textPayload)
+        }
+        register(MessageType.CLIPBOARD_IMAGE) { msg ->
+            val imageBytes = msg.payload["image_bytes"] as? ByteArray ?: return@register
+            pushImageToClipboard(imageBytes)
+        }
+        register(MessageType.PAIRING_UNPAIR) {
+            AppLog.log("Pairing", "pairing.unpair.received")
+            val keyManager = KeyManager(this@PollService)
+            keyManager.getFirstPairedDevice()?.let { paired ->
+                keyManager.removePairedDevice(paired.deviceId)
+            }
+            showTransferNotification("Desktop disconnected")
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -356,21 +378,32 @@ class PollService : Service() {
                 val encryptedBytes = Base64.decode(encryptedDataB64, Base64.NO_WRAP)
                 val plainBytes = CryptoUtils.decryptBlob(encryptedBytes, symmetricKey)
                 val payload = JSONObject(String(plainBytes))
-
+                val message = MessageAdapters.fromFasttrackPayload(payload, senderId = senderId)
                 val fn = payload.optString("fn", "")
-                // Never log `payload` — it's decrypted user data.
                 AppLog.log("Fasttrack", "fasttrack.message.processed message_id=$messageId fn=$fn")
 
-                when (fn) {
-                    "find-phone" -> {
-                        val action = payload.optString("action", "")
-                        AppLog.log("Fasttrack", "fasttrack.command.received fn=find-phone action=$action")
-                        FindPhoneManager.handleCommand(
-                            applicationContext, action, payload,
-                            senderId, api, symmetricKey
-                        )
+                if (message == null) {
+                    AppLog.log("Fasttrack", "fasttrack.command.unknown fn=$fn", "warning")
+                } else {
+                    when (message.type) {
+                        MessageType.FIND_PHONE_START,
+                        MessageType.FIND_PHONE_STOP,
+                        MessageType.FIND_PHONE_LOCATION_UPDATE -> {
+                            val action = payload.optString("action", "")
+                            AppLog.log("Fasttrack", "fasttrack.command.received fn=find-phone action=$action")
+                            FindPhoneManager.handleDeviceMessage(
+                                applicationContext,
+                                message,
+                                api,
+                                symmetricKey,
+                            )
+                        }
+                        else -> {
+                            if (!messageDispatcher.dispatch(message)) {
+                                AppLog.log("Fasttrack", "fasttrack.command.unhandled type=${message.type}", "warning")
+                            }
+                        }
                     }
-                    else -> AppLog.log("Fasttrack", "fasttrack.command.unknown fn=$fn", "warning")
                 }
             } catch (e: Exception) {
                 AppLog.log("Fasttrack", "fasttrack.message.processing_failed message_id=$messageId error_kind=${e.javaClass.simpleName}", "error")
@@ -457,7 +490,7 @@ class PollService : Service() {
     ) {
         val db = AppDatabase.getInstance(this)
         if (isFnTransfer) {
-            receiveFnTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db)
+            receiveFnTransfer(transferId, senderId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db)
         } else {
             receiveFileTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
         }
@@ -469,7 +502,7 @@ class PollService : Service() {
      * in-memory path is kept for them — streaming to disk would be overkill.
      */
     private suspend fun receiveFnTransfer(
-        transferId: String, chunkCount: Int, symmetricKey: ByteArray,
+        transferId: String, senderId: String, chunkCount: Int, symmetricKey: ByteArray,
         fileName: String, mimeType: String, api: ApiClient, prefs: AppPreferences, db: AppDatabase,
     ) {
         val parts = ArrayList<ByteArray>(chunkCount)
@@ -483,7 +516,7 @@ class PollService : Service() {
         val data = parts.fold(ByteArray(0)) { acc, part -> acc + part }
         AppLog.log("Recv", "fasttrack.command.received fn=$fileName bytes=${data.size}")
 
-        val displayLabel = handleFnTransfer(fileName, data)
+        val displayLabel = handleFnTransfer(fileName, data, senderId = senderId)
         AppLog.log("Recv", "fasttrack.command.handled fn=$fileName label=$displayLabel")
 
         try {
@@ -816,36 +849,27 @@ class PollService : Service() {
         }
     }
 
-    private fun handleFnTransfer(fileName: String, data: ByteArray): String {
-        val parts = fileName.split(".")  // ["", "fn", "clipboard", "text"]
-        if (parts.size < 3) return fileName
+    private fun handleFnTransfer(fileName: String, data: ByteArray, senderId: String?): String {
+        val message = MessageAdapters.fromFnTransfer(fileName, data, senderId = senderId)
+        if (message == null) return fileName
 
-        val fn = parts[2]
-        if (fn == "clipboard") {
-            val subtype = if (parts.size > 3) parts[3] else "text"
-            return when (subtype) {
-                "text" -> {
-                    val text = String(data)
-                    pushTextToClipboard(text)
-                    val hasUrl = com.desktopconnector.ui.containsSingleUrl(text)
-                    if (hasUrl) text else if (text.length > 40) text.take(40) + "..." else text
-                }
-                "image" -> {
-                    pushImageToClipboard(data)
-                    "Clipboard image"
-                }
-                else -> fileName
+        when (message.type) {
+            MessageType.CLIPBOARD_TEXT -> {
+                if (!messageDispatcher.dispatch(message)) return fileName
+                val text = message.payload["text"] as? String ?: return fileName
+                val hasUrl = com.desktopconnector.ui.containsSingleUrl(text)
+                return if (hasUrl) text else if (text.length > 40) text.take(40) + "..." else text
             }
-        } else if (fn == "unpair") {
-            AppLog.log("Pairing", "pairing.unpair.received")
-            val keyManager = KeyManager(this)
-            keyManager.getFirstPairedDevice()?.let {
-                keyManager.removePairedDevice(it.deviceId)
+            MessageType.CLIPBOARD_IMAGE -> {
+                messageDispatcher.dispatch(message)
+                return "Clipboard image"
             }
-            showTransferNotification("Desktop disconnected")
-            return "Unpaired by desktop"
+            MessageType.PAIRING_UNPAIR -> {
+                messageDispatcher.dispatch(message)
+                return "Unpaired by desktop"
+            }
+            else -> return fileName
         }
-        return fileName
     }
 
     private fun pushTextToClipboard(text: String) {

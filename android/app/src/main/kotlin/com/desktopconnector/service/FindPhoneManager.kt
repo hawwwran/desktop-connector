@@ -22,6 +22,7 @@ import android.util.Log
 import com.desktopconnector.crypto.CryptoUtils
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.network.ApiClient
+import com.desktopconnector.messaging.DeviceMessage
 import kotlinx.coroutines.*
 import org.json.JSONObject
 
@@ -60,6 +61,18 @@ object FindPhoneManager {
     private var activeApi: ApiClient? = null
     private var activeDesktopId: String? = null
     private var activeSymmetricKey: ByteArray? = null
+
+    fun handleDeviceMessage(
+        context: Context,
+        message: DeviceMessage,
+        api: ApiClient,
+        symmetricKey: ByteArray,
+    ) {
+        val payload = JSONObject(message.payload)
+        val action = payload.optString("action", "")
+        val senderId = message.senderId ?: return
+        handleCommand(context, action, payload, senderId, api, symmetricKey)
+    }
 
     fun handleCommand(
         context: Context,

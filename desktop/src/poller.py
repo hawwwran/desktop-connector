@@ -19,6 +19,7 @@ from .config import Config, FAST_POLL_INTERVAL, DEFAULT_POLL_INTERVAL, FAST_POLL
 from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
 from .history import TransferHistory
+from .messaging import FnTransferAdapter, MessageDispatcher, MessageType
 from .interfaces.backends import DesktopBackends
 
 log = logging.getLogger(__name__)
@@ -48,6 +49,10 @@ class Poller:
         self.crypto = crypto
         self.history = history
         self.backends = backends
+        self._message_dispatcher = MessageDispatcher()
+        self._message_dispatcher.register(MessageType.CLIPBOARD_TEXT, self._handle_message_clipboard_text)
+        self._message_dispatcher.register(MessageType.CLIPBOARD_IMAGE, self._handle_message_clipboard_image)
+        self._message_dispatcher.register(MessageType.PAIRING_UNPAIR, self._handle_message_unpair)
         self._running = True
         self._wake_event = threading.Event()
         self._poll_interval = DEFAULT_POLL_INTERVAL
@@ -230,13 +235,13 @@ class Poller:
 
         if filename.startswith(".fn."):
             self._receive_fn_transfer(
-                transfer_id, filename, chunk_count, symmetric_key)
+                transfer_id, sender_id, filename, chunk_count, symmetric_key)
         else:
             self._receive_file_transfer(
                 transfer_id, sender_id, filename, chunk_count,
                 base_nonce, symmetric_key)
 
-    def _receive_fn_transfer(self, transfer_id: str, filename: str,
+    def _receive_fn_transfer(self, transfer_id: str, sender_id: str, filename: str,
                              chunk_count: int, symmetric_key: bytes) -> None:
         """Handle command-style .fn.* transfers: tiny payloads, in-memory path,
         write to a tmp file under the save_dir, dispatch, ACK."""
@@ -269,7 +274,7 @@ class Poller:
             log.exception("Failed to write .fn payload for %s", transfer_id[:12])
             return
 
-        self._handle_fn_transfer(save_path)
+        self._handle_fn_transfer(save_path, sender_id=sender_id)
 
         if self.api.ack_transfer(transfer_id):
             log.info("delivery.acked transfer_id=%s", transfer_id[:12])
@@ -488,69 +493,60 @@ class Poller:
         if removed:
             log.info("Cleaned up %d stale .part file(s)", removed)
 
-    def _handle_fn_transfer(self, filepath) -> None:
-        """Handle special .fn. transfers (clipboard, etc.)."""
-        name = filepath.name  # e.g. ".fn.clipboard.text"
-        parts = name.split(".")  # ["", "fn", "clipboard", "text"]
-        if len(parts) < 3:
-            log.warning("Unknown .fn transfer: %s", name)
+    def _handle_fn_transfer(self, filepath: Path, *, sender_id: str | None = None) -> None:
+        """Handle special .fn. transfers through the unified message dispatcher."""
+        name = filepath.name
+        try:
+            message = FnTransferAdapter.to_device_message(name, filepath.read_bytes(), sender_id=sender_id)
+            if message is None:
+                log.warning("fasttrack.command.unknown fn=%s", name)
+                return
+
+            if not self._message_dispatcher.dispatch(message):
+                log.warning("fasttrack.command.unknown type=%s", message.type.value)
+        except Exception as e:
+            log.error("command.dispatch.failed filename=%s error_kind=%s", name, type(e).__name__)
+        finally:
+            filepath.unlink(missing_ok=True)
+
+    def _handle_message_clipboard_text(self, message) -> None:
+        text = str(message.payload.get("text", ""))
+        if not self.backends.clipboard.write_text(text):
+            log.warning("clipboard.write_text.failed")
             return
 
-        fn = parts[2]  # "clipboard"
+        log.info("clipboard.write_text.succeeded length=%d", len(text))
+        import re
+        urls = re.findall(r'https?://\S+', text)
+        preview = text if len(urls) == 1 else (text[:60] + "..." if len(text) > 60 else text)
+        self.backends.notifications.notify("Clipboard received", preview[:60])
+        self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.text"),
+                         display_label=preview, direction="received", size=len(text))
+        if len(urls) == 1 and self.config.auto_open_links:
+            if self.backends.shell.open_url(urls[0]):
+                log.info("platform.open_url.succeeded length=%d", len(urls[0]))
 
-        if fn == "clipboard":
-            subtype = parts[3] if len(parts) > 3 else "text"
-            try:
-                if subtype == "text":
-                    text = filepath.read_text(errors="replace")
-                    if self.backends.clipboard.write_text(text):
-                        log.info("clipboard.write_text.succeeded length=%d", len(text))
-                        import re
-                        urls = re.findall(r'https?://\S+', text)
-                        if len(urls) == 1:
-                            preview = text  # Keep full text for URL items
-                        elif len(text) > 60:
-                            preview = text[:60] + "..."
-                        else:
-                            preview = text
-                        self.backends.notifications.notify("Clipboard received", preview[:60])
-                        self.history.add(filename=filepath.name, display_label=preview,
-                                         direction="received", size=len(text))
-                        # Auto-open link if enabled
-                        if len(urls) == 1 and self.config.auto_open_links:
-                            # Never log the URL itself — it's decrypted clipboard content.
-                            if self.backends.shell.open_url(urls[0]):
-                                log.info("platform.open_url.succeeded length=%d", len(urls[0]))
-                    else:
-                        log.warning("clipboard.write_text.failed")
-                elif subtype == "image":
-                    data = filepath.read_bytes()
-                    if self.backends.clipboard.write_image(data):
-                        log.info("clipboard.write_image.succeeded size=%d", len(data))
-                        self.backends.notifications.notify("Clipboard received", "Image copied to clipboard")
-                        self.history.add(filename=filepath.name, display_label="Clipboard image",
-                                         direction="received", size=len(data))
-                    else:
-                        log.warning("clipboard.write_image.failed")
-                else:
-                    log.warning("clipboard.subtype.unknown subtype=%s", subtype)
-            except Exception as e:
-                log.error("clipboard.write.failed error_kind=%s", type(e).__name__)
-            finally:
-                filepath.unlink(missing_ok=True)
-        elif fn == "unpair":
-            log.info("pairing.unpair.received")
-            # Remove the sender from paired devices
-            devices = self.config.paired_devices
-            # Find and remove the device that sent this
-            for did in list(devices.keys()):
-                del devices[did]
-            self.config._data["paired_devices"] = devices
-            self.config.save()
-            filepath.unlink(missing_ok=True)
-            self.backends.notifications.notify("Unpaired", "Paired device disconnected")
+    def _handle_message_clipboard_image(self, message) -> None:
+        data = message.payload.get("image_bytes", b"")
+        if not isinstance(data, (bytes, bytearray)):
+            log.warning("clipboard.write_image.failed reason=invalid_payload")
+            return
+        if self.backends.clipboard.write_image(bytes(data)):
+            log.info("clipboard.write_image.succeeded size=%d", len(data))
+            self.backends.notifications.notify("Clipboard received", "Image copied to clipboard")
+            self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.image"),
+                             display_label="Clipboard image", direction="received", size=len(data))
         else:
-            log.warning("fasttrack.command.unknown fn=%s", fn)
+            log.warning("clipboard.write_image.failed")
+
+    def _handle_message_unpair(self, _message) -> None:
+        log.info("pairing.unpair.received")
+        devices = self.config.paired_devices
+        for did in list(devices.keys()):
+            del devices[did]
+        self.config._data["paired_devices"] = devices
+        self.config.save()
+        self.backends.notifications.notify("Unpaired", "Paired device disconnected")
 
     def _delivery_tracker_loop(self) -> None:
         """Paints per-chunk "Delivering X/Y" progress for OUTGOING transfers while
