@@ -88,7 +88,7 @@ class TransferService
         $chunks = new ChunkRepository($db);
         if (!$chunks->chunkExists($transferId, $chunkIndex)) {
             $chunks->insertChunk($transferId, $chunkIndex, $blobPath, strlen($blobData), time());
-            $transfers->incrementChunksReceived($transferId);
+            TransferLifecycle::onChunkStored($transfers, $transferId);
             AppLog::log('Transfer', sprintf(
                 'transfer.chunk.uploaded transfer_id=%s chunk_index=%d size=%d',
                 AppLog::shortId($transferId), $chunkIndex, strlen($blobData)
@@ -98,8 +98,8 @@ class TransferService
         $updated = $transfers->findById($transferId);
         $complete = $updated['chunks_received'] >= $updated['chunk_count'];
 
-        if ($complete) {
-            $transfers->markComplete($transferId);
+        if ($complete && (int)$updated['complete'] === 0) {
+            $updated = TransferLifecycle::onUploadCompleted($transfers, $transferId);
             AppLog::log('Transfer', sprintf(
                 'transfer.upload.completed transfer_id=%s sender=%s recipient=%s chunks=%d',
                 AppLog::shortId($transferId),
@@ -146,7 +146,7 @@ class TransferService
         // the last chunk (which might still fail client-side before ack).
         $cap = (int)$transfer['chunk_count'] - 1;
         $newProgress = min($chunkIndex + 1, max(0, $cap));
-        $transfers->updateDownloadProgress($transferId, $newProgress);
+        TransferLifecycle::onRecipientProgress($transfers, $transferId, $newProgress);
         AppLog::log('Transfer', sprintf(
             'transfer.chunk.served transfer_id=%s chunk_index=%d progress=%d/%d',
             AppLog::shortId($transferId), $chunkIndex, $newProgress, (int)$transfer['chunk_count']
@@ -174,7 +174,7 @@ class TransferService
         TransferCleanupService::deleteChunkFilesAndRows($db, $transferId);
 
         // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
-        $transfers->markDelivered($transferId, time());
+        TransferLifecycle::onAckReceived($transfers, $transferId, time());
         AppLog::log('Delivery', sprintf(
             'delivery.acked transfer_id=%s recipient=%s total_bytes=%d',
             AppLog::shortId($transferId), AppLog::shortId($deviceId), $totalBytes
