@@ -285,7 +285,8 @@ object FindPhoneManager {
 
         val listener = object : LocationListener {
             override fun onLocationChanged(location: Location) {
-                AppLog.log("FindPhone", "Location update: ${location.latitude},${location.longitude} acc=${location.accuracy} provider=${location.provider}")
+                // Never log raw lat/lng — GPS coords stay off-disk.
+                AppLog.log("FindPhone", "Location update acc=${location.accuracy} provider=${location.provider}")
                 currentLocation = location
                 lastLatitude = location.latitude
                 lastLongitude = location.longitude
@@ -332,7 +333,8 @@ object FindPhoneManager {
                 currentLocation = cached
                 lastLatitude = cached.latitude
                 lastLongitude = cached.longitude
-                AppLog.log("FindPhone", "Cached location: ${cached.latitude},${cached.longitude} age=${(System.currentTimeMillis() - cached.time) / 1000}s")
+                // Never log raw lat/lng — GPS coords stay off-disk.
+                AppLog.log("FindPhone", "Cached location acc=${cached.accuracy} age=${(System.currentTimeMillis() - cached.time) / 1000}s")
             } else {
                 AppLog.log("FindPhone", "No cached location available")
             }

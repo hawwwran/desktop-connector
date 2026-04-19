@@ -513,7 +513,8 @@ class Poller:
                         # Auto-open link if enabled
                         if len(urls) == 1 and self.config.auto_open_links:
                             import subprocess
-                            log.info("Auto-opening link: %s", urls[0])
+                            # Never log the URL itself — it's decrypted clipboard content.
+                            log.info("Auto-opening link (len=%d)", len(urls[0]))
                             subprocess.Popen(["xdg-open", urls[0]])
                     else:
                         log.warning("Failed to set clipboard text")

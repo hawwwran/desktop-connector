@@ -5,6 +5,13 @@
  * When the current log exceeds MAX_SIZE, the old backup is deleted,
  * current becomes backup, and a new file is started.
  * Max disk usage: 2 * MAX_SIZE.
+ *
+ * Privacy rule (must never be violated):
+ *   Never log confidential fields — encrypted_meta, encrypted_data,
+ *   auth_token, fcm_token, public_key, blob contents, or any decrypted
+ *   user data. Log only non-sensitive metadata: transfer_id, message_id,
+ *   device_id/sender_id/recipient_id (first 12 chars), counts, sizes,
+ *   outcomes, and error categories.
  */
 class AppLog
 {

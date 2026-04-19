@@ -330,7 +330,8 @@ class TrayApp:
         tid = self.api.send_file(tmp, target_id, symmetric_key,
                                  filename_override=filename, on_progress=upload_progress)
         if tid:
-            log.info("Clipboard sent: %s", preview)
+            # Never log the preview — it's decrypted clipboard content.
+            log.info("Clipboard sent (len=%d)", len(preview))
             from .notifications import notify
             notify("Clipboard sent", preview)
             # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.

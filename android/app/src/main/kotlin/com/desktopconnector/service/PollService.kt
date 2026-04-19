@@ -354,7 +354,8 @@ class PollService : Service() {
                 val payload = JSONObject(String(plainBytes))
 
                 val fn = payload.optString("fn", "")
-                AppLog.log("Fasttrack", "Message $messageId: fn=$fn, payload=$payload")
+                // Never log `payload` — it's decrypted user data.
+                AppLog.log("Fasttrack", "Message $messageId: fn=$fn")
 
                 when (fn) {
                     "find-phone" -> {

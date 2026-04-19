@@ -1542,7 +1542,8 @@ function updatePos(lat,lng,acc) {
                                 enc_bytes = base64.b64decode(enc_data)
                                 plain = crypto.decrypt_blob(enc_bytes, symmetric_key)
                                 resp = json.loads(plain)
-                                log.info("Response: %s", resp)
+                                # Never log resp directly — it contains GPS coordinates for find-phone.
+                                log.info("Response: fn=%s state=%s", resp.get("fn"), resp.get("state"))
 
                                 if resp.get("fn") == "find-phone":
                                     resp_state = resp.get("state", "")
@@ -1556,7 +1557,8 @@ function updatePos(lat,lng,acc) {
                                         label = "Search in progress" if is_silent[0] else "Phone is ringing!"
                                         GLib.idle_add(set_ui, label, False, False, True)
                                         if lat is not None:
-                                            log.info("GPS: %.6f, %.6f acc=%.1f", lat, lng, accuracy or 0)
+                                            # Never log raw lat/lng — accuracy only.
+                                            log.info("GPS fix received acc=%.1f", accuracy or 0)
                                             GLib.idle_add(update_location, lat, lng, accuracy)
                                     elif resp_state == "stopped":
                                         log.info("Phone confirmed stopped")

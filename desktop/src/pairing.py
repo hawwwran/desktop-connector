@@ -63,7 +63,8 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
 
     qr_data = generate_qr_data(config, crypto)
     qr_image = generate_qr_image(qr_data)
-    log.info("QR data: %s", qr_data)
+    # Never log qr_data itself — it contains the device's public key (E2E material).
+    log.info("QR generated for device_id=%s", crypto.get_device_id()[:12])
     log.info("Server URL for phone: %s", json.loads(qr_data)["server"])
 
     paired = [False]
@@ -157,8 +158,8 @@ def run_pairing_headless(config: Config, crypto: KeyManager, api: ApiClient,
     For testing / scripted use.
     """
     qr_data = generate_qr_data(config, crypto)
-    log.info("Pairing QR data: %s", qr_data)
-    log.info("Device ID: %s", crypto.get_device_id())
+    # Never log qr_data itself — it contains the device's public key (E2E material).
+    log.info("Pairing QR generated for device_id=%s", crypto.get_device_id()[:12])
     log.info("Waiting for phone to pair (timeout: %ds)...", timeout)
 
     start = time.time()
