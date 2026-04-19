@@ -49,6 +49,10 @@ class Poller:
         self.crypto = crypto
         self.history = history
         self.backends = backends
+        self._message_dispatcher = MessageDispatcher()
+        self._message_dispatcher.register(MessageType.CLIPBOARD_TEXT, self._handle_message_clipboard_text)
+        self._message_dispatcher.register(MessageType.CLIPBOARD_IMAGE, self._handle_message_clipboard_image)
+        self._message_dispatcher.register(MessageType.PAIRING_UNPAIR, self._handle_message_unpair)
         self._running = True
         self._wake_event = threading.Event()
         self._poll_interval = DEFAULT_POLL_INTERVAL

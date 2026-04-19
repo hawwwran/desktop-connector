@@ -35,7 +35,6 @@ def show_send_files(config_dir: Path):
     from .crypto import KeyManager
     from .connection import ConnectionManager
     from .api_client import ApiClient
-    from .messaging import FasttrackAdapter, MessageType
     from .history import TransferHistory
     # windows.py runs as a GTK4 subprocess — Linux-scoped by construction,
     # so instantiate the Linux backend directly instead of composing all four.
@@ -372,7 +371,6 @@ def show_settings(config_dir: Path):
     from .crypto import KeyManager
     from .connection import ConnectionManager, ConnectionState
     from .api_client import ApiClient
-    from .messaging import FasttrackAdapter, MessageType
 
     config = Config(config_dir)
     crypto = KeyManager(config_dir)
@@ -1167,7 +1165,6 @@ def show_pairing(config_dir: Path):
     from .crypto import KeyManager
     from .connection import ConnectionManager
     from .api_client import ApiClient
-    from .messaging import FasttrackAdapter, MessageType
     from .pairing import generate_qr_data, generate_qr_image
 
     import io
