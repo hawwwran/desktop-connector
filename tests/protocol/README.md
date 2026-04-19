@@ -1,8 +1,9 @@
 # Protocol contract tests
 
-These tests pin the externally observable behavior of the protocol:
+These tests pin the externally observable behavior of the protocol and the desktop platform boundary:
 - **`test_desktop_message_contract.py`** — validates `FnTransferAdapter` and `FasttrackAdapter` message translations (in-process).
 - **`test_server_contract.py`** — spins up a real PHP server on a random port and exercises registration, pairing, transfers, sent-status, long-poll notify, fasttrack, and the error-envelope contract (auth, validation, not-found, path-traversal).
+- **`test_platform_contract.py`** — pins the `DesktopPlatform` / `PlatformCapabilities` shape, confirms `compose_desktop_platform()` raises `NotImplementedError` on non-Linux hosts (no silent Linux fallback), and verifies `src.platform.contract` imports without pulling in Linux backends.
 
 They complement, not replace, `docs/plans/protocol.md` and `docs/protocol.examples.md`.
 
