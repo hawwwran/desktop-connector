@@ -195,6 +195,8 @@ server/
     ChunkRepository.php          — chunks table: metadata, byte aggregation (incl. chunks⋈transfers JOIN)
     FasttrackRepository.php      — fasttrack_messages table: insert, list pending, ack, expiry cleanup
     PingRateRepository.php       — atomic UPSERT cooldown slot + retry-after lookup
+  src/Messaging/             — message transport policy (refactor-7)
+    MessageTransportPolicy.php — fasttrack encrypted-payload size ceiling (128 KB)
   src/FcmSender.php          — FCM HTTP v1 API sender (JWT + OAuth2)
   migrations/001_initial.sql
 
@@ -224,6 +226,12 @@ desktop/
       clipboard_backend.py, dialog_backend.py, notification_backend.py, shell_backend.py
     platform/linux/      — composition point (refactor-6)
       compose.py             — compose_linux_backends() -> DesktopBackends
+    messaging/           — shared command/message model (refactor-7)
+      message_types.py       — MessageType + MessageTransport enums
+      message_model.py       — DeviceMessage dataclass (type + transport + payload + metadata)
+      fn_transfer_adapter.py — parse .fn.* transfer filenames/bytes into DeviceMessage
+      fasttrack_adapter.py   — parse decrypted fasttrack payloads into DeviceMessage
+      dispatcher.py          — MessageDispatcher (register handler -> dispatch by type)
     crypto.py            — X25519 + AES-256-GCM + HKDF
     connection.py        — exponential backoff state machine
     config.py            — persistent config (~/.config/desktop-connector/)
@@ -249,6 +257,10 @@ android/app/src/main/kotlin/com/desktopconnector/
     ConnectionManager.kt     — backoff state machine
     FcmManager.kt            — dynamic Firebase init + FCM token management
     UploadWorker.kt          — WorkManager background uploads
+  messaging/                 — shared command/message model (refactor-7)
+    DeviceMessage.kt         — MessageType + MessageTransport enums + DeviceMessage data class
+    MessageAdapters.kt       — fromFnTransfer / fromFasttrackPayload -> DeviceMessage?
+    MessageDispatcher.kt     — register handler -> dispatch by MessageType
   service/
     PollService.kt           — foreground service, polls for transfers + fasttrack messages
     FcmService.kt            — FCM message receiver, wakes PollService (transfer or fasttrack)

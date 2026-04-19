@@ -1,5 +1,7 @@
 # refactor-7.md
 
+> **Status: Done** — landed on `main` in commit `9cc53ff` (PR #14). Shared `DeviceMessage` / `MessageType` / `MessageTransport` model on Android (`messaging/DeviceMessage.kt`, `MessageAdapters.kt`, `MessageDispatcher.kt`) and desktop (`desktop/src/messaging/`: `message_model.py`, `message_types.py`, `fn_transfer_adapter.py`, `fasttrack_adapter.py`, `dispatcher.py`). `PollService` (Android) and `Poller` (desktop) register handlers for `CLIPBOARD_TEXT` / `CLIPBOARD_IMAGE` / `PAIRING_UNPAIR`; find-phone still routes through `FindPhoneManager.handleDeviceMessage` on both sides. Server adds `MessageTransportPolicy` with a 128 KB encrypted-payload ceiling enforced in `FasttrackController::send`. Behavior preserved — clipboard text/image, unpair sync, and find-phone start/stop/location all verified working in both directions.
+
 ## Refactor 7 / 10
 # Introduce a unified command/message model for `.fn.*` and fasttrack
 
