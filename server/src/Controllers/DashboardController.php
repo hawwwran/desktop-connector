@@ -4,7 +4,7 @@ class DashboardController
 {
     public static function show(Database $db): void
     {
-        $devices = $db->queryAll('SELECT * FROM devices ORDER BY last_seen_at DESC');
+        $devices = (new DeviceRepository($db))->findAll();
         $pairings = $db->queryAll('SELECT * FROM pairings ORDER BY created_at DESC');
         $pendingTransfers = $db->queryAll(
             'SELECT t.*,

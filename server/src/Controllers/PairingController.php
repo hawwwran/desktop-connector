@@ -9,11 +9,7 @@ class PairingController
         $phonePubkey = Validators::requireNonEmptyString($body, 'phone_pubkey');
 
         // Verify desktop device exists
-        $desktop = $db->querySingle(
-            'SELECT device_id FROM devices WHERE device_id = :id',
-            [':id' => $desktopId]
-        );
-        if (!$desktop) {
+        if (!(new DeviceRepository($db))->findById($desktopId)) {
             throw new NotFoundError('Desktop device not found');
         }
 

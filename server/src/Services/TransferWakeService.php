@@ -23,15 +23,12 @@ class TransferWakeService
                 return;
             }
 
-            $device = $db->querySingle(
-                'SELECT fcm_token FROM devices WHERE device_id = :id',
-                [':id' => $transfer['recipient_id']]
-            );
-            if (!$device || empty($device['fcm_token'])) {
+            $token = (new DeviceRepository($db))->findFcmToken($transfer['recipient_id']);
+            if ($token === null) {
                 return;
             }
 
-            FcmSender::sendDataMessage($device['fcm_token'], [
+            FcmSender::sendDataMessage($token, [
                 'type' => 'transfer_ready',
                 'transfer_id' => $transferId,
             ]);

@@ -47,18 +47,12 @@ class AuthService
         }
 
         $token = substr($authHeader, 7);
-        $device = $db->querySingle(
-            'SELECT device_id FROM devices WHERE device_id = :id AND auth_token = :token',
-            [':id' => $deviceId, ':token' => $token]
-        );
-        if (!$device) {
+        $devices = new DeviceRepository($db);
+        if (!$devices->findByCredentials($deviceId, $token)) {
             return null;
         }
 
-        $db->execute(
-            'UPDATE devices SET last_seen_at = :now WHERE device_id = :id',
-            [':now' => time(), ':id' => $deviceId]
-        );
+        $devices->updateLastSeen($deviceId, time());
 
         return new AuthIdentity($deviceId);
     }

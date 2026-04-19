@@ -17,12 +17,10 @@ class DeviceController
         }
 
         $deviceId = substr(hash('sha256', $rawKey), 0, 32);
+        $devices = new DeviceRepository($db);
 
         // Check if already registered — return existing credentials
-        $existing = $db->querySingle(
-            'SELECT device_id, auth_token FROM devices WHERE device_id = :id',
-            [':id' => $deviceId]
-        );
+        $existing = $devices->findById($deviceId);
         if ($existing) {
             Router::json([
                 'device_id' => $existing['device_id'],
@@ -34,17 +32,7 @@ class DeviceController
         $authToken = bin2hex(random_bytes(32));
         $now = time();
 
-        $db->execute(
-            'INSERT INTO devices (device_id, public_key, auth_token, device_type, created_at, last_seen_at)
-             VALUES (:id, :key, :token, :type, :now, :now)',
-            [
-                ':id' => $deviceId,
-                ':key' => $publicKey,
-                ':token' => $authToken,
-                ':type' => $deviceType,
-                ':now' => $now,
-            ]
-        );
+        $devices->insertDevice($deviceId, $publicKey, $authToken, $deviceType, $now);
 
         Router::json([
             'device_id' => $deviceId,
@@ -55,11 +43,9 @@ class DeviceController
     public static function stats(Database $db, RequestContext $ctx): void
     {
         $deviceId = $ctx->deviceId;
+        $devices = new DeviceRepository($db);
 
-        $device = $db->querySingle(
-            'SELECT * FROM devices WHERE device_id = :id',
-            [':id' => $deviceId]
-        );
+        $device = $devices->findById($deviceId);
 
         $pairings = $db->queryAll(
             'SELECT * FROM pairings WHERE device_a_id = :id OR device_b_id = :id',
@@ -69,10 +55,7 @@ class DeviceController
         $pairedDevices = [];
         foreach ($pairings as $p) {
             $otherId = $p['device_a_id'] === $deviceId ? $p['device_b_id'] : $p['device_a_id'];
-            $other = $db->querySingle(
-                'SELECT device_id, device_type, last_seen_at FROM devices WHERE device_id = :id',
-                [':id' => $otherId]
-            );
+            $other = $devices->findById($otherId);
             $pairedDevices[] = [
                 'device_id' => $otherId,
                 'device_type' => $other ? $other['device_type'] : 'unknown',
@@ -128,10 +111,7 @@ class DeviceController
         // Null is a valid value — clears the stored token.
         $token = Validators::requireNullableString($body, 'fcm_token');
 
-        $db->execute(
-            'UPDATE devices SET fcm_token = :token WHERE device_id = :id',
-            [':token' => $token, ':id' => $ctx->deviceId]
-        );
+        (new DeviceRepository($db))->updateFcmToken($ctx->deviceId, $token);
 
         Router::json(['status' => 'ok']);
     }
@@ -196,10 +176,8 @@ class DeviceController
             );
         }
 
-        $recipient = $db->querySingle(
-            'SELECT last_seen_at, fcm_token FROM devices WHERE device_id = :id',
-            [':id' => $recipientId]
-        );
+        $devices = new DeviceRepository($db);
+        $recipient = $devices->findById($recipientId);
         if (!$recipient) {
             throw new NotFoundError('Recipient not found');
         }
@@ -241,10 +219,7 @@ class DeviceController
 
         $timeoutMs = self::PING_MAX_WAIT_SEC * 1000;
         while ((microtime(true) - $start) * 1000 < $timeoutMs) {
-            $curr = $db->querySingle(
-                'SELECT last_seen_at FROM devices WHERE device_id = :id',
-                [':id' => $recipientId]
-            );
+            $curr = $devices->findById($recipientId);
             if ($curr && (int)$curr['last_seen_at'] >= $baseline) {
                 Router::json([
                     'online' => true,
