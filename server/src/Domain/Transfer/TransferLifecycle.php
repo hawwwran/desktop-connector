@@ -8,8 +8,6 @@ class TransferLifecycle
 {
     public static function deriveState(array $transfer): string
     {
-        TransferInvariants::assertValid($transfer);
-
         $complete = (int)($transfer['complete'] ?? 0);
         $downloaded = (int)($transfer['downloaded'] ?? 0);
         $chunksReceived = (int)($transfer['chunks_received'] ?? 0);
@@ -30,6 +28,7 @@ class TransferLifecycle
      */
     public static function onChunkStored(array $transfer, bool $storedNewChunk): array
     {
+        TransferInvariants::assertValid($transfer);
         $from = self::deriveState($transfer);
         $chunkCount = (int)$transfer['chunk_count'];
         $chunksReceived = (int)$transfer['chunks_received'] + ($storedNewChunk ? 1 : 0);
@@ -52,6 +51,7 @@ class TransferLifecycle
     /** Transition helper for recipient download progress updates. */
     public static function onRecipientProgress(array $transfer, int $chunkIndex): array
     {
+        TransferInvariants::assertValid($transfer);
         $from = self::deriveState($transfer);
         $chunkCount = (int)$transfer['chunk_count'];
         $cap = max(0, $chunkCount - 1);
@@ -71,6 +71,7 @@ class TransferLifecycle
     /** Transition helper for final ACK. */
     public static function onAckReceived(array $transfer): array
     {
+        TransferInvariants::assertValid($transfer);
         $from = self::deriveState($transfer);
         $to = TransferState::DELIVERED;
         self::assertTransitionAllowed($from, $to);
@@ -80,6 +81,7 @@ class TransferLifecycle
     /** Conceptual expiry transition (cleanup typically deletes rows). */
     public static function onTransferExpired(array $transfer): array
     {
+        TransferInvariants::assertValid($transfer);
         $from = self::deriveState($transfer);
         $to = TransferState::EXPIRED;
         self::assertTransitionAllowed($from, $to);

@@ -63,7 +63,6 @@ class TransferService
         if (!$transfer) {
             throw new NotFoundError('Transfer not found');
         }
-        TransferInvariants::assertValid($transfer);
         if ($transfer['sender_id'] !== $deviceId) {
             throw new ForbiddenError('Not the sender of this transfer');
         }
@@ -132,8 +131,6 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found or not for you');
         }
-        TransferInvariants::assertValid($transfer);
-
         $chunk = (new ChunkRepository($db))->findChunk($transferId, $chunkIndex);
         if (!$chunk) {
             throw new NotFoundError('Chunk not found');
@@ -166,7 +163,6 @@ class TransferService
         if (!$transfer || $transfer['recipient_id'] !== $deviceId) {
             throw new NotFoundError('Transfer not found');
         }
-        TransferInvariants::assertValid($transfer);
         TransferLifecycle::onAckReceived($transfer);
 
         // Pairing-stats SUM must run BEFORE chunk deletion (chunks table still holds sizes here).
