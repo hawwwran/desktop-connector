@@ -10,10 +10,7 @@ from ..api_client import ApiClient
 from ..config import Config
 from ..connection import ConnectionManager, ConnectionState
 from ..crypto import KeyManager
-from ..backends.linux.notification_backend import LinuxNotificationBackend
-from ..interfaces.notifications import NotificationBackend
-from ..interfaces.clipboard import ClipboardBackend
-from ..interfaces.shell import ShellBackend
+from ..interfaces.backends import DesktopBackends
 from ..poller import Poller
 
 log = logging.getLogger("desktop-connector")
@@ -23,9 +20,7 @@ def run_receiver(
     config: Config,
     crypto: KeyManager,
     headless: bool,
-    notifications: NotificationBackend | None = None,
-    clipboard: ClipboardBackend | None = None,
-    shell: ShellBackend | None = None,
+    backends: DesktopBackends,
 ) -> None:
     """Run the receiver loop (with tray or headless)."""
     from ..history import TransferHistory
@@ -33,34 +28,24 @@ def run_receiver(
     conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
     api = ApiClient(conn, crypto)
     history = TransferHistory(config.config_dir)
-    notifier = notifications or LinuxNotificationBackend()
-    poller = Poller(
-        config,
-        conn,
-        api,
-        crypto,
-        history,
-        clipboard=clipboard,
-        notifications=notifier,
-        shell=shell,
-    )
+    poller = Poller(config, conn, api, crypto, history, backends)
 
     # Wire up notifications
-    poller.on_file_received(notifier.notify_file_received)
+    poller.on_file_received(backends.notifications.notify_file_received)
 
     last_notified = [None]  # "connected", "disconnected", or None (never notified)
 
     def on_state_change(state):
         if state == ConnectionState.CONNECTED and last_notified[0] != "connected":
             if last_notified[0] == "disconnected":
-                notifier.notify_connection_restored()
+                backends.notifications.notify_connection_restored()
             last_notified[0] = "connected"
         elif (
             state == ConnectionState.DISCONNECTED
             and last_notified[0] != "disconnected"
         ):
             if last_notified[0] == "connected":
-                notifier.notify_connection_lost()
+                backends.notifications.notify_connection_lost()
             last_notified[0] = "disconnected"
 
     conn.on_state_change(on_state_change)
@@ -97,9 +82,7 @@ def run_receiver(
         crypto,
         history,
         config.save_directory,
-        notifications=notifier,
-        clipboard=clipboard,
-        shell=shell,
+        backends,
     )
     log.info("Starting tray icon. Saving to: %s", config.save_directory)
 

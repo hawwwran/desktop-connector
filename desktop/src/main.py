@@ -75,9 +75,7 @@ def main() -> int:
         context.config,
         context.crypto,
         mode == "headless_receive",
-        notifications=context.backends.notifications,
-        clipboard=context.backends.clipboard,
-        shell=context.backends.shell,
+        context.backends,
     )
     return 0
 

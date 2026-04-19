@@ -28,6 +28,7 @@ class LinuxShellBackend(ShellBackend):
 
     def launch_installer_terminal(self, command: str) -> bool:
         terminals = [
+            ["konsole", "-e", "bash", "-c", command],
             ["gnome-terminal", "--", "bash", "-c", command],
             ["x-terminal-emulator", "-e", "bash", "-c", command],
         ]
@@ -38,7 +39,7 @@ class LinuxShellBackend(ShellBackend):
             except FileNotFoundError:
                 continue
             except Exception as e:
-                log.warning("platform.terminal_launch.failed error_kind=%s", type(e).__name__)
-                return False
+                log.warning("platform.terminal_launch.failed terminal=%s error_kind=%s", args[0], type(e).__name__)
+                continue
         log.warning("platform.terminal_launch.failed reason=no_terminal")
         return False

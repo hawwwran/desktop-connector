@@ -13,17 +13,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from .api_client import ApiClient
-from .backends.linux.clipboard_backend import LinuxClipboardBackend
-from .interfaces.clipboard import ClipboardBackend
-from .interfaces.notifications import NotificationBackend
-from .interfaces.shell import ShellBackend
 from .config import Config
 from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
 from .history import TransferHistory
+from .interfaces.backends import DesktopBackends
 from .poller import Poller
-from .backends.linux.notification_backend import LinuxNotificationBackend
-from .backends.linux.shell_backend import LinuxShellBackend
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +62,7 @@ class TrayApp:
     def __init__(self, connection: ConnectionManager, poller: Poller,
                  api: ApiClient, config: Config, crypto: KeyManager,
                  history: TransferHistory, save_dir: Path,
-                 clipboard: ClipboardBackend | None = None,
-                 notifications: NotificationBackend | None = None,
-                 shell: ShellBackend | None = None):
+                 backends: DesktopBackends):
         self.conn = connection
         self.poller = poller
         self.api = api
@@ -77,9 +70,7 @@ class TrayApp:
         self.crypto = crypto
         self.history = history
         self.save_dir = save_dir
-        self.clipboard = clipboard or LinuxClipboardBackend()
-        self.notifications = notifications or LinuxNotificationBackend()
-        self.shell = shell or LinuxShellBackend()
+        self.backends = backends
         self._icon = None
         self._should_quit = threading.Event()
         self._was_uploading = False
@@ -295,9 +286,9 @@ class TrayApp:
         threading.Thread(target=self._do_send_clipboard, daemon=True).start()
 
     def _do_send_clipboard(self) -> None:
-        result = self.clipboard.read_clipboard()
+        result = self.backends.clipboard.read_clipboard()
         if result is None:
-            self.notifications.notify("Clipboard empty", "Nothing to send")
+            self.backends.notifications.notify("Clipboard empty", "Nothing to send")
             return
 
         filename, data, mime_type = result
@@ -343,18 +334,18 @@ class TrayApp:
         if tid:
             # Never log the preview — it's decrypted clipboard content.
             log.info("Clipboard sent (len=%d)", len(preview))
-            self.notifications.notify("Clipboard sent", preview)
+            self.backends.notifications.notify("Clipboard sent", preview)
             # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.
             self.history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
         else:
             if progress_tid[0]:
                 self.history.update(progress_tid[0], status="failed")
-            self.notifications.notify("Send failed", "Could not send clipboard")
+            self.backends.notifications.notify("Send failed", "Could not send clipboard")
 
     # --- Misc ---
 
     def _open_folder(self, *_) -> None:
-        if self.shell.open_folder(self.save_dir):
+        if self.backends.shell.open_folder(self.save_dir):
             log.info("platform.open_folder.succeeded")
 
     def _try_now(self, *_) -> None:

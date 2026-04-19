@@ -1,4 +1,10 @@
-"""Dependency checks and fallback install UI for desktop bootstrap."""
+"""Dependency checks and fallback install UI for desktop bootstrap.
+
+Runs before the backend composition point exists, and the missing-deps
+UI *is* the GTK4/Tkinter installer dialog itself — so the Linux shell
+backend is imported directly. Port to other platforms by branching on
+``sys.platform`` inside ``show_missing_deps_dialog``.
+"""
 
 from __future__ import annotations
 

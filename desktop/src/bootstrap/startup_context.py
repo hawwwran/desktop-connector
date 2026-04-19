@@ -9,7 +9,8 @@ from ..api_client import ApiClient
 from ..config import Config
 from ..connection import ConnectionManager
 from ..crypto import KeyManager
-from ..platform.linux.compose import DesktopBackends, compose_linux_backends
+from ..interfaces.backends import DesktopBackends
+from ..platform.linux.compose import compose_linux_backends
 from .args import StartupArgs
 
 

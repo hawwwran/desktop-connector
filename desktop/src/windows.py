@@ -36,12 +36,14 @@ def show_send_files(config_dir: Path):
     from .connection import ConnectionManager
     from .api_client import ApiClient
     from .history import TransferHistory
-    from .platform.linux.compose import compose_linux_backends
+    # windows.py runs as a GTK4 subprocess — Linux-scoped by construction,
+    # so instantiate the Linux backend directly instead of composing all four.
+    from .backends.linux.dialog_backend import LinuxDialogBackend
 
     config = Config(config_dir)
     crypto = KeyManager(config_dir)
     history = TransferHistory(config_dir)
-    dialogs = compose_linux_backends().dialogs
+    dialogs = LinuxDialogBackend()
 
     file_list: list[Path] = []
 
