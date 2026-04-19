@@ -96,6 +96,9 @@ class TransferService
         }
 
         $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new ApiError(500, 'Invariant violation: transfer disappeared after chunk upload');
+        }
         $complete = $updated['chunks_received'] >= $updated['chunk_count'];
 
         if ($complete) {
@@ -108,7 +111,12 @@ class TransferService
                 (int)$transfer['chunk_count']
             ));
             TransferWakeService::wake($db, $transferId);
+            $updated = $transfers->findById($transferId);
+            if (!$updated) {
+                throw new ApiError(500, 'Invariant violation: transfer disappeared after completion');
+            }
         }
+        TransferInvariants::assertUploadMutation($updated);
 
         return [
             'chunks_received' => (int)$updated['chunks_received'],
@@ -147,6 +155,11 @@ class TransferService
         $cap = (int)$transfer['chunk_count'] - 1;
         $newProgress = min($chunkIndex + 1, max(0, $cap));
         $transfers->updateDownloadProgress($transferId, $newProgress);
+        $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new ApiError(500, 'Invariant violation: transfer disappeared after progress update');
+        }
+        TransferInvariants::assertDownloadProgress($updated);
         AppLog::log('Transfer', sprintf(
             'transfer.chunk.served transfer_id=%s chunk_index=%d progress=%d/%d',
             AppLog::shortId($transferId), $chunkIndex, $newProgress, (int)$transfer['chunk_count']
@@ -175,6 +188,11 @@ class TransferService
 
         // chunks_downloaded reaches chunk_count only here (on ack), not during serving.
         $transfers->markDelivered($transferId, time());
+        $updated = $transfers->findById($transferId);
+        if (!$updated) {
+            throw new ApiError(500, 'Invariant violation: transfer disappeared after ack');
+        }
+        TransferInvariants::assertAckTransition($updated);
         AppLog::log('Delivery', sprintf(
             'delivery.acked transfer_id=%s recipient=%s total_bytes=%d',
             AppLog::shortId($transferId), AppLog::shortId($deviceId), $totalBytes

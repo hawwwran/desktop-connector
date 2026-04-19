@@ -9,6 +9,7 @@ require_once __DIR__ . '/../src/Http/RequestContext.php';
 require_once __DIR__ . '/../src/Http/ApiError.php';
 require_once __DIR__ . '/../src/Http/ErrorResponder.php';
 require_once __DIR__ . '/../src/Http/Validators.php';
+require_once __DIR__ . '/../src/Domain/Transfer/TransferInvariants.php';
 
 // --- Auth ---
 require_once __DIR__ . '/../src/Auth/AuthIdentity.php';

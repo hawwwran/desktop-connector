@@ -49,13 +49,22 @@ class TransferRepository
     /** Full row. Callers pick the fields they need. */
     public function findById(string $transferId): ?array
     {
-        return $this->db->querySingle(
+        $row = $this->db->querySingle(
             'SELECT id, sender_id, recipient_id, encrypted_meta, chunk_count,
                     chunks_received, complete, created_at, downloaded,
                     delivered_at, chunks_downloaded
              FROM transfers WHERE id = :id',
             [':id' => $transferId]
         );
+        if ($row !== null && self::invariantDebugEnabled()) {
+            TransferInvariants::assertValid($row);
+        }
+        return $row;
+    }
+
+    private static function invariantDebugEnabled(): bool
+    {
+        return getenv('TRANSFER_INVARIANTS_DEBUG') === '1';
     }
 
     public function incrementChunksReceived(string $transferId): void
