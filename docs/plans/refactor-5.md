@@ -1,5 +1,7 @@
 # refactor-5.md
 
+> **Status: Done** — landed on `main` in commit `2ea1e3a` (PR #12). New `desktop/src/bootstrap/` (`args.py`, `dependency_check.py`, `logging_setup.py`, `startup_context.py`) and `desktop/src/runners/` (`registration_runner.py`, `pairing_runner.py`, `send_runner.py`, `receiver_runner.py`). `main.py` is now a ~35-line orchestrator: check deps → parse args → `setup_logging` → `build_startup_context` → `register_device` → `rebuild_authenticated_api` → pair if needed → `resolve_startup_mode` → dispatch to send or receiver. CLI flags and behavior unchanged; verified both directions (desktop → android, android → desktop).
+
 ## Refactor 5 / 10
 # Thin the desktop bootstrap (`main.py`) down to a clean entrypoint
 
