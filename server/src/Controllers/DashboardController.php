@@ -5,7 +5,7 @@ class DashboardController
     public static function show(Database $db): void
     {
         $devices = (new DeviceRepository($db))->findAll();
-        $pairings = $db->queryAll('SELECT * FROM pairings ORDER BY created_at DESC');
+        $pairings = (new PairingRepository($db))->findAll();
         $pendingTransfers = $db->queryAll(
             'SELECT t.*,
                     (SELECT COALESCE(SUM(c.blob_size), 0) FROM chunks c WHERE c.transfer_id = t.id) as total_bytes

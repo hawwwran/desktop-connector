@@ -13,40 +13,21 @@ class PairingController
             throw new NotFoundError('Desktop device not found');
         }
 
+        $pairings = new PairingRepository($db);
         // Remove any existing unclaimed requests from this phone to this desktop
-        $db->execute(
-            'DELETE FROM pairing_requests WHERE phone_id = :phone AND desktop_id = :desktop AND claimed = 0',
-            [':phone' => $ctx->deviceId, ':desktop' => $desktopId]
-        );
-
-        $db->execute(
-            'INSERT INTO pairing_requests (desktop_id, phone_id, phone_pubkey, created_at)
-             VALUES (:desktop, :phone, :pubkey, :now)',
-            [
-                ':desktop' => $desktopId,
-                ':phone' => $ctx->deviceId,
-                ':pubkey' => $phonePubkey,
-                ':now' => time(),
-            ]
-        );
+        $pairings->deleteUnclaimedRequests($ctx->deviceId, $desktopId);
+        $pairings->insertPairingRequest($desktopId, $ctx->deviceId, $phonePubkey, time());
 
         Router::json(['status' => 'ok'], 201);
     }
 
     public static function poll(Database $db, RequestContext $ctx): void
     {
-        $requests = $db->queryAll(
-            'SELECT id, phone_id, phone_pubkey FROM pairing_requests
-             WHERE desktop_id = :desktop AND claimed = 0
-             ORDER BY created_at ASC',
-            [':desktop' => $ctx->deviceId]
-        );
+        $pairings = new PairingRepository($db);
+        $requests = $pairings->listUnclaimedRequestsForDesktop($ctx->deviceId);
 
         foreach ($requests as $req) {
-            $db->execute(
-                'UPDATE pairing_requests SET claimed = 1 WHERE id = :id',
-                [':id' => $req['id']]
-            );
+            $pairings->markRequestClaimed((int)$req['id']);
         }
 
         Router::json(['requests' => $requests]);
@@ -60,16 +41,9 @@ class PairingController
         $ids = [$ctx->deviceId, $phoneId];
         sort($ids);
 
-        $existing = $db->querySingle(
-            'SELECT id FROM pairings WHERE device_a_id = :a AND device_b_id = :b',
-            [':a' => $ids[0], ':b' => $ids[1]]
-        );
-
-        if (!$existing) {
-            $db->execute(
-                'INSERT INTO pairings (device_a_id, device_b_id, created_at) VALUES (:a, :b, :now)',
-                [':a' => $ids[0], ':b' => $ids[1], ':now' => time()]
-            );
+        $pairings = new PairingRepository($db);
+        if (!$pairings->findSortedPairing($ids[0], $ids[1])) {
+            $pairings->createPairing($ids[0], $ids[1], time());
         }
 
         Router::json(['status' => 'ok']);

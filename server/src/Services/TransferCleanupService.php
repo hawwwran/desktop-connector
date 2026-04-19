@@ -40,10 +40,7 @@ class TransferCleanupService
             self::deleteTransferFiles($db, $t['id']);
         }
 
-        $db->execute(
-            'DELETE FROM pairing_requests WHERE created_at < :cutoff',
-            [':cutoff' => $now - self::PAIRING_REQUEST_EXPIRY]
-        );
+        (new PairingRepository($db))->deleteExpiredRequests($now - self::PAIRING_REQUEST_EXPIRY);
     }
 
     /** Full delete: chunk files, directory, chunk rows, AND transfer row. */

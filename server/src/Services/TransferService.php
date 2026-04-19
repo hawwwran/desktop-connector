@@ -214,12 +214,7 @@ class TransferService
 
         $ids = [$senderId, $deviceId];
         sort($ids);
-        $db->execute(
-            'UPDATE pairings SET bytes_transferred = bytes_transferred + :bytes,
-             transfer_count = transfer_count + 1
-             WHERE device_a_id = :a AND device_b_id = :b',
-            [':bytes' => $totalBytes['total'], ':a' => $ids[0], ':b' => $ids[1]]
-        );
+        (new PairingRepository($db))->incrementPairingStats($ids[0], $ids[1], (int)$totalBytes['total']);
 
         TransferCleanupService::deleteChunkFilesAndRows($db, $transferId);
 

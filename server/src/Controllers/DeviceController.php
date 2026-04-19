@@ -47,10 +47,7 @@ class DeviceController
 
         $device = $devices->findById($deviceId);
 
-        $pairings = $db->queryAll(
-            'SELECT * FROM pairings WHERE device_a_id = :id OR device_b_id = :id',
-            [':id' => $deviceId]
-        );
+        $pairings = (new PairingRepository($db))->listPairingsForDevice($deviceId);
 
         $pairedDevices = [];
         foreach ($pairings as $p) {
@@ -137,14 +134,7 @@ class DeviceController
         $recipientId = Validators::requireNonEmptyString($body, 'recipient_id');
         $deviceId = $ctx->deviceId;
 
-        $pairing = $db->querySingle(
-            'SELECT id FROM pairings
-             WHERE (device_a_id = :a AND device_b_id = :b)
-                OR (device_a_id = :b2 AND device_b_id = :a2)',
-            [':a' => $deviceId, ':b' => $recipientId,
-             ':a2' => $deviceId, ':b2' => $recipientId]
-        );
-        if (!$pairing) {
+        if (!(new PairingRepository($db))->findPairing($deviceId, $recipientId)) {
             throw new ForbiddenError('Devices are not paired');
         }
 

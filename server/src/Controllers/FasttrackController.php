@@ -23,15 +23,8 @@ class FasttrackController
 
         $deviceId = $ctx->deviceId;
 
-        // Validate pairing exists (check both orderings)
-        $pairing = $db->querySingle(
-            'SELECT id FROM pairings
-             WHERE (device_a_id = :a AND device_b_id = :b)
-                OR (device_a_id = :b2 AND device_b_id = :a2)',
-            [':a' => $deviceId, ':b' => $recipientId,
-             ':a2' => $deviceId, ':b2' => $recipientId]
-        );
-        if (!$pairing) {
+        // Validate pairing exists (order-independent)
+        if (!(new PairingRepository($db))->findPairing($deviceId, $recipientId)) {
             throw new ForbiddenError('Devices are not paired');
         }
 
