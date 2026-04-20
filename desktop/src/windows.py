@@ -347,6 +347,11 @@ def show_send_files(config_dir: Path):
                                 history.update(transfer_id, status="uploading")
                             if uploaded == -1:
                                 saw_waiting[0] = True
+                                # Scrub keys off this, not row timestamp —
+                                # an upserted row's created-time can
+                                # pre-date the current waiting attempt.
+                                history.update(transfer_id,
+                                               waiting_started_at=int(time.time()))
                         else:
                             history.update(transfer_id,
                                            status="uploading",
@@ -743,18 +748,26 @@ def show_history(config_dir: Path):
     def _scrub_zombie_waiting() -> None:
         """Flip any orphaned "waiting" history row to "failed" with
         failure_reason="quota_timeout". A row is orphaned if it's
-        older than STORAGE_FULL_MAX_WINDOW_S (30 min) — beyond the
-        retry budget of any still-live send subprocess — or carries
-        the legacy chunks_downloaded=-1 sentinel. Called both at
-        window open AND on every build_list tick so rows age from
-        Waiting → Failed without the user needing to close + reopen."""
+        been in waiting state for longer than STORAGE_FULL_MAX_WINDOW_S
+        (30 min) — beyond the retry budget of any still-live send
+        subprocess — or carries the legacy chunks_downloaded=-1
+        sentinel. Called both at window open AND on every build_list
+        tick so rows age from Waiting → Failed without the user
+        needing to close + reopen.
+
+        Keys the age check off waiting_started_at (stamped when the
+        row entered waiting) when present. Falls back to timestamp
+        for legacy rows written before that field existed; in that
+        case the semantics match the original "row is old" heuristic.
+        """
         cutoff = int(time.time()) - int(STORAGE_FULL_MAX_WINDOW_S)
-        for it in list(history.items):
+        for it in history.items:
             chunks_dl = it.get("chunks_downloaded", 0) or 0
             is_waiting = it.get("status") == "waiting" or chunks_dl < 0
             if not is_waiting:
                 continue
-            if chunks_dl < 0 or int(it.get("timestamp", 0) or 0) < cutoff:
+            age_ref = int(it.get("waiting_started_at") or it.get("timestamp") or 0)
+            if chunks_dl < 0 or (age_ref and age_ref < cutoff):
                 tid = it.get("transfer_id")
                 if tid:
                     history.update(tid, status="failed",

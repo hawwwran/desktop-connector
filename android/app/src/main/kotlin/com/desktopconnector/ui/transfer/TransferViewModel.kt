@@ -125,29 +125,31 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    /** Fetch the recent transfer list and, in the same pass, flip any
+     *  WAITING row older than 30 minutes to FAILED. Such a row can't
+     *  have a live UploadWorker attached (cap enforced there too), so
+     *  it's a zombie from an app restart / WM chain cancellation —
+     *  leaving it as WAITING would spin a yellow chip forever. Scrub
+     *  + snapshot share one getRecent() so the UI never renders the
+     *  pre-scrub state for a tick. */
     private suspend fun refreshTransfers() {
-        scrubZombieWaiting()
-        _transfers.value = db.transferDao().getRecent()
-    }
-
-    /** Any WAITING row older than 30 minutes couldn't possibly still
-     *  have a live UploadWorker attached (cap enforced there too),
-     *  so it's a zombie from an app restart / WM chain cancellation.
-     *  Flip it to FAILED so the user sees an honest terminal state
-     *  instead of a spinning yellow "Waiting" forever. */
-    private suspend fun scrubZombieWaiting() {
-        val cutoffSec = System.currentTimeMillis() / 1000 - 30 * 60
-        withContext(Dispatchers.IO) {
-            db.transferDao().getRecent()
-                .filter {
-                    it.status == TransferStatus.WAITING && it.createdAt < cutoffSec
-                }
-                .forEach {
-                    db.transferDao().updateStatus(
-                        it.id, TransferStatus.FAILED, "quota exceeded",
-                    )
-                }
+        val rows = withContext(Dispatchers.IO) {
+            val cutoffSec = System.currentTimeMillis() / 1000 - 30 * 60
+            val fetched = db.transferDao().getRecent()
+            val zombieIds = fetched
+                .filter { it.status == TransferStatus.WAITING && it.createdAt < cutoffSec }
+                .map { it.id }
+            zombieIds.forEach {
+                db.transferDao().updateStatus(it, TransferStatus.FAILED, "quota exceeded")
+            }
+            if (zombieIds.isEmpty()) fetched
+            else fetched.map { row ->
+                if (row.id in zombieIds) {
+                    row.copy(status = TransferStatus.FAILED, errorMessage = "quota exceeded")
+                } else row
+            }
         }
+        _transfers.value = rows
     }
 
     fun onRefresh() {
