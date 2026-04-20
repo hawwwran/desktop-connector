@@ -66,15 +66,37 @@ class ApiClient:
         return resp is not None and resp.status_code == 200
 
     def init_transfer(self, transfer_id: str, recipient_id: str,
-                      encrypted_meta: str, chunk_count: int) -> bool:
-        """Initialize a transfer on the server."""
+                      encrypted_meta: str, chunk_count: int) -> str:
+        """Initialize a transfer on the server.
+
+        Returns a tri-state outcome so callers can route storage-full
+        separately from other failures:
+          * 'ok'            — 201, transfer registered
+          * 'storage_full'  — 507, recipient's quota exceeded; caller
+                              should keep retrying and show WAITING
+          * 'failed'        — anything else (network exception, 4xx,
+                              5xx) — caller decides retry budget
+        """
         resp = self.conn.request("POST", "/api/transfers/init", json={
             "transfer_id": transfer_id,
             "recipient_id": recipient_id,
             "encrypted_meta": encrypted_meta,
             "chunk_count": chunk_count,
         })
-        return resp is not None and resp.status_code == 201
+        if resp is None:
+            return "failed"
+        if resp.status_code == 201:
+            return "ok"
+        if resp.status_code == 507:
+            return "storage_full"
+        return "failed"
+
+    def cancel_transfer(self, transfer_id: str) -> bool:
+        """Sender-initiated cancel. Server deletes chunks + rows; a
+        still-downloading recipient gets 404 on next chunk fetch and
+        abandons the download."""
+        resp = self.conn.request("DELETE", f"/api/transfers/{transfer_id}")
+        return resp is not None and 200 <= resp.status_code < 300
 
     def upload_chunk(self, transfer_id: str, chunk_index: int, data: bytes) -> dict | None:
         """Upload an encrypted chunk. Returns {chunks_received, complete} or None."""
@@ -93,10 +115,20 @@ class ApiClient:
         return None
 
     def get_pending_transfers(self) -> list[dict]:
-        """Get list of pending transfers for this device."""
+        """Get list of pending transfers for this device.
+
+        Guards resp.json() — under load a shared-hosting server can
+        return 200 OK with an empty/partial body (PHP dies mid-response).
+        Falling through to `[]` is the right fallback: we'll try again
+        on the next poll tick without crashing the poll loop."""
         resp = self.conn.request("GET", "/api/transfers/pending")
         if resp and resp.status_code == 200:
-            return resp.json().get("transfers", [])
+            try:
+                return resp.json().get("transfers", [])
+            except ValueError:  # requests' JSONDecodeError subclasses ValueError
+                log.warning("transfer.pending.malformed body_length=%d",
+                            len(resp.content or b""))
+                return []
         return []
 
     def download_chunk(self, transfer_id: str, chunk_index: int) -> bytes | None:
@@ -152,7 +184,10 @@ class ApiClient:
         if on_progress:
             on_progress(transfer_id, 0, chunk_count)
 
-        if not self.init_transfer(transfer_id, recipient_id, encrypted_meta, chunk_count):
+        if not self._init_transfer_with_retry(
+            transfer_id, recipient_id, encrypted_meta, chunk_count,
+            on_progress,
+        ):
             log.error("transfer.init.failed transfer_id=%s", transfer_id[:12])
             return None
         log.info("transfer.init.accepted transfer_id=%s recipient=%s chunks=%d",
@@ -208,6 +243,72 @@ class ApiClient:
             elif now - first_failure_at >= CHUNK_MAX_FAILURE_WINDOW_S:
                 return (f"Chunk {index + 1}/{chunk_count} failed continuously "
                         f"for {int(CHUNK_MAX_FAILURE_WINDOW_S)}s")
+            time.sleep(CHUNK_RETRY_DELAY_S)
+
+    def _init_transfer_with_retry(self, transfer_id: str, recipient_id: str,
+                                   encrypted_meta: str, chunk_count: int,
+                                   on_progress: callable = None) -> bool:
+        """Drive init with different retry semantics per failure mode:
+
+        * 507 storage_full: retry indefinitely. The recipient's quota
+          is occupied by earlier transfers that will drain as the phone
+          downloads them. Caller sees the row in WAITING state. The
+          ConnectionManager notes the storage-pressure condition so the
+          tray / HomeScreen banner can surface it.
+
+        * Network exception / other 5xx: retry on the same 5s cadence
+          as chunk upload, capped at CHUNK_MAX_FAILURE_WINDOW_S (2 min),
+          then give up — matches the chunk-upload tolerance window.
+
+        * 201 ok: proceed to chunk upload.
+
+        on_progress, if supplied, is called with (transfer_id, -1, N)
+        the first time we hit 507 so the caller can flip its history
+        row status to "waiting". The chunk-index = -1 is the sentinel
+        meaning "not in upload phase yet, show WAITING".
+        """
+        first_failure_at: float | None = None
+        signaled_waiting = False
+        while True:
+            outcome = "failed"
+            try:
+                outcome = self.init_transfer(transfer_id, recipient_id,
+                                             encrypted_meta, chunk_count)
+            except (requests.RequestException, OSError, ValueError) as e:
+                log.warning("transfer.init.failed transfer_id=%s error_kind=%s",
+                            transfer_id[:12], type(e).__name__)
+                outcome = "failed"
+
+            if outcome == "ok":
+                if signaled_waiting:
+                    # Release the storage-full flag so the banner clears
+                    # the moment this transfer finally lands.
+                    self.conn.clear_storage_full()
+                return True
+
+            if outcome == "storage_full":
+                self.conn.mark_storage_full()
+                if not signaled_waiting and on_progress:
+                    try:
+                        on_progress(transfer_id, -1, chunk_count)
+                    except Exception:
+                        log.exception("waiting-state on_progress failed")
+                    signaled_waiting = True
+                # Indefinite retry on storage-full: recipient quota will
+                # drain as the phone downloads earlier transfers.
+                log.info("transfer.init.waiting transfer_id=%s reason=storage_full",
+                         transfer_id[:12])
+                time.sleep(CHUNK_RETRY_DELAY_S)
+                continue
+
+            # outcome == "failed" — apply 2-min cap.
+            now = time.monotonic()
+            if first_failure_at is None:
+                first_failure_at = now
+                log.warning("transfer.init.failed transfer_id=%s reason=retry_in_%ds",
+                            transfer_id[:12], int(CHUNK_RETRY_DELAY_S))
+            elif now - first_failure_at >= CHUNK_MAX_FAILURE_WINDOW_S:
+                return False
             time.sleep(CHUNK_RETRY_DELAY_S)
 
     def get_stats(self, paired_with: str | None = None) -> dict | None:

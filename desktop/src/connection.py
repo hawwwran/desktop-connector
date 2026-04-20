@@ -62,6 +62,13 @@ class ConnectionManager:
         self._auth_streak_kind: AuthFailureKind | None = None
         self._auth_failure_callbacks: list = []
 
+        # Storage-full tracking. Raised by api_client when init returns
+        # 507 and left set until the transfer init finally succeeds (or
+        # the user cancels it). Drives the "Server storage is full"
+        # banner pattern, parallel to auth_failure_kind.
+        self._storage_full = False
+        self._storage_full_callbacks: list = []
+
     @property
     def state(self) -> ConnectionState:
         with self._lock:
@@ -119,6 +126,42 @@ class ConnectionManager:
             self._auth_failure_count = 0
             self._auth_failure_kind = None
         self._notify_effective_state_change(previous)
+
+    # --- Storage-full banner (parallel to auth-failure latching) -------
+
+    @property
+    def storage_full(self) -> bool:
+        with self._lock:
+            return self._storage_full
+
+    def on_storage_full_change(self, callback) -> None:
+        """Callback(bool) fires whenever the flag transitions. Used by the
+        tray + settings window to show / hide the banner."""
+        self._storage_full_callbacks.append(callback)
+
+    def mark_storage_full(self) -> None:
+        with self._lock:
+            was = self._storage_full
+            self._storage_full = True
+        if not was:
+            log.warning("storage.full.flagged reason=init_507")
+            for cb in list(self._storage_full_callbacks):
+                try:
+                    cb(True)
+                except Exception:
+                    log.exception("storage_full callback error")
+
+    def clear_storage_full(self) -> None:
+        with self._lock:
+            was = self._storage_full
+            self._storage_full = False
+        if was:
+            log.info("storage.full.cleared")
+            for cb in list(self._storage_full_callbacks):
+                try:
+                    cb(False)
+                except Exception:
+                    log.exception("storage_full callback error")
 
     def _record_auth_response(self, status_code: int) -> None:
         """Called from request() after every authenticated response.
@@ -316,6 +359,8 @@ class ConnectionManager:
                 if 200 <= resp.status_code < 300:
                     self._on_success()
                 elif resp.status_code >= 500:
+                    log.warning("Request failed: %s %s: HTTP %d",
+                                method, path, resp.status_code)
                     self._on_failure()
                 # 4xx (including 401/403): state unchanged. The auth
                 # counter still tracks 401/403 via _record_auth_response

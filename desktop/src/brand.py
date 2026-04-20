@@ -95,9 +95,14 @@ def claim_gtk_identity() -> None:
 
 def apply_brand_css() -> None:
     """
-    Install a tiny application-priority CSS provider that redefines Adwaita's
-    accent + destructive color slots. Touches .suggested-action /
-    .destructive-action buttons, focus rings, switches, links — nothing else.
+    Install a tiny application-priority CSS provider that paints the brand
+    on Adwaita's accent + destructive slots, and forces switches in the
+    OFF state to orange (Adwaita's default is a neutral grey trough).
+
+    Buttons end up sky blue (DcBlue400) for suggested actions and orange
+    (DcOrange700) for destructive. Focus rings, links, switches in the ON
+    state inherit the accent (sky blue). Switches in the OFF state get
+    an explicit orange trough so ON/OFF reads as on-brand on either side.
     """
     try:
         from gi.repository import Gdk, Gtk
@@ -108,13 +113,124 @@ def apply_brand_css() -> None:
     if display is None:
         return
 
+    # Sky blue for buttons, orange for destructive + OFF toggles.
+    #
+    # libadwaita 1.5 bakes the accent/destructive colours into its
+    # compiled theme at SCSS build time — so redefining the classic
+    # @destructive_bg_color named token doesn't reach .destructive-action
+    # buttons because the theme references a compile-time SCSS variable,
+    # not @destructive_bg_color at runtime. CSS custom properties
+    # (--destructive-bg-color) don't exist in 1.5 either; the parser
+    # rejects them as unknown.
+    #
+    # The only reliable override on 1.5 is an explicit selector rule
+    # loaded at application priority, which beats the theme-priority
+    # compiled Adwaita stylesheet. @define-color is kept as a belt for
+    # the few paths that still resolve it at runtime (links, focus
+    # rings, some AdwPreferences accents on newer libadwaita).
     css = f"""
-    @define-color accent_bg_color        {DC_BLUE_500};
-    @define-color accent_color           {DC_BLUE_500};
+    @define-color accent_bg_color        {DC_BLUE_400};
+    @define-color accent_color           {DC_BLUE_400};
     @define-color accent_fg_color        #ffffff;
     @define-color destructive_bg_color   {DC_ORANGE_700};
     @define-color destructive_color      {DC_ORANGE_700};
     @define-color destructive_fg_color   #ffffff;
+
+    /* Explicit selectors + background-image: none. libadwaita paints
+       accent buttons with a linear-gradient background-image (not
+       background-color), so a plain background-color override is
+       drawn UNDER the gradient and never shows. Killing the gradient
+       lets the colour through.
+
+       GTK4 CSS doesn't support !important — priority is purely per
+       provider. This sheet loads at USER priority so it sits above
+       libadwaita's bundled theme.
+
+       Regular (non-flat, non-image-only, non-destructive) buttons
+       paint sky blue. Flat / circular / image-only / titlebutton
+       (window controls) keep the neutral theme look.
+
+       For icon-only buttons we want coloured, add the explicit
+       .brand-action-accent or .brand-action-destructive class. */
+    button:not(.flat):not(.circular):not(.titlebutton):not(.destructive-action):not(.image-button):not(.close):not(.minimize):not(.maximize):not(.icon),
+    button:not(.flat):not(.circular):not(.titlebutton):not(.destructive-action):not(.image-button):not(.close):not(.minimize):not(.maximize):not(.icon):hover,
+    button:not(.flat):not(.circular):not(.titlebutton):not(.destructive-action):not(.image-button):not(.close):not(.minimize):not(.maximize):not(.icon):focus,
+    button:not(.flat):not(.circular):not(.titlebutton):not(.destructive-action):not(.image-button):not(.close):not(.minimize):not(.maximize):not(.icon):active,
+    button:not(.flat):not(.circular):not(.titlebutton):not(.destructive-action):not(.image-button):not(.close):not(.minimize):not(.maximize):not(.icon):checked {{
+        background-color: {DC_BLUE_400};
+        background-image: none;
+        color: #ffffff;
+    }}
+    /* Belt + suspenders: anything inside a windowcontrols widget is
+       window chrome, period. Reset whatever the cascade above did. */
+    windowcontrols button,
+    windowcontrols button:hover,
+    windowcontrols button:focus,
+    windowcontrols button:active {{
+        background-color: transparent;
+        background-image: none;
+    }}
+    button.destructive-action,
+    button.destructive-action:hover,
+    button.destructive-action:focus,
+    button.destructive-action:active,
+    button.destructive-action:checked {{
+        background-color: {DC_ORANGE_700};
+        background-image: none;
+        color: #ffffff;
+    }}
+
+    /* Explicit opt-in for icon-only buttons that want brand colour.
+       These override the "flat/image-button stays neutral" default —
+       used for per-feature toolbar buttons we deliberately colour
+       (Open Save Folder = accent, Clear All / trash = destructive). */
+    button.brand-action-accent,
+    button.brand-action-accent:hover,
+    button.brand-action-accent:focus,
+    button.brand-action-accent:active,
+    button.brand-action-accent:checked {{
+        background-color: {DC_BLUE_400};
+        background-image: none;
+        color: #ffffff;
+    }}
+    button.brand-action-destructive,
+    button.brand-action-destructive:hover,
+    button.brand-action-destructive:focus,
+    button.brand-action-destructive:active,
+    button.brand-action-destructive:checked {{
+        background-color: {DC_ORANGE_700};
+        background-image: none;
+        color: #ffffff;
+    }}
+    /* Icon-only destructive: transparent background, orange symbolic
+       icon. Used for per-row trash where a solid orange button would
+       dominate the row. */
+    button.brand-icon-destructive,
+    button.brand-icon-destructive:hover,
+    button.brand-icon-destructive:focus,
+    button.brand-icon-destructive:active {{
+        background-color: transparent;
+        background-image: none;
+        color: {DC_ORANGE_700};
+    }}
+
+    /* Switches: trough colour on both states. ON = sky blue, OFF =
+       orange. Kill the background-image so our solid colour shows. */
+    switch {{
+        background-color: {DC_ORANGE_700};
+        background-image: none;
+    }}
+    switch:checked {{
+        background-color: {DC_BLUE_400};
+    }}
+
+    /* Sliders / scales (find-my-phone volume): filled part of the
+       trough paints sky blue. `highlight` is the filled sub-element
+       on GtkScale in GTK4. */
+    scale > trough > highlight {{
+        background-color: {DC_BLUE_400};
+        background-image: none;
+    }}
     """.encode("utf-8")
 
     provider = Gtk.CssProvider()
@@ -123,8 +239,12 @@ def apply_brand_css() -> None:
     except TypeError:
         # Older PyGObject signature: (data, length)
         provider.load_from_data(css, -1)
+    # USER priority (800) > APPLICATION (600) > THEME (200). Load at USER
+    # priority so libadwaita's theme can't win the cascade against us —
+    # GTK4 CSS has no !important, and selector specificity within same
+    # priority can go either way.
     Gtk.StyleContext.add_provider_for_display(
-        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_USER
     )
 
 
@@ -132,6 +252,44 @@ def brand_gtk_window() -> None:
     """Convenience: call once per GTK4 subprocess entry before on_activate."""
     claim_gtk_identity()
     apply_brand_css()
+
+
+def apply_pointer_cursors(root) -> None:
+    """Walk `root`'s widget tree and set the pointer cursor on every
+    Gtk.Button / Gtk.Switch / Gtk.LinkButton descendant.
+
+    GTK4 doesn't support the CSS `cursor` property — cursor is a widget
+    attribute, not a style. Adwaita's default theme doesn't set it on
+    buttons either, so without this helper every interactive element
+    keeps the default arrow. Called from each window's on_activate
+    after the UI tree is built.
+
+    Re-call after dynamically adding interactive widgets (e.g. when
+    the history window rebuilds rows). The helper is cheap — walking
+    a window's tree is O(n) and setting an identical cursor on a
+    widget that already has one is a no-op.
+    """
+    try:
+        from gi.repository import Gtk, Gdk
+    except Exception:
+        return
+    pointer = Gdk.Cursor.new_from_name("pointer")
+
+    def walk(w):
+        if isinstance(w, (Gtk.Button, Gtk.Switch, Gtk.LinkButton)):
+            w.set_cursor(pointer)
+        try:
+            child = w.get_first_child()
+        except AttributeError:
+            return
+        while child is not None:
+            walk(child)
+            try:
+                child = child.get_next_sibling()
+            except AttributeError:
+                break
+
+    walk(root)
 
 
 def brand_tk_window(root) -> None:

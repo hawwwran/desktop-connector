@@ -221,10 +221,18 @@ class TrayApp:
                     visible=lambda _: self.conn.auth_failure_kind is not None,
                 ),
                 pystray.MenuItem(
+                    lambda _: "⚠ Server storage full — delivery waiting",
+                    None,
+                    enabled=False,
+                    visible=lambda _: (self.conn.storage_full
+                                      and self.conn.auth_failure_kind is None),
+                ),
+                pystray.MenuItem(
                     "Force Reconnect",
                     self._try_now,
                     visible=lambda _: (self.conn.state != ConnectionState.CONNECTED
-                                      and self.conn.auth_failure_kind is None),
+                                      and self.conn.auth_failure_kind is None
+                                      and not self.conn.storage_full),
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Send Files...", self._send_files, visible=lambda _: self.config.is_paired),
@@ -279,6 +287,21 @@ class TrayApp:
             except Exception:
                 log.exception("auth failure notification error")
         self.conn.on_auth_failure(_on_auth_failure)
+
+        def _on_storage_full(flagged: bool):
+            try:
+                self._icon.update_menu()
+            except Exception:
+                pass
+            if flagged:
+                try:
+                    self.platform.notifications.notify(
+                        "Server storage full",
+                        "A send is waiting until the recipient has finished downloading earlier transfers.",
+                    )
+                except Exception:
+                    log.exception("storage full notification error")
+        self.conn.on_storage_full_change(_on_storage_full)
 
         # Poll for state changes that affect icon or menu
         self._upload_status_file = self.config.config_dir / "upload_active.json"

@@ -23,9 +23,11 @@ from gi.repository import Gtk, Adw, Gdk, GdkPixbuf, Gio, GLib, Pango
 
 from .brand import (
     APP_ID,
+    DC_BLUE_400,
     DC_BLUE_500,
     DC_ORANGE_700,
     apply_brand_css,
+    apply_pointer_cursors,
     claim_gtk_identity,
 )
 
@@ -307,16 +309,32 @@ def show_send_files(config_dir: Path):
                     file_size = filepath.stat().st_size
                     progress_tid = [None]
                     def upload_progress(transfer_id, uploaded, total_chunks, fp=filepath, sz=file_size):
-                        if uploaded == 0:
-                            progress_tid[0] = transfer_id
-                            history.add(filename=fp.name, display_label=fp.name,
-                                        direction="sent", size=sz,
-                                        content_path=str(fp), transfer_id=transfer_id,
-                                        status="uploading",
-                                        chunks_downloaded=0, chunks_total=total_chunks)
+                        # uploaded == -1 is the WAITING sentinel raised by
+                        # _init_transfer_with_retry when the server replies
+                        # 507 on init. We still create the history row on
+                        # first call so the user can see the queue, just
+                        # with a different status colour.
+                        if uploaded in (0, -1):
+                            if progress_tid[0] is None:
+                                progress_tid[0] = transfer_id
+                                history.add(filename=fp.name, display_label=fp.name,
+                                            direction="sent", size=sz,
+                                            content_path=str(fp), transfer_id=transfer_id,
+                                            status="waiting" if uploaded == -1 else "uploading",
+                                            chunks_downloaded=0, chunks_total=total_chunks)
+                            elif uploaded == -1:
+                                # Already had a row (e.g. we previously
+                                # tried to upload and a chunk failed);
+                                # flip it to waiting so the UI reflects
+                                # the hold.
+                                history.update(transfer_id, status="waiting")
+                            else:
+                                history.update(transfer_id, status="uploading")
                         else:
                             history.update(transfer_id,
-                                           chunks_downloaded=uploaded, chunks_total=total_chunks)
+                                           status="uploading",
+                                           chunks_downloaded=uploaded,
+                                           chunks_total=total_chunks)
 
                     tid = api.send_file(filepath, target_id, symmetric_key,
                                         on_progress=upload_progress)
@@ -371,6 +389,7 @@ def show_send_files(config_dir: Path):
 
         win.connect("close-request", lambda w: (clear_status(), False)[-1])
 
+        apply_pointer_cursors(win)
         win.present()
 
     app.connect("activate", on_activate)
@@ -674,6 +693,7 @@ def show_settings(config_dir: Path):
                 subtitle=str(stats.get("pending_outgoing", 0)),
             ))
 
+        apply_pointer_cursors(win)
         win.present()
 
     app.connect("activate", on_activate)
@@ -687,8 +707,12 @@ def show_history(config_dir: Path):
     from .config import Config
     from .history import TransferHistory
     from .clipboard import write_clipboard_text, write_clipboard_image
+    from .api_client import ApiClient
+    from .connection import ConnectionManager
+    from .crypto import KeyManager
 
     config = Config(config_dir)
+    crypto = KeyManager(config_dir)
     history = TransferHistory(config_dir)
 
     app = _make_app()
@@ -786,10 +810,24 @@ def show_history(config_dir: Path):
             .transfer-card {
                 padding-top: 5px;
                 padding-bottom: 5px;
-                transition: background-color 120ms ease;
+                transition: background-color 120ms ease,
+                            opacity 300ms ease-out,
+                            min-height 300ms ease-out,
+                            padding 300ms ease-out,
+                            margin 300ms ease-out;
             }
             .transfer-card.has-progress {
                 padding-bottom: 0;
+            }
+            /* Shrink + fade when deleting. Matching Python timeout
+               removes the widget from the tree after the transition. */
+            .transfer-card.removing {
+                opacity: 0;
+                min-height: 0;
+                padding-top: 0;
+                padding-bottom: 0;
+                margin-top: 0;
+                margin-bottom: 0;
             }
             .transfer-card:hover {
                 background-color: mix(@card_bg_color, @window_fg_color, 0.06);
@@ -862,6 +900,7 @@ def show_history(config_dir: Path):
         header.set_decoration_layout(":close")
         folder_btn = Gtk.Button.new_from_icon_name("folder-open-symbolic")
         folder_btn.set_tooltip_text("Open save folder")
+        folder_btn.add_css_class("brand-action-accent")
         folder_btn.connect("clicked", lambda b: subprocess.Popen([
             "xdg-open", str(config.save_directory)
         ]))
@@ -869,6 +908,7 @@ def show_history(config_dir: Path):
 
         clear_all_btn = Gtk.Button.new_from_icon_name("edit-clear-all-symbolic")
         clear_all_btn.set_tooltip_text("Clear all history")
+        clear_all_btn.add_css_class("brand-action-destructive")
         def on_clear_all(b):
             dialog = Adw.MessageDialog(
                 transient_for=win,
@@ -884,7 +924,7 @@ def show_history(config_dir: Path):
             dialog.connect("response", on_response)
             dialog.present()
         clear_all_btn.connect("clicked", on_clear_all)
-        header.pack_end(clear_all_btn)
+        header.pack_start(clear_all_btn)
 
         toolbar_view.add_top_bar(header)
 
@@ -902,7 +942,8 @@ def show_history(config_dir: Path):
         # row_widgets[transfer_id] = (box_widget, row, progress_bar_or_None)
         row_widgets = {}
         all_widgets = []  # ordered list of group children
-        structural_sig = [None]  # (transfer_id, ...) — triggers full rebuild
+        structural_sig = [None]  # (transfer_id, ...) — triggers structural diff
+        empty_label = [None]  # holds the "No transfers yet" label when shown
         progress_sig = [None]    # mutable fields — triggers in-place update
 
         def _compute_status(item):
@@ -913,7 +954,11 @@ def show_history(config_dir: Path):
             recv_total = item.get("recipient_chunks_total", 0)
             delivered = item.get("delivered", False)
 
-            if item_status == "uploading":
+            if item_status == "waiting":
+                # Yellow — queued, server storage is full for recipient.
+                # Matches the tray/banner "storage full" colour family.
+                text = f'<span foreground="#FDD00C">Waiting</span>'
+            elif item_status == "uploading":
                 text = f"Uploading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Uploading"
             elif item_status == "downloading":
                 text = f"Downloading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Downloading"
@@ -921,7 +966,8 @@ def show_history(config_dir: Path):
                 # Brand error slot — matches android/server/tray.
                 text = f'<span foreground="{DC_ORANGE_700}">Failed</span>'
             elif item["direction"] == "received":
-                text = "Received"
+                # Sky blue — completed incoming transfer.
+                text = f'<span foreground="{DC_BLUE_400}">Received</span>'
             elif delivered:
                 # Brand success — green is retired.
                 text = f'<span foreground="{DC_BLUE_500}">Delivered</span>'
@@ -931,7 +977,12 @@ def show_history(config_dir: Path):
                 text = "Sent"
 
             # Progress bar state: (show, css_class, fraction)
-            if item_status == "uploading" and chunks_total > 0:
+            if item_status == "waiting":
+                # No progress bar for waiting — the yellow text is the
+                # whole signal. (Pulse + fraction=0 would imply motion
+                # where there is none.)
+                bar = (False, None, 0.0)
+            elif item_status == "uploading" and chunks_total > 0:
                 bar = (True, "upload-bar", chunks_dl / chunks_total)
             elif item_status == "downloading" and chunks_total > 0:
                 bar = (True, "download-bar", chunks_dl / chunks_total)
@@ -1037,15 +1088,87 @@ def show_history(config_dir: Path):
             del_btn.set_valign(Gtk.Align.CENTER)
             del_btn.add_css_class("flat")
             del_btn.add_css_class("circular")
+            del_btn.add_css_class("brand-icon-destructive")
             captured_item = item
-            def on_delete(b, it=captured_item, c=card):
+
+            def _do_local_remove(it, c, b):
+                """The shared shrink+fade + history.remove path. Does NOT
+                call the server; callers decide whether to cancel first."""
                 history.remove(it)
-                list_container.remove(c)
-                tid = it.get("transfer_id", id(it))
-                row_widgets.pop(tid, None)
+                tid_key = it.get("transfer_id", id(it))
+                row_widgets.pop(tid_key, None)
                 if c in all_widgets:
                     all_widgets.remove(c)
                 structural_sig[0] = None
+                b.set_sensitive(False)
+                c.add_css_class("removing")
+
+                def _finalize():
+                    try:
+                        list_container.remove(c)
+                    except Exception:
+                        pass
+                    return False
+                GLib.timeout_add(300, _finalize)
+
+            def on_delete(b, it=captured_item, c=card):
+                # Delivered / received / failed rows are terminal — no
+                # server-side state to cancel, so the click just prunes
+                # the history row. Waiting / uploading / complete-but-
+                # undelivered rows still have bytes on the server and
+                # get a confirmation dialog that optionally fires the
+                # cancel endpoint.
+                status = it.get("status", "complete")
+                direction = it.get("direction", "sent")
+                delivered = it.get("delivered", False)
+                terminal = (
+                    delivered
+                    or direction == "received"
+                    or status == "failed"
+                )
+                if terminal:
+                    _do_local_remove(it, c, b)
+                    return
+
+                # Non-terminal: confirm, then cancel on the server.
+                tid = it.get("transfer_id")
+                label = history.get_label(it)
+                dialog = Adw.MessageDialog(
+                    transient_for=win,
+                    heading="Cancel delivery?",
+                    body=f"The recipient will no longer receive \u201c{label}\u201d.",
+                )
+                dialog.add_response("keep", "Keep")
+                dialog.add_response("cancel", "Cancel delivery")
+                dialog.set_response_appearance("cancel", Adw.ResponseAppearance.DESTRUCTIVE)
+                dialog.set_default_response("keep")
+                dialog.set_close_response("keep")
+
+                def on_response(d, response, _it=it, _c=c, _b=b, _tid=tid):
+                    if response != "cancel":
+                        return
+                    # Fire the cancel endpoint in a worker thread so the
+                    # UI stays responsive if the server is slow; the
+                    # local shrink/fade starts immediately either way
+                    # (cancel success or network failure — the row goes
+                    # either way, the server will gc on its own expiry
+                    # if we can't reach it now).
+                    if _tid:
+                        def _cancel_worker(tid_local=_tid):
+                            try:
+                                conn = ConnectionManager(
+                                    config.server_url,
+                                    config.device_id,
+                                    config.auth_token,
+                                )
+                                ApiClient(conn, crypto).cancel_transfer(tid_local)
+                            except Exception:
+                                pass  # best effort; row still removed locally
+                        threading.Thread(target=_cancel_worker, daemon=True).start()
+                    _do_local_remove(_it, _c, _b)
+
+                dialog.connect("response", on_response)
+                dialog.present()
             del_btn.connect("clicked", on_delete)
             row.add_suffix(del_btn)
 
@@ -1077,6 +1200,11 @@ def show_history(config_dir: Path):
                 card.append(progress_bar)
                 card.add_css_class("has-progress")
 
+            # History rows are built after the window's on_activate has
+            # already applied cursors — paint pointer on this freshly
+            # constructed subtree too (mainly catches the per-row trash
+            # button).
+            apply_pointer_cursors(card)
             return card, row, progress_bar
 
         def _update_row(item, row, old_progress_bar, parent_box):
@@ -1145,35 +1273,92 @@ def show_history(config_dir: Path):
             has_active[0] = downloading or active_sent
 
             if needs_rebuild:
-                # Full rebuild — items added, removed, or reordered
-                for w in all_widgets:
-                    list_container.remove(w)
-                all_widgets.clear()
-                row_widgets.clear()
+                # Diff instead of full rebuild so adding one item or
+                # deleting one row doesn't tear down and recreate every
+                # other card (O(N) widget churn on every add/remove used
+                # to cause visible jank on a full 50-item history).
+                #
+                # Also critical for the delete animation: a row in the
+                # .removing transition window must not be ripped out of
+                # the tree by an interleaving refresh — the 300 ms
+                # GLib.timeout_add in on_delete handles final removal.
+                new_tids_ordered = [
+                    i.get("transfer_id", i.get("timestamp")) for i in items
+                ]
+                by_tid_item = dict(zip(new_tids_ordered, items))
 
-                if not items:
+                current_tids = list(row_widgets.keys())
+                new_tids_set = set(new_tids_ordered)
+                removed_tids = [t for t in current_tids if t not in new_tids_set]
+
+                # Drop the empty-state label if we now have items.
+                if items and empty_label[0] is not None:
+                    list_container.remove(empty_label[0])
+                    if empty_label[0] in all_widgets:
+                        all_widgets.remove(empty_label[0])
+                    empty_label[0] = None
+
+                # Remove rows whose tid is gone. Skip widgets already
+                # animating out via the delete button — the GLib timer
+                # there will finalize them.
+                for tid in removed_tids:
+                    entry = row_widgets.get(tid)
+                    if not entry:
+                        continue
+                    card, _row, _pbar = entry
+                    if "removing" in card.get_css_classes():
+                        continue
+                    try:
+                        list_container.remove(card)
+                    except Exception:
+                        pass
+                    if card in all_widgets:
+                        all_widgets.remove(card)
+                    row_widgets.pop(tid, None)
+
+                # Insert newcomers at their correct positions. Assumes
+                # `items` is ordered consistently across ticks (history
+                # preserves insertion order, newest first).
+                for idx, tid in enumerate(new_tids_ordered):
+                    if tid in row_widgets:
+                        continue
+                    item = by_tid_item[tid]
+                    card, row, pbar = _create_row(item)
+                    if idx == 0:
+                        list_container.prepend(card)
+                    else:
+                        prev_tid = new_tids_ordered[idx - 1]
+                        prev_entry = row_widgets.get(prev_tid)
+                        if prev_entry is not None:
+                            list_container.insert_child_after(card, prev_entry[0])
+                        else:
+                            # Previous row isn't in the tree yet (unlikely
+                            # with newest-first order + prepend loop) —
+                            # append as a safe fallback.
+                            list_container.append(card)
+                    row_widgets[tid] = (card, row, pbar)
+                    all_widgets.insert(min(idx, len(all_widgets)), card)
+
+                # Empty-state label if nothing remains.
+                if not items and empty_label[0] is None:
                     empty = Gtk.Label(label="No transfers yet")
                     empty.add_css_class("dim-label")
                     empty.set_margin_top(48)
                     empty.set_margin_bottom(48)
                     list_container.append(empty)
                     all_widgets.append(empty)
-                else:
-                    for item in items:
-                        tid = item.get("transfer_id", item.get("timestamp"))
-                        card, row, pbar = _create_row(item)
-                        list_container.append(card)
-                        all_widgets.append(card)
-                        row_widgets[tid] = (card, row, pbar)
-            else:
-                # In-place update — just refresh subtitles and progress bars
-                for item in items:
-                    tid = item.get("transfer_id", item.get("timestamp"))
-                    entry = row_widgets.get(tid)
-                    if entry:
-                        box, row, old_pbar = entry
-                        new_pbar = _update_row(item, row, old_pbar, box)
-                        row_widgets[tid] = (box, row, new_pbar)
+                    empty_label[0] = empty
+
+            # In-place update on every tick — refresh subtitles and
+            # progress bars for rows that existed before AND for rows we
+            # just added (cheap, idempotent, makes the code branch-free).
+            for item in items:
+                tid = item.get("transfer_id", item.get("timestamp"))
+                entry = row_widgets.get(tid)
+                if entry:
+                    box, row, old_pbar = entry
+                    new_pbar = _update_row(item, row, old_pbar, box)
+                    row_widgets[tid] = (box, row, new_pbar)
 
             return True
 
@@ -1187,6 +1372,7 @@ def show_history(config_dir: Path):
             return False  # don't repeat this one, the new timeout takes over
         GLib.timeout_add(1000, refresh_tick)
 
+        apply_pointer_cursors(win)
         win.present()
 
     app.connect("activate", on_activate)
@@ -1321,6 +1507,7 @@ def show_pairing(config_dir: Path):
 
         GLib.timeout_add(2000, poll_pairing)
 
+        apply_pointer_cursors(win)
         win.present()
 
     app.connect("activate", on_activate)
@@ -1662,6 +1849,7 @@ function updatePos(lat,lng,acc) {
 
         win.connect("close-request", on_close)
 
+        apply_pointer_cursors(win)
         win.present()
 
     app.connect("activate", on_activate)

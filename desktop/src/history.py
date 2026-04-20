@@ -25,17 +25,43 @@ class TransferHistory:
         self._items: list[dict] = self._load()
 
     def _load(self) -> list[dict]:
-        if self.history_file.exists():
-            try:
-                return json.loads(self.history_file.read_text())
-            except Exception:
-                log.warning("Failed to load history, starting fresh")
-        return []
+        """Read the history file under a shared flock.
+
+        Without the lock a reader can hit the brief window between
+        truncate() and write() inside _locked_read_modify_write — the
+        file is empty on disk for a few hundred µs, json.loads raises,
+        and the caller sees `[]`. That flashed the whole history to
+        "No transfers yet" in the UI whenever the send-files subprocess
+        was actively writing progress updates.
+
+        LOCK_SH is compatible with other shared readers but blocks on
+        any exclusive writer, so the read observes a consistent file.
+        """
+        if not self.history_file.exists():
+            return []
+        try:
+            with open(self.history_file, "r") as fd:
+                fcntl.flock(fd, fcntl.LOCK_SH)
+                try:
+                    content = fd.read()
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            if not content.strip():
+                return []
+            return json.loads(content)
+        except Exception:
+            log.warning("Failed to load history, keeping previous snapshot")
+            return []
 
     def _locked_read_modify_write(self, modify_fn) -> bool:
         """Atomically read history from disk, apply modify_fn, write back.
         modify_fn(items) should return True if it made changes, False otherwise.
-        Uses flock to serialize access across processes."""
+        Uses flock to serialize access across processes.
+
+        flush + fsync happen INSIDE the lock so a reader that acquires
+        LOCK_SH right after we release doesn't observe the truncated
+        file (Python buffers writes; without the flush, the bytes are
+        still in userspace when we release flock)."""
         with self._lock:
             try:
                 fd = open(self.history_file, "a+")
@@ -49,6 +75,16 @@ class TransferHistory:
                         fd.seek(0)
                         fd.truncate()
                         fd.write(json.dumps(items, indent=2))
+                        fd.flush()
+                        try:
+                            import os
+                            os.fsync(fd.fileno())
+                        except OSError:
+                            # fsync unavailable on some filesystems —
+                            # flush() alone still gets us into the page
+                            # cache, which is enough for a same-host
+                            # reader to see the data.
+                            pass
                     self._items = items
                     return changed
                 finally:
