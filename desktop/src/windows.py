@@ -746,19 +746,23 @@ def show_history(config_dir: Path):
     from .api_client import STORAGE_FULL_MAX_WINDOW_S
 
     def _scrub_zombie_waiting() -> None:
-        """Flip any orphaned "waiting" history row to "failed" with
-        failure_reason="quota_timeout". A row is orphaned if it's
-        been in waiting state for longer than STORAGE_FULL_MAX_WINDOW_S
+        """Flip any orphaned 'waiting' history row to 'failed' with
+        failure_reason='quota_timeout'. A row is orphaned if it's
+        been in waiting state longer than STORAGE_FULL_MAX_WINDOW_S
         (30 min) — beyond the retry budget of any still-live send
-        subprocess — or carries the legacy chunks_downloaded=-1
-        sentinel. Called both at window open AND on every build_list
+        subprocess. Called at window open AND on every build_list
         tick so rows age from Waiting → Failed without the user
         needing to close + reopen.
 
-        Keys the age check off waiting_started_at (stamped when the
-        row entered waiting) when present. Falls back to timestamp
-        for legacy rows written before that field existed; in that
-        case the semantics match the original "row is old" heuristic.
+        Age check prefers waiting_started_at (stamped when the row
+        entered waiting), falling back to timestamp. The legacy
+        chunks_downloaded=-1 sentinel still qualifies a row as
+        'waiting' — tray clipboard and `--send` CLI both write it
+        while their retry loop is actively waiting — but it is NOT
+        an instant-kill. A live subprocess must be given the full
+        30-min window before we declare its row dead; otherwise the
+        UI flashes Failed while the sender is still retrying and
+        eventually succeeds.
         """
         cutoff = int(time.time()) - int(STORAGE_FULL_MAX_WINDOW_S)
         for it in history.items:
@@ -767,7 +771,7 @@ def show_history(config_dir: Path):
             if not is_waiting:
                 continue
             age_ref = int(it.get("waiting_started_at") or it.get("timestamp") or 0)
-            if chunks_dl < 0 or (age_ref and age_ref < cutoff):
+            if age_ref and age_ref < cutoff:
                 tid = it.get("transfer_id")
                 if tid:
                     history.update(tid, status="failed",
