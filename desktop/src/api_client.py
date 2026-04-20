@@ -144,14 +144,19 @@ class ApiClient:
         )
         transfer_id = str(uuid.uuid4())
 
+        # Fire the initial progress callback BEFORE init_transfer so the caller
+        # can land a history row in "uploading 0/N" state. If init then fails
+        # (network, 401/403 auth-invalid, etc.) send_file returns None and the
+        # caller's failure branch has a row to flip to "failed" — otherwise
+        # the whole send is invisible from history's perspective.
+        if on_progress:
+            on_progress(transfer_id, 0, chunk_count)
+
         if not self.init_transfer(transfer_id, recipient_id, encrypted_meta, chunk_count):
             log.error("transfer.init.failed transfer_id=%s", transfer_id[:12])
             return None
         log.info("transfer.init.accepted transfer_id=%s recipient=%s chunks=%d",
                  transfer_id[:12], recipient_id[:12], chunk_count)
-
-        if on_progress:
-            on_progress(transfer_id, 0, chunk_count)
 
         try:
             with open(filepath, "rb") as f:
@@ -227,9 +232,17 @@ class ApiClient:
             return resp.json()
         return None
 
-    def get_sent_status(self, timeout: float = 30) -> list[dict]:
-        """Get delivery status of transfers sent by this device."""
-        resp = self.conn.request("GET", "/api/transfers/sent-status", timeout=timeout)
+    def get_sent_status(self, timeout: float = 30, *,
+                        track_state: bool = True) -> list[dict]:
+        """Get delivery status of transfers sent by this device.
+
+        ``track_state=False`` is for the 500 ms delivery-tracker loop where
+        a timeout on a single 750 ms poll shouldn't be interpreted as
+        "server is down" and shouldn't trigger the exponential backoff
+        (which caused a CONNECTED⇄DISCONNECTED thrash under any slow
+        network)."""
+        resp = self.conn.request("GET", "/api/transfers/sent-status",
+                                  timeout=timeout, track_state=track_state)
         if resp and resp.status_code == 200:
             return resp.json().get("transfers", [])
         return []

@@ -116,7 +116,14 @@ class TransferHistory:
         return self._locked_read_modify_write(do_mark)
 
     def get_undelivered_transfer_ids(self) -> list[str]:
-        """Get transfer_ids of sent items not yet marked delivered."""
+        """Get transfer_ids of sent items still in flight.
+
+        Excludes transfers with status == 'failed' — those are terminal
+        (the upload itself didn't complete, so there's nothing to deliver)
+        and would otherwise keep the tray stuck on the "uploading" icon
+        forever while the delivery tracker queried a transfer the server
+        never even saw.
+        """
         # Reload from disk to pick up transfers added by other processes
         self._items = self._load()
         with self._lock:
@@ -125,6 +132,7 @@ class TransferHistory:
                 if item.get("direction") == "sent"
                 and item.get("transfer_id")
                 and not item.get("delivered")
+                and item.get("status") != "failed"
             ]
 
     def remove(self, item: dict) -> None:

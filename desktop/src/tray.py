@@ -20,7 +20,7 @@ from .brand import (
     DC_YELLOW_500_RGB,
 )
 from .config import Config
-from .connection import ConnectionManager, ConnectionState
+from .connection import AuthFailureKind, ConnectionManager, ConnectionState
 from .crypto import KeyManager
 from .history import TransferHistory
 from .platform import DesktopPlatform
@@ -29,6 +29,12 @@ from .poller import Poller
 log = logging.getLogger(__name__)
 
 _DESKTOP_DIR = Path(__file__).parent.parent
+
+# If the server ping comes back online=false but reports the phone's
+# last_seen_at within this window, we still consider it online. Longer
+# than typical poll cadences (10s Android, 25s desktop long-poll) but
+# short enough that a truly offline phone registers within a minute.
+REMOTE_FRESH_WINDOW_S = 60
 
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
@@ -210,9 +216,15 @@ class TrayApp:
                     enabled=False,
                 ),
                 pystray.MenuItem(
+                    lambda _: self._auth_banner_text(),
+                    self._repair,
+                    visible=lambda _: self.conn.auth_failure_kind is not None,
+                ),
+                pystray.MenuItem(
                     "Force Reconnect",
                     self._try_now,
-                    visible=lambda _: self.conn.state != ConnectionState.CONNECTED,
+                    visible=lambda _: (self.conn.state != ConnectionState.CONNECTED
+                                      and self.conn.auth_failure_kind is None),
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Send Files...", self._send_files, visible=lambda _: self.config.is_paired),
@@ -249,6 +261,24 @@ class TrayApp:
         self._last_applied_state: str | None = None
 
         self.conn.on_state_change(lambda state: self._update_icon())
+
+        def _on_auth_failure(kind):
+            log.warning("auth.failure.surface kind=%s", kind.value)
+            # effective_state just flipped — repaint the tray icon (blue → orange)
+            # alongside the menu banner.
+            self._update_icon()
+            try:
+                self._icon.update_menu()
+            except Exception:
+                pass
+            try:
+                self.platform.notifications.notify(
+                    "Pairing lost",
+                    "Server no longer recognises this device. Click the tray icon to re-pair.",
+                )
+            except Exception:
+                log.exception("auth failure notification error")
+        self.conn.on_auth_failure(_on_auth_failure)
 
         # Poll for state changes that affect icon or menu
         self._upload_status_file = self.config.config_dir / "upload_active.json"
@@ -319,13 +349,21 @@ class TrayApp:
             self._icon.stop()
 
     def _current_state_key(self) -> str:
-        state = self.conn.state
+        # Use effective_state so a latched 401/403 paints the orange
+        # disconnected sparkle, not the blue connected one.
+        state = self.conn.effective_state
+        # Server connection state wins: DISCONNECTED → orange,
+        # RECONNECTING → yellow. The "uploading" / "remote_offline" /
+        # "connected" overlays only make sense while we can actually talk
+        # to the server — painting them during a network outage was
+        # misleading (and kept showing a blue-sparkle + yellow-diamond
+        # "uploading" icon during a disconnect with a pending transfer).
         if state == ConnectionState.DISCONNECTED:
             return "disconnected"
-        if getattr(self, "_was_uploading", False):
-            return "uploading"
         if state == ConnectionState.RECONNECTING:
             return "reconnecting"
+        if getattr(self, "_was_uploading", False):
+            return "uploading"
         if not getattr(self, "_remote_online", False):
             return "remote_offline"
         return "connected"
@@ -361,10 +399,81 @@ class TrayApp:
     def _status_text(self) -> str:
         """Menu title text. Side effect: triggers a fresh ping when the menu
         is rendered and our last probe is older than 30s."""
+        if self.conn.auth_failure_kind is not None:
+            return "Pairing lost"
         if self.conn.state != ConnectionState.CONNECTED:
             return "Offline"
         self._maybe_ping(30.0)
         return "Online"
+
+    def _auth_banner_text(self) -> str:
+        kind = self.conn.auth_failure_kind
+        if kind == AuthFailureKind.CREDENTIALS_INVALID:
+            return "⚠ Server doesn't recognise this device — click to re-pair"
+        if kind == AuthFailureKind.PAIRING_MISSING:
+            return "⚠ Pairing lost on server — click to re-pair"
+        return "⚠ Click to re-pair"
+
+    def _repair(self, *_) -> None:
+        """User tapped the banner. Wipe the appropriate scope locally, then
+        launch the pairing subprocess. ConnectionManager's flag is cleared so
+        the banner disappears; the pairing flow restores creds.
+
+        On full-wipe (401 Credentials Invalid), re-register with the newly
+        generated keypair BEFORE the pairing subprocess starts — the pairing
+        QR embeds the desktop's device_id, and the phone's sendPairingRequest
+        will fail if that device_id doesn't exist in the server's devices
+        table yet."""
+        kind = self.conn.auth_failure_kind
+        scope = "full" if kind == AuthFailureKind.CREDENTIALS_INVALID else "pairing_only"
+        log.info("auth.repair.started scope=%s kind=%s", scope,
+                 kind.value if kind else "none")
+        try:
+            self.poller.local_unpair(scope, notify_title="Re-pair started",
+                                      notify_body="Follow the QR flow to reconnect.")
+        except Exception:
+            log.exception("local_unpair during repair failed")
+        if scope == "full":
+            if not self._reregister_after_wipe():
+                # Let the user retry by leaving the latched flag visible.
+                log.error("auth.repair.reregister.failed")
+                try:
+                    self.platform.notifications.notify(
+                        "Re-pair failed",
+                        "Couldn't re-register with the server. Check network and try again.",
+                    )
+                except Exception:
+                    pass
+                return
+        self.conn.clear_auth_failure()
+        self._update_icon()
+        try:
+            self._icon.update_menu()
+        except Exception:
+            pass
+        # Launch the pairing subprocess (same path as "Pair..." menu entry).
+        self._pair()
+
+    def _reregister_after_wipe(self) -> bool:
+        """Register the freshly generated keypair with the server and update
+        the in-memory ConnectionManager. Returns True on success."""
+        try:
+            result = self.api.register(self.config.server_url)
+        except Exception:
+            log.exception("register call raised")
+            return False
+        if not result or "device_id" not in result or "auth_token" not in result:
+            return False
+        new_device_id = result["device_id"]
+        new_auth_token = result["auth_token"]
+        self.config.device_id = new_device_id
+        self.config.auth_token = new_auth_token
+        # ConnectionManager caches creds on construction — refresh under its
+        # lock so an in-flight request on another thread can't observe a
+        # half-updated (device_id, auth_token) pair.
+        self.conn.update_credentials(new_device_id, new_auth_token)
+        log.info("auth.repair.reregistered device_id=%s", new_device_id[:12])
+        return True
 
     def _maybe_ping(self, min_age_sec: float) -> None:
         """Atomic check-and-fire: under _ping_lock, confirm we're idle and
@@ -393,6 +502,17 @@ class TrayApp:
                 if result is None:
                     return
                 online = bool(result.get("online"))
+                # Without FCM on the server, the ping handler can only say
+                # "online" via the "fresh" shortcut (phone talked to the
+                # server this second) — which mostly doesn't fire for
+                # phones on 10–25 s poll cadences. Fall back to the
+                # server-reported last_seen_at freshness: if the phone
+                # contacted the server within REMOTE_FRESH_WINDOW_S it's
+                # functionally alive, regardless of what FCM says.
+                if not online:
+                    last_seen = result.get("last_seen_at") or 0
+                    if last_seen and (time.time() - last_seen) <= REMOTE_FRESH_WINDOW_S:
+                        online = True
                 if online != self._remote_online:
                     log.info("ping.response.received recipient=%s online=%s via=%s rtt_ms=%s",
                              target_id[:12], online, result.get("via"), result.get("rtt_ms"))

@@ -558,12 +558,32 @@ class Poller:
 
     def _handle_message_unpair(self, _message) -> None:
         log.info("pairing.unpair.received")
-        devices = self.config.paired_devices
-        for did in list(devices.keys()):
-            del devices[did]
-        self.config._data["paired_devices"] = devices
-        self.config.save()
-        self.platform.notifications.notify("Unpaired", "Paired device disconnected")
+        self.local_unpair(
+            scope="pairing_only",
+            notify_title="Unpaired",
+            notify_body="Paired device disconnected",
+        )
+
+    def local_unpair(self, scope: str, *, notify_title: str | None = None,
+                     notify_body: str | None = None) -> None:
+        """
+        Wipe local pairing (and optionally device credentials) and surface a
+        notification. Shared by the .fn.unpair message handler and the
+        AUTH_INVALID re-pair flow triggered from the tray.
+
+        See Config.wipe_credentials() for scope semantics.
+        """
+        self.config.wipe_credentials(scope)
+        if scope == "full":
+            try:
+                self.crypto.reset_keys()
+            except Exception:
+                log.exception("crypto.reset_keys failed")
+        if notify_title:
+            try:
+                self.platform.notifications.notify(notify_title, notify_body or "")
+            except Exception:
+                log.exception("notification during local_unpair failed")
 
     def _delivery_tracker_loop(self) -> None:
         """Paints per-chunk "Delivering X/Y" progress for OUTGOING transfers while
@@ -589,7 +609,12 @@ class Poller:
 
         def run_poll():
             try:
-                statuses = self.api.get_sent_status(timeout=0.75)
+                # Advisory poll: 750ms timeout is aggressive on purpose so
+                # overlapping ticks are skipped. track_state=False keeps a
+                # missed tick from flipping the global connection state,
+                # which would otherwise thrash CONNECTED⇄DISCONNECTED and
+                # spam backoff-retry logs.
+                statuses = self.api.get_sent_status(timeout=0.75, track_state=False)
                 if self._process_delivery_progress(statuses):
                     self._check_delivery_status()
             except Exception:

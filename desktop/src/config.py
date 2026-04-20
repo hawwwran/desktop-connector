@@ -109,6 +109,28 @@ class Config:
             return did, devices[did]
         return None
 
+    def wipe_credentials(self, scope: str) -> None:
+        """
+        Drop credentials so the next startup re-registers and/or re-pairs.
+
+        scope:
+          * 'pairing_only' — clear only paired_devices; keep device_id + auth_token.
+            Matches the 403 "Devices are not paired" recovery: auth still works,
+            just the server-side pairings row is gone.
+          * 'full' — also clear device_id + auth_token. Matches the 401
+            "Invalid credentials" recovery: server's DB no longer recognises us
+            (either the row was lost or a restored backup reverted our token).
+            Caller should also reset_keys() on the KeyManager so a fresh
+            public key generates a fresh device_id on next register.
+        """
+        if scope not in ("pairing_only", "full"):
+            raise ValueError(f"unknown wipe scope: {scope}")
+        self._data.pop("paired_devices", None)
+        if scope == "full":
+            self._data.pop("auth_token", None)
+            self._data.pop("device_id", None)
+        self.save()
+
     @property
     def auto_open_links(self) -> bool:
         return self._data.get("auto_open_links", True)

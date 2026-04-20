@@ -21,7 +21,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gdk, GdkPixbuf, Gio, GLib, Pango
 
-from .brand import APP_ID, apply_brand_css, claim_gtk_identity
+from .brand import (
+    APP_ID,
+    DC_BLUE_500,
+    DC_ORANGE_700,
+    apply_brand_css,
+    claim_gtk_identity,
+)
 
 
 def _make_app() -> Adw.Application:
@@ -912,11 +918,13 @@ def show_history(config_dir: Path):
             elif item_status == "downloading":
                 text = f"Downloading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Downloading"
             elif item_status == "failed":
-                text = "Failed"
+                # Brand error slot — matches android/server/tray.
+                text = f'<span foreground="{DC_ORANGE_700}">Failed</span>'
             elif item["direction"] == "received":
                 text = "Received"
             elif delivered:
-                text = "Delivered"
+                # Brand success — green is retired.
+                text = f'<span foreground="{DC_BLUE_500}">Delivered</span>'
             elif recv_dl > 0 and recv_total > 0:
                 text = f"Delivering {recv_dl}/{recv_total}"
             else:
@@ -961,6 +969,14 @@ def show_history(config_dir: Path):
                 subtitle=f"{size}  \u00b7  {ts}  \u00b7  {status_text}",
             )
             row.set_title_lines(1)
+            # Subtitle carries Pango markup for the status fragment
+            # ('Failed' orange / 'Delivered' blue). Size and ts are safe
+            # strings (no '<' or '&') so enabling markup is fine.
+            row.set_subtitle_lines(1)
+            try:
+                row.set_use_markup(True)
+            except Exception:
+                pass
 
             # Thumbnail or icon as prefix
             content_path = item.get("content_path", "")

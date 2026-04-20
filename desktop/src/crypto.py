@@ -47,6 +47,16 @@ class KeyManager:
             key_file.write_bytes(pem_data)
             os.chmod(key_file, 0o600)
 
+    def reset_keys(self) -> None:
+        """Delete the on-disk keypair and generate a fresh one. Because
+        get_device_id() is a hash of the public key, the next call yields a
+        new device_id — used by the AUTH_INVALID recovery when the server's
+        record of this device has drifted beyond repair."""
+        key_file = self.keys_dir / "private_key.pem"
+        key_file.unlink(missing_ok=True)
+        self._private_key = None
+        self._load_or_generate()
+
     @property
     def private_key(self) -> X25519PrivateKey:
         return self._private_key
