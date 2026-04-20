@@ -141,6 +141,39 @@ Response (200):
 
 `"complete": true` once the last chunk lands.
 
+### Init error — quota (413 or 507)
+
+`POST /api/transfers/init` rejects up front when the per-deployment storage quota won't fit the projected transfer. Two distinct statuses:
+
+- **413 Payload Too Large** — the new transfer alone exceeds the quota. Terminal; clients fail the send immediately.
+
+```json
+{
+  "error": "Transfer exceeds server quota"
+}
+```
+
+- **507 Insufficient Storage** — the quota would fit the new transfer on its own, but not on top of everything still queued for that recipient. Transient; clients enter WAITING and retry until the queue drains (capped at 30 min).
+
+```json
+{
+  "error": "Recipient storage limit exceeded"
+}
+```
+
+### Cancel (sender tears down a still-delivering transfer)
+`DELETE /api/transfers/tx-abc-123`
+
+Response (200):
+
+```json
+{
+  "status": "cancelled"
+}
+```
+
+Returns 404 for unknown IDs *and* for transfers owned by a different sender (IDs are not enumerable).
+
 ### Chunk download
 `GET /api/transfers/tx-abc-123/chunks/0`
 

@@ -59,6 +59,9 @@ release build of the desktop or Android client could start misbehaving.
 | `/api/transfers/sent-status` row | Remove existing field (e.g. `chunk_count`) | breaking |
 | `/api/transfers/init` request | Add required field | breaking |
 | `/api/transfers/init` request | Add optional field with a default | extending |
+| `/api/transfers/init` response | Return 413 (quota, terminal) | extending — existing clients should treat 4xx as failed; new clients render "exceeds server quota" |
+| `/api/transfers/init` response | Return 507 (queue full, transient) | extending — clients aware of 507 enter WAITING; unaware clients treat as generic failure |
+| `DELETE /api/transfers/{id}` | New sender-cancel endpoint | extending — old clients never call it |
 | Chunk upload/download URL shape | Change `/chunks/{i}` path format | breaking |
 | Chunk download body | Wrap raw bytes in a JSON envelope | breaking |
 | `/api/transfers/notify` | Add `test=2` mode | extending |

@@ -147,6 +147,10 @@ The Router auto-detects the base path from `SCRIPT_NAME`, so it works in any sub
 - **Delivery tracker**: Dedicated 500ms-tick loop on both Android (`PollService.deliveryTrackerLoop`) and desktop (`Poller._delivery_tracker_loop`). 750ms abort timeout per poll; overlapping polls are skipped and logged. Idle when no active deliveries (Android also gates on screen-on). Paints "Delivering X/Y" progress; does NOT mark delivered itself — on `delivery_state == "delivered"` it clears its progress fields and delegates to the standard sent-status path (same one used on app start) as the single source of truth. DB writes only fire on value change.
 - **Delivery stall safeguard**: Per-transfer timer tracks last `chunks_downloaded` advancement. If no advancement for 2 minutes, the tracker gives up on that transfer (in-memory `gaveUp` set), clears its progress fields so UI falls back to "Sent", and logs. Transfer row stays sent/undelivered; long-poll inline `sent_status` and app-restart delivery check still catch eventual delivery when the recipient comes online. Caps tracker HTTP activity to ~240 polls per stuck transfer before going quiet.
 - **Connection state isolation**: Long poll uses raw HTTP requests, not the connection manager. Only the short health check affects connection state. Prevents state oscillation.
+- **Storage quota**: Server enforces a per-deployment quota (default 500 MB, configurable via `server/data/config.json` — auto-created by `Config.php` with defaults on first access, so a fresh deploy never 500s on a missing file). `TransferService::init` projects the *eventual* size of the new transfer + every still-in-flight transfer for the recipient (reserved = `max(sumPendingBytes, reservedChunkCount * PROJECTED_CHUNK_SIZE)`, where `PROJECTED_CHUNK_SIZE = 2 MB` must match client `CHUNK_SIZE`). Without the projection, N parallel inits at 0 bytes each would sail past the cap. Two distinct errors: `PayloadTooLargeError` (413) when the new transfer alone exceeds the cap — terminal, clients fail the send immediately with "exceeds server quota"; `StorageLimitError` (507) when only the current queue won't fit — transient, clients enter WAITING and retry until drained.
+- **WAITING state + zombie scrub**: Clients render `init → 507` transfers as `Waiting` (orange/amber) in history. Clients retry `init` with exponential backoff capped at `STORAGE_FULL_MAX_WINDOW_S = 30 min` (desktop) / `STORAGE_FULL_MAX_WINDOW_MS` (Android) — beyond that the row is marked `Failed (quota exceeded)` with `failure_reason = "quota_timeout"`. Desktop's history window additionally runs a `_scrub_zombie_waiting()` pass on every `build_list()` tick (every 1–3 s) to flip orphaned WAITING rows (crashed sender subprocess, legacy `chunks_downloaded = -1` sentinel) to Failed live, without needing to close and reopen the window. Android's `TransferViewModel.refreshTransfers` performs the same scrub via `scrubZombieWaiting`.
+- **Sender cancel**: `DELETE /api/transfers/{id}` lets the sender tear down a still-delivering transfer — every stored byte is removed so the recipient gets 404 on the next chunk fetch. Auth is enforced by the pipeline; the service 404s both for unknown IDs and for transfers owned by a different sender (so a poking client can't enumerate IDs). Desktop / Android UI exposes this via "Cancel" on an in-flight row.
+- **Auth recovery**: Both clients treat 401/403 from the server as a *terminal pairing failure*, not a transient blip. A 3-in-a-row latching streak (`authFailureStreak`) flips a persistent `auth_failure_kind` flag and surfaces a banner on the home screen ("Pairing lost — re-pair to continue"). Desktop uses `on_auth_failure` callbacks; Android uses an `AuthObservation` `SharedFlow` on `ApiClient`'s companion object. Tapping "Re-pair" wipes keys + paired devices (`KeyManager.resetKeypair` + `removeAllPairedDevices`), re-registers with the server, and navigates to the pairing screen. Prevents the "says online but silently broken" failure mode after a server wipe.
 - **Fasttrack message relay**: Lightweight encrypted message queue for commands too small for the full transfer pipeline. Server stores opaque blobs, sends FCM wake. Used by find-my-phone; extensible for future features. 10-minute expiry, 100-message limit per recipient.
 - **Find my phone**: Desktop sends encrypted start/stop commands via fasttrack. Phone plays alarm (STREAM_ALARM, bypasses silent), vibrates, reports encrypted GPS every 5s. Desktop shows location on Leaflet/OSM map (WebKitWebView, fallback to text). Requires FCM — menu item hidden without it. Configurable volume, hardcoded 5-min timeout on phone. Auto-stops on timeout. Silent search mode (GPS only, no alarm/vibration/notification — for stolen phone). Android settings: "Allow silent search" toggle (default on). Desktop: heartbeat-based status with "Lost communication" detection. Generation-counter thread safety for poll loop.
 - **Find my phone GPS permission**: Android prompts on app open (FCM active + not granted + not dismissed). "Dismiss" is permanent — user can grant later in Settings. Alarm works without GPS permission (just no coordinates). Settings shows GPS permission status with grant button when FCM is active.
@@ -198,10 +202,11 @@ server/
   .htaccess                  — root rewrite + directory protection
   src/Router.php             — URL routing + base path detection; builds RequestContext and catches ApiError in dispatch
   src/Database.php           — SQLite wrapper
+  src/Config.php             — operator config loader; auto-creates data/config.json on first access (storageQuotaMB default 500)
   src/AppLog.php             — file-based server logger (2-file rotation, 1MB each)
   src/Http/                  — request pipeline (refactor-2)
     RequestContext.php           — per-request object: method, params, query, lazy json/raw body, deviceId
-    ApiError.php                 — ApiError + Validation/Unauthorized/Forbidden/NotFound/Conflict/RateLimit/StorageLimit
+    ApiError.php                 — ApiError + Validation/Unauthorized/Forbidden/NotFound/Conflict/RateLimit/PayloadTooLarge/StorageLimit
     ErrorResponder.php           — single point that serializes ApiError → JSON + headers
     Validators.php               — requireNonEmptyString, requireInt, requireNullableString, requireIntParam, requireSafeTransferId
   src/Auth/                  — authentication layer (refactor-2)
@@ -210,12 +215,12 @@ server/
   src/Controllers/           — thin HTTP adapters; each method takes (Database $db, RequestContext $ctx)
     DeviceController.php     — register, health (via AuthService::optional), stats, FCM token, ping, pong
     PairingController.php    — QR pairing flow
-    TransferController.php   — HTTP adapter for /api/transfers/*; delegates to Services/
+    TransferController.php   — HTTP adapter for /api/transfers/*; delegates to Services/ (init, upload, download, pending, ack, cancel, sent-status)
     DashboardController.php  — HTML dashboard
     FcmController.php        — FCM config endpoint
     FasttrackController.php  — encrypted message relay (send, pending, ack)
   src/Services/              — transfer business logic (refactor-1); throws ApiError subclasses on failure
-    TransferService.php          — init, upload, download, ack, listPending
+    TransferService.php          — init, upload, download, ack, listPending, cancel; init enforces quota via PROJECTED_CHUNK_SIZE × reservedChunks, throws PayloadTooLarge (413) or StorageLimit (507)
     TransferStatusService.php    — status / delivery_state mapping (single source of truth)
     TransferNotifyService.php    — long-poll loop (25s / 500ms tick)
     TransferWakeService.php      — silent FCM wake on upload completion
@@ -357,6 +362,7 @@ docs/plans/                  — refactoring and bugfix plans (local working not
 | GET | /api/transfers/pending | Yes | Get pending transfers |
 | GET | /api/transfers/{id}/chunks/{i} | Yes | Download chunk |
 | POST | /api/transfers/{id}/ack | Yes | Acknowledge receipt |
+| DELETE | /api/transfers/{id} | Yes | Sender-initiated cancel — deletes chunks + row |
 | GET | /api/transfers/sent-status | Yes | Delivery status |
 | GET | /api/transfers/notify | Yes | Long poll for new transfers/deliveries (?test=1 for instant probe) |
 | POST | /api/fasttrack/send | Yes | Send encrypted message to paired device (triggers FCM wake) |
