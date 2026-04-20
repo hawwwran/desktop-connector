@@ -129,6 +129,24 @@ else
     info "App files installed from GitHub"
 fi
 
+# --- Brand icon (hicolor theme) ---
+
+ICON_SRC="$INSTALL_DIR/assets/brand"
+if [ -d "$ICON_SRC" ]; then
+    for size in 48 64 128 256; do
+        SRC="$ICON_SRC/desktop-connector-$size.png"
+        DEST_DIR="$HOME/.local/share/icons/hicolor/${size}x${size}/apps"
+        if [ -f "$SRC" ]; then
+            mkdir -p "$DEST_DIR"
+            cp -f "$SRC" "$DEST_DIR/$APP_NAME.png"
+        fi
+    done
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+    fi
+    info "Brand icon installed (hicolor)"
+fi
+
 # --- Create launcher ---
 
 mkdir -p "$BIN_DIR"
@@ -158,10 +176,11 @@ Type=Application
 Name=Desktop Connector
 Comment=E2E encrypted file and clipboard sharing
 Exec=$BIN_DIR/$APP_NAME
-Icon=preferences-system-network
+Icon=$APP_NAME
 Terminal=false
 Categories=Network;Utility;
 StartupNotify=false
+StartupWMClass=com.desktopconnector.Desktop
 EOF
 
 info "App menu entry installed"
@@ -203,7 +222,7 @@ Actions=sendToPhone
 
 [Desktop Action sendToPhone]
 Name=Send to Phone
-Icon=preferences-system-network
+Icon=$APP_NAME
 Exec=$BIN_DIR/$APP_NAME --headless --send=%f
 DOLPHIN_EOF
     info "Dolphin: 'Send to Phone' service menu installed"
@@ -223,9 +242,11 @@ if [ ! -f "$AUTOSTART_FILE" ] && [ ! -f "$HOME/.config/$APP_NAME/.no-autostart" 
 Type=Application
 Name=Desktop Connector
 Exec=$BIN_DIR/$APP_NAME
+Icon=$APP_NAME
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
+StartupWMClass=com.desktopconnector.Desktop
 EOF
     info "Autostart enabled (remove $AUTOSTART_FILE to disable)"
 else

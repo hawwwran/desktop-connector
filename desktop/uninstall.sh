@@ -32,6 +32,14 @@ rm -f "$HOME/.local/share/nemo/scripts/Send to Phone"
 rm -f "$HOME/.local/share/kservices5/ServiceMenus/desktop-connector-send.desktop"
 echo -e "${GREEN}[✓]${NC} Removed file manager integrations"
 
+for size in 48 64 128 256; do
+    rm -f "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/$APP_NAME.png"
+done
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+fi
+echo -e "${GREEN}[✓]${NC} Removed brand icon"
+
 rm -rf "$INSTALL_DIR"
 echo -e "${GREEN}[✓]${NC} Removed app files"
 

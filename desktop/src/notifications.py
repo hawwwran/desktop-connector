@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+from .brand import ICON_NAME
+
 log = logging.getLogger(__name__)
 
 _pending_files: list[Path] = []
@@ -16,7 +18,7 @@ _lock = threading.Lock()
 BATCH_DELAY = 5.0  # seconds to batch notifications
 
 
-def notify(title: str, body: str, icon: str = "dialog-information") -> None:
+def notify(title: str, body: str, icon: str = ICON_NAME) -> None:
     try:
         subprocess.run(
             ["notify-send", "-a", "Desktop Connector", "-i", icon, title, body],

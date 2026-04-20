@@ -11,6 +11,17 @@ import qrcode
 from PIL import Image
 
 from .api_client import ApiClient
+from .brand import (
+    APP_NAME,
+    DC_BLUE_200,
+    DC_BLUE_500,
+    DC_BLUE_950,
+    DC_BLUE_970,
+    DC_WHITE_SOFT,
+    DC_YELLOW_500,
+    DC_YELLOW_600,
+    brand_tk_window,
+)
 from .config import Config
 from .crypto import KeyManager
 
@@ -71,35 +82,37 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
     verification_code = [None]
     phone_info = [None]
 
+    bg = DC_BLUE_970
     root = tk.Tk()
-    root.title("Desktop Connector - Pairing")
-    root.configure(bg="#1e293b")
+    root.title(f"{APP_NAME} — Pairing")
+    root.configure(bg=bg)
     root.resizable(False, False)
+    brand_tk_window(root)
 
-    frame = tk.Frame(root, bg="#1e293b", padx=24, pady=24)
+    frame = tk.Frame(root, bg=bg, padx=24, pady=24)
     frame.pack()
 
     tk.Label(frame, text="Scan this QR code with your phone", font=("sans-serif", 14, "bold"),
-             fg="#f8fafc", bg="#1e293b").pack(pady=(0, 4))
+             fg=DC_WHITE_SOFT, bg=bg).pack(pady=(0, 4))
     server_url = json.loads(qr_data)["server"]
     tk.Label(frame, text=f"Server: {server_url}",
-             font=("monospace", 11), fg="#93c5fd", bg="#1e293b").pack(pady=(0, 4))
+             font=("monospace", 11), fg=DC_BLUE_200, bg=bg).pack(pady=(0, 4))
     tk.Label(frame, text=f"Device ID: {crypto.get_device_id()[:16]}...",
-             font=("monospace", 10), fg="#94a3b8", bg="#1e293b").pack(pady=(0, 12))
+             font=("monospace", 10), fg=DC_BLUE_200, bg=bg).pack(pady=(0, 12))
 
     qr_photo = ImageTk.PhotoImage(qr_image)
-    qr_label = tk.Label(frame, image=qr_photo, bg="#1e293b")
+    qr_label = tk.Label(frame, image=qr_photo, bg=bg)
     qr_label.pack(pady=(0, 16))
 
     status_label = tk.Label(frame, text="Waiting for phone to scan...",
-                            font=("sans-serif", 11), fg="#f59e0b", bg="#1e293b")
+                            font=("sans-serif", 11), fg=DC_YELLOW_600, bg=bg)
     status_label.pack(pady=(0, 8))
 
     code_label = tk.Label(frame, text="", font=("monospace", 24, "bold"),
-                          fg="#22c55e", bg="#1e293b")
+                          fg=DC_YELLOW_500, bg=bg)
     code_label.pack(pady=(0, 16))
 
-    button_frame = tk.Frame(frame, bg="#1e293b")
+    button_frame = tk.Frame(frame, bg=bg)
     button_frame.pack()
 
     def on_confirm():
@@ -121,13 +134,17 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
         root.destroy()
 
     confirm_btn = tk.Button(button_frame, text="Confirm Pairing", command=on_confirm,
-                            font=("sans-serif", 11), bg="#22c55e", fg="#0f172a",
-                            state=tk.DISABLED, padx=16, pady=6)
+                            font=("sans-serif", 11), bg=DC_BLUE_500, fg="#FFFFFF",
+                            activebackground=DC_BLUE_500, activeforeground="#FFFFFF",
+                            state=tk.DISABLED, padx=16, pady=6, relief=tk.FLAT,
+                            borderwidth=0, highlightthickness=0)
     confirm_btn.pack(side=tk.LEFT, padx=(0, 8))
 
     cancel_btn = tk.Button(button_frame, text="Cancel", command=on_cancel,
-                           font=("sans-serif", 11), bg="#475569", fg="#f8fafc",
-                           padx=16, pady=6)
+                           font=("sans-serif", 11), bg=DC_BLUE_950, fg=DC_WHITE_SOFT,
+                           activebackground=DC_BLUE_950, activeforeground=DC_WHITE_SOFT,
+                           padx=16, pady=6, relief=tk.FLAT,
+                           borderwidth=0, highlightthickness=0)
     cancel_btn.pack(side=tk.LEFT)
 
     def poll_for_pairing():
@@ -140,7 +157,7 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
             sym_key = crypto.derive_shared_key(req["phone_pubkey"])
             code = KeyManager.get_verification_code(sym_key)
             verification_code[0] = code
-            status_label.config(text=f"Phone connected: {req['phone_id'][:12]}... Verify code:", fg="#22c55e")
+            status_label.config(text=f"Phone connected: {req['phone_id'][:12]}... Verify code:", fg=DC_BLUE_500)
             code_label.config(text=code)
             confirm_btn.config(state=tk.NORMAL)
         else:

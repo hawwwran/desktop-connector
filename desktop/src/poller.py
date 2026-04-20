@@ -100,6 +100,19 @@ class Poller:
         """Wake the poller to check immediately."""
         self._wake_event.set()
 
+    def has_live_outgoing(self) -> bool:
+        """True iff any sent transfer is still flowing — not yet delivered and
+        not given up on by the stall safeguard. Covers the full outgoing arc
+        (uploading → delivering → delivered)."""
+        try:
+            undelivered = set(self.history.get_undelivered_transfer_ids())
+        except Exception:
+            return False
+        if not undelivered:
+            return False
+        with self._tracker_state_lock:
+            return bool(undelivered - self._tracker_gave_up)
+
     def run(self) -> None:
         """Main polling loop. Uses long polling after connection is confirmed."""
         log.info("Poller started")

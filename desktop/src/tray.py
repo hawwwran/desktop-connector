@@ -13,6 +13,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from .api_client import ApiClient
+from .brand import (
+    DC_BLUE_400_RGB,
+    DC_BLUE_800_RGB,
+    DC_ORANGE_700_RGB,
+    DC_YELLOW_500_RGB,
+)
 from .config import Config
 from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
@@ -26,35 +32,143 @@ _DESKTOP_DIR = Path(__file__).parent.parent
 
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
+_BRAND_DIR = _ASSETS_DIR / "brand"
+
+
+# --- Sparkle-star tray compositing ------------------------------------------
+#
+# Binary connected/disconnected is carried by SHAPE (filled vs outline star)
+# so it's still readable when the tray theme forces monochrome. Sub-state
+# (uploading, reconnecting, remote offline) is carried by TINT.
+
+def _load_master(name: str) -> Image.Image | None:
+    p = _BRAND_DIR / name
+    if not p.exists():
+        return None
+    img = Image.open(p).convert("RGBA")
+    img.load()
+    return img
+
+
+def _tint(mask: Image.Image, rgb: tuple[int, int, int]) -> Image.Image:
+    """Recolor a black-on-transparent mask to `rgb`, preserving alpha."""
+    alpha = mask.split()[-1]
+    tinted = Image.new("RGBA", mask.size, (*rgb, 255))
+    tinted.putalpha(alpha)
+    return tinted
+
+
+def _crop_and_pad(img: Image.Image, bbox: tuple[int, int, int, int],
+                  pad_ratio: float = 0.02) -> Image.Image:
+    """Crop `img` to `bbox`, then center it on a padded square canvas.
+    All masks sharing the same `bbox` + `pad_ratio` stay pixel-aligned."""
+    cropped = img.crop(bbox)
+    w, h = cropped.size
+    side = max(w, h)
+    pad = max(1, int(side * pad_ratio))
+    canvas = side + 2 * pad
+    out = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    out.alpha_composite(cropped, (pad + (side - w) // 2, pad + (side - h) // 2))
+    return out
+
+
+# Tray icons are rendered by pystray at 22–48 px (64 px on HiDPI). The PIL
+# image is PNG-encoded on every swap and written to a temp file the indicator
+# re-reads; at 600 px that's ~35 ms, long enough for the indicator to fall back
+# to the default app icon while reloading. 128 px encodes in ~3 ms, below one
+# frame, so the swap looks instant.
+_TRAY_RENDER_SIZE = 128
 
 
 def _load_icons() -> dict[str, Image.Image]:
-    """Load all icon variants eagerly at import time. Thread-safe after init."""
-    icons = {}
-    for color in ("green", "green_yellow", "green_red", "red", "yellow", "blue"):
-        png_path = _ASSETS_DIR / f"icon_{color}.png"
-        if png_path.exists():
-            img = Image.open(png_path)
-            img.load()  # Force full pixel read (Image.open is lazy)
-            icons[color] = img
-    # Generate fallbacks for any missing icons
-    for color, rgb in (("green", (34, 197, 94)), ("red", (239, 68, 68)),
-                        ("yellow", (245, 158, 11)), ("blue", (59, 130, 246))):
-        if color not in icons:
-            size = 128
+    """
+    Build one PIL image per tray state. Composited once at import time.
+    Keys match _get_state_icon() below.
+    """
+    full_raw = _load_master("star-full-bw.png")
+    center_raw = _load_master("star-center-bw.png")
+    # Anchor center to the full-star bbox so the inner diamond stays
+    # geometrically centered inside the outer star after trimming.
+    if full_raw is not None:
+        star_bbox = full_raw.split()[-1].getbbox()
+        full = _crop_and_pad(full_raw, star_bbox)
+        center = _crop_and_pad(center_raw, star_bbox) if center_raw is not None else None
+    else:
+        full = center = None
+
+    icons: dict[str, Image.Image] = {}
+
+    if full is not None:
+        # Shape is always a filled star; color scale carries state:
+        #   dark blue  = fully connected (server + phone)
+        #   sky blue   = half-connected  (server ok, phone offline)
+        #   yellow     = reconnecting    (server handshake in progress)
+        #   orange     = offline         (server unreachable)
+        icons["connected"] = _tint(full, DC_BLUE_800_RGB)
+        icons["remote_offline"] = _tint(full, DC_BLUE_400_RGB)
+        icons["reconnecting"] = _tint(full, DC_YELLOW_500_RGB)
+        icons["disconnected"] = _tint(full, DC_ORANGE_700_RGB)
+
+        if center is not None:
+            upload = _tint(full, DC_BLUE_800_RGB)
+            inner = _tint(center, DC_YELLOW_500_RGB)
+            upload.alpha_composite(inner)
+            icons["uploading"] = upload
+        else:
+            icons["uploading"] = _tint(full, DC_YELLOW_500_RGB)
+
+    if not icons:
+        # Installer didn't ship brand/, or running from an old checkout.
+        # Draw flat-colored circles as a bare fallback so the tray still works.
+        size = _TRAY_RENDER_SIZE
+        for state, rgb in (("connected", DC_BLUE_800_RGB),
+                           ("remote_offline", DC_BLUE_400_RGB),
+                           ("uploading", DC_YELLOW_500_RGB),
+                           ("reconnecting", DC_YELLOW_500_RGB),
+                           ("disconnected", DC_ORANGE_700_RGB)):
             img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
             ImageDraw.Draw(img).ellipse([16, 16, size - 16, size - 16], fill=rgb)
-            icons[color] = img
+            icons[state] = img
+
+    # Downsample once at load time so icon swaps don't re-encode 600 px PNGs.
+    for key, img in icons.items():
+        if img.size != (_TRAY_RENDER_SIZE, _TRAY_RENDER_SIZE):
+            icons[key] = img.resize(
+                (_TRAY_RENDER_SIZE, _TRAY_RENDER_SIZE), Image.LANCZOS)
+
     return icons
 
 
 _icons = _load_icons()
 
 
-def _make_icon(color: str) -> Image.Image:
-    """Return a copy of a pre-loaded icon. Safe to call from any thread."""
-    img = _icons.get(color) or _icons.get("green")
+def _make_icon(state: str) -> Image.Image:
+    """Return a copy of a pre-composited state icon. Safe from any thread."""
+    img = _icons.get(state) or _icons.get("connected") or next(iter(_icons.values()))
     return img.copy()
+
+
+def _bake_state_paths(cache_dir: Path) -> dict[str, str]:
+    """
+    Write each state icon to a stable file in `cache_dir` once. Returns
+    {state: absolute_path}.
+
+    pystray's default _update_icon deletes the current temp file, mktemps a
+    new random path, then calls AppIndicator.set_icon(new_path). The delete +
+    rename forces a theme/path lookup in the tray frontend (GNOME Shell's
+    AppIndicator ext, KDE systray, xfce4-indicator-plugin), which briefly
+    renders the stock application icon until the new path resolves — that's
+    the ~500ms "burger" flash. Writing each state once to a stable path
+    lets us call AppIndicator.set_icon(same_path) without file churn, so
+    the frontend sees only a pixbuf-reload and skips the fallback render.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    paths: dict[str, str] = {}
+    for state, img in _icons.items():
+        p = cache_dir / f"tray-{state}.png"
+        img.save(p, format="PNG")
+        paths[state] = str(p)
+    return paths
 
 
 class TrayApp:
@@ -123,10 +237,16 @@ class TrayApp:
 
         self._icon = pystray.Icon(
             "desktop-connector",
-            icon=self._get_state_icon(),
+            icon=_make_icon(self._current_state_key()),
             title="Desktop Connector",
             menu=build_menu(),
         )
+
+        # Stable on-disk paths keyed by state. Bypasses pystray's delete +
+        # mktemp path churn on every swap, which is what produced the
+        # default-icon flash between state transitions.
+        self._state_paths = _bake_state_paths(self.config.config_dir / "tray")
+        self._last_applied_state: str | None = None
 
         self.conn.on_state_change(lambda state: self._update_icon())
 
@@ -148,9 +268,12 @@ class TrayApp:
             while not self._should_quit.is_set():
                 changed = False
 
-                uploading = self._upload_status_file.exists()
-                if uploading != self._was_uploading:
-                    self._was_uploading = uploading
+                # "Outgoing" = uploading OR delivering. Covers the full
+                # uploading → delivering → delivered arc.
+                outgoing = (self._upload_status_file.exists()
+                            or self.poller.has_live_outgoing())
+                if outgoing != self._was_uploading:
+                    self._was_uploading = outgoing
                     self._update_icon()
                     changed = True
 
@@ -195,24 +318,45 @@ class TrayApp:
         if self._icon:
             self._icon.stop()
 
-    def _get_state_icon(self) -> Image.Image:
+    def _current_state_key(self) -> str:
         state = self.conn.state
         if state == ConnectionState.DISCONNECTED:
-            return _make_icon("red")
-        if self._was_uploading:
-            return _make_icon("blue")
+            return "disconnected"
+        if getattr(self, "_was_uploading", False):
+            return "uploading"
         if state == ConnectionState.RECONNECTING:
-            return _make_icon("yellow")
-        if not self._remote_online:
-            return _make_icon("green_yellow")
-        return _make_icon("green")
+            return "reconnecting"
+        if not getattr(self, "_remote_online", False):
+            return "remote_offline"
+        return "connected"
 
     def _update_icon(self) -> None:
-        if self._icon:
+        if not self._icon:
+            return
+        key = self._current_state_key()
+        # No-op if the state didn't actually change.
+        if key == self._last_applied_state:
+            return
+        path = getattr(self, "_state_paths", {}).get(key)
+        indicator = getattr(self._icon, "_appindicator", None)
+        if path and indicator is not None:
+            # AppIndicator backend: swap by stable path — no file churn,
+            # no theme relookup, no default-icon flash. Must run on the GTK
+            # main thread (icon_poll lives on a daemon thread).
             try:
-                self._icon.icon = self._get_state_icon()
+                from gi.repository import GLib
+                GLib.idle_add(lambda p=path: (indicator.set_icon(p), False)[1])
+                self._last_applied_state = key
+                return
             except Exception:
                 pass
+        # Fallback (gtk / xorg backends, or appindicator failed): pystray's
+        # default path, which will re-encode and rewrite the temp file.
+        try:
+            self._icon.icon = _make_icon(key)
+            self._last_applied_state = key
+        except Exception:
+            pass
 
     def _status_text(self) -> str:
         """Menu title text. Side effect: triggers a fresh ping when the menu

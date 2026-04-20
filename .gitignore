@@ -8,7 +8,8 @@ server/google-services.json
 # Desktop
 desktop/__pycache__/
 desktop/src/__pycache__/
-desktop/assets/
+desktop/assets/*
+!desktop/assets/brand/
 *.pyc
 
 # Android

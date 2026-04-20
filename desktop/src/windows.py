@@ -19,7 +19,20 @@ from pathlib import Path
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, Gdk, GdkPixbuf, GLib, Pango
+from gi.repository import Gtk, Adw, Gdk, GdkPixbuf, Gio, GLib, Pango
+
+from .brand import APP_ID, apply_brand_css, claim_gtk_identity
+
+
+def _make_app() -> Adw.Application:
+    """Shared Adw.Application factory.
+
+    NON_UNIQUE lets multiple window subprocesses coexist under one app_id,
+    which is what makes the compositor group them into a single taskbar
+    entry tagged with the brand icon."""
+    claim_gtk_identity()
+    return Adw.Application(application_id=APP_ID,
+                            flags=Gio.ApplicationFlags.NON_UNIQUE)
 
 
 def format_size(b):
@@ -47,9 +60,10 @@ def show_send_files(config_dir: Path):
 
     file_list: list[Path] = []
 
-    app = Adw.Application(application_id="com.desktopconnector.send")
+    app = _make_app()
 
     def on_activate(app):
+        apply_brand_css()
         win = Adw.ApplicationWindow(application=app, title="Send to Phone",
                                      default_width=480, default_height=520)
 
@@ -385,9 +399,10 @@ def show_settings(config_dir: Path):
     except Exception:
         pass
 
-    app = Adw.Application(application_id="com.desktopconnector.settings")
+    app = _make_app()
 
     def on_activate(app):
+        apply_brand_css()
         win = Adw.ApplicationWindow(application=app, title="Settings", default_width=420, default_height=480)
         win.set_resizable(False)
 
@@ -670,7 +685,7 @@ def show_history(config_dir: Path):
     config = Config(config_dir)
     history = TransferHistory(config_dir)
 
-    app = Adw.Application(application_id="com.desktopconnector.history")
+    app = _make_app()
 
     import re as _re
     _url_re = _re.compile(r'https?://\S+')
@@ -754,6 +769,7 @@ def show_history(config_dir: Path):
             toast_overlay.add_toast(toast)
 
     def on_activate(app):
+        apply_brand_css()
         win = Adw.ApplicationWindow(application=app, title="Transfer History",
                                      default_width=500, default_height=480)
         win.set_size_request(400, 300)
@@ -797,23 +813,26 @@ def show_history(config_dir: Path):
             .transfer-card-list > row.activatable:active {
                 background: transparent;
             }
-            .upload-bar, .download-bar {
+            .upload-bar, .download-bar, .delivery-bar {
                 min-height: 5px;
             }
-            .upload-bar trough, .download-bar trough {
+            .upload-bar trough, .download-bar trough, .delivery-bar trough {
                 min-height: 5px;
                 background: alpha(@card_shade_color, 0.35);
                 border-radius: 0;
             }
-            .upload-bar progress, .download-bar progress {
+            .upload-bar progress, .download-bar progress, .delivery-bar progress {
                 min-height: 5px;
                 border-radius: 0;
             }
             .upload-bar progress {
-                background-color: #F59E0B;
+                background-color: #FDD00C;
             }
             .download-bar progress {
-                background-color: #22C55E;
+                background-color: #5898FB;
+            }
+            .delivery-bar progress {
+                background-color: #3986FC;
             }
             @keyframes pulse {
                 0% { opacity: 0.5; }
@@ -910,9 +929,9 @@ def show_history(config_dir: Path):
                 bar = (True, "download-bar", chunks_dl / chunks_total)
             elif (item["direction"] == "sent" and not delivered and item_status == "complete"):
                 if recv_dl > 0 and recv_total > 0:
-                    bar = (True, "download-bar", recv_dl / recv_total)
+                    bar = (True, "delivery-bar", recv_dl / recv_total)
                 else:
-                    bar = (True, "upload-bar pulse-bar", 1.0)
+                    bar = (True, "delivery-bar pulse-bar", 1.0)
             else:
                 bar = (False, None, 0.0)
 
@@ -1057,7 +1076,7 @@ def show_history(config_dir: Path):
                 if old_progress_bar:
                     old_progress_bar.set_fraction(fraction)
                     # Update CSS classes
-                    for cls in ("upload-bar", "download-bar", "pulse-bar"):
+                    for cls in ("upload-bar", "download-bar", "delivery-bar", "pulse-bar"):
                         if cls in (bar_cls or ""):
                             old_progress_bar.add_css_class(cls)
                         else:
@@ -1179,9 +1198,10 @@ def show_pairing(config_dir: Path):
     server_url = json.loads(qr_data)["server"]
     device_id = crypto.get_device_id()
 
-    app = Adw.Application(application_id="com.desktopconnector.pairing")
+    app = _make_app()
 
     def on_activate(app):
+        apply_brand_css()
         win = Adw.ApplicationWindow(application=app, title="Pair with Phone",
                                      default_width=400, default_height=560)
 
@@ -1340,16 +1360,17 @@ function updatePos(lat,lng,acc) {
   }
   if (circle) map.removeLayer(circle);
   if (acc && acc > 0) {
-    circle = L.circle([lat,lng], {radius:acc, color:'#3b82f6',
-      fillColor:'#3b82f6', fillOpacity:0.15, weight:1}).addTo(map);
+    circle = L.circle([lat,lng], {radius:acc, color:'#3986FC',
+      fillColor:'#3986FC', fillOpacity:0.15, weight:1}).addTo(map);
   }
 }
 </script>
 </body></html>"""
 
-    app = Adw.Application(application_id="com.desktopconnector.findphone")
+    app = _make_app()
 
     def on_activate(app):
+        apply_brand_css()
         win = Adw.ApplicationWindow(application=app, title="Find my Phone",
                                      default_width=480, default_height=640)
 
