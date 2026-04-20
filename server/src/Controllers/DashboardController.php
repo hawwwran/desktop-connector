@@ -43,6 +43,19 @@ class DashboardController
         $uploadingCount = $stats['uploading_count'] ?? 0;
         $storageBytes = $stats['storage_bytes'] ?? 0;
         $storageMB = round($storageBytes / (1024 * 1024), 2);
+        $quotaMB = (int)Config::get('storageQuotaMB');
+        $quotaBytes = $quotaMB * 1024 * 1024;
+        // Threshold colour: orange (full) at >=100%, yellow at >=80%,
+        // brand blue otherwise. Gives operators a quick visual cue that
+        // new incoming transfers are at risk of 507.
+        if ($quotaBytes > 0 && $storageBytes >= $quotaBytes) {
+            $storageColour = '#EA7601';
+        } elseif ($quotaBytes > 0 && $storageBytes >= 0.8 * $quotaBytes) {
+            $storageColour = '#FDD00C';
+        } else {
+            $storageColour = '#ffffff';
+        }
+        $storageDisplay = sprintf('%.1f / %d MB', $storageMB, $quotaMB);
         $version = self::serverVersion();
         $versionChip = $version !== null ? ('v' . htmlspecialchars($version) . ' &middot; ') : '';
 
@@ -172,7 +185,7 @@ class DashboardController
         <div class="stat"><div class="stat-value">{$pairingCount}</div><div class="stat-label">Pairings</div></div>
         <div class="stat"><div class="stat-value">{$pendingCount}</div><div class="stat-label">Pending transfers</div></div>
         <div class="stat"><div class="stat-value">{$uploadingCount}</div><div class="stat-label">Uploading</div></div>
-        <div class="stat"><div class="stat-value">{$storageMB} MB</div><div class="stat-label">Storage used</div></div>
+        <div class="stat"><div class="stat-value" style="color:{$storageColour}">{$storageDisplay}</div><div class="stat-label">Storage used</div></div>
     </div>
 
     <h2>Devices</h2>

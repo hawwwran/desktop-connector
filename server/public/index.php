@@ -12,6 +12,7 @@ if (PHP_SAPI === 'cli-server') {
 }
 
 require_once __DIR__ . '/../src/Database.php';
+require_once __DIR__ . '/../src/Config.php';
 
 // --- Http pipeline ---
 require_once __DIR__ . '/../src/Http/RequestContext.php';
@@ -138,6 +139,10 @@ $router->authGet('/api/transfers/{transfer_id}/chunks/{chunk_index}', function (
 
 $router->authPost('/api/transfers/{transfer_id}/ack', function (RequestContext $ctx) use ($db) {
     TransferController::ack($db, $ctx);
+});
+
+$router->authDelete('/api/transfers/{transfer_id}', function (RequestContext $ctx) use ($db) {
+    TransferController::cancel($db, $ctx);
 });
 
 $router->authGet('/api/transfers/sent-status', function (RequestContext $ctx) use ($db) {

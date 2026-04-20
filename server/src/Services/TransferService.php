@@ -18,7 +18,6 @@
  */
 class TransferService
 {
-    private const MAX_PENDING_BYTES = 500 * 1024 * 1024;   // 500 MB per recipient
     private const MAX_CHUNK_COUNT = 500;
 
     public static function init(
@@ -33,7 +32,11 @@ class TransferService
             throw new ValidationError('Invalid chunk_count');
         }
 
-        if ((new ChunkRepository($db))->sumPendingBytesForRecipient($recipientId) >= self::MAX_PENDING_BYTES) {
+        // Quota comes from server/data/config.json (auto-created with
+        // defaults); operators can edit without a code change.
+        if ((new ChunkRepository($db))->sumPendingBytesForRecipient($recipientId)
+            >= Config::storageQuotaBytes()
+        ) {
             throw new StorageLimitError('Recipient storage limit exceeded');
         }
 
@@ -200,5 +203,33 @@ class TransferService
         ));
 
         return ['status' => 'deleted'];
+    }
+
+    /**
+     * Sender-initiated cancel. Removes every byte of the transfer from
+     * the server so a still-delivering recipient can't pull further
+     * chunks (it gets 404 on the next chunk request).
+     *
+     * Auth is enforced at the HTTP layer (device_id == sender_id check
+     * here). 404 is returned for unknown transfer ids or transfers that
+     * were never owned by this sender — we deliberately don't
+     * distinguish the two so a poking client can't enumerate transfer
+     * ids of other senders.
+     */
+    public static function cancel(Database $db, string $deviceId, string $transferId): array
+    {
+        $transfers = new TransferRepository($db);
+        $transfer = $transfers->findById($transferId);
+        if (!$transfer || $transfer['sender_id'] !== $deviceId) {
+            throw new NotFoundError('Transfer not found');
+        }
+        TransferCleanupService::deleteTransferFiles($db, $transferId);
+        AppLog::log('Transfer', sprintf(
+            'transfer.cancel.accepted transfer_id=%s sender=%s recipient=%s',
+            AppLog::shortId($transferId),
+            AppLog::shortId($deviceId),
+            AppLog::shortId($transfer['recipient_id']),
+        ));
+        return ['status' => 'cancelled'];
     }
 }

@@ -67,6 +67,12 @@ class TransferController
         Router::json(TransferService::ack($db, $ctx->deviceId, $transferId));
     }
 
+    public static function cancel(Database $db, RequestContext $ctx): void
+    {
+        $transferId = Validators::requireSafeTransferId($ctx->params);
+        Router::json(TransferService::cancel($db, $ctx->deviceId, $transferId));
+    }
+
     public static function sentStatus(Database $db, RequestContext $ctx): void
     {
         $rows = TransferStatusService::loadSentForDevice($db, $ctx->deviceId);

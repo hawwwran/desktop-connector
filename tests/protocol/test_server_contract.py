@@ -342,6 +342,100 @@ class ServerProtocolContractTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", body)
 
+    def _pair_and_init(self):
+        """Create a sender+recipient pair and init a tiny transfer.
+        Returns (sender_id, sender_token, recipient_id, transfer_id)."""
+        sender_id, sender_token, _ = self._register_device("desktop")
+        recipient_id, recipient_token, recipient_pub = self._register_device("phone")
+        # Pair them
+        self.h.request(
+            "POST", "/api/pairing/request",
+            token=recipient_token, device_id=recipient_id,
+            json_body={"desktop_id": sender_id, "phone_pubkey": recipient_pub},
+        )
+        self.h.request(
+            "POST", "/api/pairing/confirm",
+            token=sender_token, device_id=sender_id,
+            json_body={"phone_id": recipient_id},
+        )
+        import uuid
+        tid = str(uuid.uuid4())
+        status, _h, body = self.h.request(
+            "POST", "/api/transfers/init",
+            token=sender_token, device_id=sender_id,
+            json_body={
+                "transfer_id": tid,
+                "recipient_id": recipient_id,
+                "encrypted_meta": "e30=",  # {}
+                "chunk_count": 1,
+            },
+        )
+        self.assertEqual(status, 201)
+        return sender_id, sender_token, recipient_id, recipient_token, tid
+
+    def test_cancel_transfer_by_sender(self):
+        """DELETE /api/transfers/{id} removes chunks + row; recipient
+        gets 404 on pending lookup afterwards."""
+        sender_id, sender_token, recipient_id, recipient_token, tid = \
+            self._pair_and_init()
+        # Upload a 1-byte chunk so there's something to clean up
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=sender_token, device_id=sender_id,
+            raw_body=b"x",
+        )
+        # Cancel as sender — expect 2xx
+        status, _h, _b = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=sender_token, device_id=sender_id,
+        )
+        self.assertIn(status, (200, 204))
+        # Recipient no longer sees it pending
+        status, _h, body = self.h.request(
+            "GET", "/api/transfers/pending",
+            token=recipient_token, device_id=recipient_id,
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn(tid, [t.get("transfer_id") for t in body.get("transfers", [])])
+
+    def test_cancel_transfer_non_sender_denied(self):
+        """A device that isn't the sender can't cancel someone else's
+        transfer — same 404 the route returns for unknown ids (deliberate;
+        keeps the endpoint from leaking transfer-id existence)."""
+        sender_id, sender_token, recipient_id, recipient_token, tid = \
+            self._pair_and_init()
+        status, _h, body = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=recipient_token, device_id=recipient_id,
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+
+    def test_cancel_transfer_requires_auth(self):
+        sender_id, sender_token, recipient_id, recipient_token, tid = \
+            self._pair_and_init()
+        status, _h, body = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",  # no token
+        )
+        self.assertEqual(status, 401)
+
+    def test_config_file_auto_created_with_defaults(self):
+        """Server must auto-create server/data/config.json on first
+        Config::get() call. Startup already triggers it via migrate(),
+        so after the harness starts the file should exist with the
+        default storageQuotaMB=500."""
+        import os as _os
+        config_path = _os.path.join(self.h._server_copy, "data", "config.json")
+        # Trigger Config::get by hitting the dashboard (which calls
+        # Config::get('storageQuotaMB') for the storage stat).
+        status, _h, _b = self.h.request("GET", "/dashboard")
+        self.assertEqual(status, 200)
+        self.assertTrue(_os.path.isfile(config_path),
+                        f"config.json not created at {config_path}")
+        with open(config_path) as fd:
+            data = json.load(fd)
+        self.assertEqual(data.get("storageQuotaMB"), 500)
+
 
 if __name__ == "__main__":
     unittest.main()

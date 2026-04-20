@@ -36,6 +36,11 @@ class Router
         $this->add('POST', $pattern, $handler, requiresAuth: true);
     }
 
+    public function authDelete(string $pattern, callable $handler): void
+    {
+        $this->add('DELETE', $pattern, $handler, requiresAuth: true);
+    }
+
     public function dispatch(string $method, string $uri): void
     {
         try {
