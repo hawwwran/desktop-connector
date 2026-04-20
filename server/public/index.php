@@ -2,6 +2,15 @@
 
 // Desktop Connector - PHP Relay Server
 
+// Let the PHP built-in dev server pass through static files in this directory
+// (favicons etc). Apache/.htaccess handles the same thing in production.
+if (PHP_SAPI === 'cli-server') {
+    $staticPath = __DIR__ . parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+    if (is_file($staticPath)) {
+        return false;
+    }
+}
+
 require_once __DIR__ . '/../src/Database.php';
 
 // --- Http pipeline ---

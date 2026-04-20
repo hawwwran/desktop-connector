@@ -12,6 +12,9 @@ RewriteRule ^migrations/ - [F,L]
 RewriteRule ^firebase-service-account\.json$ - [F,L]
 RewriteRule ^google-services\.json$ - [F,L]
 
+# Serve static brand assets from public/ without rewriting to index.php
+RewriteRule ^favicon-(\d+)\.png$ public/favicon-$1.png [L]
+
 # Route everything else to public/index.php
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^ public/index.php [QSA,L]

@@ -38,6 +38,8 @@ class DashboardController
         $uploadingCount = $stats['uploading_count'] ?? 0;
         $storageBytes = $stats['storage_bytes'] ?? 0;
         $storageMB = round($storageBytes / (1024 * 1024), 2);
+        $version = self::serverVersion();
+        $versionChip = $version !== null ? ('v' . htmlspecialchars($version) . ' &middot; ') : '';
 
         $deviceRows = '';
         foreach ($devices as $d) {
@@ -48,8 +50,8 @@ class DashboardController
             $fullId = htmlspecialchars($d['device_id']);
             $online = ($now - $d['last_seen_at']) < 120;
             $statusDot = $online
-                ? '<span style="color:#22c55e">&#9679;</span> online'
-                : '<span style="color:#ef4444">&#9679;</span> ' . $age . ' ago';
+                ? '<span style="color:#3986FC">&#9679;</span> online'
+                : '<span style="color:#EA7601">&#9679;</span> ' . $age . ' ago';
             $deviceRows .= "<tr>
                 <td title=\"{$fullId}\">{$id}</td>
                 <td>{$type}</td>
@@ -83,7 +85,7 @@ class DashboardController
             $bytes = self::formatBytes($t['total_bytes']);
             $age = self::timeAgo($now - $t['created_at']);
             $status = $t['complete'] ? 'ready' : 'uploading';
-            $statusColor = $t['complete'] ? '#22c55e' : '#f59e0b';
+            $statusColor = $t['complete'] ? '#3986FC' : '#FDD00C';
             $transferRows .= "<tr>
                 <td>{$tid}</td>
                 <td>{$from}</td>
@@ -101,28 +103,37 @@ class DashboardController
 <head>
     <title>Desktop Connector Dashboard</title>
     <meta http-equiv="refresh" content="5">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+    <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-               background: #0f172a; color: #e2e8f0; padding: 24px; }
-        h1 { color: #f8fafc; margin-bottom: 8px; font-size: 1.5rem; }
-        .subtitle { color: #94a3b8; margin-bottom: 24px; font-size: 0.875rem; }
+               background: #000733; color: #E8EEFD; padding: 24px; }
+        h1 { color: #ffffff; margin-bottom: 8px; font-size: 1.5rem;
+             display: flex; align-items: center; gap: 10px; }
+        h1 .spark { width: 22px; height: 22px; flex: none; }
+        .subtitle { color: #A4D0FB; margin-bottom: 24px; font-size: 0.875rem; }
         .stats { display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }
-        .stat { background: #1e293b; border-radius: 8px; padding: 16px 24px; min-width: 140px; }
-        .stat-value { font-size: 1.5rem; font-weight: 700; color: #f8fafc; }
-        .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
-        h2 { color: #f8fafc; margin: 24px 0 12px; font-size: 1.1rem; }
-        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; margin-bottom: 24px; }
-        th { background: #334155; color: #94a3b8; font-size: 0.75rem; text-transform: uppercase;
+        .stat { background: #00146C; border-radius: 8px; padding: 16px 24px; min-width: 140px; }
+        .stat-value { font-size: 1.5rem; font-weight: 700; color: #ffffff; }
+        .stat-label { font-size: 0.75rem; color: #A4D0FB; text-transform: uppercase; letter-spacing: 0.05em; }
+        h2 { color: #ffffff; margin: 24px 0 12px; font-size: 1.1rem; }
+        table { width: 100%; border-collapse: collapse; background: #00146C; border-radius: 8px; overflow: hidden; margin-bottom: 24px; }
+        th { background: #0A1C7A; color: #A4D0FB; font-size: 0.75rem; text-transform: uppercase;
              letter-spacing: 0.05em; padding: 10px 14px; text-align: left; }
-        td { padding: 10px 14px; border-top: 1px solid #334155; font-size: 0.875rem; font-family: 'SF Mono', monospace; }
-        tr:hover td { background: #263048; }
-        .empty { color: #64748b; padding: 24px; text-align: center; }
+        td { padding: 10px 14px; border-top: 1px solid #0A1C7A; font-size: 0.875rem; font-family: 'SF Mono', monospace; }
+        tr:hover td { background: #0920AC; }
+        .empty { color: #5898FB; padding: 24px; text-align: center; }
     </style>
 </head>
 <body>
-    <h1>Desktop Connector</h1>
-    <div class="subtitle">Relay server dashboard &mdash; auto-refreshes every 5s</div>
+    <h1>
+        <svg class="spark" viewBox="0 0 24 24" fill="#3986FC" aria-hidden="true">
+            <path d="M12 0 L14 10 L24 12 L14 14 L12 24 L10 14 L0 12 L10 10 Z"/>
+        </svg>
+        Desktop Connector
+    </h1>
+    <div class="subtitle">{$versionChip}auto-refreshes every 5s</div>
 
     <div class="stats">
         <div class="stat"><div class="stat-value">{$deviceCount}</div><div class="stat-label">Devices</div></div>
@@ -160,6 +171,21 @@ HTML;
         if ($seconds < 3600) return floor($seconds / 60) . 'm';
         if ($seconds < 86400) return floor($seconds / 3600) . 'h';
         return floor($seconds / 86400) . 'd';
+    }
+
+    private static function serverVersion(): ?string
+    {
+        // server/VERSION.md ships with the deploy tree and is the authoritative
+        // release marker (bumped on every release). YAML frontmatter with a
+        // `version: X.Y.Z` line.
+        $path = __DIR__ . '/../../VERSION.md';
+        if (!is_file($path)) return null;
+        $body = (string)@file_get_contents($path);
+        if ($body === '') return null;
+        if (preg_match('/^version:\s*([^\s]+)\s*$/m', $body, $m)) {
+            return $m[1];
+        }
+        return null;
     }
 
     private static function formatBytes(int $bytes): string
