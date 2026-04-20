@@ -35,6 +35,10 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean("location_prompt_dismissed", false)
         set(value) = prefs.edit().putBoolean("location_prompt_dismissed", value).apply()
 
+    var backgroundLocationPromptDismissed: Boolean
+        get() = prefs.getBoolean("background_location_prompt_dismissed", false)
+        set(value) = prefs.edit().putBoolean("background_location_prompt_dismissed", value).apply()
+
     var loggingEnabled: Boolean
         get() = prefs.getBoolean("logging_enabled", false)
         set(value) = prefs.edit().putBoolean("logging_enabled", value).apply()

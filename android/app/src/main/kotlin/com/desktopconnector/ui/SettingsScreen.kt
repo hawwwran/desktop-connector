@@ -209,10 +209,39 @@ fun SettingsScreen(
                             PackageManager.PERMISSION_GRANTED
                     )
                 }
+                var hasBackgroundLocation by remember {
+                    mutableStateOf(
+                        android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                            ) == PackageManager.PERMISSION_GRANTED
+                    )
+                }
                 val locationLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) { results ->
                     hasLocation = results[Manifest.permission.ACCESS_FINE_LOCATION] == true
+                }
+                // Re-check background state when user returns from the system Settings page
+                // (the only way to grant "Allow all the time" on Android 11+).
+                val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                DisposableEffect(lifecycleOwner) {
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                            hasLocation = ContextCompat.checkSelfPermission(
+                                context, Manifest.permission.ACCESS_FINE_LOCATION
+                            ) == PackageManager.PERMISSION_GRANTED
+                            hasBackgroundLocation =
+                                android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+                                    ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                                    ) == PackageManager.PERMISSION_GRANTED
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                 }
 
                 Card(
@@ -237,6 +266,27 @@ fun SettingsScreen(
                                 ))
                             }) {
                                 Text("Grant GPS Permission")
+                            }
+                        }
+                        if (hasLocation) {
+                            Spacer(Modifier.height(8.dp))
+                            SettingsRow(
+                                "Background location",
+                                if (hasBackgroundLocation) "Allowed all the time" else "Foreground only",
+                                if (hasBackgroundLocation) MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.error,
+                            )
+                            if (!hasBackgroundLocation) {
+                                Spacer(Modifier.height(8.dp))
+                                SettingsActionButton(onClick = {
+                                    val intent = android.content.Intent(
+                                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        android.net.Uri.parse("package:${context.packageName}"),
+                                    )
+                                    context.startActivity(intent)
+                                }) {
+                                    Text("Grant Background Location")
+                                }
                             }
                         }
                         Spacer(Modifier.height(8.dp))
@@ -492,10 +542,32 @@ private fun LogsDialog(
     var appendBatteryStats by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    // Check both permissions needed for battery stats
+    // Check both permissions needed for battery stats. PACKAGE_USAGE_STATS is an AppOp,
+    // not a regular runtime permission — checkSelfPermission always returns DENIED for it
+    // even when `appops set ... GET_USAGE_STATS allow` has granted the op. Query the
+    // AppOpsManager directly so the toggle appears once both sides are actually granted.
     val hasAllBatteryStatsPermissions = remember {
-        context.checkSelfPermission(android.Manifest.permission.DUMP) == PackageManager.PERMISSION_GRANTED &&
-        context.checkSelfPermission(android.Manifest.permission.PACKAGE_USAGE_STATS) == PackageManager.PERMISSION_GRANTED
+        val dumpOk = context.checkSelfPermission(android.Manifest.permission.DUMP) ==
+            PackageManager.PERMISSION_GRANTED
+        val appOps = context.getSystemService(android.app.AppOpsManager::class.java)
+        val usageOk = appOps?.let {
+            val mode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                it.unsafeCheckOpNoThrow(
+                    android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    android.os.Process.myUid(),
+                    context.packageName,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                it.checkOpNoThrow(
+                    android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    android.os.Process.myUid(),
+                    context.packageName,
+                )
+            }
+            mode == android.app.AppOpsManager.MODE_ALLOWED
+        } ?: false
+        dumpOk && usageOk
     }
 
     AlertDialog(

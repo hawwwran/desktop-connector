@@ -154,6 +154,91 @@ fun AppNavigation(
                 )
             }
 
+            // Background location prompt (for find-phone when screen is off). Android 11+
+            // cannot grant this via a runtime dialog — must route through App Info. Only
+            // prompts after foreground location is granted, because system denies the
+            // background ask outright without it.
+            val hasBackgroundLocation = remember {
+                mutableStateOf(
+                    android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                        ) == PackageManager.PERMISSION_GRANTED
+                )
+            }
+            val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner) {
+                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                    if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                        hasLocationPermission.value = ContextCompat.checkSelfPermission(
+                            context, Manifest.permission.ACCESS_FINE_LOCATION
+                        ) == PackageManager.PERMISSION_GRANTED
+                        hasBackgroundLocation.value =
+                            android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+                                ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                                ) == PackageManager.PERMISSION_GRANTED
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+            }
+
+            var showBackgroundPrompt by remember { mutableStateOf(false) }
+            var showBackgroundDismissed by remember { mutableStateOf(false) }
+
+            LaunchedEffect(hasLocationPermission.value) {
+                if (FcmManager.isInitialized
+                    && hasLocationPermission.value
+                    && !hasBackgroundLocation.value
+                    && !prefs.backgroundLocationPromptDismissed
+                ) {
+                    showBackgroundPrompt = true
+                }
+            }
+
+            if (showBackgroundPrompt) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    title = { Text("Background Location") },
+                    text = {
+                        Text(
+                            "To locate this phone when the screen is off, allow location access \"All the time\". " +
+                                "Tap Grant, then choose \"Allow all the time\" in the Settings page that opens."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showBackgroundPrompt = false
+                            val intent = android.content.Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:${context.packageName}"),
+                            )
+                            context.startActivity(intent)
+                        }) { Text("Grant") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = {
+                            showBackgroundPrompt = false
+                            prefs.backgroundLocationPromptDismissed = true
+                            showBackgroundDismissed = true
+                        }) { Text("Dismiss") }
+                    },
+                )
+            }
+
+            if (showBackgroundDismissed) {
+                AlertDialog(
+                    onDismissRequest = {},
+                    text = { Text("You can grant background location later in Settings.") },
+                    confirmButton = {
+                        TextButton(onClick = { showBackgroundDismissed = false }) { Text("OK") }
+                    },
+                )
+            }
+
             // Battery optimization prompt for reliable background downloads
             var showBatteryPrompt by remember { mutableStateOf(false) }
             var showBatteryDismissed by remember { mutableStateOf(false) }
