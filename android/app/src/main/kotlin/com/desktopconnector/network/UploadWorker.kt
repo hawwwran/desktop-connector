@@ -138,7 +138,7 @@ class UploadWorker(
                         "warning")
                     db.transferDao().updateStatus(
                         transferDbId, TransferStatus.FAILED,
-                        "Recipient storage full — gave up after 30 min",
+                        "quota exceeded",
                     )
                     spoolFile?.delete()
                     return Result.failure()

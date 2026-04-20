@@ -144,8 +144,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                 }
                 .forEach {
                     db.transferDao().updateStatus(
-                        it.id, TransferStatus.FAILED,
-                        "Recipient storage full — gave up after 30 min",
+                        it.id, TransferStatus.FAILED, "quota exceeded",
                     )
                 }
         }

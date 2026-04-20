@@ -421,7 +421,11 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
             transfer.deliveryTotal > 0 -> "Delivering ${transfer.deliveryChunks}/${transfer.deliveryTotal}"
             else -> "Sent"
         }
-        TransferStatus.FAILED -> transfer.errorMessage ?: "Failed"
+        // errorMessage is a short tag like "quota exceeded"; the full
+        // row renders as "Failed (quota exceeded)". Plain "Failed"
+        // when nothing specific is known.
+        TransferStatus.FAILED -> transfer.errorMessage
+            ?.let { "Failed ($it)" } ?: "Failed"
     }
     val label = transfer.displayLabel.ifEmpty { transfer.displayName }
     val isClipboard = transfer.displayName.startsWith(".fn.clipboard")

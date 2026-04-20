@@ -308,6 +308,7 @@ def show_send_files(config_dir: Path):
                     # Track upload progress in history
                     file_size = filepath.stat().st_size
                     progress_tid = [None]
+                    saw_waiting = [False]
                     def upload_progress(transfer_id, uploaded, total_chunks, fp=filepath, sz=file_size):
                         # uploaded == -1 is the WAITING sentinel raised by
                         # _init_transfer_with_retry when the server replies
@@ -330,6 +331,8 @@ def show_send_files(config_dir: Path):
                                 history.update(transfer_id, status="waiting")
                             else:
                                 history.update(transfer_id, status="uploading")
+                            if uploaded == -1:
+                                saw_waiting[0] = True
                         else:
                             history.update(transfer_id,
                                            status="uploading",
@@ -344,7 +347,14 @@ def show_send_files(config_dir: Path):
                         history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
                         GLib.idle_add(remove_row, filepath)
                     elif progress_tid[0]:
-                        history.update(progress_tid[0], status="failed")
+                        # If the send bounced on quota (saw a WAITING
+                        # signal during init), tag the failure so the
+                        # history row renders as "Failed (quota
+                        # exceeded)". Otherwise plain Failed — we can't
+                        # always distinguish network vs protocol errors.
+                        reason = "quota_timeout" if saw_waiting[0] else None
+                        history.update(progress_tid[0], status="failed",
+                                        failure_reason=reason)
 
                 clear_status()
                 GLib.idle_add(finish_sending, sent, total)
@@ -737,7 +747,8 @@ def show_history(config_dir: Path):
             tid = _it.get("transfer_id")
             if tid:
                 history.update(tid, status="failed",
-                               chunks_downloaded=0, chunks_total=0)
+                               chunks_downloaded=0, chunks_total=0,
+                               failure_reason="quota_timeout")
 
     app = _make_app()
 
@@ -992,7 +1003,18 @@ def show_history(config_dir: Path):
                 text = f"Downloading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Downloading"
             elif item_status == "failed":
                 # Brand error slot — matches android/server/tray.
-                text = f'<span foreground="{DC_ORANGE_700}">Failed</span>'
+                # failure_reason (optional) is a short tag set by the
+                # callers that know WHY a send failed; renders as a
+                # parenthetical note. No tag => plain "Failed".
+                reason = item.get("failure_reason")
+                reason_label = {
+                    "quota": "quota exceeded",
+                    "quota_timeout": "quota exceeded",
+                }.get(reason)
+                if reason_label:
+                    text = f'<span foreground="{DC_ORANGE_700}">Failed ({reason_label})</span>'
+                else:
+                    text = f'<span foreground="{DC_ORANGE_700}">Failed</span>'
             elif item["direction"] == "received":
                 # Sky blue — completed incoming transfer.
                 text = f'<span foreground="{DC_BLUE_400}">Received</span>'
