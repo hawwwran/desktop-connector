@@ -8,8 +8,15 @@ class Database
     private function __construct(string $dbPath)
     {
         $this->db = new SQLite3($dbPath);
+        // busyTimeout MUST come first. The PRAGMA-exec form can itself
+        // fail with "database is locked" under concurrent load before
+        // any busy-wait is configured — that's what produced the big
+        // yellow warning banner on the dashboard whenever two upload
+        // workers hit PHP at the same time. The native busyTimeout()
+        // call isn't a PRAGMA and can't be blocked, so it takes effect
+        // before any subsequent exec/prepare.
+        $this->db->busyTimeout(5000);
         $this->db->exec('PRAGMA journal_mode=WAL');
-        $this->db->exec('PRAGMA busy_timeout=5000');
         $this->db->exec('PRAGMA foreign_keys=ON');
     }
 
