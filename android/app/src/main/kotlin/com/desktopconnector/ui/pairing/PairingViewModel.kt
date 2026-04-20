@@ -96,8 +96,11 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         _state.value = current.copy(stage = PairingStage.COMPLETE)
         AppLog.log("Pairing", "pairing.confirm.accepted peer=${current.desktopId.take(12)}")
 
-        // Trigger FCM init now that we have a paired device
-        FcmManager.reset()
+        // Trigger FCM init now that we have a paired device. Pass prefs so
+        // the cached FCM token is cleared — otherwise the next
+        // registerToken() would skip the POST because the token string
+        // is unchanged, and the new server record would never learn it.
+        FcmManager.reset(prefs)
     }
 
     fun cancel() {

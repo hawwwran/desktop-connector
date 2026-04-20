@@ -182,7 +182,12 @@ fun SettingsScreen(
                             onClick = {
                                 fcmChecking = true
                                 scope.launch(Dispatchers.IO) {
-                                    FcmManager.reset()
+                                    // Pass prefs so the cached FCM token is
+                                    // also cleared — the "Re-check FCM"
+                                    // button in Settings is the manual
+                                    // recovery hatch for the case the
+                                    // server lost this device's token.
+                                    FcmManager.reset(prefs)
                                     val result = try {
                                         FcmManager.initialize(context.applicationContext, prefs)
                                     } catch (_: Exception) { false }

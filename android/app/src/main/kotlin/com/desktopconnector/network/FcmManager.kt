@@ -37,11 +37,21 @@ object FcmManager {
      * is ready (or was already initialized). Returns false on any failure.
      */
     /**
-     * Reset init state so the next initialize() call tries again.
-     * Call after pairing or server URL change.
+     * Reset init state AND the cached token so the next initialize() call
+     * fully re-runs *and* the next registerToken() actually POSTs.
+     *
+     * FCM tokens survive pair cycles (and even app reinstalls — the token
+     * is keyed on installation + sender_id). Without also clearing
+     * prefs.fcmToken, the `if (token != storedToken)` check inside
+     * registerToken() skips the POST, and a fresh server record (e.g.
+     * after a re-pair or server-side DB wipe) never learns this device's
+     * FCM token — every subsequent push comes back `fcm_result=no_token`
+     * and the phone can't be woken.
      */
-    fun reset() {
+    fun reset(prefs: AppPreferences? = null) {
+        isInitialized = false
         initAttempted = false
+        prefs?.fcmToken = null
     }
 
     fun initialize(context: Context, prefs: AppPreferences): Boolean {
@@ -93,29 +103,44 @@ object FcmManager {
     }
 
     /**
-     * Get current FCM token and send to server if it changed.
+     * Get current FCM token and send to server.
+     *
+     * Always POSTs — the previous "only if token changed vs prefs cache"
+     * optimization caused a silent failure mode: FCM tokens survive
+     * pair cycles and even reinstalls (keyed on installation + sender),
+     * so whenever the server's record was wiped (re-pair, DB restore),
+     * the phone thought it had already registered and skipped the POST,
+     * leaving the server with no_token on every wake and the tray stuck
+     * painting "phone offline".
+     *
+     * One extra POST per init is cheap and keeps the server record
+     * authoritatively in sync. We still cache the token in prefs for
+     * diagnostics / audit but don't gate on it.
      */
     fun registerToken(prefs: AppPreferences) {
         try {
             FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-                val storedToken = prefs.fcmToken
-                if (token != storedToken) {
-                    val serverUrl = prefs.serverUrl ?: return@addOnSuccessListener
-                    val deviceId = prefs.deviceId ?: return@addOnSuccessListener
-                    val authToken = prefs.authToken ?: return@addOnSuccessListener
+                val serverUrl = prefs.serverUrl ?: return@addOnSuccessListener
+                val deviceId = prefs.deviceId ?: return@addOnSuccessListener
+                val authToken = prefs.authToken ?: return@addOnSuccessListener
 
-                    Thread {
-                        try {
-                            val api = ApiClient(serverUrl, deviceId, authToken)
-                            if (api.updateFcmToken(token)) {
-                                prefs.fcmToken = token
-                                AppLog.log("FCM", "Token registered")
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Token registration failed: ${e.message}")
+                Thread {
+                    try {
+                        val api = ApiClient(serverUrl, deviceId, authToken)
+                        if (api.updateFcmToken(token)) {
+                            prefs.fcmToken = token
+                            AppLog.log("FCM", "Token registered")
+                        } else {
+                            AppLog.log("FCM", "Token registration failed (non-2xx)", "warning")
                         }
-                    }.start()
-                }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Token registration failed: ${e.message}")
+                        AppLog.log("FCM", "Token registration exception: ${e.javaClass.simpleName}", "warning")
+                    }
+                }.start()
+            }.addOnFailureListener { e ->
+                Log.w(TAG, "Failed to get FCM token: ${e.message}")
+                AppLog.log("FCM", "Failed to get token: ${e.javaClass.simpleName}", "warning")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to get FCM token: ${e.message}")
