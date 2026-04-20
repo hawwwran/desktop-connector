@@ -25,7 +25,7 @@ data class PairingState(
     val error: String? = null,
 )
 
-enum class PairingStage { SCANNING, VERIFYING, COMPLETE, ERROR }
+enum class PairingStage { SCANNING, SENDING, VERIFYING, COMPLETE, ERROR }
 
 class PairingViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -37,6 +37,9 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
 
     fun onQrScanned(serverUrl: String, desktopId: String, desktopPubkey: String, desktopName: String) {
         AppLog.log("Pairing", "pairing.qr.scanned desktop_id=${desktopId.take(12)}")
+        // Flip immediately so the UI stops the scanner and shows a spinner
+        // while we register + send the pairing request over the network.
+        _state.value = PairingState(stage = PairingStage.SENDING)
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 // Save server URL

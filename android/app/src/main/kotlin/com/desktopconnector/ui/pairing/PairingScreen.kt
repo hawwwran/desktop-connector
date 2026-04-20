@@ -30,9 +30,12 @@ import org.json.JSONObject
 
 @Composable
 fun PairingScreen(
+    stage: PairingStage,
+    errorMessage: String?,
     onQrScanned: (serverUrl: String, desktopId: String, desktopPubkey: String, desktopName: String) -> Unit,
     verificationCode: String?,
     onConfirmPairing: () -> Unit,
+    onRetry: () -> Unit,
     onCancel: () -> Unit,
 ) {
     var scannedData by remember { mutableStateOf<JSONObject?>(null) }
@@ -54,7 +57,38 @@ fun PairingScreen(
         )
         Spacer(Modifier.height(8.dp))
 
-        if (verificationCode != null) {
+        if (stage == PairingStage.SENDING) {
+            Spacer(Modifier.height(48.dp))
+            CircularProgressIndicator()
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "Waiting for desktop to accept pairing…",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(24.dp))
+            OutlinedButton(onClick = onCancel) { Text("Cancel") }
+        } else if (stage == PairingStage.ERROR) {
+            Spacer(Modifier.height(48.dp))
+            Text(
+                "Pairing failed",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                errorMessage ?: "The desktop didn't respond. Make sure it's running the latest version and showing a QR code, then try again.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(24.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                OutlinedButton(onClick = onCancel) { Text("Close") }
+                Button(onClick = onRetry) { Text("Scan again") }
+            }
+        } else if (verificationCode != null) {
             // Verification stage
             Text(
                 "Verify this code matches your desktop:",

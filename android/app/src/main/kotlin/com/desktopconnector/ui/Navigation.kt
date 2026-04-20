@@ -307,10 +307,14 @@ fun AppNavigation(
                 )
             }
 
+            val authFailureKind by transferViewModel.connectionManager.authFailureKind
+                .collectAsState()
+
             HomeScreen(
                 connectionState = connState,
                 transfers = transfers,
                 isRefreshing = isRefreshing,
+                authFailureKind = authFailureKind,
                 onFilesSelected = { uris -> transferViewModel.queueFiles(uris) },
                 onSendClipboard = { transferViewModel.sendClipboard() },
                 onSendUri = { uri -> transferViewModel.queueFiles(listOf(uri)) },
@@ -320,6 +324,12 @@ fun AppNavigation(
                 onNavigateSettings = { navController.navigate("settings") },
                 onNavigateDownloads = { navController.navigate("downloads") },
                 onClearHistory = { transferViewModel.clearHistory() },
+                onRepair = {
+                    transferViewModel.repairFromAuthFailure()
+                    navController.navigate("pairing") {
+                        popUpTo("home") { inclusive = false }
+                    }
+                },
             )
         }
 
@@ -344,12 +354,21 @@ fun AppNavigation(
             }
 
             PairingScreen(
+                stage = state.stage,
+                errorMessage = state.error,
                 onQrScanned = { server, id, pubkey, name ->
                     pairingViewModel.onQrScanned(server, id, pubkey, name)
                 },
                 verificationCode = state.verificationCode,
                 onConfirmPairing = { pairingViewModel.confirmPairing() },
-                onCancel = { pairingViewModel.cancel() },
+                onRetry = { pairingViewModel.reset() },
+                // Cancel exits the pairing screen entirely — previously it
+                // reset state to SCANNING which was a no-op since the
+                // scanner was already showing.
+                onCancel = {
+                    pairingViewModel.reset()
+                    navController.popBackStack("home", inclusive = false)
+                },
             )
         }
 

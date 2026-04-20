@@ -1,11 +1,27 @@
 package com.desktopconnector.network
 
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+
+
+/** Why the server rejected our credentials. 401 vs 403 mark different
+ *  recovery scopes — see ConnectionManager / HomeScreen consumers. */
+enum class AuthFailureKind { CREDENTIALS_INVALID, PAIRING_MISSING }
+
+
+/** Every authenticated HTTP call funnels a verdict through this flow so
+ *  ConnectionManager can maintain the consecutive-failure counter. */
+sealed class AuthObservation {
+    object Success : AuthObservation()
+    data class Failure(val kind: AuthFailureKind) : AuthObservation()
+}
 
 /**
  * HTTP client for all server API endpoints.
@@ -31,9 +47,34 @@ class ApiClient(
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val binaryType = "application/octet-stream".toMediaType()
 
+    companion object {
+        // Global auth-observation bus: every ApiClient (view-model's and
+        // PollService's short-lived ones) emits to the same flow so one
+        // ConnectionManager can aggregate the full picture. extraBufferCapacity
+        // makes tryEmit non-suspending under burst polling.
+        private val _authObservations = MutableSharedFlow<AuthObservation>(
+            extraBufferCapacity = 16,
+        )
+        val authObservations: SharedFlow<AuthObservation> = _authObservations.asSharedFlow()
+
+        internal fun emitAuth(observation: AuthObservation) {
+            _authObservations.tryEmit(observation)
+        }
+    }
+
     fun setCredentials(deviceId: String, authToken: String) {
         this.deviceId = deviceId
         this.authToken = authToken
+    }
+
+    private fun reportAuthStatus(code: Int) {
+        val o = when (code) {
+            in 200..299 -> AuthObservation.Success
+            401 -> AuthObservation.Failure(AuthFailureKind.CREDENTIALS_INVALID)
+            403 -> AuthObservation.Failure(AuthFailureKind.PAIRING_MISSING)
+            else -> return  // 4xx/5xx for other reasons are not auth verdicts
+        }
+        emitAuth(o)
     }
 
     private fun authHeaders(builder: Request.Builder): Request.Builder {
@@ -139,6 +180,7 @@ class ApiClient(
         return try {
             call.execute().use { resp ->
                 activeLongPollCall = null
+                reportAuthStatus(resp.code)
                 val body = resp.body?.string() ?: return null
                 if (resp.isSuccessful) JSONObject(body) else null
             }
@@ -165,6 +207,7 @@ class ApiClient(
             .build()
         return try {
             client.newCall(request).execute().use { resp ->
+                reportAuthStatus(resp.code)
                 if (resp.isSuccessful) resp.body?.bytes() else null
             }
         } catch (e: Exception) {
@@ -193,7 +236,10 @@ class ApiClient(
             .post("".toRequestBody(jsonType))
             .build()
         return try {
-            pongClient.newCall(request).execute().use { it.isSuccessful }
+            pongClient.newCall(request).execute().use {
+                reportAuthStatus(it.code)
+                it.isSuccessful
+            }
         } catch (e: Exception) {
             false
         }
@@ -260,10 +306,21 @@ class ApiClient(
         .build()
 
     fun healthCheck(fast: Boolean = false): Boolean {
+        // Use an authenticated endpoint so a 200 genuinely proves "we can
+        // reach the server AND our creds are valid". /api/health was
+        // optional-auth and 200'd even with stale creds — that's how the
+        // persistent notification and tray could show "online" while every
+        // authed call was getting 401'd.
         return try {
-            val request = authHeaders(Request.Builder()).url("$serverUrl/api/health").get().build()
+            val request = authHeaders(Request.Builder())
+                .url("$serverUrl/api/transfers/pending")
+                .get()
+                .build()
             val c = if (fast) heartbeatClient else client
-            c.newCall(request).execute().use { it.isSuccessful }
+            c.newCall(request).execute().use { resp ->
+                reportAuthStatus(resp.code)
+                resp.isSuccessful
+            }
         } catch (e: Exception) {
             false
         }
@@ -272,6 +329,7 @@ class ApiClient(
     private fun executeJson(request: Request): JSONObject? {
         return try {
             client.newCall(request).execute().use { resp ->
+                reportAuthStatus(resp.code)
                 val body = resp.body?.string() ?: return null
                 if (resp.isSuccessful) JSONObject(body) else null
             }
@@ -282,7 +340,10 @@ class ApiClient(
 
     private fun executeStatus(request: Request): Boolean {
         return try {
-            client.newCall(request).execute().use { it.isSuccessful }
+            client.newCall(request).execute().use {
+                reportAuthStatus(it.code)
+                it.isSuccessful
+            }
         } catch (e: Exception) {
             false
         }

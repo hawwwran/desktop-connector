@@ -69,4 +69,13 @@ class AppPreferences(context: Context) {
     fun clear() {
         prefs.edit().clear().apply()
     }
+
+    /** Drop the device_id/auth_token pair so the next app start re-registers
+     *  with the server. Leaves theme/server URL/other prefs alone. */
+    fun clearAuthCredentials() {
+        prefs.edit()
+            .remove("device_id")
+            .remove("auth_token")
+            .apply()
+    }
 }

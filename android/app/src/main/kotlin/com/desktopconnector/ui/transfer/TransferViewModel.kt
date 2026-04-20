@@ -72,6 +72,15 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             connectionManager.authToken = prefs.authToken ?: ""
         }
 
+        // Feed every authenticated HTTP verdict (from the view-model's
+        // ApiClient and PollService's ApiClients alike) into the counter
+        // that decides when to surface the "re-pair" banner.
+        viewModelScope.launch(Dispatchers.IO) {
+            ApiClient.authObservations.collect { observation ->
+                connectionManager.observeAuth(observation)
+            }
+        }
+
         // Health check loop — pings server, then waits for backoff or 15s
         viewModelScope.launch(Dispatchers.IO) {
             while (true) {
@@ -94,10 +103,13 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        // UI tick — updates status text and connection state every second
+        // UI tick — updates status text and effective connection state every
+        // second. Effective state folds auth-invalid into DISCONNECTED, so a
+        // latched 401/403 paints the status dot offline even while network
+        // reachability to /api/health is fine.
         viewModelScope.launch(Dispatchers.IO) {
             while (true) {
-                _connectionState.value = connectionManager.state.value
+                _connectionState.value = connectionManager.effectiveState.value
                 _statusText.value = connectionManager.getStatusText()
                 delay(1_000)
             }
@@ -582,6 +594,27 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             connectionManager.tryNow()
             _connectionState.value = connectionManager.state.value
             _statusText.value = connectionManager.getStatusText()
+        }
+    }
+
+    /** User tapped the "Re-pair" banner. Wipes the appropriate scope and
+     *  clears the latched auth-failure flag. Caller navigates to the
+     *  pairing screen. */
+    fun repairFromAuthFailure() {
+        val kind = connectionManager.authFailureKind.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            keyManager.removeAllPairedDevices()
+            if (kind == com.desktopconnector.network.AuthFailureKind.CREDENTIALS_INVALID) {
+                prefs.clearAuthCredentials()
+                keyManager.resetKeypair()
+            }
+            // FCM token survives pair cycles on the device side but the
+            // server's record of it just got wiped. Reset so the next
+            // registerToken() POSTs rather than skipping on a matching
+            // cached string.
+            com.desktopconnector.network.FcmManager.reset(prefs)
+            _isPaired.value = false
+            connectionManager.clearAuthFailure()
         }
     }
 

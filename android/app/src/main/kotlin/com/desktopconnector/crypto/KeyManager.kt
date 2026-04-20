@@ -99,6 +99,25 @@ class KeyManager(context: Context) {
         securePrefs.edit().remove("paired_$deviceId").apply()
     }
 
+    /** Drop every paired_* row. Shared helper used by the .fn.unpair flow
+     *  and by the AUTH_INVALID banner's re-pair button. */
+    fun removeAllPairedDevices() {
+        val editor = securePrefs.edit()
+        securePrefs.all.keys
+            .filter { it.startsWith("paired_") }
+            .forEach { editor.remove(it) }
+        editor.apply()
+    }
+
+    /** For AUTH_INVALID kind = CREDENTIALS_INVALID: also nuke the on-device
+     *  keypair so the next register() generates a fresh public key (and
+     *  therefore a fresh device_id). The server's zombie row expires on its
+     *  own. */
+    fun resetKeypair() {
+        securePrefs.edit().remove("private_key").apply()
+        generateKeypair()
+    }
+
     // --- File encryption (streaming) ---
 
     /** Generate a random 12-byte base nonce for a transfer. */

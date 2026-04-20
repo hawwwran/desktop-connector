@@ -27,6 +27,7 @@ import com.desktopconnector.data.QueuedTransfer
 import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
 import com.desktopconnector.network.ApiClient
+import com.desktopconnector.network.AuthObservation
 import com.desktopconnector.network.FcmManager
 import com.desktopconnector.messaging.DeviceMessage
 import com.desktopconnector.messaging.MessageAdapters
@@ -113,7 +114,37 @@ class PollService : Service() {
         scope.launch { pollLoop() }
         scope.launch { deliveryTrackerLoop() }
         scope.launch { sweepStaleParts() }
+        scope.launch { observeAuthForNotification() }
         Log.i(TAG, "PollService started")
+    }
+
+    /** Keep the persistent notification honest about auth state: a 401/403
+     *  on any poll call flips it to Disconnected immediately; a 2xx
+     *  authenticated response restores it. Without this the notification
+     *  would cling to "Connected" because `healthCheck()` used to hit an
+     *  optional-auth endpoint and ordinary poll calls silently dropped
+     *  auth failures. */
+    private suspend fun observeAuthForNotification() {
+        ApiClient.authObservations.collect { obs ->
+            when (obs) {
+                is AuthObservation.Failure -> {
+                    if (isConnected) {
+                        isConnected = false
+                        updateNotification(buildIdleNotification(false))
+                        AppLog.log("Auth",
+                            "notification.auth.disconnected kind=${obs.kind.name}",
+                            "warning")
+                    }
+                }
+                is AuthObservation.Success -> {
+                    if (!isConnected) {
+                        isConnected = true
+                        updateNotification(buildIdleNotification(true))
+                        AppLog.log("Auth", "notification.auth.connected")
+                    }
+                }
+            }
+        }
     }
 
     /**

@@ -49,6 +49,7 @@ import com.desktopconnector.R
 import com.desktopconnector.data.QueuedTransfer
 import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
+import com.desktopconnector.network.AuthFailureKind
 import com.desktopconnector.network.ConnectionState
 import com.desktopconnector.ui.theme.brandColors
 
@@ -58,6 +59,7 @@ fun HomeScreen(
     connectionState: ConnectionState,
     transfers: List<QueuedTransfer>,
     isRefreshing: Boolean,
+    authFailureKind: AuthFailureKind?,
     onFilesSelected: (List<Uri>) -> Unit,
     onSendClipboard: () -> Unit,
     onSendUri: (Uri) -> Unit,
@@ -67,6 +69,7 @@ fun HomeScreen(
     onNavigateSettings: () -> Unit,
     onNavigateDownloads: () -> Unit,
     onClearHistory: () -> Unit,
+    onRepair: () -> Unit,
 ) {
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
@@ -154,6 +157,12 @@ fun HomeScreen(
             },
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
+                if (authFailureKind != null) {
+                    AuthFailureBanner(
+                        kind = authFailureKind,
+                        onRepair = onRepair,
+                    )
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -274,6 +283,49 @@ fun HomeScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AuthFailureBanner(
+    kind: AuthFailureKind,
+    onRepair: () -> Unit,
+) {
+    val brand = MaterialTheme.brandColors
+    val message = when (kind) {
+        AuthFailureKind.CREDENTIALS_INVALID ->
+            "Server doesn't recognise this device. Re-pair to restore the connection."
+        AuthFailureKind.PAIRING_MISSING ->
+            "Pairing was lost on the server. Re-pair to restore the connection."
+    }
+    androidx.compose.material3.Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Button(
+                onClick = onRepair,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+            ) { Text("Re-pair") }
         }
     }
 }
