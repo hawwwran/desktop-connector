@@ -26,6 +26,11 @@ class DashboardController
             'pending_count' => $transfers->countPendingByCompleteDownloaded(1, 0),
             'uploading_count' => $transfers->countPendingByCompleteDownloaded(0, 0),
             'storage_bytes' => $chunks->sumAllBytes(),
+            // The quota is per-recipient, not global — so the value the
+            // dashboard should compare to storageQuotaMB is the largest
+            // individual queue, not sumAllBytes() (which can exceed the
+            // quota across several recipients while each stays under it).
+            'peak_recipient_bytes' => $chunks->peakPendingBytesForAnyRecipient(),
         ];
 
         http_response_code(200);
@@ -50,17 +55,26 @@ class DashboardController
         $storageMB = round($storageBytes / (1024 * 1024), 2);
         $quotaMB = (int)Config::get('storageQuotaMB');
         $quotaBytes = $quotaMB * 1024 * 1024;
-        // Threshold colour: orange (full) at >=100%, yellow at >=80%,
-        // brand blue otherwise. Gives operators a quick visual cue that
-        // new incoming transfers are at risk of 507.
-        if ($quotaBytes > 0 && $storageBytes >= $quotaBytes) {
-            $storageColour = '#EA7601';
-        } elseif ($quotaBytes > 0 && $storageBytes >= 0.8 * $quotaBytes) {
-            $storageColour = '#FDD00C';
+        $peakBytes = (int)($stats['peak_recipient_bytes'] ?? 0);
+        $peakMB = round($peakBytes / (1024 * 1024), 2);
+
+        // "Storage used" card: total pending bytes across all transfers.
+        // Informational only — no quota framing because the quota is
+        // per-recipient, not global.
+        $storageDisplay = sprintf('%.1f MB', $storageMB);
+
+        // "Peak queue" card: largest single-recipient queue against
+        // the configured quota. THIS is what determines whether a new
+        // send will 507 on init. Threshold colour: orange (full) at
+        // >=100 %, yellow at >=80 %, white otherwise.
+        if ($quotaBytes > 0 && $peakBytes >= $quotaBytes) {
+            $peakColour = '#EA7601';
+        } elseif ($quotaBytes > 0 && $peakBytes >= 0.8 * $quotaBytes) {
+            $peakColour = '#FDD00C';
         } else {
-            $storageColour = '#ffffff';
+            $peakColour = '#ffffff';
         }
-        $storageDisplay = sprintf('%.1f / %d MB', $storageMB, $quotaMB);
+        $peakDisplay = sprintf('%.1f / %d MB', $peakMB, $quotaMB);
         $version = self::serverVersion();
         $versionChip = $version !== null ? ('v' . htmlspecialchars($version) . ' &middot; ') : '';
 
@@ -190,7 +204,8 @@ class DashboardController
         <div class="stat"><div class="stat-value">{$pairingCount}</div><div class="stat-label">Pairings</div></div>
         <div class="stat"><div class="stat-value">{$pendingCount}</div><div class="stat-label">Pending transfers</div></div>
         <div class="stat"><div class="stat-value">{$uploadingCount}</div><div class="stat-label">Uploading</div></div>
-        <div class="stat"><div class="stat-value" style="color:{$storageColour}">{$storageDisplay}</div><div class="stat-label">Storage used</div></div>
+        <div class="stat"><div class="stat-value">{$storageDisplay}</div><div class="stat-label">Storage used</div></div>
+        <div class="stat"><div class="stat-value" style="color:{$peakColour}">{$peakDisplay}</div><div class="stat-label">Peak queue / quota</div></div>
     </div>
 
     <h2>Devices</h2>

@@ -103,4 +103,26 @@ class ChunkRepository
         );
         return (int)($row['total'] ?? 0);
     }
+
+    /**
+     * Largest per-recipient pending-bytes figure — the value the quota
+     * check in TransferService::init actually bounds. Used by the
+     * dashboard so operators can see how close any single recipient's
+     * queue is to 507 territory, which sumAllBytes() alone can't show
+     * (total across several recipients can exceed the per-recipient
+     * quota while every individual recipient stays under it).
+     */
+    public function peakPendingBytesForAnyRecipient(): int
+    {
+        $row = $this->db->querySingle(
+            'SELECT COALESCE(MAX(total), 0) as peak FROM (
+                SELECT SUM(c.blob_size) as total
+                FROM chunks c
+                JOIN transfers t ON c.transfer_id = t.id
+                WHERE t.downloaded = 0
+                GROUP BY t.recipient_id
+             )'
+        );
+        return (int)($row['peak'] ?? 0);
+    }
 }
