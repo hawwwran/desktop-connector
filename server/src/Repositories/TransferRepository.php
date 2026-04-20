@@ -178,6 +178,22 @@ class TransferRepository
         return (int)($row['count'] ?? 0);
     }
 
+    /**
+     * Total chunk_count across every transfer still owed to this
+     * recipient (not yet fully downloaded). Used at init to project
+     * reserved storage (chunks * CHUNK_SIZE) and enforce the per-
+     * recipient quota before we accept a new transfer.
+     */
+    public function sumPendingChunkCountForRecipient(string $recipientId): int
+    {
+        $row = $this->db->querySingle(
+            'SELECT COALESCE(SUM(chunk_count), 0) as total FROM transfers
+             WHERE recipient_id = :rid AND downloaded = 0',
+            [':rid' => $recipientId]
+        );
+        return (int)($row['total'] ?? 0);
+    }
+
     public function countDeliveredSinceForSender(string $senderId, int $since): int
     {
         $row = $this->db->querySingle(

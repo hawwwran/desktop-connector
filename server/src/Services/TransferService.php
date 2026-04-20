@@ -23,6 +23,11 @@ require_once __DIR__ . '/../Config.php';
 class TransferService
 {
     private const MAX_CHUNK_COUNT = 500;
+    /** Must match the clients' CHUNK_SIZE. Used to project a transfer's
+     *  eventual on-disk size at init-time so the quota can reserve space
+     *  before chunks arrive — without this, N transfers could each look
+     *  under-quota at init while their combined payloads blow past it. */
+    private const PROJECTED_CHUNK_SIZE = 2 * 1024 * 1024;
 
     public static function init(
         Database $db,
@@ -38,9 +43,24 @@ class TransferService
 
         // Quota comes from server/data/config.json (auto-created with
         // defaults); operators can edit without a code change.
-        if ((new ChunkRepository($db))->sumPendingBytesForRecipient($recipientId)
-            >= Config::storageQuotaBytes()
-        ) {
+        //
+        // Project the full eventual size of the new transfer PLUS every
+        // still-in-flight transfer to this recipient. Without the
+        // projection, init can accept a new big transfer because no
+        // chunks have uploaded yet (0 bytes counted), and per-chunk
+        // uploads have no second quota gate — so the server quietly
+        // overshoots the cap. Projecting up-front is a tight bound
+        // because chunk_count is known at init.
+        $transferRepo = new TransferRepository($db);
+        $quotaBytes = Config::storageQuotaBytes();
+        $pendingBytes = (new ChunkRepository($db))->sumPendingBytesForRecipient($recipientId);
+        $reservedChunks = $transferRepo->sumPendingChunkCountForRecipient($recipientId);
+        // reserved = already-uploaded + not-yet-uploaded for every
+        // in-flight transfer. Cap at pendingBytes so an aggressive
+        // projection doesn't double-count bytes that actually landed.
+        $reservedProjected = max($pendingBytes, $reservedChunks * self::PROJECTED_CHUNK_SIZE);
+        $newProjected = $chunkCount * self::PROJECTED_CHUNK_SIZE;
+        if ($reservedProjected + $newProjected > $quotaBytes) {
             throw new StorageLimitError('Recipient storage limit exceeded');
         }
 

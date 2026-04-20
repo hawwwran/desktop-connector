@@ -17,6 +17,13 @@ from .crypto import KeyManager, CHUNK_SIZE
 
 CHUNK_RETRY_DELAY_S = 5.0
 CHUNK_MAX_FAILURE_WINDOW_S = 120.0
+# Upper bound on how long a single transfer can sit in WAITING state
+# (server replied 507 "storage full") before we give up and mark it
+# failed. Without a cap, a closed send-files window would leave its
+# row stuck "waiting" forever since there's no longer a subprocess to
+# retry. 30 minutes is enough to outlast any reasonable chunk-drain
+# on the recipient side while still cleaning up abandoned sends.
+STORAGE_FULL_MAX_WINDOW_S = 30 * 60
 
 log = logging.getLogger(__name__)
 
@@ -268,6 +275,7 @@ class ApiClient:
         meaning "not in upload phase yet, show WAITING".
         """
         first_failure_at: float | None = None
+        waiting_started_at: float | None = None
         signaled_waiting = False
         while True:
             outcome = "failed"
@@ -294,8 +302,19 @@ class ApiClient:
                     except Exception:
                         log.exception("waiting-state on_progress failed")
                     signaled_waiting = True
-                # Indefinite retry on storage-full: recipient quota will
-                # drain as the phone downloads earlier transfers.
+                    waiting_started_at = time.monotonic()
+                # Bounded wait on storage-full: if the recipient quota
+                # doesn't free up in STORAGE_FULL_MAX_WINDOW_S (30 min)
+                # we give up and surface Failed. Prevents a long-dead
+                # send-files subprocess from accidentally keeping the
+                # row alive forever.
+                if waiting_started_at is not None and \
+                        time.monotonic() - waiting_started_at >= STORAGE_FULL_MAX_WINDOW_S:
+                    log.warning(
+                        "transfer.init.waiting.timed_out transfer_id=%s elapsed=%ds",
+                        transfer_id[:12], int(STORAGE_FULL_MAX_WINDOW_S),
+                    )
+                    return False
                 log.info("transfer.init.waiting transfer_id=%s reason=storage_full",
                          transfer_id[:12])
                 time.sleep(CHUNK_RETRY_DELAY_S)

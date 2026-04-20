@@ -715,6 +715,30 @@ def show_history(config_dir: Path):
     crypto = KeyManager(config_dir)
     history = TransferHistory(config_dir)
 
+    # Scrub zombie "waiting" rows: subprocesses that once owned a
+    # queued send but have long since exited (window closed, crashed,
+    # pre-fix build with chunks_downloaded=-1). A row is a zombie if
+    # it's been sitting in waiting for more than the retry budget —
+    # any subprocess that's still actively retrying would have given
+    # up by STORAGE_FULL_MAX_WINDOW_S (30 min) and marked it failed
+    # itself. chunks_downloaded < 0 is the explicit legacy sentinel
+    # from older builds.
+    from .api_client import STORAGE_FULL_MAX_WINDOW_S
+    _zombie_cutoff = int(time.time()) - int(STORAGE_FULL_MAX_WINDOW_S)
+    for _it in list(history.items):
+        _is_waiting = (
+            _it.get("status") == "waiting"
+            or (_it.get("chunks_downloaded", 0) or 0) < 0
+        )
+        if not _is_waiting:
+            continue
+        if _it.get("chunks_downloaded", 0) < 0 or \
+                int(_it.get("timestamp", 0) or 0) < _zombie_cutoff:
+            tid = _it.get("transfer_id")
+            if tid:
+                history.update(tid, status="failed",
+                               chunks_downloaded=0, chunks_total=0)
+
     app = _make_app()
 
     import re as _re
