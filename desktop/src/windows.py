@@ -954,7 +954,11 @@ def show_history(config_dir: Path):
             recv_total = item.get("recipient_chunks_total", 0)
             delivered = item.get("delivered", False)
 
-            if item_status == "waiting":
+            # chunks_dl < 0 is the legacy "waiting" sentinel written by
+            # earlier builds before status="waiting" existed. Normalise
+            # on read so old history rows render as Waiting too, not
+            # as "Uploading -1/N".
+            if item_status == "waiting" or chunks_dl < 0:
                 # Yellow — queued, server storage is full for recipient.
                 # Matches the tray/banner "storage full" colour family.
                 text = f'<span foreground="#FDD00C">Waiting</span>'
@@ -977,10 +981,12 @@ def show_history(config_dir: Path):
                 text = "Sent"
 
             # Progress bar state: (show, css_class, fraction)
-            if item_status == "waiting":
+            if item_status == "waiting" or chunks_dl < 0:
                 # No progress bar for waiting — the yellow text is the
                 # whole signal. (Pulse + fraction=0 would imply motion
-                # where there is none.)
+                # where there is none.) Same legacy-row fallback as
+                # above so stale chunks_downloaded=-1 rows don't paint
+                # a negative fraction.
                 bar = (False, None, 0.0)
             elif item_status == "uploading" and chunks_total > 0:
                 bar = (True, "upload-bar", chunks_dl / chunks_total)
