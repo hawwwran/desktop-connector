@@ -31,6 +31,8 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.rememberSwipeToDismissBoxState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
@@ -146,8 +148,8 @@ fun HomeScreen(
                     state = pullState,
                     isRefreshing = isRefreshing,
                     modifier = Modifier.align(Alignment.TopCenter),
-                    color = MaterialTheme.colorScheme.primary,
-                    containerColor = MaterialTheme.colorScheme.surface,
+                    color = com.desktopconnector.ui.theme.DcYellow500,
+                    containerColor = com.desktopconnector.ui.theme.DcOrange700,
                 )
             },
         ) {
@@ -233,10 +235,15 @@ fun HomeScreen(
                 }
 
                 if (transfers.isEmpty()) {
+                    // verticalScroll gives PullToRefreshBox a nested-scroll
+                    // surface so pull-to-refresh still fires over the empty
+                    // state — the non-empty branch uses a LazyColumn which
+                    // already participates in nested scroll.
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .weight(1f),
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
