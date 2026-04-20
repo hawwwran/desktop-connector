@@ -33,7 +33,7 @@ data class BrandColors(
 private val DarkBrandColors = BrandColors(
     connectionConnected = DcBlue500,
     connectionReconnecting = DcYellow500,
-    connectionDisconnected = DcBlue200,
+    connectionDisconnected = DcOrange700,
     transferOutgoing = DcYellow500,
     transferIncoming = DcBlue400,
     transferDelivering = DcBlue500,
@@ -43,7 +43,7 @@ private val DarkBrandColors = BrandColors(
 private val LightBrandColors = BrandColors(
     connectionConnected = DcBlue500,
     connectionReconnecting = DcYellow600,
-    connectionDisconnected = DcBlue400,
+    connectionDisconnected = DcOrange700,
     transferOutgoing = DcYellow600,
     transferIncoming = DcBlue800,
     transferDelivering = DcBlue500,

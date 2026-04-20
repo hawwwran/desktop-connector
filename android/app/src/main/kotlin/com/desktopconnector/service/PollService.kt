@@ -10,6 +10,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -57,6 +58,8 @@ class PollService : Service() {
         @Volatile var fasttrackWakeSignal: Boolean = false
         // Active ApiClient — used to cancel long poll from FcmService
         @Volatile var activeApi: ApiClient? = null
+        // Active service instance — used by FindPhoneManager to toggle FGS location type
+        @Volatile var activeService: PollService? = null
 
         fun start(context: Context) {
             val intent = Intent(context, PollService::class.java)
@@ -93,8 +96,20 @@ class PollService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeService = this
         createNotificationChannels()
-        startForeground(NOTIFICATION_ID, buildIdleNotification(false))
+        // API 29+: assert only DATA_SYNC at startup. LOCATION is declared in the manifest
+        // and upgraded into at find-phone start (see setForegroundType); asserting it here
+        // would crash on any fresh install that has not yet granted location permission.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                buildIdleNotification(false),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, buildIdleNotification(false))
+        }
         scope.launch { pollLoop() }
         scope.launch { deliveryTrackerLoop() }
         scope.launch { sweepStaleParts() }
@@ -126,8 +141,31 @@ class PollService : Service() {
     override fun onDestroy() {
         running = false
         scope.cancel()
+        if (activeService === this) activeService = null
         Log.i(TAG, "PollService stopped")
         super.onDestroy()
+    }
+
+    /**
+     * Re-assert the foreground-service type. Called by FindPhoneManager to add
+     * LOCATION while the alarm is active (so GPS survives Doze) and to drop it
+     * again when the alarm stops. Caller must hold ACCESS_{FINE,COARSE}_LOCATION
+     * before requesting includeLocation=true, or startForeground will throw.
+     */
+    fun setForegroundType(includeLocation: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val type = if (includeLocation) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
+        try {
+            startForeground(NOTIFICATION_ID, buildIdleNotification(isConnected), type)
+            AppLog.log("Poll", "fgs.type.changed location=$includeLocation")
+        } catch (e: SecurityException) {
+            AppLog.log("Poll", "fgs.type.denied reason=${e.message}", "warning")
+        }
     }
 
     private fun isScreenOn(): Boolean {
@@ -181,11 +219,13 @@ class PollService : Service() {
         val icon = if (connected) R.drawable.ic_notif_connected else R.drawable.ic_notif_disconnected
         val statusText = if (connected) "Connected" else "Disconnected"
 
+        // Title-only, no large icon: Android 12+ already surfaces the app name and icon
+        // in the header row, so repeating "Desktop Connector" and attaching a brand bitmap
+        // just inflates the notification. Single-line status keeps it compact.
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(icon)
             .setColor(BRAND_ACCENT)
-            .setContentTitle("Desktop Connector")
-            .setContentText(statusText)
+            .setContentTitle(statusText)
             .setContentIntent(pending)
             .setOngoing(true)
             .build()

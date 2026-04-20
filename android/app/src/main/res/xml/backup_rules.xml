@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pre-Android 12 auto-backup rules. Same reasoning as data_extraction_rules.xml:
+     keystore master key does not travel with backup, so the encrypted prefs
+     file would decrypt to garbage after restore. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="dc_secure_keys.xml" />
+</full-backup-content>

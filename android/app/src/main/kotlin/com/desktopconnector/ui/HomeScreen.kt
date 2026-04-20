@@ -74,10 +74,14 @@ fun HomeScreen(
     Scaffold(
         topBar = {
             val brand = MaterialTheme.brandColors
-            val dotColor = when (connectionState) {
+            val statusColor = when (connectionState) {
                 ConnectionState.CONNECTED -> brand.connectionConnected
                 ConnectionState.RECONNECTING -> brand.connectionReconnecting
                 ConnectionState.DISCONNECTED -> brand.connectionDisconnected
+            }
+            val statusIcon = when (connectionState) {
+                ConnectionState.DISCONNECTED -> R.drawable.ic_notif_disconnected
+                else -> R.drawable.ic_notif_connected
             }
             TopAppBar(
                 title = {
@@ -85,14 +89,18 @@ fun HomeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.clickable { onRefresh() },
                     ) {
-                        Text("Desktop Connector")
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(androidx.compose.foundation.shape.CircleShape)
-                                .background(dotColor)
+                        Icon(
+                            painter = androidx.compose.ui.res.painterResource(statusIcon),
+                            contentDescription = when (connectionState) {
+                                ConnectionState.CONNECTED -> "Connected"
+                                ConnectionState.RECONNECTING -> "Reconnecting"
+                                ConnectionState.DISCONNECTED -> "Disconnected"
+                            },
+                            tint = statusColor,
+                            modifier = Modifier.size(20.dp),
                         )
+                        Spacer(Modifier.width(10.dp))
+                        Text("Desktop Connector")
                     }
                 },
                 actions = {

@@ -181,6 +181,15 @@ object FindPhoneManager {
             showAlarmNotification(context)
         }
 
+        // Upgrade foreground service to include LOCATION type so LocationManager
+        // keeps delivering updates in Doze. Silently skipped if location permission
+        // is missing — alarm still rings/vibrates, just no live GPS.
+        if (hasLocationPermission(context)) {
+            PollService.activeService?.setForegroundType(includeLocation = true)
+        } else {
+            AppLog.log("FindPhone", "Location permission not granted — GPS tracking will degrade in Doze")
+        }
+
         // Start active location tracking (getLastKnownLocation returns stale/null data)
         startLocationUpdates(context)
 
@@ -239,6 +248,10 @@ object FindPhoneManager {
 
         // Stop location updates
         stopLocationUpdates(context)
+
+        // Drop LOCATION from the foreground service type; the service returns to
+        // the baseline DATA_SYNC posture until the next find-phone request.
+        PollService.activeService?.setForegroundType(includeLocation = false)
 
         // Cancel coroutines
         locationJob?.cancel()
@@ -369,6 +382,15 @@ object FindPhoneManager {
         } catch (_: Exception) {}
         locationListener = null
         currentLocation = null
+    }
+
+    private fun hasLocationPermission(context: Context): Boolean {
+        val pm = android.content.pm.PackageManager.PERMISSION_GRANTED
+        val check = { perm: String ->
+            androidx.core.content.ContextCompat.checkSelfPermission(context, perm) == pm
+        }
+        return check(android.Manifest.permission.ACCESS_FINE_LOCATION) ||
+            check(android.Manifest.permission.ACCESS_COARSE_LOCATION)
     }
 
     private fun sendUpdate(

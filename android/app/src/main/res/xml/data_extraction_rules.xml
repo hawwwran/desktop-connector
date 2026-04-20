@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ backup/transfer rules. The keystore-backed master key behind
+     EncryptedSharedPreferences is never included in backup, so the encrypted
+     prefs file must be excluded too — otherwise a restore produces ciphertext
+     that no longer decrypts (AEADBadTagException) and the app crashes on
+     first launch. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="dc_secure_keys.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="dc_secure_keys.xml" />
+    </device-transfer>
+</data-extraction-rules>
