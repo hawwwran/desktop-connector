@@ -1,5 +1,10 @@
 <?php
 
+// Defensive require — index.php's bootstrap list loads Config.php, but
+// an operator who only ships the changed controllers to a shared host
+// would otherwise hit a fatal "Class Config not found" here.
+require_once __DIR__ . '/../Config.php';
+
 class DashboardController
 {
     public static function show(Database $db): void

@@ -16,6 +16,10 @@
  * TransferWakeService::wake; ack removes chunk storage via
  * TransferCleanupService::deleteChunkFilesAndRows.
  */
+// Defensive require — matches DashboardController's pattern so a
+// partial upload that forgets index.php still loads Config.
+require_once __DIR__ . '/../Config.php';
+
 class TransferService
 {
     private const MAX_CHUNK_COUNT = 500;
