@@ -523,11 +523,24 @@ fun SettingsScreen(
                 }
             }
 
-            // Version
+            // Version (read at runtime from PackageInfo — Gradle populates
+            // versionName from the repo-root version.json, so this matches
+            // the authoritative release value).
+            val versionName = remember {
+                try {
+                    context.packageManager
+                        .getPackageInfo(context.packageName, 0)
+                        .versionName ?: "?"
+                } catch (_: Exception) { "?" }
+            }
             Text(
-                "Desktop Connector v0.1.0",
+                "Desktop Connector v$versionName",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.CenterHorizontally),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
         }
     }

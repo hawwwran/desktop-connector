@@ -1,8 +1,23 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+}
+
+// Single source of truth for the Android version lives at the repo root:
+//   version.json -> { "android": "X.Y.Z", ... }
+// Fall back to a stamped-in value if the file is missing (e.g. custom
+// source drops that don't include the file).
+val androidVersionName: String = run {
+    val f = rootProject.file("../version.json")
+    if (f.isFile) {
+        @Suppress("UNCHECKED_CAST")
+        (JsonSlurper().parse(f) as? Map<String, Any?>)
+            ?.get("android") as? String ?: "0.0.0"
+    } else "0.0.0"
 }
 
 android {
@@ -14,7 +29,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 4
-        versionName = "0.2.0"
+        versionName = androidVersionName
         setProperty("archivesBaseName", "Desktop-Connector-${versionName}")
     }
 
