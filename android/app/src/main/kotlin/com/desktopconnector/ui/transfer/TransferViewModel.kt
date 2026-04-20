@@ -126,7 +126,29 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
     }
 
     private suspend fun refreshTransfers() {
+        scrubZombieWaiting()
         _transfers.value = db.transferDao().getRecent()
+    }
+
+    /** Any WAITING row older than 30 minutes couldn't possibly still
+     *  have a live UploadWorker attached (cap enforced there too),
+     *  so it's a zombie from an app restart / WM chain cancellation.
+     *  Flip it to FAILED so the user sees an honest terminal state
+     *  instead of a spinning yellow "Waiting" forever. */
+    private suspend fun scrubZombieWaiting() {
+        val cutoffSec = System.currentTimeMillis() / 1000 - 30 * 60
+        withContext(Dispatchers.IO) {
+            db.transferDao().getRecent()
+                .filter {
+                    it.status == TransferStatus.WAITING && it.createdAt < cutoffSec
+                }
+                .forEach {
+                    db.transferDao().updateStatus(
+                        it.id, TransferStatus.FAILED,
+                        "Recipient storage full — gave up after 30 min",
+                    )
+                }
+        }
     }
 
     fun onRefresh() {

@@ -32,6 +32,12 @@ class UploadWorker(
         private const val CHUNK_RETRY_DELAY_MS = 5_000L
         private const val CHUNK_MAX_FAILURE_WINDOW_MS = 120_000L
         private const val INIT_MAX_ATTEMPTS = 3
+        // Upper bound on how long a transfer can sit in WAITING state
+        // before we give up and mark it FAILED. Mirrors the desktop's
+        // STORAGE_FULL_MAX_WINDOW_S cap — prevents a row from
+        // zombie-ing if WorkManager keeps rescheduling while the
+        // recipient quota never drains.
+        private const val STORAGE_FULL_MAX_WINDOW_MS = 30L * 60 * 1000
 
         fun enqueue(context: Context, transferDbId: Long) {
             val request = OneTimeWorkRequestBuilder<UploadWorker>()
@@ -122,9 +128,21 @@ class UploadWorker(
                 // transfer still draining). Flip to WAITING so the UI
                 // shows a yellow chip + banner instead of the FAILED
                 // red it would otherwise get, and let WorkManager
-                // reschedule us. INIT_MAX_ATTEMPTS doesn't cap this:
-                // the queue is expected to wait until the recipient
-                // downloads enough to free quota.
+                // reschedule us — up to STORAGE_FULL_MAX_WINDOW_MS,
+                // after which we give up and mark FAILED so the row
+                // can't zombie forever.
+                val rowAgeMs = (System.currentTimeMillis() / 1000 - transfer.createdAt) * 1000
+                if (rowAgeMs >= STORAGE_FULL_MAX_WINDOW_MS) {
+                    AppLog.log("Upload",
+                        "transfer.init.waiting.timed_out transfer_id=${transferId.take(12)} elapsed_ms=$rowAgeMs",
+                        "warning")
+                    db.transferDao().updateStatus(
+                        transferDbId, TransferStatus.FAILED,
+                        "Recipient storage full — gave up after 30 min",
+                    )
+                    spoolFile?.delete()
+                    return Result.failure()
+                }
                 AppLog.log("Upload", "transfer.init.waiting transfer_id=${transferId.take(12)} reason=storage_full",
                     "warning")
                 db.transferDao().updateStatus(transferDbId, TransferStatus.WAITING)
