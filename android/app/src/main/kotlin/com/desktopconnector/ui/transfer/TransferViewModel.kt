@@ -491,7 +491,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                 val encryptedChunk = keyManager.encryptChunk(data, baseNonce, 0, symmetricKey)
 
                 val transferId = java.util.UUID.randomUUID().toString()
-                if (api.initTransfer(transferId, pairedDeviceId, encryptedMeta, 1)) {
+                if (api.initTransfer(transferId, pairedDeviceId, encryptedMeta, 1) == ApiClient.InitOutcome.OK) {
                     api.uploadChunk(transferId, 0, encryptedChunk)
                 }
             } catch (e: Exception) {
@@ -580,6 +580,43 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             db.transferDao().delete(transfer.id)
             refreshTransfers()
         }
+    }
+
+    /** Cancel a still-in-flight outgoing transfer + remove from history.
+     *  Fires server DELETE so the recipient stops pulling; local row
+     *  goes away regardless of whether the server call succeeds (best
+     *  effort — server will GC the orphan on its own expiry timer). */
+    fun cancelAndDelete(transfer: QueuedTransfer) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val tid = transfer.transferId
+            if (tid != null && prefs.serverUrl != null
+                && prefs.deviceId != null && prefs.authToken != null) {
+                try {
+                    ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
+                        .cancelTransfer(tid)
+                } catch (_: Exception) {
+                    // best effort
+                }
+            }
+            // WorkManager may still re-trigger this transfer's worker
+            // for waiting/uploading rows; cancel the chain first so the
+            // row doesn't get recreated on retry.
+            androidx.work.WorkManager.getInstance(getApplication())
+                .cancelAllWorkByTag("upload-${transfer.id}")
+            db.transferDao().delete(transfer.id)
+            com.desktopconnector.network.StoragePressure.clear()
+            refreshTransfers()
+        }
+    }
+
+    /** Is this row still "in flight" on the server? Drives the
+     *  confirmation dialog: WAITING / UPLOADING / COMPLETE-but-not-
+     *  delivered all count as needing confirmation before delete. */
+    fun isInFlight(transfer: QueuedTransfer): Boolean {
+        if (transfer.direction == TransferDirection.INCOMING) return false
+        if (transfer.status == TransferStatus.FAILED) return false
+        if (transfer.status == TransferStatus.COMPLETE && transfer.delivered) return false
+        return true
     }
 
     fun clearHistory() {

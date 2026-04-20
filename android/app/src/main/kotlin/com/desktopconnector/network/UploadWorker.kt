@@ -41,9 +41,16 @@ class UploadWorker(
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build()
                 )
+                // Tag so TransferViewModel.cancelAndDelete can cancel
+                // just this transfer's work chain (prevents a WAITING
+                // row we just cancelled from being recreated on
+                // WorkManager retry).
+                .addTag(tagForTransfer(transferDbId))
                 .build()
             WorkManager.getInstance(context).enqueue(request)
         }
+
+        fun tagForTransfer(transferDbId: Long): String = "upload-$transferDbId"
     }
 
     override suspend fun doWork(): Result {
@@ -107,19 +114,36 @@ class UploadWorker(
         )
         val transferId = UUID.randomUUID().toString()
 
-        if (!api.initTransfer(transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount)) {
-            AppLog.log("Upload", "transfer.init.failed transfer_id=${transferId.take(12)} attempt=${runAttemptCount + 1}/$INIT_MAX_ATTEMPTS")
-            spoolFile?.delete()
-            // Keep status at PREPARING during WorkManager back-off retries so the
-            // user doesn't see a brief FAILED that then silently un-fails. Only
-            // commit to FAILED once we've exhausted our retry budget.
-            return if (runAttemptCount + 1 >= INIT_MAX_ATTEMPTS) {
-                db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Failed to initialize transfer on server")
-                Result.failure()
-            } else {
-                Result.retry()
+        val initOutcome = api.initTransfer(transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount)
+        when (initOutcome) {
+            ApiClient.InitOutcome.OK -> { /* proceed below */ }
+            ApiClient.InitOutcome.STORAGE_FULL -> {
+                // Recipient's pending-bytes quota is full (earlier
+                // transfer still draining). Flip to WAITING so the UI
+                // shows a yellow chip + banner instead of the FAILED
+                // red it would otherwise get, and let WorkManager
+                // reschedule us. INIT_MAX_ATTEMPTS doesn't cap this:
+                // the queue is expected to wait until the recipient
+                // downloads enough to free quota.
+                AppLog.log("Upload", "transfer.init.waiting transfer_id=${transferId.take(12)} reason=storage_full",
+                    "warning")
+                db.transferDao().updateStatus(transferDbId, TransferStatus.WAITING)
+                StoragePressure.mark()
+                spoolFile?.delete()
+                return Result.retry()
+            }
+            ApiClient.InitOutcome.FAILED -> {
+                AppLog.log("Upload", "transfer.init.failed transfer_id=${transferId.take(12)} attempt=${runAttemptCount + 1}/$INIT_MAX_ATTEMPTS")
+                spoolFile?.delete()
+                return if (runAttemptCount + 1 >= INIT_MAX_ATTEMPTS) {
+                    db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Failed to initialize transfer on server")
+                    Result.failure()
+                } else {
+                    Result.retry()
+                }
             }
         }
+        StoragePressure.clear()
 
         db.transferDao().updateStatus(transferDbId, TransferStatus.UPLOADING)
         db.transferDao().updateProgress(transferDbId, 0, chunkCount)

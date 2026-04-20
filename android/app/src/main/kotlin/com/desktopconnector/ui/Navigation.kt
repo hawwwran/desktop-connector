@@ -309,17 +309,22 @@ fun AppNavigation(
 
             val authFailureKind by transferViewModel.connectionManager.authFailureKind
                 .collectAsState()
+            val storageFull by com.desktopconnector.network.StoragePressure.full
+                .collectAsState()
 
             HomeScreen(
                 connectionState = connState,
                 transfers = transfers,
                 isRefreshing = isRefreshing,
                 authFailureKind = authFailureKind,
+                storageFull = storageFull,
                 onFilesSelected = { uris -> transferViewModel.queueFiles(uris) },
                 onSendClipboard = { transferViewModel.sendClipboard() },
                 onSendUri = { uri -> transferViewModel.queueFiles(listOf(uri)) },
                 onItemClick = { transfer -> transferViewModel.onItemClick(transfer) },
                 onDelete = { transfer -> transferViewModel.deleteTransfer(transfer) },
+                onCancelInFlight = { transfer -> transferViewModel.cancelAndDelete(transfer) },
+                isInFlight = { transfer -> transferViewModel.isInFlight(transfer) },
                 onRefresh = { transferViewModel.onRefresh() },
                 onNavigateSettings = { navController.navigate("settings") },
                 onNavigateDownloads = { navController.navigate("downloads") },

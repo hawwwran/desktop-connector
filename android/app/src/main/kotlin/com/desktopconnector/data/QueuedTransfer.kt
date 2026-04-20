@@ -2,7 +2,7 @@ package com.desktopconnector.data
 
 import androidx.room.*
 
-enum class TransferStatus { QUEUED, PREPARING, UPLOADING, COMPLETE, FAILED }
+enum class TransferStatus { QUEUED, PREPARING, WAITING, UPLOADING, COMPLETE, FAILED }
 enum class TransferDirection { OUTGOING, INCOMING }
 
 @Entity(tableName = "queued_transfers")
@@ -45,7 +45,7 @@ interface TransferDao {
     @Query("SELECT * FROM queued_transfers ORDER BY createdAt DESC LIMIT 100")
     suspend fun getRecent(): List<QueuedTransfer>
 
-    @Query("SELECT * FROM queued_transfers WHERE status IN ('QUEUED', 'PREPARING', 'UPLOADING') AND direction = 'OUTGOING' ORDER BY createdAt ASC")
+    @Query("SELECT * FROM queued_transfers WHERE status IN ('QUEUED', 'PREPARING', 'WAITING', 'UPLOADING') AND direction = 'OUTGOING' ORDER BY createdAt ASC")
     suspend fun getPending(): List<QueuedTransfer>
 
     @Query("DELETE FROM queued_transfers WHERE id = :id")
@@ -81,6 +81,6 @@ interface TransferDao {
     @Query("DELETE FROM queued_transfers WHERE id NOT IN (SELECT id FROM queued_transfers ORDER BY createdAt DESC LIMIT 100)")
     suspend fun trimHistory()
 
-    @Query("DELETE FROM queued_transfers WHERE status NOT IN ('QUEUED', 'PREPARING', 'UPLOADING')")
+    @Query("DELETE FROM queued_transfers WHERE status NOT IN ('QUEUED', 'PREPARING', 'WAITING', 'UPLOADING')")
     suspend fun clearAll()
 }

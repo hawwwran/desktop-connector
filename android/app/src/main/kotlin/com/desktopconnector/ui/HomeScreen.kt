@@ -60,17 +60,44 @@ fun HomeScreen(
     transfers: List<QueuedTransfer>,
     isRefreshing: Boolean,
     authFailureKind: AuthFailureKind?,
+    storageFull: Boolean,
     onFilesSelected: (List<Uri>) -> Unit,
     onSendClipboard: () -> Unit,
     onSendUri: (Uri) -> Unit,
     onItemClick: (QueuedTransfer) -> Unit,
     onDelete: (QueuedTransfer) -> Unit,
+    onCancelInFlight: (QueuedTransfer) -> Unit,
+    isInFlight: (QueuedTransfer) -> Boolean,
     onRefresh: () -> Unit,
     onNavigateSettings: () -> Unit,
     onNavigateDownloads: () -> Unit,
     onClearHistory: () -> Unit,
     onRepair: () -> Unit,
 ) {
+    var confirmCandidate by remember { mutableStateOf<QueuedTransfer?>(null) }
+
+    confirmCandidate?.let { target ->
+        AlertDialog(
+            onDismissRequest = { confirmCandidate = null },
+            title = { Text("Cancel delivery?") },
+            text = {
+                val name = target.displayLabel.ifEmpty { target.displayName }
+                Text("The recipient will no longer receive \u201c$name\u201d.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val t = confirmCandidate
+                    confirmCandidate = null
+                    if (t != null) onCancelInFlight(t)
+                }) {
+                    Text("Cancel delivery", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmCandidate = null }) { Text("Keep") }
+            },
+        )
+    }
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -162,6 +189,12 @@ fun HomeScreen(
                         kind = authFailureKind,
                         onRepair = onRepair,
                     )
+                }
+                // Storage-full info banner. Unlike the auth banner this
+                // one has no action button — the queue resolves on its
+                // own as the recipient drains. Yellow surface + icon.
+                if (storageFull && authFailureKind == null) {
+                    StorageFullBanner()
                 }
                 Row(
                     modifier = Modifier
@@ -275,7 +308,13 @@ fun HomeScreen(
                     ) {
                         items(transfers, key = { it.id }) { transfer ->
                             SwipeToDeleteItem(
-                                onDelete = { onDelete(transfer) },
+                                onDelete = {
+                                    if (isInFlight(transfer)) {
+                                        confirmCandidate = transfer
+                                    } else {
+                                        onDelete(transfer)
+                                    }
+                                },
                             ) {
                                 TransferItem(transfer, onClick = { onItemClick(transfer) })
                             }
@@ -331,12 +370,33 @@ private fun AuthFailureBanner(
 }
 
 @Composable
+private fun StorageFullBanner() {
+    val brand = MaterialTheme.brandColors
+    // Yellow surface — matches the WAITING pill on the transfer row.
+    androidx.compose.material3.Surface(
+        color = com.desktopconnector.ui.theme.DcYellow500,
+        contentColor = com.desktopconnector.ui.theme.DcBlue950,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Text(
+            text = "Server storage full — your next send is queued and will resume when the recipient has downloaded earlier transfers.",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+        )
+    }
+}
+
+@Composable
 private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
     val brand = MaterialTheme.brandColors
     val dim = MaterialTheme.colorScheme.onSurfaceVariant
     val statusColor = when {
         transfer.status == TransferStatus.QUEUED -> dim
         transfer.status == TransferStatus.PREPARING -> dim
+        transfer.status == TransferStatus.WAITING -> brand.transferOutgoing  // yellow
         transfer.status == TransferStatus.UPLOADING && transfer.direction == TransferDirection.INCOMING -> brand.transferIncoming
         transfer.status == TransferStatus.UPLOADING -> brand.transferOutgoing
         transfer.status == TransferStatus.COMPLETE && transfer.direction == TransferDirection.INCOMING -> brand.connectionConnected
@@ -350,6 +410,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
     val statusText = when (transfer.status) {
         TransferStatus.QUEUED -> "Queued"
         TransferStatus.PREPARING -> "Preparing"
+        TransferStatus.WAITING -> "Waiting"
         TransferStatus.UPLOADING -> when (transfer.direction) {
             TransferDirection.INCOMING -> if (transfer.totalChunks > 0) "Downloading ${transfer.chunksUploaded}/${transfer.totalChunks}" else "Downloading"
             TransferDirection.OUTGOING -> if (transfer.totalChunks > 0) "Uploading ${transfer.chunksUploaded}/${transfer.totalChunks}" else "Uploading"

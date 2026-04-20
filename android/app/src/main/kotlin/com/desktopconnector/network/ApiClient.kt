@@ -113,7 +113,9 @@ class ApiClient(
 
     // --- Transfers ---
 
-    fun initTransfer(transferId: String, recipientId: String, encryptedMeta: String, chunkCount: Int): Boolean {
+    enum class InitOutcome { OK, STORAGE_FULL, FAILED }
+
+    fun initTransfer(transferId: String, recipientId: String, encryptedMeta: String, chunkCount: Int): InitOutcome {
         val body = JSONObject().apply {
             put("transfer_id", transferId)
             put("recipient_id", recipientId)
@@ -123,6 +125,31 @@ class ApiClient(
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/init")
             .post(body.toString().toRequestBody(jsonType))
+            .build()
+        return try {
+            client.newCall(request).execute().use { resp ->
+                reportAuthStatus(resp.code)
+                when (resp.code) {
+                    201 -> InitOutcome.OK
+                    // 507 = recipient's pending-bytes quota exhausted.
+                    // Caller treats this as WAITING and retries later,
+                    // unlike FAILED which is terminal.
+                    507 -> InitOutcome.STORAGE_FULL
+                    else -> InitOutcome.FAILED
+                }
+            }
+        } catch (e: Exception) {
+            InitOutcome.FAILED
+        }
+    }
+
+    /** Sender-initiated cancel. Server deletes chunks + rows; a
+     *  still-downloading recipient gets 404 on next chunk fetch and
+     *  abandons gracefully. */
+    fun cancelTransfer(transferId: String): Boolean {
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/transfers/$transferId")
+            .delete()
             .build()
         return executeStatus(request)
     }
