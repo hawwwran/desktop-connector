@@ -84,3 +84,18 @@ class StorageLimitError extends ApiError
         parent::__construct(507, $message);
     }
 }
+
+/**
+ * 413 — this specific request is larger than the server's configured
+ * cap, independent of current usage. Distinct from StorageLimitError
+ * (507) which is transient: waiting for existing queued transfers to
+ * drain makes room. 413 is terminal; the client should surface
+ * "exceeds server quota" and not retry.
+ */
+class PayloadTooLargeError extends ApiError
+{
+    public function __construct(string $message)
+    {
+        parent::__construct(413, $message);
+    }
+}

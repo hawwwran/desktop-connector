@@ -60,6 +60,15 @@ class TransferService
         // projection doesn't double-count bytes that actually landed.
         $reservedProjected = max($pendingBytes, $reservedChunks * self::PROJECTED_CHUNK_SIZE);
         $newProjected = $chunkCount * self::PROJECTED_CHUNK_SIZE;
+        // The new transfer itself exceeds the cap — terminal, never
+        // fits. 413 so clients fail the send immediately with a clear
+        // "exceeds server quota" message instead of retrying forever
+        // in WAITING.
+        if ($newProjected > $quotaBytes) {
+            throw new PayloadTooLargeError('Transfer exceeds server quota');
+        }
+        // Transient: current queue can't fit this new one, but will
+        // after existing transfers drain. 507 → clients go WAITING.
         if ($reservedProjected + $newProjected > $quotaBytes) {
             throw new StorageLimitError('Recipient storage limit exceeded');
         }

@@ -309,12 +309,26 @@ def show_send_files(config_dir: Path):
                     file_size = filepath.stat().st_size
                     progress_tid = [None]
                     saw_waiting = [False]
+                    saw_too_large = [False]
                     def upload_progress(transfer_id, uploaded, total_chunks, fp=filepath, sz=file_size):
-                        # uploaded == -1 is the WAITING sentinel raised by
-                        # _init_transfer_with_retry when the server replies
-                        # 507 on init. We still create the history row on
-                        # first call so the user can see the queue, just
-                        # with a different status colour.
+                        # Sentinel values from the API client:
+                        #   0  — initial row write (uploading 0/N)
+                        #   -1 — 507 storage_full, flip to WAITING
+                        #   -2 — 413 too_large, terminal failure
+                        if uploaded == -2:
+                            saw_too_large[0] = True
+                            if progress_tid[0] is None:
+                                progress_tid[0] = transfer_id
+                                history.add(filename=fp.name, display_label=fp.name,
+                                            direction="sent", size=sz,
+                                            content_path=str(fp), transfer_id=transfer_id,
+                                            status="failed",
+                                            chunks_downloaded=0, chunks_total=total_chunks,
+                                            failure_reason="too_large")
+                            else:
+                                history.update(transfer_id, status="failed",
+                                                failure_reason="too_large")
+                            return
                         if uploaded in (0, -1):
                             if progress_tid[0] is None:
                                 progress_tid[0] = transfer_id
@@ -346,12 +360,11 @@ def show_send_files(config_dir: Path):
                         # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.
                         history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
                         GLib.idle_add(remove_row, filepath)
-                    elif progress_tid[0]:
-                        # If the send bounced on quota (saw a WAITING
-                        # signal during init), tag the failure so the
-                        # history row renders as "Failed (quota
-                        # exceeded)". Otherwise plain Failed — we can't
-                        # always distinguish network vs protocol errors.
+                    elif progress_tid[0] and not saw_too_large[0]:
+                        # Row wasn't already tagged as too_large by the
+                        # callback. Map WAITING → quota_timeout,
+                        # everything else to plain Failed (we can't
+                        # always distinguish network vs protocol).
                         reason = "quota_timeout" if saw_waiting[0] else None
                         history.update(progress_tid[0], status="failed",
                                         failure_reason=reason)
@@ -1010,6 +1023,7 @@ def show_history(config_dir: Path):
                 reason_label = {
                     "quota": "quota exceeded",
                     "quota_timeout": "quota exceeded",
+                    "too_large": "exceeds server quota",
                 }.get(reason)
                 if reason_label:
                     text = f'<span foreground="{DC_ORANGE_700}">Failed ({reason_label})</span>'

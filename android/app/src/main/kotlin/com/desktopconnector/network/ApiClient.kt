@@ -113,7 +113,7 @@ class ApiClient(
 
     // --- Transfers ---
 
-    enum class InitOutcome { OK, STORAGE_FULL, FAILED }
+    enum class InitOutcome { OK, STORAGE_FULL, TOO_LARGE, FAILED }
 
     fun initTransfer(transferId: String, recipientId: String, encryptedMeta: String, chunkCount: Int): InitOutcome {
         val body = JSONObject().apply {
@@ -132,9 +132,11 @@ class ApiClient(
                 when (resp.code) {
                     201 -> InitOutcome.OK
                     // 507 = recipient's pending-bytes quota exhausted.
-                    // Caller treats this as WAITING and retries later,
-                    // unlike FAILED which is terminal.
+                    // Transient; caller treats as WAITING and retries.
                     507 -> InitOutcome.STORAGE_FULL
+                    // 413 = this specific transfer exceeds the server's
+                    // cap. Terminal — no retry, no WAITING.
+                    413 -> InitOutcome.TOO_LARGE
                     else -> InitOutcome.FAILED
                 }
             }

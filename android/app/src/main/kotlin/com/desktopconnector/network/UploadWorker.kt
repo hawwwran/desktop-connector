@@ -123,6 +123,19 @@ class UploadWorker(
         val initOutcome = api.initTransfer(transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount)
         when (initOutcome) {
             ApiClient.InitOutcome.OK -> { /* proceed below */ }
+            ApiClient.InitOutcome.TOO_LARGE -> {
+                // 413 — terminal. The transfer is bigger than the
+                // server's configured quota; no amount of waiting makes
+                // it fit. Mark FAILED immediately with a clear tag.
+                AppLog.log("Upload",
+                    "transfer.init.too_large transfer_id=${transferId.take(12)}",
+                    "error")
+                db.transferDao().updateStatus(
+                    transferDbId, TransferStatus.FAILED, "exceeds server quota",
+                )
+                spoolFile?.delete()
+                return Result.failure()
+            }
             ApiClient.InitOutcome.STORAGE_FULL -> {
                 // Recipient's pending-bytes quota is full (earlier
                 // transfer still draining). Flip to WAITING so the UI

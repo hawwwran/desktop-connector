@@ -96,6 +96,11 @@ class ApiClient:
             return "ok"
         if resp.status_code == 507:
             return "storage_full"
+        if resp.status_code == 413:
+            # Transfer itself exceeds the server's quota — terminal, no
+            # amount of waiting makes it fit. Caller bails immediately
+            # instead of entering WAITING / retry loops.
+            return "too_large"
         return "failed"
 
     def cancel_transfer(self, transfer_id: str) -> bool:
@@ -293,6 +298,19 @@ class ApiClient:
                     # the moment this transfer finally lands.
                     self.conn.clear_storage_full()
                 return True
+
+            if outcome == "too_large":
+                # 413 — no retry. Server's quota is smaller than this
+                # single transfer; nothing the client can do but surface
+                # the error. Attach the reason via on_progress so the
+                # caller can tag the history row.
+                log.error("transfer.init.too_large transfer_id=%s", transfer_id[:12])
+                if on_progress:
+                    try:
+                        on_progress(transfer_id, -2, chunk_count)
+                    except Exception:
+                        log.exception("too_large on_progress failed")
+                return False
 
             if outcome == "storage_full":
                 self.conn.mark_storage_full()
