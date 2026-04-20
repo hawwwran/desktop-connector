@@ -738,30 +738,30 @@ def show_history(config_dir: Path):
     crypto = KeyManager(config_dir)
     history = TransferHistory(config_dir)
 
-    # Scrub zombie "waiting" rows: subprocesses that once owned a
-    # queued send but have long since exited (window closed, crashed,
-    # pre-fix build with chunks_downloaded=-1). A row is a zombie if
-    # it's been sitting in waiting for more than the retry budget —
-    # any subprocess that's still actively retrying would have given
-    # up by STORAGE_FULL_MAX_WINDOW_S (30 min) and marked it failed
-    # itself. chunks_downloaded < 0 is the explicit legacy sentinel
-    # from older builds.
     from .api_client import STORAGE_FULL_MAX_WINDOW_S
-    _zombie_cutoff = int(time.time()) - int(STORAGE_FULL_MAX_WINDOW_S)
-    for _it in list(history.items):
-        _is_waiting = (
-            _it.get("status") == "waiting"
-            or (_it.get("chunks_downloaded", 0) or 0) < 0
-        )
-        if not _is_waiting:
-            continue
-        if _it.get("chunks_downloaded", 0) < 0 or \
-                int(_it.get("timestamp", 0) or 0) < _zombie_cutoff:
-            tid = _it.get("transfer_id")
-            if tid:
-                history.update(tid, status="failed",
-                               chunks_downloaded=0, chunks_total=0,
-                               failure_reason="quota_timeout")
+
+    def _scrub_zombie_waiting() -> None:
+        """Flip any orphaned "waiting" history row to "failed" with
+        failure_reason="quota_timeout". A row is orphaned if it's
+        older than STORAGE_FULL_MAX_WINDOW_S (30 min) — beyond the
+        retry budget of any still-live send subprocess — or carries
+        the legacy chunks_downloaded=-1 sentinel. Called both at
+        window open AND on every build_list tick so rows age from
+        Waiting → Failed without the user needing to close + reopen."""
+        cutoff = int(time.time()) - int(STORAGE_FULL_MAX_WINDOW_S)
+        for it in list(history.items):
+            chunks_dl = it.get("chunks_downloaded", 0) or 0
+            is_waiting = it.get("status") == "waiting" or chunks_dl < 0
+            if not is_waiting:
+                continue
+            if chunks_dl < 0 or int(it.get("timestamp", 0) or 0) < cutoff:
+                tid = it.get("transfer_id")
+                if tid:
+                    history.update(tid, status="failed",
+                                   chunks_downloaded=0, chunks_total=0,
+                                   failure_reason="quota_timeout")
+
+    _scrub_zombie_waiting()
 
     app = _make_app()
 
@@ -1307,6 +1307,7 @@ def show_history(config_dir: Path):
                 return None
 
         def build_list():
+            _scrub_zombie_waiting()
             history._items = history._load()
             items = history.items
 
