@@ -27,7 +27,8 @@ class TransferWakeService
             }
             $recipient = AppLog::shortId($transfer['recipient_id']);
 
-            $token = (new DeviceRepository($db))->findFcmToken($transfer['recipient_id']);
+            $deviceRepo = new DeviceRepository($db);
+            $token = $deviceRepo->findFcmToken($transfer['recipient_id']);
             if ($token === null) {
                 $result = 'no_token';
                 return;
@@ -37,6 +38,9 @@ class TransferWakeService
                 'type' => 'transfer_ready',
                 'transfer_id' => $transferId,
             ]);
+            if ($ok) {
+                $deviceRepo->bumpFcmLastSuccessAt($transfer['recipient_id'], time());
+            }
             $result = $ok ? 'sent' : 'failed';
         } catch (\Throwable $e) {
             // FCM failure must never break the transfer flow.

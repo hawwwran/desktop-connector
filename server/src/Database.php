@@ -42,6 +42,16 @@ class Database
             $this->db->exec('ALTER TABLE devices ADD COLUMN fcm_token TEXT DEFAULT NULL');
         }
 
+        // Track the last time an FCM push to this device was accepted by
+        // Google's FCM service. Surfaces on the dashboard as "ready 12s ago" /
+        // "ready 4m ago" so operators can tell at a glance whether pushes
+        // are actually working vs the device just having a stale token.
+        // Re-read $deviceCols since the block above may have just ALTERed.
+        $deviceCols = $this->db->querySingle("SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'");
+        if ($deviceCols && strpos($deviceCols, 'fcm_last_success_at') === false) {
+            $this->db->exec('ALTER TABLE devices ADD COLUMN fcm_last_success_at INTEGER DEFAULT NULL');
+        }
+
         // Add chunks_downloaded column if missing (download progress tracking for sender)
         if ($cols && strpos($cols, 'chunks_downloaded') === false) {
             $this->db->exec('ALTER TABLE transfers ADD COLUMN chunks_downloaded INTEGER DEFAULT 0');

@@ -27,10 +27,15 @@ class DashboardController
         header('Content-Type: text/html; charset=utf-8');
 
         $now = time();
-        echo self::render($devices, $pairings, $pendingTransfers, $stats, $now);
+        // FCM column is only meaningful when this server can actually push.
+        // Without service-account.json the whole row disappears — no point
+        // scolding phones for missing tokens on a server that can't use them.
+        $fcmAvailable = FcmSender::isAvailable();
+        echo self::render($devices, $pairings, $pendingTransfers, $stats, $now, $fcmAvailable);
     }
 
-    private static function render(array $devices, array $pairings, array $transfers, ?array $stats, int $now): string
+    private static function render(array $devices, array $pairings, array $transfers,
+                                   ?array $stats, int $now, bool $fcmAvailable): string
     {
         $deviceCount = $stats['device_count'] ?? 0;
         $pairingCount = $stats['pairing_count'] ?? 0;
@@ -52,13 +57,40 @@ class DashboardController
             $statusDot = $online
                 ? '<span style="color:#3986FC">&#9679;</span> online'
                 : '<span style="color:#EA7601">&#9679;</span> ' . $age . ' ago';
+            $fcmCell = '';
+            if ($fcmAvailable) {
+                $hasToken = !empty($d['fcm_token']);
+                if ($hasToken) {
+                    // Brand blue — token on record, push wake available.
+                    // Suffix with the last successful push so operators can
+                    // distinguish "registered, never pushed" from "pushes
+                    // actively working". "never" = token registered but no
+                    // push has succeeded since the column was added.
+                    $lastOk = (int)($d['fcm_last_success_at'] ?? 0);
+                    $freshness = $lastOk > 0
+                        ? self::timeAgo($now - $lastOk) . ' ago'
+                        : 'never';
+                    $fcmCell = '<td><span style="color:#3986FC">&#9679;</span> ready'
+                        . ' <span style="color:#A4D0FB">&middot; ' . $freshness . '</span></td>';
+                } elseif ($d['device_type'] === 'phone') {
+                    // Orange — phone without a token is a problem; pings
+                    // come back no_token and the desktop sees the phone
+                    // as offline.
+                    $fcmCell = '<td><span style="color:#EA7601">&#9679;</span> no token</td>';
+                } else {
+                    // Desktops don't register FCM tokens — dim dash.
+                    $fcmCell = '<td style="color:#5898FB">&mdash;</td>';
+                }
+            }
             $deviceRows .= "<tr>
                 <td title=\"{$fullId}\">{$id}</td>
                 <td>{$type}</td>
                 <td>{$statusDot}</td>
+                {$fcmCell}
                 <td>{$created}</td>
             </tr>";
         }
+        $fcmHeader = $fcmAvailable ? '<th>FCM</th>' : '';
 
         $pairingRows = '';
         foreach ($pairings as $p) {
@@ -101,7 +133,7 @@ class DashboardController
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Desktop Connector Dashboard</title>
+    <title>Desktop Connector &mdash; Relay Server</title>
     <meta http-equiv="refresh" content="5">
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
     <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png">
@@ -131,7 +163,7 @@ class DashboardController
         <svg class="spark" viewBox="0 0 24 24" fill="#3986FC" aria-hidden="true">
             <path d="M12 0 L14 10 L24 12 L14 14 L12 24 L10 14 L0 12 L10 10 Z"/>
         </svg>
-        Desktop Connector
+        Desktop Connector &mdash; Relay Server
     </h1>
     <div class="subtitle">{$versionChip}auto-refreshes every 5s</div>
 
@@ -145,7 +177,7 @@ class DashboardController
 
     <h2>Devices</h2>
     <table>
-        <tr><th>Device ID</th><th>Type</th><th>Status</th><th>Registered</th></tr>
+        <tr><th>Device ID</th><th>Type</th><th>Status</th>{$fcmHeader}<th>Registered</th></tr>
         {$deviceRows}
     </table>
 

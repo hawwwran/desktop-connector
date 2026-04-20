@@ -195,6 +195,7 @@ class DeviceController
             ]);
             return;
         }
+        $devices->bumpFcmLastSuccessAt($recipientId, time());
         AppLog::log('Ping', sprintf(
             'ping.fcm.sent sender=%s recipient=%s',
             AppLog::shortId($deviceId), AppLog::shortId($recipientId)

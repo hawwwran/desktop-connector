@@ -69,6 +69,20 @@ class DeviceRepository
     }
 
     /**
+     * Record the timestamp of a successful FCM push (accepted by Google's
+     * service). Drives the dashboard's "ready 12s ago" indicator so
+     * operators can distinguish "token registered but pushes failing" from
+     * "token registered and actively working".
+     */
+    public function bumpFcmLastSuccessAt(string $deviceId, int $when): void
+    {
+        $this->db->execute(
+            'UPDATE devices SET fcm_last_success_at = :when WHERE device_id = :id',
+            [':when' => $when, ':id' => $deviceId]
+        );
+    }
+
+    /**
      * Returns the raw token string or null if the device doesn't exist or
      * hasn't registered a token. Callers that use `empty()` on the return
      * value behave unchanged.

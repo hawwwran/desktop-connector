@@ -62,9 +62,13 @@ class FasttrackController
         // Send FCM wake to recipient (fire-and-forget, no content leaked)
         $fcmSent = 'no_fcm';
         if (FcmSender::isAvailable()) {
-            $token = (new DeviceRepository($db))->findFcmToken($recipientId);
+            $deviceRepo = new DeviceRepository($db);
+            $token = $deviceRepo->findFcmToken($recipientId);
             if ($token !== null) {
                 $ok = FcmSender::sendDataMessage($token, ['type' => 'fasttrack']);
+                if ($ok) {
+                    $deviceRepo->bumpFcmLastSuccessAt($recipientId, time());
+                }
                 $fcmSent = $ok ? 'sent' : 'failed';
             } else {
                 $fcmSent = 'no_token';
