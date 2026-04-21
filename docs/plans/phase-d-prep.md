@@ -29,8 +29,10 @@ needs to see, in real time:
 
 The `_devel_` folder gives Claude that observability without
 requiring SSH access to the server. It's a small, purposely-
-scoped PHP web tool the user drops into `server/public/_devel_/`.
-After Phase D lands it gets removed.
+scoped PHP web tool the user drops onto the deployed server
+as `public/_devel_/`. The repo-side source lives in `temp/_devel_/`
+(gitignored — the tool never enters git history). After Phase D
+lands the deployed folder gets removed.
 
 ---
 
@@ -41,10 +43,11 @@ the folder, set the secret token, and confirm access.
 
 ### Authentication
 
-One shared-secret token, checked on every request. Token lives in
-`server/public/_devel_/secret.php` (or a small file read at
-runtime) and is **never committed** to git — the file is
-generated locally, deployed by the user, and `.gitignore`d.
+One shared-secret token, checked on every request. Token lives
+in `secret.php` inside the deployed `_devel_/` folder. It's
+**never committed** — the whole `temp/` tree (where Claude
+develops) is already in `.gitignore`, and the deployed copy
+exists only on the server.
 
 Without the token — or with a wrong one — every endpoint returns
 **404 Not Found** (not 401). This way the folder doesn't
@@ -53,19 +56,33 @@ passed via:
 - `?t=<token>` query param, or
 - `X-Devel-Token: <token>` header.
 
-### Endpoints
+### Location — source lives in `./temp/`, deploy copies to server's `public/`
 
-All endpoints live under `/SERVICES/desktop-connector/public/_devel_/`.
-The server's existing `public/.htaccess` serves real files first
-(`!-f` escape), so the `_devel_/*.php` files bypass the front
-controller cleanly — no `.htaccess` changes to existing routes.
+**Repo source: `temp/_devel_/`.** The whole `temp/` tree is
+already in the project's `.gitignore`, so nothing under
+`_devel_/` — source, secrets, README — ever gets committed. The
+tool is personal-dev-only; it stays out of the shipped codebase.
 
-Layout:
+**Deploy target: `public/_devel_/` on the real server**, served
+at `/SERVICES/desktop-connector/public/_devel_/`. User copies
+the contents of `temp/_devel_/` into
+`public_html/SERVICES/desktop-connector/public/_devel_/` using
+whatever SFTP / file-manager flow they already use for server
+deploys.
+
+The deployed server's existing `public/.htaccess` serves real
+files first (`!-f` escape), so the deployed `_devel_/*.php` files
+bypass the front controller cleanly — no `.htaccess` changes to
+existing shipped routes.
+
+Layout (both in `temp/_devel_/` locally and in deployed
+`public/_devel_/`):
 
 ```
-server/public/_devel_/
+_devel_/
   index.php         — HTML dashboard; links to every subtool
-  secret.php        — the one-line token file, .gitignore'd
+  secret.php        — the one-line token file (never committed;
+                      temp/ is .gitignored as a whole)
   lib.php           — shared auth + DB open + JSON helpers
   logs.php          — tail server.log
   transfers.php     — list transfers with full row state
@@ -76,10 +93,26 @@ server/public/_devel_/
   abort.php         — force-abort a transfer (server-side kill)
   fcm-probe.php     — fire a test FCM wake to a specific device
   .htaccess         — deny direct access to secret.php, lib.php
+  README.md         — deploy + usage cheat sheet (local only)
 ```
 
 Each endpoint is a single PHP file returning JSON (or HTML for
 `index.php`). Small, reviewable, no framework.
+
+**Path resolution inside PHP:** each endpoint includes server
+classes via `require_once __DIR__ . '/../../src/…'`. That's the
+correct relative path on the deployed server, where `_devel_`
+sits at `public/_devel_/` and `src/` at `../src/` from public —
+i.e. `../../src/` from an endpoint inside `_devel_/`. The code
+in `temp/_devel_/` ships with those paths hardcoded for the
+deploy target.
+
+**Local smoke-testing** the folder before handing it to the user:
+Claude runs `php -S 127.0.0.1:8000 -t /tmp/sandbox` where
+`/tmp/sandbox` is a fresh copy of `server/` with
+`temp/_devel_/` merged into `public/_devel_/`. A small shell
+helper (`temp/_devel_/run-local.sh`) automates this. Nothing
+permanent in the repo.
 
 ### Endpoint behaviour
 
@@ -132,13 +165,18 @@ place. Ordered by "Claude can't proceed without this" first.
 
 ### Blocking
 
-1. **Deploy `server/public/_devel_/` to the live server.**
-   Claude will commit the folder to git (code-reviewed like
-   everything else). User uploads `public/_devel_/*` into
-   `public_html/SERVICES/desktop-connector/public/_devel_/`
-   using whatever shared-hosting transfer the user uses today.
-   - Claude will build the folder as part of this prep phase
-     after the plan is accepted. User then deploys it.
+1. **Deploy `temp/_devel_/` to the live server.**
+   Claude will build the folder under `temp/_devel_/` in the
+   repo — `temp/` is gitignored so nothing under it gets
+   committed. User copies the contents of `temp/_devel_/`
+   into `public_html/SERVICES/desktop-connector/public/_devel_/`
+   using whatever SFTP / file-manager flow they already use.
+   - Claude will ship the folder as the first artifact of
+     this prep phase. User then deploys it manually.
+   - The tool is not code-reviewed in the usual sense
+     because it doesn't enter git history. Claude keeps the
+     files small and boring so a quick eyeball before
+     upload catches anything odd.
 
 2. **Generate a `_devel_` secret token and paste it into
    `secret.php` on the deployed server.**
@@ -146,8 +184,11 @@ place. Ordered by "Claude can't proceed without this" first.
      One-liner: `openssl rand -hex 24`.
    - Paste the token into a chat message so Claude has it
      available when hitting endpoints during Phase D.
-   - **Never commit the token.** Claude adds `secret.php` to
-     the repo's `.gitignore` as part of the deployed folder.
+   - Token never needs to leave the user's clipboard + the
+     deployed `secret.php`. Local `temp/_devel_/secret.php`
+     can have a dummy / placeholder — the deployed copy is
+     what matters. Whole `temp/` is .gitignored so even a
+     real token there can't leak.
    - User posts the token ONCE in chat. Claude reads it, uses
      it, doesn't log it back.
 
@@ -217,39 +258,53 @@ place. Ordered by "Claude can't proceed without this" first.
 
 ## What Claude will deliver in this prep phase (before D starts)
 
-The commit(s) from this prep phase will contain:
+Because the tool lives only in `temp/` and doesn't enter git
+history, there's no "prep phase commit" to land — Claude just
+writes the files and tells the user it's ready. The deliverable
+is the folder itself plus a single commit that updates THIS plan
+doc's post-prep notes once the user confirms the deploy works.
 
-1. `server/public/_devel_/` — the PHP tool described above.
-   Every file reviewable; no framework; minimal dependencies
-   (just `src/Database.php` and `src/Config.php` via
-   `require_once` with correct relative paths; no Composer).
-2. `server/public/_devel_/.htaccess` — denies direct access
-   to `secret.php` / `lib.php`.
-3. `.gitignore` entry for `server/public/_devel_/secret.php`.
-4. `server/public/_devel_/README.md` — 1-page deploy +
-   usage cheat sheet for the user, mirroring this plan's
-   "prepare" checklist.
-5. A dedicated pair of tests under
-   `tests/protocol/test_devel_tools.py`:
-    - 404 without token / with bad token.
-    - `/logs.php` auth'd response shape.
-    - `/transfers.php` returns the expected JSON shape with
-      `mode`, `state`, `bytes_on_disk`.
-    - `/abort.php` marks the row aborted.
-    - Privacy checks: no `encrypted_meta`, no raw public key,
-      no FCM token string in any response body.
-6. A short addition to this doc under "Post-prep notes" once
-   the user has deployed + tested, capturing the deployed URL
-   and any host-specific quirks discovered.
+Files written (all under `temp/_devel_/`, all uncommitted):
 
-After the prep phase commits land, Claude will wait for the
-user to:
-1. Deploy the folder.
-2. Set the token and paste it in chat.
-3. Confirm the dashboard loads.
-4. Confirm items 4–7 above as far as the user cares to.
+1. The PHP endpoints described in the **Endpoints** section
+   above. No framework, minimal includes (reach into
+   `server/src/…` via relative paths). Single PHP files,
+   small enough to eyeball before each deploy.
+2. `.htaccess` — denies direct access to `secret.php` /
+   `lib.php` regardless of auth; hardens the folder against
+   accidental exposure.
+3. `README.md` — 1-page deploy + usage cheat sheet mirroring
+   this plan's "prepare" checklist, so the user has it next
+   to the files rather than having to cross-reference the
+   docs tree.
+4. `run-local.sh` — helper that merges `server/` + this
+   folder into a tempdir and spins up `php -S` so Claude can
+   smoke-test endpoints against a local copy before telling
+   the user to redeploy.
+5. `secret.php` — a placeholder with a clearly-fake token;
+   user overwrites the deployed copy with a real token.
 
-Then Phase D (Android streaming client) begins.
+Testing:
+
+- Claude drives local smoke tests via `run-local.sh` + ad-hoc
+  curl / Python one-liners — these don't get committed either,
+  they're part of the `temp/` scratch space.
+- No `tests/protocol/test_devel_tools.py` in the committed
+  tree. Auth + privacy invariants get hand-verified locally
+  and spot-checked against the deployed server once it's
+  running.
+
+After Claude writes the folder, the user:
+1. Copies `temp/_devel_/` into the server's
+   `public/_devel_/`.
+2. Sets the real token in the deployed `secret.php`.
+3. Confirms the dashboard loads at the deployed URL.
+4. Optionally works through items 4–7 above.
+
+Then Phase D (Android streaming client) begins. Once the user
+confirms the deploy, Claude commits the **Post-prep notes**
+update below with the deployed URL + any host-specific quirks —
+that's the one commit this prep phase produces.
 
 ---
 
