@@ -18,6 +18,14 @@ from .crypto import KeyManager, CHUNK_SIZE
 
 CHUNK_RETRY_DELAY_S = 5.0
 CHUNK_MAX_FAILURE_WINDOW_S = 120.0
+
+# Streaming sender mid-stream 507 backoff (see streaming-improvement.md
+# §5.4 and desktop-streaming-relay-plan.md §C.4). 507s during streaming
+# mean the recipient's quota is full — the sender sleeps, retries the
+# SAME chunk until the recipient drains. Honours the standard 30-min
+# STORAGE_FULL_MAX_WINDOW_S ceiling below; on expiry the transfer is
+# aborted with reason=sender_failed.
+STREAM_QUOTA_BACKOFF_RAMP_S = (2.0, 4.0, 8.0, 16.0, 30.0)
 # Upper bound on how long a single transfer can sit in WAITING state
 # (server replied 507 "storage full") before we give up and mark it
 # failed. Without a cap, a closed send-files window would leave its
@@ -386,18 +394,39 @@ class ApiClient:
 
     def send_file(self, filepath: Path, recipient_id: str, symmetric_key: bytes,
                   filename_override: str | None = None,
-                  on_progress: callable = None) -> str | None:
+                  on_progress: callable = None,
+                  *,
+                  on_stream_progress: callable = None,
+                  streaming: bool = True) -> str | None:
         """
-        Encrypt and upload a file to a recipient using a streaming pipeline:
+        Encrypt and upload a file to a recipient using a chunked pipeline:
         read one chunk → encrypt → upload → repeat. Memory is bounded by
         CHUNK_SIZE regardless of file size.
 
-        Per-chunk retry: on failure, retry every 5 s. If the same chunk
-        keeps failing for 120 s continuously, the transfer is aborted and
-        send_file returns None. The retry timer resets on each success.
+        Mode is negotiated with the server at init time:
+          * ``streaming=True`` (default) + server advertises ``stream_v1``
+            + filename is NOT a ``.fn.*`` command transfer → request
+            ``mode=streaming``. Server honours it when the recipient is
+            online; otherwise silently downgrades to classic.
+          * ``streaming=False`` OR the above conditions fail → classic
+            mode (store-then-forward).
 
-        filename_override: use this name in metadata instead of the actual file name.
-        on_progress: callback(transfer_id, chunks_uploaded, total_chunks) called per chunk.
+        Callbacks:
+          * ``on_progress(tid, uploaded, total)`` — fired on the classic
+            upload path (unchanged from pre-streaming). Sentinel values
+            -1 and -2 on init-waiting / init-too-large are still emitted.
+          * ``on_stream_progress(tid, uploaded, total, state)`` — fired
+            on the streaming upload path. ``state`` ∈ ``{'sending',
+            'waiting_stream', 'aborted', 'failed'}``. Both callbacks may
+            be None; the upload proceeds silently in that case.
+
+        Per-chunk retry semantics:
+          * Classic: 5s cadence, 120s budget per chunk; then abort.
+          * Streaming: see ``_upload_stream`` — 507 enters waiting_stream
+            with exponential backoff and the standard 30-min window,
+            410 flips to aborted (recipient aborted), network errors
+            follow the classic 2-min budget.
+
         Returns transfer_id on success, None on failure.
         """
         display = filename_override or filepath.name
@@ -417,6 +446,14 @@ class ApiClient:
         )
         transfer_id = str(uuid.uuid4())
 
+        # .fn.* command transfers always go classic — streaming adds
+        # round-trip overhead to what's already a tiny single-chunk
+        # payload. See streaming-improvement.md §9 non-goals.
+        is_fn = display.startswith(".fn.")
+        requested_mode = "classic"
+        if streaming and not is_fn and self.supports_streaming():
+            requested_mode = "streaming"
+
         # Fire the initial progress callback BEFORE init_transfer so the caller
         # can land a history row in "uploading 0/N" state. If init then fails
         # (network, 401/403 auth-invalid, etc.) send_file returns None and the
@@ -427,14 +464,23 @@ class ApiClient:
 
         negotiated_mode = self._init_transfer_with_retry(
             transfer_id, recipient_id, encrypted_meta, chunk_count,
-            on_progress,
+            on_progress, mode=requested_mode,
         )
         if negotiated_mode is None:
             log.error("transfer.init.failed transfer_id=%s", transfer_id[:12])
             return None
-        log.info("transfer.init.accepted transfer_id=%s recipient=%s chunks=%d mode=%s",
-                 transfer_id[:12], recipient_id[:12], chunk_count, negotiated_mode)
+        log.info("transfer.init.accepted transfer_id=%s recipient=%s chunks=%d "
+                 "requested_mode=%s negotiated_mode=%s",
+                 transfer_id[:12], recipient_id[:12], chunk_count,
+                 requested_mode, negotiated_mode)
 
+        if negotiated_mode == "streaming":
+            return self._upload_stream(
+                filepath, transfer_id, chunk_count, base_nonce,
+                symmetric_key, on_stream_progress,
+            )
+
+        # Classic path — unchanged byte-for-byte from pre-streaming.
         try:
             with open(filepath, "rb") as f:
                 for index in range(chunk_count):
@@ -457,6 +503,212 @@ class ApiClient:
         log.info("transfer.upload.completed transfer_id=%s name=%s",
                  transfer_id[:12], display)
         return transfer_id
+
+    def _upload_stream(self, filepath: Path, transfer_id: str,
+                       chunk_count: int, base_nonce: bytes,
+                       symmetric_key: bytes,
+                       on_stream_progress: callable = None) -> str | None:
+        """Streaming upload state machine (see docs/plans/streaming-
+        improvement.md §3.1 and desktop-streaming-relay-plan.md §C.4).
+
+        Sequential per-chunk encrypt → upload. Outcomes:
+          * UPLOAD_OK         → bump uploaded counter, fire
+                                 on_stream_progress(state='sending').
+          * UPLOAD_STORAGE_FULL (507) → enter waiting_stream, backoff
+                                 per STREAM_QUOTA_BACKOFF_RAMP_S, retry
+                                 the SAME chunk. On 30-min expiry →
+                                 abort(sender_failed), state='failed'.
+          * UPLOAD_ABORTED (410) → recipient_abort from the other side.
+                                 State flips to 'aborted'; we do NOT
+                                 DELETE (server already wiped).
+          * network/other      → reuse the classic 2-min / 5s budget.
+                                 On exhaustion → abort(sender_failed),
+                                 state='failed'.
+
+        Returns transfer_id on success, None on any terminal failure
+        (aborted, failed, quota_timeout).
+
+        On entry we fire on_stream_progress(tid, 0, N, 'sending') so the
+        caller can flip the history row off the "uploading 0/N" placeholder
+        written just before init.
+        """
+        # Initial state: uploaded 0 chunks, streaming negotiated. Caller
+        # rewrites its row mode + status here.
+        if on_stream_progress:
+            on_stream_progress(transfer_id, 0, chunk_count, "sending")
+
+        try:
+            with open(filepath, "rb") as f:
+                for index in range(chunk_count):
+                    plaintext = f.read(CHUNK_SIZE)
+                    encrypted = KeyManager.encrypt_chunk(
+                        plaintext, base_nonce, index, symmetric_key)
+                    result = self._upload_stream_chunk(
+                        transfer_id, index, chunk_count, encrypted,
+                        on_stream_progress,
+                    )
+                    if result == "ok":
+                        if on_stream_progress:
+                            on_stream_progress(transfer_id, index + 1,
+                                               chunk_count, "sending")
+                        continue
+                    if result == "aborted":
+                        if on_stream_progress:
+                            on_stream_progress(transfer_id, index,
+                                               chunk_count, "aborted")
+                        log.info(
+                            "transfer.stream.aborted_by_recipient transfer_id=%s "
+                            "chunk_index=%d",
+                            transfer_id[:12], index,
+                        )
+                        return None
+                    if result == "failed":
+                        # Client-side give-up: network budget exhausted
+                        # OR 30-min quota waiting window expired. Tell
+                        # the server so the recipient's row can flip to
+                        # aborted, then surface failure locally.
+                        self.abort_transfer(transfer_id, "sender_failed")
+                        if on_stream_progress:
+                            on_stream_progress(transfer_id, index,
+                                               chunk_count, "failed")
+                        log.error(
+                            "transfer.upload.failed transfer_id=%s "
+                            "chunk_index=%d mode=streaming",
+                            transfer_id[:12], index,
+                        )
+                        return None
+                    # Defensive: unknown result — bail like a failure.
+                    log.error(
+                        "transfer.upload.failed transfer_id=%s "
+                        "reason=unknown_upload_result result=%s",
+                        transfer_id[:12], result,
+                    )
+                    self.abort_transfer(transfer_id, "sender_failed")
+                    if on_stream_progress:
+                        on_stream_progress(transfer_id, index, chunk_count, "failed")
+                    return None
+        except OSError as e:
+            log.error("transfer.upload.failed transfer_id=%s error_kind=%s "
+                      "mode=streaming",
+                      transfer_id[:12], type(e).__name__)
+            self.abort_transfer(transfer_id, "sender_failed")
+            if on_stream_progress:
+                on_stream_progress(transfer_id, 0, chunk_count, "failed")
+            return None
+
+        log.info("transfer.upload.completed transfer_id=%s mode=streaming",
+                 transfer_id[:12])
+        return transfer_id
+
+    def _upload_stream_chunk(self, transfer_id: str, index: int,
+                              chunk_count: int, encrypted: bytes,
+                              on_stream_progress: callable = None) -> str:
+        """Upload a single streaming chunk with the full streaming retry
+        policy. Returns one of 'ok' | 'aborted' | 'failed'.
+
+        Two interleaved budgets:
+          * 507 quota waiting: STORAGE_FULL_MAX_WINDOW_S (30 min) of
+            continuous 507s → failed. Backoff follows
+            STREAM_QUOTA_BACKOFF_RAMP_S (2→4→8→16→30s).
+          * Network errors: CHUNK_MAX_FAILURE_WINDOW_S (2 min) of
+            continuous non-507, non-410 errors → failed. 5-s cadence.
+
+        Each successful upload (OK) resets both budgets. A non-507
+        response also clears the storage-full flag in the connection
+        so the tray banner hides.
+        """
+        quota_waiting_since: float | None = None
+        quota_ramp_idx = 0
+        network_started_at: float | None = None
+        signaled_waiting = False
+
+        while True:
+            try:
+                outcome = self.upload_chunk(transfer_id, index, encrypted)
+            except (requests.RequestException, OSError, ValueError) as e:
+                log.warning(
+                    "transfer.chunk.failed transfer_id=%s chunk_index=%d "
+                    "error_kind=%s",
+                    transfer_id[:12], index, type(e).__name__,
+                )
+                outcome = ChunkUploadOutcome(status=UPLOAD_NETWORK_ERROR)
+
+            if outcome.status == UPLOAD_OK:
+                log.debug(
+                    "transfer.chunk.uploaded transfer_id=%s chunk_index=%d/%d mode=streaming",
+                    transfer_id[:12], index + 1, chunk_count,
+                )
+                if signaled_waiting:
+                    # Drain observed — clear the global storage-full
+                    # banner. The row status flips back to 'sending' via
+                    # the on_stream_progress call in the caller's loop.
+                    self.conn.clear_storage_full()
+                return "ok"
+
+            if outcome.status == UPLOAD_ABORTED:
+                log.info(
+                    "transfer.stream.aborted transfer_id=%s chunk_index=%d reason=%s",
+                    transfer_id[:12], index, outcome.abort_reason or "unknown",
+                )
+                return "aborted"
+
+            if outcome.status == UPLOAD_STORAGE_FULL:
+                # Reset network streak (this isn't a network error).
+                network_started_at = None
+                now = time.monotonic()
+                if quota_waiting_since is None:
+                    quota_waiting_since = now
+                    self.conn.mark_storage_full()
+                    if not signaled_waiting and on_stream_progress:
+                        # Flip caller's row to waiting_stream on first 507.
+                        on_stream_progress(
+                            transfer_id, index, chunk_count, "waiting_stream",
+                        )
+                        signaled_waiting = True
+                elapsed = now - quota_waiting_since
+                if elapsed >= STORAGE_FULL_MAX_WINDOW_S:
+                    log.warning(
+                        "transfer.stream.waiting_quota.timed_out "
+                        "transfer_id=%s chunk_index=%d elapsed=%ds",
+                        transfer_id[:12], index, int(elapsed),
+                    )
+                    return "failed"
+                delay = STREAM_QUOTA_BACKOFF_RAMP_S[
+                    min(quota_ramp_idx, len(STREAM_QUOTA_BACKOFF_RAMP_S) - 1)
+                ]
+                quota_ramp_idx = min(quota_ramp_idx + 1,
+                                     len(STREAM_QUOTA_BACKOFF_RAMP_S) - 1)
+                log.info(
+                    "transfer.stream.waiting_quota transfer_id=%s chunk_index=%d "
+                    "retry_in=%.1fs elapsed=%ds",
+                    transfer_id[:12], index, delay, int(elapsed),
+                )
+                time.sleep(delay)
+                continue
+
+            # Everything else: network, auth, 404, generic server error.
+            # Matches the classic helper's 2-min / 5-s cadence.
+            now = time.monotonic()
+            if network_started_at is None:
+                network_started_at = now
+                log.warning(
+                    "transfer.chunk.failed transfer_id=%s chunk_index=%d/%d "
+                    "status=%s retry_in=%ds",
+                    transfer_id[:12], index + 1, chunk_count, outcome.status,
+                    int(CHUNK_RETRY_DELAY_S),
+                )
+            elif now - network_started_at >= CHUNK_MAX_FAILURE_WINDOW_S:
+                log.error(
+                    "transfer.chunk.failed transfer_id=%s chunk_index=%d "
+                    "final_status=%s elapsed=%ds",
+                    transfer_id[:12], index, outcome.status,
+                    int(now - network_started_at),
+                )
+                return "failed"
+            # Non-507 reset of the quota ramp, but keep the quota_waiting_since
+            # null — we already nulled it above if we were in quota mode.
+            quota_ramp_idx = 0
+            time.sleep(CHUNK_RETRY_DELAY_S)
 
     def _upload_chunk_with_retry(self, transfer_id: str, index: int,
                                   chunk_count: int, encrypted: bytes) -> str | None:
