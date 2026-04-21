@@ -82,9 +82,14 @@ class Router
 
             throw new NotFoundError();
         } catch (ApiError $e) {
-            // 5xx and unexpected 4xx are worth a warning; routine 404/401/403
-            // stay at info. NotFound routes come from typos or probes — info.
-            $level = $e->status >= 500 ? 'error' : 'warning';
+            // 5xx: error. 425: debug — streaming pipelines emit one per
+            // chunk-poll before the sender catches up; logging each at
+            // warning would spam the log. Other 4xx: warning.
+            $level = match (true) {
+                $e->status >= 500 => 'error',
+                $e->status === 425 => 'debug',
+                default => 'warning',
+            };
             AppLog::log('Api', sprintf(
                 'apierror.caught status=%d method=%s uri=%s reason=%s',
                 $e->status,

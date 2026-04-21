@@ -25,7 +25,7 @@ class _ServerHarness:
     state sharing across tests in the same class is benign.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config_overrides: dict | None = None) -> None:
         self._tmpdir = tempfile.mkdtemp(prefix="dc-protocol-")
         self._server_src = os.path.join(REPO_ROOT, "server")
         self._server_copy = os.path.join(self._tmpdir, "server")
@@ -34,6 +34,16 @@ class _ServerHarness:
             self._server_copy,
             ignore=shutil.ignore_patterns("data", "storage", "__pycache__", ".*"),
         )
+        # Pre-seed data/config.json so the server's first request reads
+        # overrides instead of auto-creating the default. Merges with
+        # the defaults server-side (Config::load falls back to
+        # self::DEFAULTS per missing key), so tests only need to set
+        # what they want to change.
+        if config_overrides:
+            cfg_dir = os.path.join(self._server_copy, "data")
+            os.makedirs(cfg_dir, exist_ok=True)
+            with open(os.path.join(cfg_dir, "config.json"), "w") as fd:
+                json.dump(config_overrides, fd)
 
         self._port = self._pick_port()
         self.base_url = f"http://127.0.0.1:{self._port}"
@@ -702,6 +712,276 @@ class ServerProtocolContractTests(unittest.TestCase):
         with open(config_path) as fd:
             data = json.load(fd)
         self.assertEqual(data.get("storageQuotaMB"), 500)
+
+
+    # --- Extra streaming contract coverage (review follow-ups) --------------
+
+    def test_streaming_download_chunk_after_abort_returns_410(self):
+        """After a recipient aborts, a sender-side chunk upload 410s
+        (existing test). Here we verify the recipient-side GET also
+        410s — same terminal signal for everyone talking to the row."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=3)
+        tid = ctx["transfer_id"]
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"chunk-0",
+        )
+        self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        status, _h, body = self.h.request(
+            "GET", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 410)
+        self.assertIn("error", body)
+        self.assertEqual(body.get("abort_reason"), "recipient_abort")
+
+    def test_streaming_download_chunk_already_acked_returns_410(self):
+        """Chunks that were served+acked+wiped must 410 on replay — not
+        425 (which would loop a confused recipient forever). 425 means
+        'upstream hasn't produced yet'; 410 means 'gone'."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=3)
+        tid = ctx["transfer_id"]
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"chunk-0",
+        )
+        self.h.request(
+            "GET", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0/ack",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        # Upload chunk 1 so chunks_downloaded has room to be below it —
+        # we want the re-GET of chunk 0 to hit the "< chunks_downloaded"
+        # branch, not the 425 branch.
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/1",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"chunk-1",
+        )
+        status, _h, body = self.h.request(
+            "GET", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 410, f"got {status}: {body}")
+        self.assertIn("error", body)
+
+    def test_sender_delete_rejects_invalid_reason(self):
+        """Sender passing {reason: "recipient_abort"} or a typo should
+        400, not silently coerce to sender_abort."""
+        ctx = self._pair_and_init_mode(mode=None, chunk_count=1)
+        tid = ctx["transfer_id"]
+        status, _h, body = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            json_body={"reason": "recipient_abort"},
+        )
+        self.assertEqual(status, 400, f"got {status}: {body}")
+        # Transfer still alive — wrong reason must not have triggered
+        # the abort path. Confirm by cancelling cleanly afterwards.
+        status, _h, _ = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+        )
+        self.assertEqual(status, 200)
+
+    def test_recipient_delete_rejects_invalid_reason(self):
+        """Recipient passing a sender reason must 400."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=2)
+        tid = ctx["transfer_id"]
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"x",
+        )
+        status, _h, body = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+            json_body={"reason": "sender_failed"},
+        )
+        self.assertEqual(status, 400, f"got {status}: {body}")
+
+    def test_abort_after_delivered_reports_delivered_not_aborted(self):
+        """A late DELETE after the recipient finalized the transfer
+        must NOT flip the sender's local row to aborted. The already-
+        delivered short-circuit returns status=delivered so the UI
+        agrees with reality."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=1)
+        tid = ctx["transfer_id"]
+        # Upload + download + per-chunk-ack the only chunk (final).
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"x",
+        )
+        self.h.request(
+            "GET", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        status, _h, body = self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0/ack",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(body.get("status"), "delivered")
+
+        # Sender DELETE after delivery — must report delivered, not aborted.
+        status, _h, body = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body.get("status"), "delivered",
+                         f"late DELETE flipped row to {body.get('status')}")
+        self.assertEqual(body.get("note"), "already_delivered")
+
+
+class ServerWithStreamingDisabledTests(unittest.TestCase):
+    """Operator kill-switch: streamingEnabled=false must drop stream_v1
+    from /api/health capabilities AND force negotiated_mode=classic
+    even when the client explicitly requests streaming. Uses a dedicated
+    harness because the knob can't be toggled at runtime."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.h = _ServerHarness(config_overrides={
+            "storageQuotaMB": 500,
+            "streamingEnabled": False,
+        })
+        cls.h.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.h.stop()
+
+    def _register(self, kind):
+        raw_key = os.urandom(32)
+        pub = base64.b64encode(raw_key).decode("ascii")
+        status, _h, body = self.h.request(
+            "POST", "/api/devices/register",
+            json_body={"public_key": pub, "device_type": kind},
+        )
+        assert status == 201, body
+        return body["device_id"], body["auth_token"], pub
+
+    def test_health_omits_stream_v1_when_disabled(self):
+        status, _h, body = self.h.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertNotIn("stream_v1", body.get("capabilities", []))
+
+    def test_streaming_init_downgraded_to_classic(self):
+        sender_id, sender_tok, _ = self._register("desktop")
+        recipient_id, recipient_tok, recipient_pub = self._register("phone")
+        self.h.request(
+            "POST", "/api/pairing/request",
+            token=recipient_tok, device_id=recipient_id,
+            json_body={"desktop_id": sender_id, "phone_pubkey": recipient_pub},
+        )
+        self.h.request(
+            "POST", "/api/pairing/confirm",
+            token=sender_tok, device_id=sender_id,
+            json_body={"phone_id": recipient_id},
+        )
+        self.h.request("GET", "/api/health", token=recipient_tok, device_id=recipient_id)
+
+        import uuid
+        tid = str(uuid.uuid4())
+        status, _h, body = self.h.request(
+            "POST", "/api/transfers/init",
+            token=sender_tok, device_id=sender_id,
+            json_body={
+                "transfer_id": tid,
+                "recipient_id": recipient_id,
+                "encrypted_meta": "e30=",
+                "chunk_count": 1,
+                "mode": "streaming",
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body.get("negotiated_mode"), "classic",
+                         f"kill-switch failed to downgrade: {body}")
+
+
+class ServerWithTightQuotaTests(unittest.TestCase):
+    """Mid-stream quota gate. Sets storageQuotaMB=2 (exactly one
+    PROJECTED_CHUNK_SIZE of 2 MiB) so streaming init passes the
+    pathological-quota check but the second 1.5 MB chunk upload
+    bounces on 507."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.h = _ServerHarness(config_overrides={
+            "storageQuotaMB": 2,
+            "streamingEnabled": True,
+        })
+        cls.h.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.h.stop()
+
+    def _register(self, kind):
+        pub = base64.b64encode(os.urandom(32)).decode("ascii")
+        status, _h, body = self.h.request(
+            "POST", "/api/devices/register",
+            json_body={"public_key": pub, "device_type": kind},
+        )
+        assert status == 201, body
+        return body["device_id"], body["auth_token"], pub
+
+    def test_streaming_midstream_quota_gate_returns_507(self):
+        sender_id, sender_tok, _ = self._register("desktop")
+        recipient_id, recipient_tok, recipient_pub = self._register("phone")
+        self.h.request(
+            "POST", "/api/pairing/request",
+            token=recipient_tok, device_id=recipient_id,
+            json_body={"desktop_id": sender_id, "phone_pubkey": recipient_pub},
+        )
+        self.h.request(
+            "POST", "/api/pairing/confirm",
+            token=sender_tok, device_id=sender_id,
+            json_body={"phone_id": recipient_id},
+        )
+        self.h.request("GET", "/api/health", token=recipient_tok, device_id=recipient_id)
+
+        import uuid
+        tid = str(uuid.uuid4())
+        status, _h, body = self.h.request(
+            "POST", "/api/transfers/init",
+            token=sender_tok, device_id=sender_id,
+            json_body={
+                "transfer_id": tid,
+                "recipient_id": recipient_id,
+                "encrypted_meta": "e30=",
+                "chunk_count": 3,
+                "mode": "streaming",
+            },
+        )
+        self.assertEqual(status, 201, f"streaming init failed: {body}")
+        self.assertEqual(body.get("negotiated_mode"), "streaming")
+
+        # 1.5 MiB per chunk → after chunk 0 current=1.5 MiB (fits 2 MiB
+        # quota); chunk 1 would push to 3 MiB → 507.
+        chunk = b"A" * (1_572_864)
+        status, _h, _ = self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=sender_tok, device_id=sender_id,
+            raw_body=chunk,
+        )
+        self.assertEqual(status, 200)
+        status, _h, body = self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/1",
+            token=sender_tok, device_id=sender_id,
+            raw_body=chunk,
+        )
+        self.assertEqual(status, 507, f"expected 507, got {status}: {body}")
+        self.assertIn("error", body)
 
 
 if __name__ == "__main__":

@@ -336,7 +336,6 @@ class TransferService
             // the recipient drives that via POST .../ack. The
             // cap-below-chunk_count trick from classic doesn't apply —
             // in streaming, progress is delete-on-ack, not cap-on-serve.
-            $transfers->touchLastServedAt($transferId, time());
             AppLog::log('Transfer', sprintf(
                 'transfer.chunk.served_and_pending_ack transfer_id=%s chunk_index=%d',
                 AppLog::shortId($transferId),
@@ -540,13 +539,13 @@ class TransferService
         }
         // Already-delivered transfers are terminal the other way — the
         // file was actually received. A late abort call is just a stale
-        // client; treat as a no-op success so the DELETE endpoint stays
-        // idempotent from the caller's perspective (matches how old
-        // `cancel` behaved for already-gone transfers).
+        // client; report delivery truthfully (NOT as aborted) so the
+        // caller's UI doesn't flip a successfully-delivered row to
+        // "Aborted". Endpoint stays idempotent: 200 either way, client
+        // decides what to do from `status`.
         if ((int)($transfer['downloaded'] ?? 0) === 1) {
             return [
-                'status' => 'aborted',
-                'reason' => $reason,
+                'status' => 'delivered',
                 'note' => 'already_delivered',
             ];
         }
@@ -582,13 +581,20 @@ class TransferService
      * streaming still reaches the unified abort. Controllers call this
      * when the caller is identified as the sender; the controller
      * routes recipient callers through `abort` directly.
+     *
+     * Preserves the pre-streaming `status: "cancelled"` response shape
+     * for the normal abort path so release-build clients keep parsing
+     * it. The already-delivered short-circuit keeps its truthful
+     * `status: "delivered"` — clobbering that to "cancelled" would
+     * flip a successfully-delivered row in the sender's history to
+     * "cancelled" on a late DELETE.
      */
     public static function cancel(Database $db, string $deviceId, string $transferId): array
     {
         $result = self::abort($db, $deviceId, $transferId, 'sender_abort');
-        // Preserve the exact on-wire shape of the previous response so
-        // release-build clients that check for status=='cancelled' still
-        // see what they expect.
-        return ['status' => 'cancelled'] + $result;
+        if (($result['status'] ?? null) === 'aborted') {
+            return ['status' => 'cancelled'] + $result;
+        }
+        return $result;
     }
 }

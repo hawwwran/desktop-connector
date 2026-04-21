@@ -56,7 +56,7 @@ class TransferRepository
                     chunks_received, complete, created_at, downloaded,
                     delivered_at, chunks_downloaded,
                     mode, aborted, abort_reason, aborted_at,
-                    stream_ready_at, last_served_at, chunks_uploaded
+                    stream_ready_at, chunks_uploaded
              FROM transfers WHERE id = :id',
             [':id' => $transferId]
         );
@@ -354,41 +354,6 @@ class TransferRepository
         $this->db->execute(
             'UPDATE transfers SET chunks_uploaded = chunks_uploaded + 1 WHERE id = :id',
             [':id' => $transferId]
-        );
-    }
-
-    public function isAborted(string $transferId): bool
-    {
-        $row = $this->db->querySingle(
-            'SELECT aborted FROM transfers WHERE id = :id',
-            [':id' => $transferId]
-        );
-        return $row !== null && (int)($row['aborted'] ?? 0) === 1;
-    }
-
-    /**
-     * Total bytes this transfer currently holds on disk (i.e. chunks
-     * that are uploaded but not yet recipient-ACK'd). Drives the
-     * mid-stream quota gate — streaming doesn't reserve projected size
-     * on init, so the server has to measure live on every chunk upload.
-     */
-    public function bytesOnDiskForTransfer(string $transferId): int
-    {
-        $row = $this->db->querySingle(
-            'SELECT COALESCE(SUM(blob_size), 0) AS total
-             FROM chunks WHERE transfer_id = :tid',
-            [':tid' => $transferId]
-        );
-        return (int)($row['total'] ?? 0);
-    }
-
-    /** Bumped when a chunk is served. Reserved for a streaming stall
-     *  safeguard that the plan schedules for a later iteration. */
-    public function touchLastServedAt(string $transferId, int $now): void
-    {
-        $this->db->execute(
-            'UPDATE transfers SET last_served_at = :now WHERE id = :id',
-            [':now' => $now, ':id' => $transferId]
         );
     }
 }

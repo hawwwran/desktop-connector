@@ -94,6 +94,11 @@ class TransferController
      * exhaustion). Sender callers flow through the `cancel()` alias
      * which preserves the old `status: "cancelled"` on-wire shape so
      * pre-streaming release builds keep parsing the response.
+     *
+     * Reason validation is explicit at the HTTP boundary so a typoed
+     * or cross-role reason ("sender passing recipient_abort") surfaces
+     * as a 400 instead of being silently coerced. `abort()` revalidates
+     * in the service layer.
      */
     public static function cancel(Database $db, RequestContext $ctx): void
     {
@@ -107,11 +112,16 @@ class TransferController
         $reason = isset($body['reason']) && is_string($body['reason']) ? $body['reason'] : null;
 
         if ($transfer['recipient_id'] === $deviceId) {
-            $effective = $reason ?? 'recipient_abort';
-            Router::json(TransferService::abort($db, $deviceId, $transferId, $effective));
+            if ($reason !== null && $reason !== 'recipient_abort') {
+                throw new ValidationError('Invalid reason for recipient abort');
+            }
+            Router::json(TransferService::abort($db, $deviceId, $transferId, 'recipient_abort'));
             return;
         }
-        // Sender-side (or unknown caller — abort() will 404 the latter).
+        // Sender-side (or unknown caller — abort() 404s the latter).
+        if ($reason !== null && !in_array($reason, ['sender_abort', 'sender_failed'], true)) {
+            throw new ValidationError('Invalid reason for sender abort');
+        }
         if ($reason === 'sender_failed') {
             Router::json(TransferService::abort($db, $deviceId, $transferId, 'sender_failed'));
             return;
