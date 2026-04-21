@@ -1,15 +1,28 @@
 # Phase C — Desktop streaming client
 
-Companion to `docs/plans/streaming-improvement.md`. Server Phase A + B
-are landed and deployed at
-`https://hawwwran.com/SERVICES/desktop-connector/`. Classic transfers
-still work byte-for-byte. This plan turns the Python desktop client
-into a streaming-capable sender AND recipient.
+**Status: LANDED** (all 7 sub-phases). Commits:
+- `0ba6825` — C.1 typed chunk outcomes + capability probe
+- `f529443` — C.2 history schema + status vocabulary
+- `0ffebc7` — C.3 recipient streaming receive loop
+- `1c0d33e` — C.4 sender streaming state machine
+- `273a1e0` — C.5 send-files UI + history row actions
+- `3ee9906` — C.6 integration tests + lifecycle fix
+- C.7 is this plan-status flip + CLAUDE.md key-design-decisions entry
 
-Correctness over speed. Each sub-phase ends on a green `test_loop.sh`
-and is independently landable. Old client (classic) + new server keeps
-working; new client (streaming) + old server falls back to classic via
-the existing `/api/health` capability probe.
+118/118 protocol tests green, classic `test_loop.sh` still green,
+live streaming end-to-end against hermetic + deployed servers. Kept
+as a historical record of the breakdown — future plans (Phase D for
+Android) can mirror this shape.
+
+Companion to `docs/plans/streaming-improvement.md`. Server Phase A + B
+landed earlier and are deployed at
+`https://hawwwran.com/SERVICES/desktop-connector/`. Classic transfers
+still work byte-for-byte.
+
+Correctness over speed. Each sub-phase ended on a green `test_loop.sh`
+and was independently landable. Old client (classic) + new server
+keeps working; new client (streaming) + old server falls back to
+classic via the existing `/api/health` capability probe.
 
 ---
 

@@ -6,7 +6,16 @@
   `https://hawwwran.com/SERVICES/desktop-connector/`. 29/29 protocol
   contract tests green; `test_loop.sh` classic end-to-end still green.
   Old clients default to classic and keep working unchanged.
-- **Desktop client (Phase C): NOT STARTED.**
+- **Desktop client (Phase C): LANDED** (commits `0ba6825` typed
+  outcomes + capability probe; `f529443` history schema + status
+  vocabulary; `0ffebc7` recipient streaming receive loop; `1c0d33e`
+  sender streaming state machine; `273a1e0` send-files UI + row
+  actions; `3ee9906` integration tests + lifecycle fix). 118/118
+  protocol tests green; classic `test_loop.sh` still green; live
+  streaming end-to-end against hermetic + deployed servers
+  round-trips multi-megabyte payloads with peak on-disk ≤ one chunk.
+  See `docs/plans/desktop-streaming-relay-plan.md` for the per-phase
+  breakdown.
 - **Android client (Phase D): NOT STARTED.**
 - **Integration / cleanup (Phase E): NOT STARTED.**
 
@@ -699,17 +708,42 @@ Shipped in commits `2faf95b` + `cc8fb85` on `main`. Deployed at
    (canonical streaming request/response examples), and
    `docs/diagnostics.events.md` (new event names).
 
-### Phase C — desktop client (Python) — NOT STARTED
+### Phase C — desktop client (Python) ✅ LANDED
 
-7. Plumb the new fields through `api_client`, `poller`, `history`,
-   `windows`.
-8. Implement sender streaming state machine.
-9. Implement recipient streaming receive loop (425 polling, per-chunk
-   ack, abort handling).
-10. Add UI labels and yellow/orange rendering for `sending`,
-    `waiting_stream`, `aborted`.
-11. Desktop integration test: large file, slow-drain recipient,
-    verify peak server bytes ≤ a few chunks.
+7. ✅ Typed chunk outcomes (`ChunkUploadOutcome` /
+   `ChunkDownloadOutcome`), `init_transfer(mode=...)` →
+   `(status, negotiated_mode)`, `ack_chunk`, `abort_transfer(reason)`,
+   `get_capabilities()` + `supports_streaming()` in `api_client.py`
+   (commit `0ba6825`).
+8. ✅ `TransferStatus` constant vocabulary + streaming row fields
+   (`mode`, `chunks_uploaded`, `abort_reason`) in `history.py`;
+   pass-through renderer branches for `sending` / `waiting_stream` /
+   `aborted` in `windows.py` (commit `f529443`).
+9. ✅ `Poller._receive_streaming_transfer` with 425 backoff (5-min
+   dead-upstream budget) + 410 clean abort + per-chunk ACK → blob
+   deletion. Classic `.fn.*` transfers always take the classic path
+   (commit `0ffebc7`).
+10. ✅ `ApiClient._upload_stream` + `_upload_stream_chunk` with the
+    507 quota backoff (30-min ceiling), 410 recipient-abort handling,
+    and network retry. New `on_stream_progress(tid, uploaded, total,
+    state)` callback (commit `1c0d33e`).
+11. ✅ `send_files` window + `runners/send_runner.py` consume the new
+    callback; history-row Cancel migrated to `abort_transfer(reason)`
+    with role-specific dialogs; `_scrub_zombie_waiting` handles
+    `waiting_stream` alongside `waiting` (commit `273a1e0`).
+12. ✅ Integration test — 4 scenarios (happy path, sender abort,
+    recipient abort, quota gate) against the hermetic server + real
+    `send_file` / `_receive_streaming_transfer`. Surfaced and fixed
+    a pre-existing server lifecycle bug where `UPLOADING →
+    DELIVERING` wasn't allowlisted, which only manifested when the
+    recipient drained faster than the sender uploaded (commit
+    `3ee9906`).
+
+118/118 protocol tests green, `test_loop.sh` (classic) green, live
+end-to-end streaming round-trips correctly. Clients that request
+streaming AND talk to a `stream_v1`-capable server get streaming;
+every other combination falls back to classic. Classic flows are
+byte-for-byte identical to pre-streaming behaviour.
 
 ### Phase D — Android client (Kotlin) — NOT STARTED
 
@@ -872,6 +906,26 @@ server, but an ad-hoc script that hits
 `https://hawwwran.com/SERVICES/desktop-connector/` confirmed all 17
 streaming smoke checks pass against the deployed build.
 
-**Clients** (Phase C + D): not started. Implementation will live at
-`docs/plans/desktop-streaming-relay-plan.md` and
-`docs/plans/android-streaming-relay-plan.md` once those phases begin.
+**Phase C (desktop client) LANDED**:
+- `desktop/src/api_client.py` — typed outcomes, `ack_chunk`,
+  `abort_transfer`, capability probe, `_upload_stream` state machine.
+- `desktop/src/poller.py` — mode routing + `_receive_streaming_transfer`
+  with 425/410 handling and per-chunk ACK.
+- `desktop/src/history.py` — `TransferStatus` vocabulary + streaming
+  row fields (`mode`, `chunks_uploaded`, `abort_reason`).
+- `desktop/src/windows.py` + `desktop/src/runners/send_runner.py` —
+  streaming UI states, `abort_transfer(reason)` row action,
+  `waiting_stream` zombie scrub.
+- `tests/protocol/test_desktop_*_streaming*.py` — 47 new tests
+  (typed outcomes, history schema, recipient loop, sender loop,
+  runner callback wiring, end-to-end integration).
+- Server fix (`server/src/Domain/Transfer/TransferLifecycle.php`):
+  allow `UPLOADING → DELIVERING` / `INITIALIZED → DELIVERING` so
+  streaming transfers where the recipient drains faster than the
+  sender uploads don't 500 on the final chunk.
+
+See `docs/plans/desktop-streaming-relay-plan.md` for the per-phase
+breakdown (C.1 through C.7).
+
+**Phase D (Android client)**: not started. Implementation will live at
+`docs/plans/android-streaming-relay-plan.md` once it begins.

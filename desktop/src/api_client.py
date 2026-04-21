@@ -755,7 +755,9 @@ class ApiClient:
           is occupied by earlier transfers that will drain as the phone
           downloads them. Caller sees the row in WAITING state. The
           ConnectionManager notes the storage-pressure condition so the
-          tray / HomeScreen banner can surface it.
+          tray / HomeScreen banner can surface it. (Streaming init
+          never returns 507 — the projected-size check is skipped and
+          quota is enforced per-chunk instead; see `_upload_stream`.)
 
         * Network exception / other 5xx: retry on the same 5s cadence
           as chunk upload, capped at CHUNK_MAX_FAILURE_WINDOW_S (2 min),
@@ -763,10 +765,24 @@ class ApiClient:
 
         * 201 ok: proceed to chunk upload.
 
-        on_progress, if supplied, is called with (transfer_id, -1, N)
-        the first time we hit 507 so the caller can flip its history
-        row status to "waiting". The chunk-index = -1 is the sentinel
-        meaning "not in upload phase yet, show WAITING".
+        ``on_progress`` signals init-time state via sentinel chunk
+        indices — this is the classic path's state channel, kept
+        separate from streaming's ``on_stream_progress``:
+
+          * ``(tid, 0, N)``   — initial row placeholder (fired by
+                                 send_file before calling this helper).
+          * ``(tid, -1, N)``  — 507 storage_full: flip row to WAITING.
+                                 Fires once on first 507, then on each
+                                 subsequent retry timestamp refresh.
+          * ``(tid, -2, N)``  — 413 too_large: terminal, tag row with
+                                 failure_reason='too_large'.
+
+        These sentinels pre-date the typed ``on_stream_progress``
+        (C.4) and are still live because classic init waiting is a
+        distinct flow from streaming mid-stream waiting. They're NOT
+        dead code — removing them requires a parallel cleanup of the
+        classic callers in windows.py and runners/send_runner.py.
+        Left in place; documented here so the contract stays visible.
 
         Returns the server-negotiated mode string ("classic" or
         "streaming") on success, or None on failure. Callers that only
