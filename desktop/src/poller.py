@@ -14,7 +14,7 @@ from pathlib import Path
 import requests as _raw_requests
 from cryptography.exceptions import InvalidTag
 
-from .api_client import ApiClient
+from .api_client import ApiClient, DOWNLOAD_OK
 from .config import Config, FAST_POLL_INTERVAL, DEFAULT_POLL_INTERVAL, FAST_POLL_DURATION
 from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
@@ -260,13 +260,17 @@ class Poller:
         write to a tmp file under the save_dir, dispatch, ACK."""
         plaintext_parts: list[bytes] = []
         for i in range(chunk_count):
-            chunk_data = self.api.download_chunk(transfer_id, i)
-            if chunk_data is None:
-                log.error("Failed to download .fn chunk %d/%d of transfer %s",
-                          i + 1, chunk_count, transfer_id[:12])
+            # .fn transfers are always classic (streaming is forbidden for
+            # them per the plan), so the only outcomes we care about are
+            # "200 with bytes" vs "anything else → bail". The streaming
+            # 425/410 paths are handled in the file-transfer branch.
+            outcome = self.api.download_chunk(transfer_id, i)
+            if outcome.status != DOWNLOAD_OK or outcome.data is None:
+                log.error("Failed to download .fn chunk %d/%d of transfer %s status=%s",
+                          i + 1, chunk_count, transfer_id[:12], outcome.status)
                 return
             try:
-                plaintext_parts.append(KeyManager.decrypt_chunk(chunk_data, symmetric_key))
+                plaintext_parts.append(KeyManager.decrypt_chunk(outcome.data, symmetric_key))
             except Exception:
                 log.exception("Failed to decrypt .fn chunk %d of transfer %s",
                               i, transfer_id[:12])
@@ -456,19 +460,24 @@ class Poller:
     def _download_and_decrypt_chunk(self, transfer_id: str, index: int,
                                      chunk_count: int, symmetric_key: bytes) -> bytes | None:
         """Download + decrypt one chunk. Retries the download on either a
-        missing body (None) or an AES-GCM auth failure (InvalidTag). The
+        missing body or an AES-GCM auth failure (InvalidTag). The
         latter defends against server-side races where a concurrent upload
         causes the reader to see partial bytes — the server's atomic rename
         is the primary fix; this is belt-and-suspenders. Returns plaintext
-        bytes or None if the chunk cannot be recovered after 3 attempts."""
+        bytes or None if the chunk cannot be recovered after 3 attempts.
+
+        Classic-mode helper. The streaming receive loop (C.3) handles
+        425 / 410 directly and does not route through here.
+        """
         for attempt in range(1, CHUNK_DOWNLOAD_ATTEMPTS + 1):
-            encrypted = self.api.download_chunk(transfer_id, index)
-            if encrypted is None:
-                log.warning("Chunk %d/%d download returned no body (attempt %d/%d)",
-                            index + 1, chunk_count, attempt, CHUNK_DOWNLOAD_ATTEMPTS)
+            outcome = self.api.download_chunk(transfer_id, index)
+            if outcome.status != DOWNLOAD_OK or outcome.data is None:
+                log.warning("Chunk %d/%d download returned no body (attempt %d/%d) status=%s",
+                            index + 1, chunk_count, attempt, CHUNK_DOWNLOAD_ATTEMPTS,
+                            outcome.status)
             else:
                 try:
-                    return KeyManager.decrypt_chunk(encrypted, symmetric_key)
+                    return KeyManager.decrypt_chunk(outcome.data, symmetric_key)
                 except InvalidTag:
                     log.warning("Chunk %d/%d decrypt failed (attempt %d/%d), "
                                 "re-downloading", index + 1, chunk_count,

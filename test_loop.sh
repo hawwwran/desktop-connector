@@ -256,9 +256,9 @@ if temp_path.exists():
 
 with open(temp_path, 'wb') as out:
     for i in range(t['chunk_count']):
-        data = api.download_chunk(t['transfer_id'], i)
-        assert data, f'Failed to download chunk {i}'
-        out.write(KeyManager.decrypt_chunk(data, sym_key))
+        outcome = api.download_chunk(t['transfer_id'], i)
+        assert outcome.status == 'ok' and outcome.data, f'Failed to download chunk {i} ({outcome.status})'
+        out.write(KeyManager.decrypt_chunk(outcome.data, sym_key))
         print(f'Downloaded+decrypted chunk {i+1}/{t[\"chunk_count\"]}')
     out.flush()
     os.fsync(out.fileno())
@@ -383,9 +383,9 @@ temp = parts_dir / f'.incoming_{t[\"transfer_id\"]}.part'
 final = save_dir / meta['filename']
 with open(temp, 'wb') as out:
     for i in range(meta['chunk_count']):
-        data = api.download_chunk(t['transfer_id'], i)
-        assert data, f'chunk {i} download failed'
-        out.write(KeyManager.decrypt_chunk(data, sym_key))
+        outcome = api.download_chunk(t['transfer_id'], i)
+        assert outcome.status == 'ok' and outcome.data, f'chunk {i} download failed ({outcome.status})'
+        out.write(KeyManager.decrypt_chunk(outcome.data, sym_key))
     out.flush(); os.fsync(out.fileno())
 os.link(str(temp), str(final))
 os.unlink(str(temp))
