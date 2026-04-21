@@ -1,7 +1,21 @@
 # Streaming improvement — relay pass-through chunks
 
-**Status:** PLAN (not implemented). App-agnostic; the desktop and Android
-clients will each land it afterward against this shared scaffolding.
+**Status:**
+- **Server (Phase A + B): LANDED** (commits `2faf95b` streaming relay;
+  `cc8fb85` review follow-ups). Deployed at
+  `https://hawwwran.com/SERVICES/desktop-connector/`. 29/29 protocol
+  contract tests green; `test_loop.sh` classic end-to-end still green.
+  Old clients default to classic and keep working unchanged.
+- **Desktop client (Phase C): NOT STARTED.**
+- **Android client (Phase D): NOT STARTED.**
+- **Integration / cleanup (Phase E): NOT STARTED.**
+
+Clients will land streaming afterward against the shared server
+scaffolding. Both sides negotiate via `POST /api/transfers/init` —
+old clients omit `mode`, new clients can request `mode: "streaming"`
+and get `negotiated_mode` back. See §11 below for the exact server
+surface that shipped, and `docs/protocol.examples.md §8` for canonical
+request/response shapes.
 
 ## Motivation
 
@@ -631,31 +645,61 @@ or FCM payload contents.
 
 Phased so we always have a green `test_loop.sh`:
 
-### Phase A — server (additive, no client change)
+### Phase A — server (additive, no client change) ✅ DONE
 
-1. **Migration 002** — schema columns added, no behavioural change.
-2. **`mode` parameter accepted at init** (default classic) — server
-   routes everything through classic path for now. Advertises
-   `stream_v1` in `/api/health`.
-3. **New endpoints wired through** (`/chunks/{i}/ack`, `DELETE` by
-   recipient, 425/410 error envelopes) — classic transfers ignore the
-   per-chunk ACK endpoint (transfer-level ack still works).
-4. **Server switches to streaming path when `mode=streaming`** —
-   streaming path enforces per-chunk quota, deletes chunks on ACK,
-   fires `stream_ready` wake on first chunk. Classic path untouched.
+Shipped in commits `2faf95b` + `cc8fb85` on `main`. Deployed at
+`https://hawwwran.com/SERVICES/desktop-connector/`.
 
-### Phase B — protocol tests
+1. ✅ **Schema additions** — `mode`, `aborted`, `abort_reason`,
+   `aborted_at`, `stream_ready_at`, `chunks_uploaded` on `transfers`
+   (+ `idx_transfers_aborted`). Inline in `Database::migrate()` via
+   `PRAGMA table_info` idempotency checks; no separate `.sql` file
+   (a `002_streaming.sql` was briefly written but removed in review —
+   it would have been unread documentation).
+2. ✅ **`mode` parameter at init** (default classic). `/api/health`
+   advertises `capabilities: ["stream_v1"]` when
+   `Config::streamingEnabled()` (operator kill-switch, default true).
+   `/api/transfers/init` returns `negotiated_mode`.
+3. ✅ **New endpoints / error envelopes** —
+   `POST /api/transfers/{id}/chunks/{i}/ack`, `DELETE` accepts
+   recipient too, `425 TooEarlyError` (Retry-After + `retry_after_ms`),
+   `410 AbortedError` (with optional `abort_reason`). Classic transfers
+   reject per-chunk ACK with 400 — transfer-level ACK is still the
+   only legitimate path for them.
+4. ✅ **Streaming path** — `TransferService::uploadChunk` streaming
+   branch runs mid-stream 507 quota gate, fires `stream_ready` FCM
+   wake exactly once per transfer (via idempotent `markStreamReady`);
+   `downloadChunk` streaming branch emits 425/410 appropriately;
+   `ackChunk` deletes blob + row + bumps `chunks_downloaded`,
+   finalizes delivery on the last index; `abort` replaces `cancel`
+   with unified either-party semantics, `markAborted` guarded by
+   `aborted=0 AND downloaded=0` so concurrent final-ACK-vs-abort
+   races settle cleanly. Classic path is byte-for-byte untouched.
 
-5. Extend `tests/protocol/test_server_contract.py` to cover:
-   - init with `mode=streaming`, online recipient → `negotiated_mode=streaming`
-   - init with `mode=streaming`, offline recipient → `negotiated_mode=classic`
+### Phase B — protocol tests ✅ DONE
+
+5. ✅ `tests/protocol/test_server_contract.py` covers:
+   - init with `mode=streaming`, online recipient → streaming
+   - init with `mode=streaming`, `streamingEnabled=false` → classic
+     (via dedicated `ServerWithStreamingDisabledTests` harness)
    - GET chunk that hasn't uploaded → 425 + Retry-After
-   - DELETE by recipient → 200 for recipient, subsequent GETs → 410
-   - Per-chunk ack deletes the blob file
-   - 507 on mid-stream chunk upload when quota is full
-6. Update `docs/protocol.compatibility.md` and `docs/protocol.examples.md`.
+   - GET chunk that's already been acked+wiped → 410 (distinct path)
+   - DELETE by recipient → 200 aborted; subsequent upload 410
+   - Per-chunk ack deletes the blob file from disk
+   - Per-chunk ack rejected for classic transfers (400)
+   - 507 on mid-stream chunk upload when quota is full (via dedicated
+     `ServerWithTightQuotaTests` harness with `storageQuotaMB=2`)
+   - Invalid DELETE `reason` (cross-role typos) → 400
+   - Late DELETE after `downloaded=1` → `status: "delivered"`,
+     not "aborted"
+   - `sent-status` exposes `mode`, `chunks_uploaded`, `abort_reason`
+   29/29 tests green.
+6. ✅ Updated `docs/protocol.compatibility.md` (new row per change,
+   classified preserving/extending), `docs/protocol.examples.md §8`
+   (canonical streaming request/response examples), and
+   `docs/diagnostics.events.md` (new event names).
 
-### Phase C — desktop client (Python)
+### Phase C — desktop client (Python) — NOT STARTED
 
 7. Plumb the new fields through `api_client`, `poller`, `history`,
    `windows`.
@@ -667,12 +711,12 @@ Phased so we always have a green `test_loop.sh`:
 11. Desktop integration test: large file, slow-drain recipient,
     verify peak server bytes ≤ a few chunks.
 
-### Phase D — Android client (Kotlin)
+### Phase D — Android client (Kotlin) — NOT STARTED
 
 12. Same scope as C on the Android side. Reuse the shared message model
     where possible; new `TransferState` enum values.
 
-### Phase E — integration + cleanup
+### Phase E — integration + cleanup — NOT STARTED
 
 13. Update `test_loop.sh` to exercise both modes.
 14. Concurrent streaming test (two transfers overlapping to the same
@@ -684,7 +728,9 @@ Phased so we always have a green `test_loop.sh`:
 
 Each phase ends on a green `test_loop.sh`. No phase requires the
 next one to also land (old client + new server and new client + old
-server both keep working by falling back to classic).
+server both keep working by falling back to classic — confirmed after
+Phase A: `test_loop.sh` stayed green unchanged, and a deployed-server
+smoke test against 17 checkpoints all passed).
 
 ---
 
@@ -769,31 +815,63 @@ server both keep working by falling back to classic).
 
 ## 11. Summary of added files / changed surface
 
-**Server** (Phase A):
-- `server/migrations/002_streaming.sql` — new
-- `server/src/Http/ApiError.php` — add `TooEarlyError`, `AbortedError`
-- `server/src/Services/TransferService.php` — `init` (mode param),
-  `uploadChunk` (streaming branch + quota-on-chunk), `downloadChunk`
-  (425), `ackChunk` (new), `abort` (supersedes `cancel`)
-- `server/src/Services/TransferStatusService.php` — emit `aborted`,
-  `sending` sub-state, new fields
-- `server/src/Services/TransferWakeService.php` — `wakeStreamReady`
-- `server/src/Services/TransferCleanupService.php` — unified wipe
-- `server/src/Repositories/TransferRepository.php` — new methods
-- `server/src/Repositories/ChunkRepository.php` — `deleteChunkByIndex`
-- `server/src/Controllers/TransferController.php` — wire new routes
-- `server/src/Router.php` — route `POST /chunks/{i}/ack`
-- `server/public/index.php` — front-controller registration
+**Server** (Phase A + B, LANDED — commits `2faf95b`, `cc8fb85`):
+- `server/src/Database.php` — inline idempotent schema migration via
+  `PRAGMA table_info` (no separate `.sql` file).
+- `server/src/Config.php` — `streamingEnabled` knob (default true) +
+  `Config::streamingEnabled()` accessor that tolerates "0" / "false"
+  string values for hand-edited JSON.
+- `server/src/Http/ApiError.php` — `TooEarlyError` (425 + Retry-After),
+  `AbortedError` (410 + optional `abort_reason`).
+- `server/src/Router.php` — 425 logs at `debug`, other 4xx at
+  `warning`, 5xx at `error` (avoids log spam on streaming pipelines).
+- `server/src/Services/TransferService.php` — `init` accepts `mode`
+  and returns `negotiated_mode`; `uploadChunk` streaming branch with
+  mid-stream 507 quota gate + idempotent `stream_ready` wake;
+  `downloadChunk` emits 425/410; new `ackChunk`; new `abort`
+  (supersedes `cancel`, which stays as a back-compat alias preserving
+  `status: "cancelled"` on the wire).
+- `server/src/Services/TransferStatusService.php` — `computeStatus`
+  short-circuits on `aborted=1`; `formatSent` emits `mode`,
+  `chunks_uploaded`, `abort_reason`.
+- `server/src/Services/TransferWakeService.php` — three wake flavors
+  (`transfer_ready` / `stream_ready` / `abort`) sharing one fire-and-
+  forget helper.
+- `server/src/Repositories/TransferRepository.php` — `markStreamReady`,
+  `markAborted` (guarded by `aborted=0 AND downloaded=0`),
+  `incrementChunksUploaded`; pending/notify/sent-status queries now
+  surface streaming rows on `stream_ready_at > 0` instead of
+  `complete=1`.
+- `server/src/Repositories/ChunkRepository.php` — `deleteChunkByIndex`.
+- `server/src/Controllers/TransferController.php` — `mode` plumbing at
+  init; new `ackChunk`; unified DELETE dispatcher with explicit 400
+  on cross-role / unknown `reason`.
+- `server/public/index.php` — front-controller registration for
+  `POST /api/transfers/{id}/chunks/{i}/ack`.
 
 **Docs**:
-- `docs/diagnostics.events.md` — new event names (§7)
-- `docs/protocol.compatibility.md` — stream_v1 classification
-- `docs/protocol.examples.md` — streaming request/response examples
+- `docs/diagnostics.events.md` — new event names: `transfer.stream.ready`,
+  `transfer.stream.waiting_quota`, `transfer.chunk.served_and_pending_ack`,
+  `transfer.chunk.acked_and_deleted`, `transfer.chunk.too_early`,
+  `transfer.abort.{sender,recipient}`, `transfer.abort.wake.sent`.
+- `docs/protocol.compatibility.md` — per-row classification of every
+  new surface (all "extending" or "preserving").
+- `docs/protocol.examples.md` — §8 with canonical streaming request /
+  response examples, 425 envelope, 410 envelope, FCM type table.
+- `docs/plans/streaming-improvement.md` (this file) — status header +
+  phase markers.
 
-**Tests**:
-- `tests/protocol/test_server_contract.py` — §B coverage
+**Tests** (29/29 green):
+- `tests/protocol/test_server_contract.py` — streaming contract
+  coverage, `_ServerHarness` gained `config_overrides` kwarg;
+  new `ServerWithStreamingDisabledTests` (operator kill-switch) and
+  `ServerWithTightQuotaTests` (mid-stream 507) classes.
 
-**Clients**: specced here, implementation tracked in per-client plans
-that will live at `docs/plans/desktop-streaming-relay-plan.md` and
-`docs/plans/android-streaming-relay-plan.md` once the server side is
-green.
+**Live smoke test** — `tests/protocol/` doesn't spam the deployed
+server, but an ad-hoc script that hits
+`https://hawwwran.com/SERVICES/desktop-connector/` confirmed all 17
+streaming smoke checks pass against the deployed build.
+
+**Clients** (Phase C + D): not started. Implementation will live at
+`docs/plans/desktop-streaming-relay-plan.md` and
+`docs/plans/android-streaming-relay-plan.md` once those phases begin.

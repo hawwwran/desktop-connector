@@ -34,3 +34,4 @@ haven't yet.
 | [protocol.md](plans/protocol.md) | Formal spec of the HTTP + encrypted-envelope protocol between desktop, phone, relay. Reverse-specified from `main`. | Reference (living doc) |
 | [explain.protocol.md](plans/explain.protocol.md) | Rationale for why `protocol.md` exists, how to extend it, how to use it during change design. | Reference |
 | [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Draft |
+| [streaming-improvement.md](plans/streaming-improvement.md) | Replace the store-then-forward relay with a streaming pass-through: per-chunk ACK wipes blobs on the server, so peak on-disk bytes collapse to the in-flight window. Either-party abort, mode negotiation, 425/410 error envelopes. | Server **Done** (phases A+B) · Desktop Draft · Android Draft · Integration Draft |
