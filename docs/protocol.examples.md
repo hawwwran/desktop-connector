@@ -376,5 +376,174 @@ Canonical status codes:
 | 403 | Authenticated but not authorized (e.g. not the sender of a transfer) |
 | 404 | Unknown transfer / chunk / resource |
 | 409 | Conflict (transfer id already exists) |
+| 410 | Transfer has been aborted (streaming only); `abort_reason` may be set in body |
+| 413 | Transfer alone exceeds server quota (terminal) |
+| 425 | Streaming download — chunk not yet stored; retry after `retry_after_ms` (also in `Retry-After` header, seconds) |
 | 429 | Too many pings (includes `retry_after`) |
 | 500 | Server-side invariant violation or storage failure |
+| 507 | Recipient storage limit would be exceeded (transient; WAITING state) |
+
+## 8) Streaming relay (optional, additive)
+
+See `docs/plans/streaming-improvement.md` for the full design. The
+streaming relay lets the recipient pull chunks as they land instead of
+waiting for the whole upload — per-chunk ACK wipes the blob on the
+server, so peak on-disk usage collapses to the in-flight window. Old
+clients keep working unchanged because `/api/transfers/init` defaults
+to classic.
+
+### Health advertises capabilities
+`GET /api/health`
+
+```json
+{
+  "status": "ok",
+  "time": 1710000000,
+  "capabilities": ["stream_v1"]
+}
+```
+
+When the operator disables streaming via `server/data/config.json`
+(`"streamingEnabled": false`), the capability is omitted and every
+`init` negotiates to `classic` regardless of the requested mode.
+
+### Init with `mode=streaming`
+`POST /api/transfers/init`
+
+```json
+{
+  "transfer_id": "tx-stream-1",
+  "recipient_id": "phone-device-id",
+  "encrypted_meta": "base64-ciphertext",
+  "chunk_count": 50,
+  "mode": "streaming"
+}
+```
+
+### Init response (streaming accepted, 201)
+
+```json
+{
+  "transfer_id": "tx-stream-1",
+  "status": "awaiting_chunks",
+  "negotiated_mode": "streaming"
+}
+```
+
+### Init response (streaming requested, recipient offline — downgraded, 201)
+
+```json
+{
+  "transfer_id": "tx-stream-1",
+  "status": "awaiting_chunks",
+  "negotiated_mode": "classic"
+}
+```
+
+The server downgrades to classic when the recipient's `last_seen_at`
+is older than 15 s, when `streamingEnabled=false`, or when the client
+passes `mode=classic` / omits `mode`.
+
+### Download chunk not yet stored (425)
+`GET /api/transfers/tx-stream-1/chunks/7`
+
+```
+HTTP/1.1 425 Too Early
+Retry-After: 1
+Content-Type: application/json
+
+{
+  "error": "Chunk not yet uploaded",
+  "retry_after_ms": 1000
+}
+```
+
+### Per-chunk ACK (streaming only)
+`POST /api/transfers/tx-stream-1/chunks/7/ack`
+
+Response (200) for a non-final chunk:
+
+```json
+{
+  "status": "acked",
+  "chunk_index": 7,
+  "chunks_downloaded": 8
+}
+```
+
+Response (200) on the final chunk — transfer is finalized in the same
+call:
+
+```json
+{
+  "status": "delivered"
+}
+```
+
+After the ACK the chunk blob is removed from disk; subsequent GETs for
+the same index return 410 Gone.
+
+### Abort by recipient
+`DELETE /api/transfers/tx-stream-1`
+
+Response (200):
+
+```json
+{
+  "status": "aborted",
+  "reason": "recipient_abort"
+}
+```
+
+Sender sees 410 on the next chunk upload. The row stays in
+`/sent-status` with `status: "aborted"`, `delivery_state: "aborted"`,
+and `abort_reason: "recipient_abort"`.
+
+### Sender-initiated cancel (preserved shape)
+`DELETE /api/transfers/tx-stream-1`
+
+Response (200):
+
+```json
+{
+  "status": "cancelled",
+  "reason": "sender_abort"
+}
+```
+
+The legacy `status: "cancelled"` is preserved so pre-streaming release
+builds parse the response unchanged. Pass
+`{"reason": "sender_failed"}` in the body to mark the transfer as a
+sender-side failure (shown as `"Failed: quota_timeout"` etc. in the UI).
+
+### Sent-status extensions
+
+```json
+{
+  "transfer_id": "tx-stream-1",
+  "status": "pending",
+  "delivery_state": "in_progress",
+  "chunks_downloaded": 24,
+  "chunks_uploaded": 31,
+  "chunk_count": 50,
+  "mode": "streaming",
+  "created_at": 1710000100
+}
+```
+
+New fields: `mode` (`classic` \| `streaming`), `chunks_uploaded`
+(streaming only, drives "Sending X→Y"), `abort_reason` (only when
+`status == "aborted"`). Old clients ignore these.
+
+### FCM wake types (opaque)
+
+Data-only FCM payload. The `type` tells the recipient app which loop to
+nudge; no content is leaked:
+
+| type | Fired when |
+|---|---|
+| `transfer_ready` | Classic upload completed |
+| `stream_ready` | Streaming transfer stored its first chunk |
+| `abort` | Either party aborted — sent to the opposite side |
+| `ping` | Liveness probe (existing) |
+| `fasttrack` | Fasttrack message waiting (existing) |

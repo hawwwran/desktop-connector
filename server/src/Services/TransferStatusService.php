@@ -10,9 +10,18 @@ class TransferStatusService
     /**
      * Map a transfers row to {status, delivery_state}.
      * Required row fields: chunk_count, complete, downloaded, chunks_downloaded.
+     * Adds an `aborted` short-circuit ahead of the classic state derivation
+     * so aborted rows always report as aborted regardless of the pre-abort
+     * progress counters that stay frozen in the row.
      */
     public static function computeStatus(array $row): array
     {
+        if ((int)($row['aborted'] ?? 0) === 1) {
+            return [
+                'status' => 'aborted',
+                'delivery_state' => 'aborted',
+            ];
+        }
         $internalState = TransferLifecycle::deriveState($row);
         return TransferStatusMapper::toProtocolStatus($internalState);
     }
@@ -21,7 +30,7 @@ class TransferStatusService
     public static function formatSent(array $row): array
     {
         $s = self::computeStatus($row);
-        return [
+        $out = [
             'transfer_id' => $row['transfer_id'],
             'status' => $s['status'],
             'delivery_state' => $s['delivery_state'],
@@ -29,6 +38,17 @@ class TransferStatusService
             'chunk_count' => (int)$row['chunk_count'],
             'created_at' => (int)$row['created_at'],
         ];
+        // Additive streaming fields. Old clients ignore unknown JSON
+        // keys; new clients use these to paint "Sending X→Y" / "Aborted".
+        $mode = $row['mode'] ?? 'classic';
+        $out['mode'] = $mode;
+        if ($mode === 'streaming') {
+            $out['chunks_uploaded'] = (int)($row['chunks_uploaded'] ?? 0);
+        }
+        if ((int)($row['aborted'] ?? 0) === 1 && !empty($row['abort_reason'])) {
+            $out['abort_reason'] = (string)$row['abort_reason'];
+        }
+        return $out;
     }
 
     /** Trimmed per-transfer dict for /notify inline payload (no created_at). */

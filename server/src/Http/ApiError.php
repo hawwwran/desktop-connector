@@ -99,3 +99,45 @@ class PayloadTooLargeError extends ApiError
         parent::__construct(413, $message);
     }
 }
+
+/**
+ * 425 Too Early — streaming download only. The transfer exists and is
+ * not aborted, but the chunk hasn't been stored yet. The recipient
+ * should retry after `retry_after_ms`. Distinct from 404 (transfer
+ * unknown / wiped, terminal) so the recipient can poll politely
+ * instead of treating a transient upstream gap as a fatal error.
+ *
+ * Emits both a `Retry-After` HTTP header (seconds, per RFC 7231) and
+ * a millisecond-precision `retry_after_ms` body field — recipients on
+ * a hot pipeline want sub-second pacing, but standard HTTP caches /
+ * gateways only understand the integer-second header.
+ */
+class TooEarlyError extends ApiError
+{
+    public function __construct(string $message, int $retryAfterMs = 1000)
+    {
+        $retrySec = max(1, (int)ceil($retryAfterMs / 1000));
+        parent::__construct(
+            425,
+            $message,
+            ['retry_after_ms' => $retryAfterMs],
+            ['Retry-After' => (string)$retrySec],
+        );
+    }
+}
+
+/**
+ * 410 Gone — the transfer has been aborted (by either party) or has
+ * been fully wiped after streaming completion. Terminal from the
+ * caller's perspective: no retry helps. Distinct from 404 because the
+ * transfer_id WAS valid at some point; the caller may want to reflect
+ * that in the UI ("Aborted" vs "Not found").
+ */
+class AbortedError extends ApiError
+{
+    public function __construct(string $message = 'Transfer has been aborted', ?string $reason = null)
+    {
+        $extra = $reason !== null ? ['abort_reason' => $reason] : [];
+        parent::__construct(410, $message, $extra);
+    }
+}

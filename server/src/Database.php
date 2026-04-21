@@ -85,6 +85,43 @@ class Database
                 PRIMARY KEY (sender_id, recipient_id)
             )
         ');
+
+        // Streaming-relay columns (migration 002). Additive; old clients
+        // keep reading/writing the classic subset because `mode` defaults
+        // to 'classic' and everything else is nullable / zero-default.
+        //
+        // Column-existence check goes via PRAGMA table_info — the other
+        // migrations above use strpos() on sqlite_master.sql, which works
+        // for distinctive names but gets fragile when you need to
+        // distinguish `aborted` from `aborted_at`. PRAGMA is unambiguous.
+        $existingCols = [];
+        foreach ($this->queryAll('PRAGMA table_info(transfers)') as $row) {
+            if (isset($row['name'])) {
+                $existingCols[$row['name']] = true;
+            }
+        }
+        if (!isset($existingCols['mode'])) {
+            $this->db->exec("ALTER TABLE transfers ADD COLUMN mode TEXT NOT NULL DEFAULT 'classic'");
+        }
+        if (!isset($existingCols['aborted'])) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN aborted INTEGER NOT NULL DEFAULT 0');
+        }
+        if (!isset($existingCols['abort_reason'])) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN abort_reason TEXT');
+        }
+        if (!isset($existingCols['aborted_at'])) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN aborted_at INTEGER');
+        }
+        if (!isset($existingCols['stream_ready_at'])) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN stream_ready_at INTEGER');
+        }
+        if (!isset($existingCols['last_served_at'])) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN last_served_at INTEGER');
+        }
+        if (!isset($existingCols['chunks_uploaded'])) {
+            $this->db->exec('ALTER TABLE transfers ADD COLUMN chunks_uploaded INTEGER NOT NULL DEFAULT 0');
+        }
+        $this->db->exec('CREATE INDEX IF NOT EXISTS idx_transfers_aborted ON transfers(aborted)');
     }
 
     public function query(string $sql, array $params = []): SQLite3Result

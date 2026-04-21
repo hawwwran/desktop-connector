@@ -18,6 +18,12 @@ class Config
     /** Defaults applied when the key is missing from the on-disk JSON. */
     private const DEFAULTS = [
         'storageQuotaMB' => 500,
+        // Operator kill-switch for the streaming relay (see
+        // docs/plans/streaming-improvement.md). When false, /api/health
+        // drops `stream_v1` from capabilities and /api/transfers/init
+        // always returns negotiated_mode=classic so the entire fleet
+        // falls back to store-then-forward without a code change.
+        'streamingEnabled' => true,
     ];
 
     /** @var array<string,mixed>|null — memoised per-request to avoid
@@ -36,6 +42,26 @@ class Config
     {
         $mb = (int)self::get('storageQuotaMB');
         return $mb * 1024 * 1024;
+    }
+
+    /** Whether the streaming-relay mode is exposed to clients. Tolerant
+     *  of non-bool values in the JSON — accepts string "false" / "0" so
+     *  an operator editing by hand doesn't have to know PHP-truthiness
+     *  rules. Default true (set in self::DEFAULTS). */
+    public static function streamingEnabled(): bool
+    {
+        $raw = self::get('streamingEnabled');
+        if (is_bool($raw)) {
+            return $raw;
+        }
+        if (is_string($raw)) {
+            $v = strtolower(trim($raw));
+            return !in_array($v, ['0', 'false', 'no', 'off', ''], true);
+        }
+        if (is_int($raw)) {
+            return $raw !== 0;
+        }
+        return (bool)self::DEFAULTS['streamingEnabled'];
     }
 
     public static function all(): array

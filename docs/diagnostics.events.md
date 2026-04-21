@@ -175,10 +175,18 @@ renamed/restructured.
 | `transfer.upload.completed` | server (new), desktop, android | info | `transfer_id`, `sender`, `recipient`, `chunks` | All chunks received by server |
 | `transfer.pending.found` | desktop, android | info | `count` | Poll returned pending transfers |
 | `transfer.download.started` | desktop, android | info | `transfer_id`, `sender`, `chunks` | Download begun |
-| `transfer.chunk.served` | server (new) | debug | `transfer_id`, `chunk_index` | Server sent a chunk to recipient |
+| `transfer.chunk.served` | server (new) | debug | `transfer_id`, `chunk_index` | Server sent a chunk to recipient (classic) |
+| `transfer.chunk.served_and_pending_ack` | server | debug | `transfer_id`, `chunk_index` | Streaming: chunk served, awaiting per-chunk ACK |
+| `transfer.chunk.acked_and_deleted` | server | debug | `transfer_id`, `chunk_index` | Streaming: per-chunk ACK removed the blob from disk |
+| `transfer.chunk.too_early` | server, desktop, android | debug | `transfer_id`, `chunk_index` | Streaming: recipient got 425 — chunk not yet stored. Surfaces via `apierror.caught` at 425 — no dedicated info-level line to avoid spamming |
 | `transfer.download.completed` | desktop, android | info | `transfer_id`, `bytes` | File saved locally |
 | `transfer.download.cancelled` | android | info | `transfer_id`, `chunk_index` | User deleted row mid-download |
-| `transfer.wake.sent` | server (new) | info | `transfer_id`, `recipient`, `fcm_result` | FCM push after complete |
+| `transfer.wake.sent` | server (new) | info | `transfer_id`, `target`, `fcm_result`, `fcm_type` | FCM push; `fcm_type ∈ {transfer_ready}` (classic) |
+| `transfer.stream.ready` | server | info | `transfer_id`, `sender`, `recipient` | Streaming: first chunk stored, `stream_ready` FCM fired |
+| `transfer.stream.waiting_quota` | server | warning | `transfer_id`, `chunk_index`, `current`, `cap` | Streaming: chunk upload bounced on 507 — recipient's on-disk bytes would exceed quota |
+| `transfer.abort.sender` | server | info | `transfer_id`, `sender`, `recipient`, `reason` | `DELETE` by sender, reason=sender_abort |
+| `transfer.abort.recipient` | server | info | `transfer_id`, `sender`, `recipient`, `reason` | `DELETE` by recipient, reason=recipient_abort |
+| `transfer.abort.wake.sent` | server | info | `transfer_id`, `target`, `fcm_result`, `fcm_type` | Abort FCM wake to the opposite party |
 | `transfer.cleanup.expired` | server (new) | info | `count` | Sweep deleted expired rows |
 
 ### delivery

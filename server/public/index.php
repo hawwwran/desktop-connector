@@ -141,6 +141,10 @@ $router->authPost('/api/transfers/{transfer_id}/ack', function (RequestContext $
     TransferController::ack($db, $ctx);
 });
 
+$router->authPost('/api/transfers/{transfer_id}/chunks/{chunk_index}/ack', function (RequestContext $ctx) use ($db) {
+    TransferController::ackChunk($db, $ctx);
+});
+
 $router->authDelete('/api/transfers/{transfer_id}', function (RequestContext $ctx) use ($db) {
     TransferController::cancel($db, $ctx);
 });

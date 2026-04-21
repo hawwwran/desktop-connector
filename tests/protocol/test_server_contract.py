@@ -398,17 +398,49 @@ class ServerProtocolContractTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn(tid, [t.get("transfer_id") for t in body.get("transfers", [])])
 
-    def test_cancel_transfer_non_sender_denied(self):
-        """A device that isn't the sender can't cancel someone else's
-        transfer — same 404 the route returns for unknown ids (deliberate;
-        keeps the endpoint from leaking transfer-id existence)."""
+    def test_cancel_transfer_third_party_denied(self):
+        """A device that is neither sender NOR recipient can't abort
+        someone else's transfer — same 404 the route returns for
+        unknown ids (deliberate; keeps the endpoint from leaking
+        transfer-id existence). Post-streaming the DELETE endpoint
+        accepts both sender and recipient; third parties stay denied."""
         sender_id, sender_token, recipient_id, recipient_token, tid = \
             self._pair_and_init()
+        # Register a fresh third-party device unrelated to the pair
+        third_id, third_token, _ = self._register_device("desktop")
+        status, _h, body = self.h.request(
+            "DELETE", f"/api/transfers/{tid}",
+            token=third_token, device_id=third_id,
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", body)
+
+    def test_abort_transfer_by_recipient(self):
+        """Recipient can now DELETE — marks the transfer aborted with
+        reason='recipient_abort', wipes chunks, and disappears from
+        pending/sent-status properly."""
+        sender_id, sender_token, recipient_id, recipient_token, tid = \
+            self._pair_and_init()
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=sender_token, device_id=sender_id,
+            raw_body=b"x",
+        )
         status, _h, body = self.h.request(
             "DELETE", f"/api/transfers/{tid}",
             token=recipient_token, device_id=recipient_id,
         )
-        self.assertEqual(status, 404)
+        self.assertEqual(status, 200)
+        self.assertEqual(body.get("status"), "aborted")
+        self.assertEqual(body.get("reason"), "recipient_abort")
+
+        # Subsequent sender chunk upload returns 410 Gone.
+        status, _h, body = self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/1",
+            token=sender_token, device_id=sender_id,
+            raw_body=b"y",
+        )
+        self.assertEqual(status, 410)
         self.assertIn("error", body)
 
     def test_cancel_transfer_requires_auth(self):
@@ -418,6 +450,241 @@ class ServerProtocolContractTests(unittest.TestCase):
             "DELETE", f"/api/transfers/{tid}",  # no token
         )
         self.assertEqual(status, 401)
+
+    def _pair_and_init_mode(self, *, mode=None, chunk_count=3, bump_recipient_last_seen=True):
+        """Like _pair_and_init but lets the test pick mode and chunk count.
+        `bump_recipient_last_seen` hits /api/health with the recipient's
+        credentials so the streaming `online-by-last-seen` check passes.
+        """
+        sender_id, sender_token, _ = self._register_device("desktop")
+        recipient_id, recipient_token, recipient_pub = self._register_device("phone")
+        self.h.request(
+            "POST", "/api/pairing/request",
+            token=recipient_token, device_id=recipient_id,
+            json_body={"desktop_id": sender_id, "phone_pubkey": recipient_pub},
+        )
+        self.h.request(
+            "POST", "/api/pairing/confirm",
+            token=sender_token, device_id=sender_id,
+            json_body={"phone_id": recipient_id},
+        )
+        if bump_recipient_last_seen:
+            # /api/health with optional auth bumps last_seen_at. Without
+            # this bump, the freshly-registered recipient still has
+            # last_seen from registration — which works, but we want the
+            # freshness signal to be explicit in the test.
+            self.h.request(
+                "GET", "/api/health",
+                token=recipient_token, device_id=recipient_id,
+            )
+        import uuid
+        tid = str(uuid.uuid4())
+        body = {
+            "transfer_id": tid,
+            "recipient_id": recipient_id,
+            "encrypted_meta": "e30=",
+            "chunk_count": chunk_count,
+        }
+        if mode is not None:
+            body["mode"] = mode
+        status, _h, resp = self.h.request(
+            "POST", "/api/transfers/init",
+            token=sender_token, device_id=sender_id,
+            json_body=body,
+        )
+        self.assertEqual(status, 201)
+        return {
+            "sender_id": sender_id,
+            "sender_token": sender_token,
+            "recipient_id": recipient_id,
+            "recipient_token": recipient_token,
+            "transfer_id": tid,
+            "init_response": resp,
+        }
+
+    # ---- Streaming-relay contract (migration 002) ---------------------------
+
+    def test_health_advertises_stream_v1_capability(self):
+        """Post-streaming, /api/health exposes a `capabilities` list
+        that includes stream_v1 when the operator hasn't disabled it."""
+        status, _h, body = self.h.request("GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertIn("capabilities", body)
+        self.assertIn("stream_v1", body["capabilities"])
+
+    def test_init_defaults_to_classic_mode(self):
+        """Old client omitting `mode` must still succeed and get
+        classic behaviour — negotiated_mode=classic is returned for
+        forward-compat, but the existing transfer_id/status fields are
+        untouched."""
+        ctx = self._pair_and_init_mode(mode=None, chunk_count=1)
+        resp = ctx["init_response"]
+        self.assertEqual(resp["transfer_id"], ctx["transfer_id"])
+        self.assertEqual(resp["status"], "awaiting_chunks")
+        self.assertEqual(resp.get("negotiated_mode"), "classic")
+
+    def test_init_streaming_mode_online_recipient(self):
+        """mode=streaming + online recipient → negotiated_mode=streaming."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=2)
+        self.assertEqual(ctx["init_response"].get("negotiated_mode"), "streaming")
+
+    def test_init_streaming_transfer_surfaces_in_pending_on_first_chunk(self):
+        """Streaming transfers must appear in /pending as soon as the
+        first chunk is stored — not only after the full upload
+        completes. Without this, the streaming pipeline collapses to
+        classic timing."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=3)
+        tid = ctx["transfer_id"]
+
+        # Before any chunks: recipient's pending list doesn't include it
+        status, _h, body = self.h.request(
+            "GET", "/api/transfers/pending",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn(tid, [t["transfer_id"] for t in body.get("transfers", [])])
+
+        # Upload chunk 0 → pending list surfaces the transfer
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"chunk-0",
+        )
+        status, _h, body = self.h.request(
+            "GET", "/api/transfers/pending",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 200)
+        ids = [t["transfer_id"] for t in body.get("transfers", [])]
+        self.assertIn(tid, ids)
+
+    def test_streaming_download_chunk_not_yet_uploaded_returns_425(self):
+        """GET on a streaming chunk that hasn't landed yet returns 425
+        Too Early with a Retry-After header and retry_after_ms body
+        field — distinguishes 'upstream hasn't produced it' from
+        'genuinely unknown' (404)."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=3)
+        tid = ctx["transfer_id"]
+        # Upload chunk 0 so transfer surfaces in pending; then recipient
+        # asks for chunk 1 before the sender has uploaded it.
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"chunk-0",
+        )
+        status, headers, body = self.h.request(
+            "GET", f"/api/transfers/{tid}/chunks/1",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 425)
+        self.assertIn("Retry-After", headers)
+        self.assertIn("retry_after_ms", body)
+        self.assertGreater(int(body["retry_after_ms"]), 0)
+
+    def test_streaming_per_chunk_ack_wipes_blob(self):
+        """Per-chunk ACK deletes the chunk file from disk and blocks
+        further serves of that index (410)."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=3)
+        tid = ctx["transfer_id"]
+        # Upload + download + ack chunk 0
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"chunk-0",
+        )
+        status, _h, _ = self.h.request(
+            "GET", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 200)
+        status, _h, body = self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0/ack",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body.get("status"), "acked")
+        self.assertEqual(body.get("chunk_index"), 0)
+        # Blob file should be gone from disk
+        import os as _os
+        blob_path = _os.path.join(self.h._server_copy, "storage", tid, "0.bin")
+        self.assertFalse(_os.path.exists(blob_path))
+        # Re-GET chunk 0 → 410 (already acked and wiped)
+        status, _h, _ = self.h.request(
+            "GET", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 410)
+
+    def test_streaming_final_chunk_ack_marks_delivered(self):
+        """ACKing the final chunk flips downloaded=1, matches the
+        invariant chunks_downloaded == chunk_count ⇒ downloaded == 1."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=2)
+        tid = ctx["transfer_id"]
+
+        for i in range(2):
+            self.h.request(
+                "POST", f"/api/transfers/{tid}/chunks/{i}",
+                token=ctx["sender_token"], device_id=ctx["sender_id"],
+                raw_body=f"chunk-{i}".encode(),
+            )
+            self.h.request(
+                "GET", f"/api/transfers/{tid}/chunks/{i}",
+                token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+            )
+            status, _h, body = self.h.request(
+                "POST", f"/api/transfers/{tid}/chunks/{i}/ack",
+                token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+            )
+            self.assertEqual(status, 200)
+        # Final ACK returns status=delivered
+        self.assertEqual(body.get("status"), "delivered")
+
+        # sent-status: delivered + chunks_downloaded == chunk_count
+        status, _h, body = self.h.request(
+            "GET", "/api/transfers/sent-status",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+        )
+        self.assertEqual(status, 200)
+        match = next(t for t in body["transfers"] if t["transfer_id"] == tid)
+        self.assertEqual(match["delivery_state"], "delivered")
+        self.assertEqual(match["chunks_downloaded"], match["chunk_count"])
+
+    def test_streaming_per_chunk_ack_rejected_for_classic(self):
+        """Classic transfers must reject /chunks/{i}/ack — a client
+        confused about the transfer's mode shouldn't accidentally wipe
+        half the chunks before the recipient has downloaded them."""
+        ctx = self._pair_and_init_mode(mode=None, chunk_count=2)
+        tid = ctx["transfer_id"]
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"x",
+        )
+        status, _h, _ = self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0/ack",
+            token=ctx["recipient_token"], device_id=ctx["recipient_id"],
+        )
+        self.assertEqual(status, 400)
+
+    def test_sent_status_exposes_mode_and_streaming_counters(self):
+        """New clients use `mode` + `chunks_uploaded` + `chunks_downloaded`
+        to paint 'Sending X→Y'. Test that both fields appear for
+        streaming transfers and only `mode` appears for classic."""
+        ctx = self._pair_and_init_mode(mode="streaming", chunk_count=2)
+        tid = ctx["transfer_id"]
+        self.h.request(
+            "POST", f"/api/transfers/{tid}/chunks/0",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+            raw_body=b"chunk-0",
+        )
+        status, _h, body = self.h.request(
+            "GET", "/api/transfers/sent-status",
+            token=ctx["sender_token"], device_id=ctx["sender_id"],
+        )
+        self.assertEqual(status, 200)
+        match = next(t for t in body["transfers"] if t["transfer_id"] == tid)
+        self.assertEqual(match.get("mode"), "streaming")
+        self.assertEqual(match.get("chunks_uploaded"), 1)
 
     def test_config_file_auto_created_with_defaults(self):
         """Server must auto-create server/data/config.json on first

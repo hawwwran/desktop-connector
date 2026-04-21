@@ -249,9 +249,14 @@ class DeviceController
     public static function health(Database $db, RequestContext $ctx): void
     {
         AuthService::optional($db);
+        $capabilities = [];
+        if (Config::streamingEnabled()) {
+            $capabilities[] = 'stream_v1';
+        }
         Router::json([
             'status' => 'ok',
             'time' => time(),
+            'capabilities' => $capabilities,
         ]);
     }
 }

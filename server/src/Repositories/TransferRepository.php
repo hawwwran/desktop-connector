@@ -30,11 +30,12 @@ class TransferRepository
         string $recipientId,
         string $encryptedMeta,
         int $chunkCount,
-        int $now
+        int $now,
+        string $mode = 'classic',
     ): void {
         $this->db->execute(
-            'INSERT INTO transfers (id, sender_id, recipient_id, encrypted_meta, chunk_count, created_at)
-             VALUES (:id, :sender, :recipient, :meta, :chunks, :now)',
+            'INSERT INTO transfers (id, sender_id, recipient_id, encrypted_meta, chunk_count, created_at, mode)
+             VALUES (:id, :sender, :recipient, :meta, :chunks, :now, :mode)',
             [
                 ':id' => $id,
                 ':sender' => $senderId,
@@ -42,6 +43,7 @@ class TransferRepository
                 ':meta' => $encryptedMeta,
                 ':chunks' => $chunkCount,
                 ':now' => $now,
+                ':mode' => $mode,
             ]
         );
     }
@@ -52,7 +54,9 @@ class TransferRepository
         return $this->db->querySingle(
             'SELECT id, sender_id, recipient_id, encrypted_meta, chunk_count,
                     chunks_received, complete, created_at, downloaded,
-                    delivered_at, chunks_downloaded
+                    delivered_at, chunks_downloaded,
+                    mode, aborted, abort_reason, aborted_at,
+                    stream_ready_at, last_served_at, chunks_uploaded
              FROM transfers WHERE id = :id',
             [':id' => $transferId]
         );
@@ -74,13 +78,24 @@ class TransferRepository
         );
     }
 
+    /**
+     * Classic mode returns transfers with complete=1 (upload finished);
+     * streaming returns transfers as soon as stream_ready_at is stamped
+     * (first chunk stored) so the recipient can start pulling
+     * immediately. Aborted rows are filtered out — recipients shouldn't
+     * see an aborted transfer in pending and try to download it.
+     */
     public function listPendingForRecipient(string $recipientId): array
     {
         return $this->db->queryAll(
-            'SELECT id as transfer_id, sender_id, encrypted_meta, chunk_count, created_at
+            "SELECT id as transfer_id, sender_id, encrypted_meta, chunk_count, created_at, mode
              FROM transfers
-             WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0
-             ORDER BY created_at ASC',
+             WHERE recipient_id = :rid AND aborted = 0 AND downloaded = 0
+               AND (
+                 (mode = 'classic'   AND complete = 1)
+                 OR (mode = 'streaming' AND stream_ready_at IS NOT NULL AND stream_ready_at > 0)
+               )
+             ORDER BY created_at ASC",
             [':rid' => $recipientId]
         );
     }
@@ -144,11 +159,23 @@ class TransferRepository
      * payload ($onlyComplete=true). Single source of truth for both
      * paths so they can't drift.
      */
+    /**
+     * $onlyComplete=true historically narrowed to uploads that had at
+     * least finished server-side (the /notify inline payload cared only
+     * about delivery progression). Streaming transfers expose progress
+     * before complete=1, so the "interesting" filter now also allows
+     * aborted rows and streaming rows — in both cases the sender wants
+     * to paint a new state on its local row.
+     */
     public function loadSentForDevice(string $deviceId, int $limit = 50, bool $onlyComplete = false): array
     {
-        $where = 'sender_id = :sid' . ($onlyComplete ? ' AND complete = 1' : '');
+        $where = 'sender_id = :sid';
+        if ($onlyComplete) {
+            $where .= " AND (complete = 1 OR aborted = 1 OR mode = 'streaming')";
+        }
         return $this->db->queryAll(
-            "SELECT id AS transfer_id, recipient_id, complete, downloaded, chunk_count, chunks_downloaded, created_at
+            "SELECT id AS transfer_id, recipient_id, complete, downloaded, chunk_count, chunks_downloaded, created_at,
+                    mode, aborted, abort_reason, chunks_uploaded
              FROM transfers WHERE $where ORDER BY created_at DESC LIMIT " . (int)$limit,
             [':sid' => $deviceId]
         );
@@ -156,23 +183,36 @@ class TransferRepository
 
     /**
      * Baseline progress sum used by /notify long-poll to detect
-     * recipient-side chunk advancement.
+     * recipient-side chunk advancement. Previously filtered to
+     * `complete = 1` — that hid streaming transfers whose recipient
+     * already started ACKing chunks while the upload was in flight.
+     * Aborted rows are filtered so a cleanup race doesn't mask
+     * legitimate progress elsewhere.
      */
     public function sumSentChunksDownloaded(string $deviceId): int
     {
         $row = $this->db->querySingle(
             'SELECT COALESCE(SUM(chunks_downloaded), 0) as total FROM transfers
-             WHERE sender_id = :sid AND complete = 1 AND downloaded = 0',
+             WHERE sender_id = :sid AND downloaded = 0 AND aborted = 0',
             [':sid' => $deviceId]
         );
         return (int)($row['total'] ?? 0);
     }
 
+    /**
+     * Matches the filter used by listPendingForRecipient so /notify
+     * long-poll fires on streaming transfers as soon as chunk 0 lands,
+     * not after the full upload completes.
+     */
     public function countPendingForRecipient(string $recipientId): int
     {
         $row = $this->db->querySingle(
-            'SELECT COUNT(*) as count FROM transfers
-             WHERE recipient_id = :rid AND complete = 1 AND downloaded = 0',
+            "SELECT COUNT(*) as count FROM transfers
+             WHERE recipient_id = :rid AND aborted = 0 AND downloaded = 0
+               AND (
+                 (mode = 'classic'   AND complete = 1)
+                 OR (mode = 'streaming' AND stream_ready_at IS NOT NULL AND stream_ready_at > 0)
+               )",
             [':rid' => $recipientId]
         );
         return (int)($row['count'] ?? 0);
@@ -269,5 +309,86 @@ class TransferRepository
             [':c' => $complete, ':d' => $downloaded]
         );
         return (int)($row['count'] ?? 0);
+    }
+
+    // --- Streaming-relay support (migration 002) ----------------------------
+
+    /**
+     * Stamp the first-chunk-stored moment for a streaming transfer.
+     * Idempotent via the WHERE clause — only the first caller actually
+     * writes, so the `stream_ready` FCM wake fires exactly once.
+     */
+    public function markStreamReady(string $transferId, int $now): bool
+    {
+        $this->db->execute(
+            'UPDATE transfers
+             SET stream_ready_at = :now
+             WHERE id = :id AND (stream_ready_at IS NULL OR stream_ready_at = 0)',
+            [':now' => $now, ':id' => $transferId]
+        );
+        return $this->db->changes() > 0;
+    }
+
+    /**
+     * Mark the transfer aborted. The partial UPDATE is idempotent via the
+     * aborted=0 guard: a second DELETE request from either party sees the
+     * row already flipped and can short-circuit to a 410 without a race
+     * against concurrent cleanup. The downloaded=0 guard closes the race
+     * with a concurrent final per-chunk ACK — once the recipient has
+     * finalized the transfer, the bytes are theirs and abort is a no-op.
+     */
+    public function markAborted(string $transferId, string $reason, int $now): bool
+    {
+        $this->db->execute(
+            'UPDATE transfers
+             SET aborted = 1, abort_reason = :reason, aborted_at = :now
+             WHERE id = :id AND aborted = 0 AND downloaded = 0',
+            [':reason' => $reason, ':now' => $now, ':id' => $transferId]
+        );
+        return $this->db->changes() > 0;
+    }
+
+    /** Streaming-only. Classic mode keeps chunks_uploaded at 0. */
+    public function incrementChunksUploaded(string $transferId): void
+    {
+        $this->db->execute(
+            'UPDATE transfers SET chunks_uploaded = chunks_uploaded + 1 WHERE id = :id',
+            [':id' => $transferId]
+        );
+    }
+
+    public function isAborted(string $transferId): bool
+    {
+        $row = $this->db->querySingle(
+            'SELECT aborted FROM transfers WHERE id = :id',
+            [':id' => $transferId]
+        );
+        return $row !== null && (int)($row['aborted'] ?? 0) === 1;
+    }
+
+    /**
+     * Total bytes this transfer currently holds on disk (i.e. chunks
+     * that are uploaded but not yet recipient-ACK'd). Drives the
+     * mid-stream quota gate — streaming doesn't reserve projected size
+     * on init, so the server has to measure live on every chunk upload.
+     */
+    public function bytesOnDiskForTransfer(string $transferId): int
+    {
+        $row = $this->db->querySingle(
+            'SELECT COALESCE(SUM(blob_size), 0) AS total
+             FROM chunks WHERE transfer_id = :tid',
+            [':tid' => $transferId]
+        );
+        return (int)($row['total'] ?? 0);
+    }
+
+    /** Bumped when a chunk is served. Reserved for a streaming stall
+     *  safeguard that the plan schedules for a later iteration. */
+    public function touchLastServedAt(string $transferId, int $now): void
+    {
+        $this->db->execute(
+            'UPDATE transfers SET last_served_at = :now WHERE id = :id',
+            [':now' => $now, ':id' => $transferId]
+        );
     }
 }

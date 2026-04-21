@@ -95,6 +95,19 @@ class ChunkRepository
         );
     }
 
+    /**
+     * Remove a single chunk row. Used by streaming per-chunk ACK — the
+     * chunk blob file is deleted separately by the service so this
+     * repository stays purely metadata. Idempotent.
+     */
+    public function deleteChunkByIndex(string $transferId, int $chunkIndex): void
+    {
+        $this->db->execute(
+            'DELETE FROM chunks WHERE transfer_id = :tid AND chunk_index = :idx',
+            [':tid' => $transferId, ':idx' => $chunkIndex]
+        );
+    }
+
     /** Dashboard "total storage used" figure across every pending chunk. */
     public function sumAllBytes(): int
     {
