@@ -100,9 +100,17 @@ class TransferLifecycle
             return;
         }
 
+        // Streaming mode can legitimately bypass the UPLOADED "idle"
+        // phase: the recipient starts pulling as soon as chunk 0 is
+        // stored, so by the time the sender's LAST chunk upload flips
+        // complete=1, chunks_downloaded may already be >0 — which
+        // derives to DELIVERING, not UPLOADED. Classic transfers still
+        // take INITIALIZED -> UPLOADING -> UPLOADED -> DELIVERING ->
+        // DELIVERED because the recipient can't download until
+        // complete=1. See streaming-improvement.md §3.
         $allowed = [
-            TransferState::INITIALIZED => [TransferState::UPLOADING, TransferState::UPLOADED, TransferState::EXPIRED],
-            TransferState::UPLOADING => [TransferState::UPLOADING, TransferState::UPLOADED, TransferState::EXPIRED],
+            TransferState::INITIALIZED => [TransferState::UPLOADING, TransferState::UPLOADED, TransferState::DELIVERING, TransferState::EXPIRED],
+            TransferState::UPLOADING => [TransferState::UPLOADING, TransferState::UPLOADED, TransferState::DELIVERING, TransferState::EXPIRED],
             TransferState::UPLOADED => [TransferState::DELIVERING, TransferState::DELIVERED, TransferState::EXPIRED],
             TransferState::DELIVERING => [TransferState::DELIVERING, TransferState::DELIVERED, TransferState::EXPIRED],
             TransferState::DELIVERED => [TransferState::EXPIRED],
