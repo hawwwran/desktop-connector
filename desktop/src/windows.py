@@ -57,7 +57,7 @@ def show_send_files(config_dir: Path):
     from .crypto import KeyManager
     from .connection import ConnectionManager
     from .api_client import ApiClient
-    from .history import TransferHistory
+    from .history import TransferHistory, TransferStatus
     # windows.py runs as a GTK4 subprocess — Linux-scoped by construction,
     # so instantiate the Linux backend directly instead of composing all four.
     from .backends.linux.dialog_backend import LinuxDialogBackend
@@ -306,74 +306,161 @@ def show_send_files(config_dir: Path):
                     GLib.idle_add(mark_row_uploading, filepath)
                     write_status(True, filepath.name, i + 1, total)
 
-                    # Track upload progress in history
+                    # Track upload progress in history. Flags share
+                    # state between the two callbacks and the post-
+                    # send_file fallback; a dict keeps closures cheap
+                    # without one list-per-flag.
                     file_size = filepath.stat().st_size
-                    progress_tid = [None]
-                    saw_waiting = [False]
-                    saw_too_large = [False]
-                    def upload_progress(transfer_id, uploaded, total_chunks, fp=filepath, sz=file_size):
-                        # Sentinel values from the API client:
+                    st = {
+                        "tid": None,
+                        "saw_waiting_classic": False,   # classic init 507
+                        "saw_waiting_stream": False,    # streaming mid-upload 507
+                        "saw_too_large": False,         # classic init 413
+                        "stream_terminal": False,       # stream cb set final status
+                    }
+
+                    def upload_progress(transfer_id, uploaded, total_chunks,
+                                        fp=filepath, sz=file_size, state=st):
+                        # Classic-path callback. Sentinel values:
                         #   0  — initial row write (uploading 0/N)
                         #   -1 — 507 storage_full, flip to WAITING
                         #   -2 — 413 too_large, terminal failure
+                        # Streaming init never 507s; uploaded==-1 only
+                        # happens when the server downgraded to classic
+                        # and the classic path hit a 507 at init.
                         if uploaded == -2:
-                            saw_too_large[0] = True
-                            if progress_tid[0] is None:
-                                progress_tid[0] = transfer_id
+                            state["saw_too_large"] = True
+                            if state["tid"] is None:
+                                state["tid"] = transfer_id
                                 history.add(filename=fp.name, display_label=fp.name,
                                             direction="sent", size=sz,
                                             content_path=str(fp), transfer_id=transfer_id,
-                                            status="failed",
+                                            status=TransferStatus.FAILED,
                                             chunks_downloaded=0, chunks_total=total_chunks,
                                             failure_reason="too_large")
                             else:
-                                history.update(transfer_id, status="failed",
+                                history.update(transfer_id,
+                                                status=TransferStatus.FAILED,
                                                 failure_reason="too_large")
                             return
                         if uploaded in (0, -1):
-                            if progress_tid[0] is None:
-                                progress_tid[0] = transfer_id
+                            if state["tid"] is None:
+                                state["tid"] = transfer_id
                                 history.add(filename=fp.name, display_label=fp.name,
                                             direction="sent", size=sz,
                                             content_path=str(fp), transfer_id=transfer_id,
-                                            status="waiting" if uploaded == -1 else "uploading",
+                                            status=(TransferStatus.WAITING
+                                                    if uploaded == -1
+                                                    else TransferStatus.UPLOADING),
                                             chunks_downloaded=0, chunks_total=total_chunks)
                             elif uploaded == -1:
-                                # Already had a row (e.g. we previously
-                                # tried to upload and a chunk failed);
-                                # flip it to waiting so the UI reflects
-                                # the hold.
-                                history.update(transfer_id, status="waiting")
+                                history.update(transfer_id,
+                                               status=TransferStatus.WAITING)
                             else:
-                                history.update(transfer_id, status="uploading")
+                                history.update(transfer_id,
+                                               status=TransferStatus.UPLOADING)
                             if uploaded == -1:
-                                saw_waiting[0] = True
-                                # Scrub keys off this, not row timestamp —
-                                # an upserted row's created-time can
-                                # pre-date the current waiting attempt.
+                                state["saw_waiting_classic"] = True
                                 history.update(transfer_id,
                                                waiting_started_at=int(time.time()))
                         else:
                             history.update(transfer_id,
-                                           status="uploading",
+                                           status=TransferStatus.UPLOADING,
                                            chunks_downloaded=uploaded,
                                            chunks_total=total_chunks)
 
+                    def stream_progress(transfer_id, uploaded, total_chunks,
+                                        stream_state, fp=filepath, state=st):
+                        """Streaming-path callback — state ∈
+                        {sending, waiting_stream, aborted, failed}.
+
+                        By the time this fires, the classic ``on_progress``
+                        has already created the history row with
+                        status=uploading. We flip to the streaming
+                        representation here and own terminal statuses
+                        (aborted / failed) so the post-send_file
+                        fallback doesn't overwrite them.
+                        """
+                        if stream_state == "sending":
+                            # Row may still be in UPLOADING from the
+                            # pre-init placeholder; flip to SENDING + mark
+                            # mode=streaming so _compute_status picks the
+                            # "Sending X→Y/N" branch. chunks_downloaded
+                            # stays in lockstep with chunks_uploaded so
+                            # older readers (no mode awareness) still
+                            # render sensible numbers.
+                            history.update(
+                                transfer_id,
+                                status=TransferStatus.SENDING,
+                                mode="streaming",
+                                chunks_uploaded=uploaded,
+                                chunks_downloaded=uploaded,
+                                chunks_total=total_chunks,
+                            )
+                        elif stream_state == "waiting_stream":
+                            state["saw_waiting_stream"] = True
+                            history.update(
+                                transfer_id,
+                                status=TransferStatus.WAITING_STREAM,
+                                mode="streaming",
+                                chunks_uploaded=uploaded,
+                                chunks_total=total_chunks,
+                                waiting_started_at=int(time.time()),
+                            )
+                        elif stream_state == "aborted":
+                            # Streaming sender only sees aborted when the
+                            # recipient aborted — the server emits 410
+                            # with abort_reason=recipient_abort on the
+                            # next chunk upload.
+                            state["stream_terminal"] = True
+                            history.update(
+                                transfer_id,
+                                status=TransferStatus.ABORTED,
+                                abort_reason="recipient_abort",
+                                chunks_downloaded=0,
+                                chunks_total=0,
+                            )
+                        elif stream_state == "failed":
+                            state["stream_terminal"] = True
+                            reason = ("quota_timeout"
+                                      if state["saw_waiting_stream"]
+                                      else None)
+                            fields = {
+                                "status": TransferStatus.FAILED,
+                                "chunks_downloaded": 0,
+                                "chunks_total": 0,
+                            }
+                            if reason:
+                                fields["failure_reason"] = reason
+                            history.update(transfer_id, **fields)
+
                     tid = api.send_file(filepath, target_id, symmetric_key,
-                                        on_progress=upload_progress)
+                                        on_progress=upload_progress,
+                                        on_stream_progress=stream_progress)
                     if tid:
                         sent += 1
-                        # Upload logic cleans up its own progress fields; delivery tracker owns recipient_* from here.
-                        history.update(tid, status="complete", chunks_downloaded=0, chunks_total=0)
+                        # Upload logic cleans up its own progress fields;
+                        # delivery tracker owns recipient_* from here.
+                        # Keep mode intact so the history renderer knows
+                        # whether to paint "Delivered" vs a streaming
+                        # breadcrumb (both currently render "Delivered"
+                        # blue, but C.7 may diverge).
+                        history.update(tid, status=TransferStatus.COMPLETE,
+                                       chunks_downloaded=0, chunks_total=0)
                         GLib.idle_add(remove_row, filepath)
-                    elif progress_tid[0] and not saw_too_large[0]:
-                        # Row wasn't already tagged as too_large by the
-                        # callback. Map WAITING → quota_timeout,
-                        # everything else to plain Failed (we can't
-                        # always distinguish network vs protocol).
-                        reason = "quota_timeout" if saw_waiting[0] else None
-                        history.update(progress_tid[0], status="failed",
-                                        failure_reason=reason)
+                    elif (state["tid"] and not state["saw_too_large"]
+                          and not state["stream_terminal"]):
+                        # Row wasn't already tagged by the too_large or
+                        # streaming-terminal callback. Map WAITING
+                        # (classic init 507) → quota_timeout, everything
+                        # else to plain Failed.
+                        reason = ("quota_timeout"
+                                  if state["saw_waiting_classic"]
+                                  else None)
+                        fields = {"status": TransferStatus.FAILED}
+                        if reason:
+                            fields["failure_reason"] = reason
+                        history.update(state["tid"], **fields)
 
                 clear_status()
                 GLib.idle_add(finish_sending, sent, total)
@@ -747,7 +834,7 @@ def show_history(config_dir: Path):
     from .api_client import STORAGE_FULL_MAX_WINDOW_S
 
     def _scrub_zombie_waiting() -> None:
-        """Flip any orphaned 'waiting' history row to 'failed' with
+        """Flip any orphaned waiting row to 'failed' with
         failure_reason='quota_timeout'. A row is orphaned if it's
         been in waiting state longer than STORAGE_FULL_MAX_WINDOW_S
         (30 min) — beyond the retry budget of any still-live send
@@ -755,27 +842,38 @@ def show_history(config_dir: Path):
         tick so rows age from Waiting → Failed without the user
         needing to close + reopen.
 
+        Covers both waiting flavours:
+          * ``waiting`` — classic 507 at init (row never uploaded
+            anything; the legacy chunks_downloaded=-1 sentinel also
+            qualifies, for back-compat with tray clipboard + --send
+            CLI rows written by older builds).
+          * ``waiting_stream`` — streaming mid-upload 507 (quota
+            back-pressure between sender's write head and recipient's
+            drain).
+        Both use the same 30-min ceiling — they're the same logical
+        budget, just measured from different points in the transfer
+        lifecycle.
+
         Age check prefers waiting_started_at (stamped when the row
-        entered waiting), falling back to timestamp. The legacy
-        chunks_downloaded=-1 sentinel still qualifies a row as
-        'waiting' — tray clipboard and `--send` CLI both write it
-        while their retry loop is actively waiting — but it is NOT
-        an instant-kill. A live subprocess must be given the full
-        30-min window before we declare its row dead; otherwise the
-        UI flashes Failed while the sender is still retrying and
+        entered waiting), falling back to timestamp. The 30-min window
+        is a ceiling, not an instant-kill — a live subprocess must be
+        given the full budget before we declare its row dead, otherwise
+        the UI flashes Failed while the sender is still retrying and
         eventually succeeds.
         """
         cutoff = int(time.time()) - int(STORAGE_FULL_MAX_WINDOW_S)
+        waiting_statuses = {TransferStatus.WAITING, TransferStatus.WAITING_STREAM}
         for it in history.items:
             chunks_dl = it.get("chunks_downloaded", 0) or 0
-            is_waiting = it.get("status") == "waiting" or chunks_dl < 0
+            is_waiting = (it.get("status") in waiting_statuses
+                          or chunks_dl < 0)
             if not is_waiting:
                 continue
             age_ref = int(it.get("waiting_started_at") or it.get("timestamp") or 0)
             if age_ref and age_ref < cutoff:
                 tid = it.get("transfer_id")
                 if tid:
-                    history.update(tid, status="failed",
+                    history.update(tid, status=TransferStatus.FAILED,
                                    chunks_downloaded=0, chunks_total=0,
                                    failure_reason="quota_timeout")
 
@@ -1256,59 +1354,86 @@ def show_history(config_dir: Path):
                 GLib.timeout_add(300, _finalize)
 
             def on_delete(b, it=captured_item, c=card):
-                # Delivered / received / failed rows are terminal — no
-                # server-side state to cancel, so the click just prunes
-                # the history row. Waiting / uploading / complete-but-
-                # undelivered rows still have bytes on the server and
-                # get a confirmation dialog that optionally fires the
-                # cancel endpoint.
+                # Terminal rows (delivered sent, completed received,
+                # aborted, failed) have no server state left — the
+                # click just prunes the local history entry.
+                # Non-terminal rows still own bytes on the server:
+                #   * Sent + not-yet-delivered
+                #       -> abort as sender. Recipient's next chunk call
+                #         returns 410 and their row flips to Aborted.
+                #   * Received + still downloading (streaming only —
+                #                 classic receivers finalise before
+                #                 returning to the history list)
+                #       -> abort as recipient. Sender's next chunk
+                #         upload returns 410 and their row flips to
+                #         Aborted. Poller's streaming download loop
+                #         also picks up the 410 on its next GET.
                 status = it.get("status", "complete")
                 direction = it.get("direction", "sent")
                 delivered = it.get("delivered", False)
-                terminal = (
-                    delivered
-                    or direction == "received"
-                    or status == "failed"
+                is_live_receiver = (
+                    direction == "received"
+                    and status == TransferStatus.DOWNLOADING
                 )
-                if terminal:
+                is_live_sender = (
+                    direction == "sent"
+                    and not delivered
+                    and status not in (TransferStatus.FAILED,
+                                       TransferStatus.ABORTED)
+                )
+                if not (is_live_sender or is_live_receiver):
                     _do_local_remove(it, c, b)
                     return
 
-                # Non-terminal: confirm, then cancel on the server.
                 tid = it.get("transfer_id")
                 label = history.get_label(it)
+                if is_live_receiver:
+                    heading = "Stop receiving?"
+                    body = (f"The download of \u201c{label}\u201d will be "
+                            f"cancelled and the sender will see Aborted.")
+                    action_label = "Stop download"
+                    abort_reason = "recipient_abort"
+                else:
+                    heading = "Cancel delivery?"
+                    body = (f"The recipient will no longer receive "
+                            f"\u201c{label}\u201d.")
+                    action_label = "Cancel delivery"
+                    abort_reason = "sender_abort"
+
                 dialog = Adw.MessageDialog(
                     transient_for=win,
-                    heading="Cancel delivery?",
-                    body=f"The recipient will no longer receive \u201c{label}\u201d.",
+                    heading=heading,
+                    body=body,
                 )
                 dialog.add_response("keep", "Keep")
-                dialog.add_response("cancel", "Cancel delivery")
+                dialog.add_response("cancel", action_label)
                 dialog.set_response_appearance("cancel", Adw.ResponseAppearance.DESTRUCTIVE)
                 dialog.set_default_response("keep")
                 dialog.set_close_response("keep")
 
-                def on_response(d, response, _it=it, _c=c, _b=b, _tid=tid):
+                def on_response(d, response, _it=it, _c=c, _b=b, _tid=tid,
+                                _reason=abort_reason):
                     if response != "cancel":
                         return
-                    # Fire the cancel endpoint in a worker thread so the
+                    # Fire the server abort in a worker thread so the
                     # UI stays responsive if the server is slow; the
                     # local shrink/fade starts immediately either way
-                    # (cancel success or network failure — the row goes
+                    # (abort success or network failure — the row goes
                     # either way, the server will gc on its own expiry
                     # if we can't reach it now).
                     if _tid:
-                        def _cancel_worker(tid_local=_tid):
+                        def _abort_worker(tid_local=_tid, reason=_reason):
                             try:
                                 conn = ConnectionManager(
                                     config.server_url,
                                     config.device_id,
                                     config.auth_token,
                                 )
-                                ApiClient(conn, crypto).cancel_transfer(tid_local)
+                                ApiClient(conn, crypto).abort_transfer(
+                                    tid_local, reason)
                             except Exception:
                                 pass  # best effort; row still removed locally
-                        threading.Thread(target=_cancel_worker, daemon=True).start()
+                        threading.Thread(target=_abort_worker, daemon=True).start()
                     _do_local_remove(_it, _c, _b)
 
                 dialog.connect("response", on_response)
