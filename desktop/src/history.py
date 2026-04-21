@@ -14,6 +14,46 @@ log = logging.getLogger(__name__)
 MAX_HISTORY = 50
 
 
+class TransferStatus:
+    """Canonical status strings written to history rows.
+
+    Single source of truth so senders, receivers, and the history
+    renderer don't drift on case / spelling. Consumers can import the
+    class and reference e.g. ``TransferStatus.SENDING`` instead of a
+    string literal; new callers SHOULD do this. Legacy rows persisted
+    by older builds use the same string values so no migration is
+    needed.
+
+    Phase C introduces three new values used only by streaming
+    transfers: ``SENDING`` (sender uploading while recipient drains),
+    ``WAITING_STREAM`` (mid-stream 507 backpressure), and ``ABORTED``
+    (either side cancelled after init). The classic-mode statuses are
+    unchanged.
+    """
+
+    # --- Classic + existing (unchanged wire shape) -------------------
+    UPLOADING = "uploading"
+    WAITING = "waiting"          # init-time 507 (quota full at init)
+    COMPLETE = "complete"        # sender: upload done. See `delivered`
+                                 # for the recipient-ack state.
+    DOWNLOADING = "downloading"  # recipient pulling chunks
+    FAILED = "failed"
+
+    # --- Streaming additions (C.2 pass-through; C.3/C.4/C.5 writers) -
+    SENDING = "sending"                # X→Y co-progress while streaming
+    WAITING_STREAM = "waiting_stream"  # mid-stream 507 backpressure
+    ABORTED = "aborted"                # either-party abort after init
+
+
+# Terminal = no more state transitions expected, no server-side work
+# needs polling. Used by ``get_undelivered_transfer_ids`` to stop
+# painting delivery spinners on rows that are already done.
+_TERMINAL_SENT_STATUSES = frozenset({
+    TransferStatus.FAILED,
+    TransferStatus.ABORTED,
+})
+
+
 class TransferHistory:
     """Persistent transfer history (JSON file, max 50 items).
     All mutations use file locking so multiple processes (tray, send-files,
@@ -102,7 +142,25 @@ class TransferHistory:
     def add(self, filename: str, display_label: str, direction: str,
             size: int, content_path: str = "", sender_id: str = "",
             transfer_id: str = "", status: str = "complete",
-            chunks_downloaded: int = 0, chunks_total: int = 0) -> None:
+            chunks_downloaded: int = 0, chunks_total: int = 0,
+            *,
+            mode: str = "classic",
+            chunks_uploaded: int = 0,
+            abort_reason: str | None = None) -> None:
+        """Append a history row.
+
+        Streaming-specific kwargs (``mode``, ``chunks_uploaded``,
+        ``abort_reason``) are keyword-only and optional so classic
+        callers keep working unchanged; rows persisted without them
+        still read cleanly (missing keys default to classic behaviour).
+
+        ``chunks_uploaded`` is the sender's upload counter in streaming
+        mode — paired with the existing ``recipient_chunks_downloaded``
+        to paint "Sending X→Y". Distinct from ``chunks_downloaded``
+        which historically doubles as the sender's upload counter
+        AND the recipient's download counter depending on direction;
+        kept untouched for back-compat.
+        """
         new_item = {
             "filename": filename,
             "display_label": display_label,
@@ -116,7 +174,11 @@ class TransferHistory:
             "chunks_total": chunks_total,
             "delivered": direction == "received" and status == "complete",
             "timestamp": int(time.time()),
+            "mode": mode,
+            "chunks_uploaded": chunks_uploaded,
         }
+        if abort_reason is not None:
+            new_item["abort_reason"] = abort_reason
         def do_add(items):
             # Upsert: if a row with this transfer_id already exists (e.g. a prior
             # failed attempt of the same transfer being retried), replace it in
@@ -154,11 +216,13 @@ class TransferHistory:
     def get_undelivered_transfer_ids(self) -> list[str]:
         """Get transfer_ids of sent items still in flight.
 
-        Excludes transfers with status == 'failed' — those are terminal
-        (the upload itself didn't complete, so there's nothing to deliver)
-        and would otherwise keep the tray stuck on the "uploading" icon
-        forever while the delivery tracker queried a transfer the server
-        never even saw.
+        Excludes transfers with a terminal status — ``failed`` (the
+        upload itself didn't complete, so there's nothing to deliver)
+        and ``aborted`` (either side cancelled after init; server has
+        already wiped the blobs so there's nothing to track). Without
+        this guard the delivery tracker would keep polling a server
+        row that doesn't exist, and the tray would stay stuck on
+        "uploading" forever.
         """
         # Reload from disk to pick up transfers added by other processes
         self._items = self._load()
@@ -168,7 +232,7 @@ class TransferHistory:
                 if item.get("direction") == "sent"
                 and item.get("transfer_id")
                 and not item.get("delivered")
-                and item.get("status") != "failed"
+                and item.get("status") not in _TERMINAL_SENT_STATUSES
             ]
 
     def remove(self, item: dict) -> None:
