@@ -181,7 +181,25 @@ interface TransferDao {
     @Query("UPDATE queued_transfers SET delivered = 1 WHERE transferId = :transferId")
     suspend fun markDelivered(transferId: String)
 
-    @Query("SELECT transferId FROM queued_transfers WHERE direction = 'OUTGOING' AND delivered = 0 AND transferId IS NOT NULL AND status = 'COMPLETE'")
+    /**
+     * Rows eligible for the "check if delivered" pass (called at app
+     * start, on long-poll hints, and when the tracker observes the
+     * delivered transition). Classic rows are COMPLETE+undelivered;
+     * streaming rows stay in SENDING after upload finishes (per D.4b —
+     * no COMPLETE transition for streaming), so they must also be
+     * picked up here or `markDelivered` never fires and the row stays
+     * "Sending X/N" forever.
+     */
+    @Query("""
+        SELECT transferId FROM queued_transfers
+        WHERE direction = 'OUTGOING'
+          AND delivered = 0
+          AND transferId IS NOT NULL
+          AND (
+            status = 'COMPLETE'
+            OR (negotiatedMode = 'streaming' AND status = 'SENDING')
+          )
+    """)
     suspend fun getUndeliveredTransferIds(): List<String>
 
     @Query("DELETE FROM queued_transfers WHERE id NOT IN (SELECT id FROM queued_transfers ORDER BY createdAt DESC LIMIT 100)")

@@ -1122,9 +1122,21 @@ class PollService : Service() {
 
             if (advanced) {
                 trackerLastProgress[tid] = Pair(downloaded, now)
-                // not_started reports 0 chunks; keep bar visible at 0/N.
-                val dbValue = if (state == "in_progress") downloaded else 0
-                db.transferDao().updateDeliveryProgress(tid, dbValue, total)
+                // Paint whatever the server reports. For classic rows,
+                // `downloaded` is 0 until state flips to in_progress
+                // (recipient started draining post-upload), so this is
+                // byte-for-byte the same behaviour as before. For
+                // streaming rows, the server reports `chunks_downloaded >
+                // 0` WHILE state is still "not_started" (lifecycle stays
+                // in UPLOADING until complete=1 even when the recipient
+                // is draining in parallel — see
+                // TransferStatusMapper::toProtocolStatus). The earlier
+                // `if (state == "in_progress") downloaded else 0` clause
+                // discarded this mid-stream progress and kept
+                // deliveryChunks at 0 throughout the streaming upload,
+                // which in turn kept `maybeFlipToSending` from ever
+                // flipping the sender row to SENDING.
+                db.transferDao().updateDeliveryProgress(tid, downloaded, total)
             } else if (now - prev!!.second > DELIVERY_STALL_TIMEOUT_MS) {
                 // D.4b: stall semantics differ by mode.
                 //
