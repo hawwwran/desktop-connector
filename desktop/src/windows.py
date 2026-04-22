@@ -1163,15 +1163,40 @@ def show_history(config_dir: Path):
             elif item_status == TransferStatus.UPLOADING:
                 text = f"Uploading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Uploading"
             elif item_status == TransferStatus.SENDING:
-                # Streaming mid-flight: sender uploading while recipient
-                # drains. Blue matches classic Delivering so the row
-                # reads as "still in motion" rather than a warning.
-                text = (
-                    f'<span foreground="{DC_BLUE_500}">Sending {stream_xy}'
-                    f'/{stream_total}</span>'
-                    if stream_total > 0
-                    else f'<span foreground="{DC_BLUE_500}">Sending</span>'
-                )
+                # The SENDING status is a "streaming in-flight" marker
+                # set at init time by the sender loop. The LABEL we show
+                # depends on where we actually are in the stream:
+                #
+                #   1. No recipient progress yet   → "Uploading X/N"
+                #      (same as classic UPLOADING; sender is the only
+                #      active party. Avoids the "Sending 5→0/5" footer
+                #      that was confusing users into thinking they'd
+                #      already finished.)
+                #   2. Real overlap, upload in
+                #      progress + recipient acking → "Sending X→Y/N"
+                #      (blue; both sides active.)
+                #   3. Upload done, recipient
+                #      still draining              → "Delivering Y/N"
+                #      (blue; matches classic delivery label — only
+                #      the recipient is active.)
+                #
+                # Terminal "Delivered" handled by the `delivered` flag
+                # branch further down.
+                upload_done = stream_total > 0 and chunks_up >= stream_total
+                if stream_total == 0:
+                    text = f'<span foreground="{DC_BLUE_500}">Sending</span>'
+                elif recv_dl == 0:
+                    text = f"Uploading {chunks_up}/{stream_total}"
+                elif not upload_done:
+                    text = (
+                        f'<span foreground="{DC_BLUE_500}">Sending {stream_xy}'
+                        f'/{stream_total}</span>'
+                    )
+                else:
+                    text = (
+                        f'<span foreground="{DC_BLUE_500}">Delivering {recv_dl}'
+                        f'/{stream_total}</span>'
+                    )
             elif item_status == TransferStatus.DOWNLOADING:
                 text = f"Downloading {chunks_dl}/{chunks_total}" if chunks_total > 0 else "Downloading"
             elif item_status == TransferStatus.FAILED:
@@ -1220,11 +1245,21 @@ def show_history(config_dir: Path):
             elif item_status == TransferStatus.UPLOADING and chunks_total > 0:
                 bar = (True, "upload-bar", chunks_dl / chunks_total)
             elif item_status == TransferStatus.SENDING and stream_total > 0:
-                # Streaming: one blue bar carrying the delivery fraction
-                # (Y/N), which is the end-to-end progress the user
-                # actually cares about. The X upload number shows in
-                # the text next to it.
-                bar = (True, "delivery-bar", recv_dl / stream_total)
+                # Streaming phases (matches the label branches above):
+                #   recv_dl == 0               → upload fraction, yellow
+                #                                (visually the same as
+                #                                classic UPLOADING).
+                #   recv_dl > 0, upload in
+                #                 progress     → delivery fraction, blue
+                #                                (blue denotes real
+                #                                overlap).
+                #   recv_dl > 0, upload done   → delivery fraction, blue
+                #                                (same blue; label flips
+                #                                to "Delivering").
+                if recv_dl == 0:
+                    bar = (True, "upload-bar", chunks_up / stream_total)
+                else:
+                    bar = (True, "delivery-bar", recv_dl / stream_total)
             elif item_status == TransferStatus.DOWNLOADING and chunks_total > 0:
                 bar = (True, "download-bar", chunks_dl / chunks_total)
             elif (item["direction"] == "sent" and not delivered
