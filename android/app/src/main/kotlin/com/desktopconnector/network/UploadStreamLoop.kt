@@ -1,5 +1,6 @@
 package com.desktopconnector.network
 
+import com.desktopconnector.data.TransferStatus
 import kotlinx.coroutines.delay
 
 /**
@@ -64,6 +65,45 @@ internal sealed class StreamOutcome {
  *
  * Not thread-safe — intended to run on a single coroutine at a time.
  */
+/**
+ * D.4b helper: given the current sender-side row status and the
+ * tracker-observed `deliveryChunks`, returns the status to flip TO, or
+ * null if no flip is needed. Idempotent.
+ *
+ * Transition rules (streaming only; called from the streaming branch):
+ *   UPLOADING      → SENDING      when deliveryChunks > 0 (recipient
+ *                                  ack'd at least one chunk — the
+ *                                  classic "upload then deliver" phases
+ *                                  have merged).
+ *   WAITING_STREAM → SENDING      when exiting 507 backoff AND the
+ *                                  recipient has drained at least one
+ *                                  chunk.
+ *   WAITING_STREAM → UPLOADING    when exiting 507 backoff AND the
+ *                                  recipient hasn't drained anything
+ *                                  yet. Classic-shaped flow resumes.
+ *   SENDING        → SENDING      idempotent (returns null).
+ *   * → *                         no-op for any other combination
+ *                                  (FAILED, ABORTED, COMPLETE, DELIVERED,
+ *                                  DELIVERING are all invalid inputs to
+ *                                  the streaming sender state machine).
+ *
+ * Field-ownership: only the upload loop writes `status`. The tracker
+ * writes `deliveryChunks`; we only read it here.
+ */
+internal fun streamingSenderStatusTarget(
+    currentStatus: TransferStatus,
+    deliveryChunks: Int,
+    isExitingWaitingStream: Boolean = false,
+): TransferStatus? {
+    return when {
+        currentStatus == TransferStatus.SENDING -> null
+        isExitingWaitingStream -> if (deliveryChunks > 0) TransferStatus.SENDING else TransferStatus.UPLOADING
+        currentStatus == TransferStatus.UPLOADING && deliveryChunks > 0 -> TransferStatus.SENDING
+        currentStatus == TransferStatus.WAITING_STREAM && deliveryChunks > 0 -> TransferStatus.SENDING
+        else -> null
+    }
+}
+
 internal suspend fun uploadStreamLoop(
     chunkCount: Int,
     uploadChunk: suspend (chunkIndex: Int) -> ApiClient.ChunkUploadResult,

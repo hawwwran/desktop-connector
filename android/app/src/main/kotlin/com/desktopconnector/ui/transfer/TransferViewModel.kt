@@ -634,11 +634,18 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
 
     /** Is this row still "in flight" on the server? Drives the
      *  confirmation dialog: WAITING / UPLOADING / COMPLETE-but-not-
-     *  delivered all count as needing confirmation before delete. */
+     *  delivered all count as needing confirmation before delete.
+     *
+     *  D.4b: `delivered=1` is terminal regardless of status — streaming
+     *  rows stay in SENDING after the tracker flips the delivered flag,
+     *  so the "delivered" check is status-agnostic now. ABORTED is
+     *  terminal too (user already saw the row fail).
+     */
     fun isInFlight(transfer: QueuedTransfer): Boolean {
         if (transfer.direction == TransferDirection.INCOMING) return false
         if (transfer.status == TransferStatus.FAILED) return false
-        if (transfer.status == TransferStatus.COMPLETE && transfer.delivered) return false
+        if (transfer.status == TransferStatus.ABORTED) return false
+        if (transfer.delivered) return false
         return true
     }
 

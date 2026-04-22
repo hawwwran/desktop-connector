@@ -400,6 +400,7 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
         transfer.status == TransferStatus.WAITING_STREAM -> brand.transferOutgoing  // yellow (same pill as WAITING)
         transfer.status == TransferStatus.UPLOADING && transfer.direction == TransferDirection.INCOMING -> brand.transferIncoming
         transfer.status == TransferStatus.UPLOADING -> brand.transferOutgoing
+        transfer.status == TransferStatus.SENDING && transfer.delivered -> dim   // post-delivery handoff window
         transfer.status == TransferStatus.SENDING -> brand.transferDelivering    // blue — overlapped upload/delivery
         transfer.status == TransferStatus.DELIVERING -> brand.transferDelivering // blue — reserved, parity with desktop
         transfer.status == TransferStatus.COMPLETE && transfer.direction == TransferDirection.INCOMING -> brand.connectionConnected
@@ -432,15 +433,20 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
         // back to the existing errorMessage path for classic failures.
         TransferStatus.FAILED -> (transfer.failureReason ?: transfer.errorMessage)
             ?.let { "Failed ($it)" } ?: "Failed"
-        // --- Streaming pass-through labels (D.2). ---
-        // No writer produces these statuses yet; D.4a/b and D.3 wire
-        // them in. D.5 will refine the SENDING / WAITING_STREAM cases
-        // into the full X→Y two-metric rendering.
-        TransferStatus.SENDING -> if (transfer.deliveryTotal > 0)
-            "Sending ${transfer.chunksUploaded}→${transfer.deliveryChunks}"
-        else if (transfer.totalChunks > 0)
-            "Sending ${transfer.chunksUploaded}/${transfer.totalChunks}"
-        else "Sending"
+        // --- Streaming labels (wiring lands in D.3/D.4a/D.4b). ---
+        // D.5 will refine the SENDING / WAITING_STREAM cases into the
+        // full two-metric rendering. This branch covers the post-
+        // delivery "Delivered" case by checking `delivered` — the
+        // tracker writes that flag via markDelivered once the server
+        // reports delivery_state == "delivered", but it does NOT flip
+        // the status itself (streaming rows stay in SENDING post-
+        // delivery, consistent with classic rows staying in COMPLETE).
+        TransferStatus.SENDING -> when {
+            transfer.delivered -> "Delivered"
+            transfer.deliveryTotal > 0 -> "Sending ${transfer.chunksUploaded}→${transfer.deliveryChunks}"
+            transfer.totalChunks > 0 -> "Sending ${transfer.chunksUploaded}/${transfer.totalChunks}"
+            else -> "Sending"
+        }
         TransferStatus.WAITING_STREAM -> if (transfer.deliveryTotal > 0)
             "Waiting ${transfer.chunksUploaded}→${transfer.deliveryChunks}"
         else "Waiting"

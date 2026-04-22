@@ -125,8 +125,52 @@ interface TransferDao {
     @Query("UPDATE queued_transfers SET deliveryChunks = 0, deliveryTotal = 0 WHERE transferId = :transferId")
     suspend fun clearDeliveryProgress(transferId: String)
 
-    @Query("SELECT transferId FROM queued_transfers WHERE direction = 'OUTGOING' AND status = 'COMPLETE' AND delivered = 0 AND transferId IS NOT NULL")
+    /**
+     * Active-for-delivery-tracking outgoing transfers.
+     *
+     * Classic path (unchanged since v1): `status == COMPLETE AND delivered == 0`.
+     * The upload finished, now we're waiting for the recipient to drain.
+     *
+     * Streaming path (D.4b): also include rows still in-flight on the
+     * sender side — `UPLOADING` / `WAITING_STREAM` / `SENDING` — whenever
+     * `negotiatedMode == 'streaming'`. The recipient drains overlappingly
+     * with the sender's upload, so the tracker needs to paint
+     * `deliveryChunks` while the sender is still producing chunks.
+     *
+     * Both branches share `delivered == 0` and a non-null `transferId`.
+     */
+    @Query("""
+        SELECT transferId FROM queued_transfers
+        WHERE direction = 'OUTGOING'
+          AND delivered = 0
+          AND transferId IS NOT NULL
+          AND (
+            status = 'COMPLETE'
+            OR (negotiatedMode = 'streaming'
+                AND status IN ('UPLOADING', 'WAITING_STREAM', 'SENDING'))
+          )
+    """)
     suspend fun getActiveDeliveryIds(): List<String>
+
+    /**
+     * Is this transfer's row streaming-negotiated? The delivery tracker
+     * uses this to change stall-safeguard semantics: classic rows stall
+     * out permanently after 2 min (tracker gives up), streaming rows
+     * only clear their Y display (the sender may still be uploading).
+     *
+     * Returns null if the row doesn't exist or the mode column isn't set.
+     */
+    @Query("SELECT negotiatedMode FROM queued_transfers WHERE transferId = :transferId LIMIT 1")
+    suspend fun getNegotiatedModeByTransferId(transferId: String): String?
+
+    /**
+     * Row-scoped read for the sender state machine (D.4b): inspect
+     * `deliveryChunks` to decide whether to flip UPLOADING/WAITING_STREAM
+     * → SENDING after a successful chunk upload. Tracker owns
+     * `deliveryChunks` writes; the upload loop only reads.
+     */
+    @Query("SELECT deliveryChunks FROM queued_transfers WHERE id = :id LIMIT 1")
+    suspend fun getDeliveryChunks(id: Long): Int?
 
     @Query("UPDATE queued_transfers SET status = :status, contentUri = :uri, displayLabel = :label, sizeBytes = :size WHERE id = :id")
     suspend fun completeDownload(id: Long, status: TransferStatus, uri: String, label: String, size: Long)

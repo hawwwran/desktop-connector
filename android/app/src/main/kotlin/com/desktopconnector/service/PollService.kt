@@ -1161,10 +1161,37 @@ class PollService : Service() {
                 val dbValue = if (state == "in_progress") downloaded else 0
                 db.transferDao().updateDeliveryProgress(tid, dbValue, total)
             } else if (now - prev!!.second > DELIVERY_STALL_TIMEOUT_MS) {
-                AppLog.log("Delivery", "delivery.tracker.stall transfer_id=${tid.take(12)} stall_seconds=${(now - prev.second) / 1000}")
-                db.transferDao().clearDeliveryProgress(tid)
-                trackerGaveUp.add(tid)
-                trackerLastProgress.remove(tid)
+                // D.4b: stall semantics differ by mode.
+                //
+                //  Classic: give up on this tid. The sender has finished
+                //     uploading long ago and the recipient has been silent
+                //     for 2 min — the long-poll inline sent_status and
+                //     app-restart delivery check will still catch eventual
+                //     delivery, so safe to quit HTTP-hammering.
+                //
+                //  Streaming: only clear the Y display. The sender may
+                //     still be actively uploading on this same row; the
+                //     recipient may simply be slower than the sender. We
+                //     keep polling so that if `chunks_downloaded` advances
+                //     again, the tracker resumes painting immediately.
+                //     The sender's own budgets (30 min WAITING_STREAM,
+                //     per-chunk 120 s network) catch the truly-dead cases.
+                val mode = db.transferDao().getNegotiatedModeByTransferId(tid)
+                val stallSeconds = (now - prev.second) / 1000
+                if (mode == "streaming") {
+                    AppLog.log("Delivery",
+                        "delivery.tracker.stall transfer_id=${tid.take(12)} stall_seconds=$stallSeconds mode=streaming action=cleared_y_kept_polling")
+                    db.transferDao().clearDeliveryProgress(tid)
+                    trackerLastProgress.remove(tid)
+                    // Deliberately NOT adding to trackerGaveUp — the next
+                    // advance re-engages the tracker without a restart.
+                } else {
+                    AppLog.log("Delivery",
+                        "delivery.tracker.stall transfer_id=${tid.take(12)} stall_seconds=$stallSeconds mode=classic action=gave_up")
+                    db.transferDao().clearDeliveryProgress(tid)
+                    trackerGaveUp.add(tid)
+                    trackerLastProgress.remove(tid)
+                }
             }
         }
 

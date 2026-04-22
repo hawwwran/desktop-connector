@@ -315,6 +315,13 @@ class UploadWorker(
         wakeLock.acquire(2 * 60 * 1000L)  // 2 min refreshed per chunk
         wifiLock.acquire()
 
+        // Stamp transferId upfront so the delivery tracker (D.4b) can
+        // immediately pick this row up via getActiveDeliveryIds once the
+        // recipient starts acking chunks. Classic path sets transferId
+        // only after the final chunk; streaming needs it available while
+        // the upload is still in flight.
+        db.transferDao().setTransferId(transferDbId, transferId)
+
         return try {
             sourceOpener().use { input ->
                 val buf = ByteArray(CryptoUtils.CHUNK_SIZE)
@@ -334,6 +341,12 @@ class UploadWorker(
                     },
                     onChunkOk = { index ->
                         db.transferDao().updateProgress(transferDbId, index + 1, chunkCount)
+                        // D.4b: flip UPLOADING → SENDING once the tracker
+                        // (running on its own thread) has observed any
+                        // recipient-side download progress. Idempotent.
+                        // Field ownership: status is owned by the upload
+                        // loop; we only READ tracker-owned deliveryChunks.
+                        maybeFlipToSending(db, transferDbId, isExitingWaitingStream = false)
                     },
                     onEnterWaitingStream = { startedAtMs ->
                         AppLog.log("Upload",
@@ -342,32 +355,52 @@ class UploadWorker(
                         db.transferDao().markWaitingStream(transferDbId, startedAtMs)
                     },
                     onExitWaitingStream = {
-                        db.transferDao().clearWaitingStream(transferDbId, TransferStatus.UPLOADING)
+                        // D.4b: decide UPLOADING or SENDING based on whether
+                        // the recipient drained anything while we were
+                        // blocked on 507. clearWaitingStream() is a simple
+                        // status update; the resolved target comes from the
+                        // helper so tests can pin both paths.
+                        val target = streamingSenderStatusTarget(
+                            currentStatus = TransferStatus.WAITING_STREAM,
+                            deliveryChunks = db.transferDao().getDeliveryChunks(transferDbId) ?: 0,
+                            isExitingWaitingStream = true,
+                        ) ?: TransferStatus.UPLOADING
+                        db.transferDao().clearWaitingStream(transferDbId, target)
                     },
                 )
 
                 when (outcome) {
                     is StreamOutcome.Delivered -> {
-                        db.transferDao().setTransferId(transferDbId, transferId)
-                        // DeliveryTracker owns delivery{Chunks,Total} from here.
-                        db.transferDao().updateProgress(transferDbId, 0, 0)
-                        db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
+                        // D.4b: the sender's last chunk Ok'd. We do NOT flip
+                        // to COMPLETE — streaming rows stay SENDING until
+                        // the delivery tracker observes downloaded=1 and
+                        // calls markDelivered (which only flips the
+                        // `delivered` flag, status stays SENDING). The UI
+                        // reads `delivered` in addition to `status` to show
+                        // "Delivered" post-handoff. Keep `chunksUploaded`/
+                        // `totalChunks` intact so the "Sending N→Y" label
+                        // renders correctly during the final-ACK window.
+                        //
+                        // Ensure status is SENDING even in the fast path
+                        // where the tracker never saw progress (e.g. very
+                        // small transfer, recipient much slower than the
+                        // sender's final-chunk POST). Idempotent.
+                        maybeFlipToSending(db, transferDbId, isExitingWaitingStream = false,
+                                           forceFlip = true)
                         AppLog.log("Upload",
-                            "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName mode=streaming")
+                            "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName mode=streaming awaiting_delivery_ack=true")
                         Result.success()
                     }
                     is StreamOutcome.AbortedByRecipient -> {
                         val reason = outcome.reason ?: "recipient_abort"
                         AppLog.log("Upload",
                             "transfer.abort.recipient transfer_id=${transferId.take(12)} reason=$reason")
-                        db.transferDao().setTransferId(transferDbId, transferId)
                         db.transferDao().markAborted(transferDbId, reason)
                         Result.failure()
                     }
                     is StreamOutcome.SenderFailed -> {
                         AppLog.log("Upload",
                             "transfer.upload.failed transfer_id=${transferId.take(12)} reason=${outcome.reason} mode=streaming")
-                        db.transferDao().setTransferId(transferDbId, transferId)
                         // Best-effort tell server so recipient gets 410 on
                         // its next chunk GET instead of 425'ing forever.
                         try { api.abortTransfer(transferId, "sender_failed") } catch (_: Exception) {}
@@ -425,6 +458,50 @@ class UploadWorker(
             }
             delay(CHUNK_RETRY_DELAY_MS)
         }
+    }
+
+    /**
+     * D.4b: streaming-sender status-flip helper. Reads the row's current
+     * status + tracker-written `deliveryChunks`, computes whether a flip
+     * to SENDING is warranted via `streamingSenderStatusTarget`, and
+     * writes the flip if so.
+     *
+     * Called from:
+     *   - `onChunkOk`                   (isExitingWaitingStream=false) —
+     *     after every successful chunk upload, to catch the first moment
+     *     the recipient starts draining.
+     *   - `onExitWaitingStream`'s target resolution — not through this
+     *     function directly; the callback inlines `streamingSenderStatusTarget`
+     *     because the transition there is guaranteed (waiting_stream →
+     *     uploading OR sending) and the status write happens via
+     *     `clearWaitingStream` which also nulls `waitingStartedAt`.
+     *   - `StreamOutcome.Delivered`     (forceFlip=true) — the final
+     *     chunk Ok'd. If the tracker never saw progress we still flip
+     *     to SENDING so the row enters the "awaiting delivery ack" phase
+     *     consistently. `forceFlip` bypasses the deliveryChunks>0 check
+     *     so fast-path transfers (upload completes before tracker ticks)
+     *     end up in SENDING rather than stuck in UPLOADING.
+     *
+     * Idempotent. Reads the row + writes status at most once per call.
+     */
+    private suspend fun maybeFlipToSending(
+        db: AppDatabase,
+        transferDbId: Long,
+        isExitingWaitingStream: Boolean,
+        forceFlip: Boolean = false,
+    ) {
+        val row = db.transferDao().getById(transferDbId) ?: return
+        if (row.status == TransferStatus.SENDING) return
+        val target = if (forceFlip) {
+            TransferStatus.SENDING
+        } else {
+            streamingSenderStatusTarget(
+                currentStatus = row.status,
+                deliveryChunks = row.deliveryChunks,
+                isExitingWaitingStream = isExitingWaitingStream,
+            ) ?: return
+        }
+        db.transferDao().updateStatus(transferDbId, target, null)
     }
 
     /** Read exactly one chunk worth of bytes (last chunk may be shorter). */
