@@ -397,13 +397,17 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
         transfer.status == TransferStatus.QUEUED -> dim
         transfer.status == TransferStatus.PREPARING -> dim
         transfer.status == TransferStatus.WAITING -> brand.transferOutgoing  // yellow
+        transfer.status == TransferStatus.WAITING_STREAM -> brand.transferOutgoing  // yellow (same pill as WAITING)
         transfer.status == TransferStatus.UPLOADING && transfer.direction == TransferDirection.INCOMING -> brand.transferIncoming
         transfer.status == TransferStatus.UPLOADING -> brand.transferOutgoing
+        transfer.status == TransferStatus.SENDING -> brand.transferDelivering    // blue — overlapped upload/delivery
+        transfer.status == TransferStatus.DELIVERING -> brand.transferDelivering // blue — reserved, parity with desktop
         transfer.status == TransferStatus.COMPLETE && transfer.direction == TransferDirection.INCOMING -> brand.connectionConnected
         transfer.status == TransferStatus.COMPLETE && transfer.delivered -> dim
         transfer.status == TransferStatus.COMPLETE && transfer.deliveryTotal > 0 -> brand.transferDelivering
         transfer.status == TransferStatus.COMPLETE -> dim
         transfer.status == TransferStatus.FAILED -> MaterialTheme.colorScheme.error
+        transfer.status == TransferStatus.ABORTED -> MaterialTheme.colorScheme.error  // orange per brand palette
         else -> dim
     }
     val dirLabel = if (transfer.direction == TransferDirection.INCOMING) "\u2193 " else "\u2191 "
@@ -423,9 +427,34 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
         }
         // errorMessage is a short tag like "quota exceeded"; the full
         // row renders as "Failed (quota exceeded)". Plain "Failed"
-        // when nothing specific is known.
-        TransferStatus.FAILED -> transfer.errorMessage
+        // when nothing specific is known. failureReason (D.2) is the
+        // typed streaming variant — prefer it when set, otherwise fall
+        // back to the existing errorMessage path for classic failures.
+        TransferStatus.FAILED -> (transfer.failureReason ?: transfer.errorMessage)
             ?.let { "Failed ($it)" } ?: "Failed"
+        // --- Streaming pass-through labels (D.2). ---
+        // No writer produces these statuses yet; D.4a/b and D.3 wire
+        // them in. D.5 will refine the SENDING / WAITING_STREAM cases
+        // into the full X→Y two-metric rendering.
+        TransferStatus.SENDING -> if (transfer.deliveryTotal > 0)
+            "Sending ${transfer.chunksUploaded}→${transfer.deliveryChunks}"
+        else if (transfer.totalChunks > 0)
+            "Sending ${transfer.chunksUploaded}/${transfer.totalChunks}"
+        else "Sending"
+        TransferStatus.WAITING_STREAM -> if (transfer.deliveryTotal > 0)
+            "Waiting ${transfer.chunksUploaded}→${transfer.deliveryChunks}"
+        else "Waiting"
+        TransferStatus.DELIVERING -> if (transfer.deliveryTotal > 0)
+            "Delivering ${transfer.deliveryChunks}/${transfer.deliveryTotal}"
+        else "Delivering"
+        TransferStatus.ABORTED -> transfer.abortReason?.let { reason ->
+            when (reason) {
+                "sender_abort" -> "Aborted (sender cancelled)"
+                "sender_failed" -> "Aborted (sender gave up)"
+                "recipient_abort" -> "Aborted (recipient cancelled)"
+                else -> "Aborted ($reason)"
+            }
+        } ?: "Aborted"
     }
     val label = transfer.displayLabel.ifEmpty { transfer.displayName }
     val isClipboard = transfer.displayName.startsWith(".fn.clipboard")

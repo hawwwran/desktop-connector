@@ -14,7 +14,7 @@ class Converters {
     fun toDirection(value: String): TransferDirection = TransferDirection.valueOf(value)
 }
 
-@Database(entities = [QueuedTransfer::class], version = 7, exportSchema = false)
+@Database(entities = [QueuedTransfer::class], version = 8, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transferDao(): TransferDao
@@ -29,7 +29,18 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "desktop_connector.db"
-                ).fallbackToDestructiveMigration().build().also { instance = it }
+                )
+                    // `.addMigrations(...)` is consulted FIRST — Room uses the
+                    // registered migration when source version matches. The
+                    // `fallbackToDestructiveMigration()` below is the safety
+                    // net for versions we haven't explicitly handled; once
+                    // we're confident the migration chain is solid we can
+                    // drop the fallback so future schema drift fails loudly
+                    // instead of silently losing data.
+                    .addMigrations(MIGRATION_7_8)
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { instance = it }
             }
         }
     }
