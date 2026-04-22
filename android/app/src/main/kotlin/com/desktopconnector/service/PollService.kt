@@ -30,6 +30,8 @@ import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.ApiClient.ChunkDownloadResult
 import com.desktopconnector.network.AuthObservation
 import com.desktopconnector.network.FcmManager
+import com.desktopconnector.network.StreamReceiveOutcome
+import com.desktopconnector.network.downloadStreamLoop
 import com.desktopconnector.messaging.DeviceMessage
 import com.desktopconnector.messaging.MessageAdapters
 import com.desktopconnector.messaging.MessageDispatcher
@@ -860,132 +862,95 @@ class PollService : Service() {
         val tempFile = java.io.File(partsDir, ".incoming_${transferId}.part")
         tempFile.delete()  // clear stale partial from a prior aborted run
 
-        // Retry budgets / backoff state (per plan §10).
-        val noProgressBudgetMs = 5 * 60 * 1000L
-        val maxNetworkRetries = 3
-        val maxTooEarlyBackoffMs = 10_000L
-        var lastProgressAt = System.currentTimeMillis()
-        var networkRetries = 0
-        var tooEarlyBackoffMs = 1000L
-        // Terminal flag — set before `return` so the finally block wipes
-        // the temp file only on failure / abort paths. "complete" means
-        // the rename below succeeds; anything else wipes the .part.
+        // D.6b: chunk-by-chunk state machine lives in downloadStreamLoop
+        // as a pure function; this caller owns the IO + DB concerns
+        // (file write, wake lock refresh, Room progress). Field
+        // ownership during this call: PollService writes status,
+        // chunksUploaded, totalChunks, abortReason, failureReason; the
+        // delivery tracker owns deliveryChunks/Total on OUTGOING rows
+        // (not relevant here — this path is INCOMING).
         var terminalState = "running"
-
+        val outcome: StreamReceiveOutcome
         try {
             val fos = java.io.FileOutputStream(tempFile)
-            java.io.BufferedOutputStream(fos).use { out ->
-                var i = 0
-                chunkLoop@ while (i < chunkCount) {
-                    // Bail if the user deleted the row (swipe-to-dismiss).
-                    // Tell the server explicitly so the sender stops pushing
-                    // new chunks — otherwise it'd keep uploading to a dead
-                    // recipient until the server expires the transfer.
-                    if (db.transferDao().exists(dbRowId) == 0) {
-                        AppLog.log("Recv", "transfer.download.cancelled transfer_id=${transferId.take(12)} chunk_index=${i + 1}/$chunkCount mode=streaming")
-                        try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
-                        terminalState = "aborted"
-                        return
-                    }
-
-                    // Overall "no progress" budget — if we've spent 5 min
-                    // getting only TooEarly / transient errors, give up and
-                    // let the sender abort our upload on its next attempt.
-                    val now = System.currentTimeMillis()
-                    if (now - lastProgressAt > noProgressBudgetMs) {
-                        AppLog.log("Recv", "transfer.stream.no_progress_budget_exceeded transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
-                        try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
-                        db.transferDao().markAborted(dbRowId, "recipient_abort")
-                        db.transferDao().markFailedWithReason(dbRowId, "stall_timeout")
-                        terminalState = "failed"
-                        return
-                    }
-
-                    when (val result = api.downloadChunkTyped(transferId, i)) {
-                        is ChunkDownloadResult.Ok -> {
-                            val plaintext = try {
-                                CryptoUtils.decryptBlob(result.bytes, symmetricKey)
-                            } catch (e: Exception) {
-                                // GCM auth failure — usually a concurrent
-                                // upload race on the server. Reuse classic's
-                                // backoff: 2 s then retry the same chunk.
-                                AppLog.log("Recv", "transfer.chunk.decrypt_failed chunk_index=$i error_kind=${e.javaClass.simpleName}", "warning")
-                                delay(2000L)
-                                continue@chunkLoop
-                            }
-                            out.write(plaintext)
-                            out.flush()
-                            // fsync — see durability contract in KDoc.
-                            try { fos.fd.sync() } catch (_: Exception) {}
-                            // Per-chunk ACK. If this fails we still have the
-                            // bytes durably on disk, so we don't retry the
-                            // download — we just log and move on. The server
-                            // will expire the un-acked blob eventually; the
-                            // next chunk's GET will either succeed (server
-                            // recovered) or surface the issue properly.
-                            val acked = try { api.ackChunk(transferId, i) } catch (_: Exception) { false }
-                            if (!acked) {
-                                AppLog.log("Recv", "transfer.chunk.ack_failed transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
-                            }
-                            wakeLock.acquire(2 * 60 * 1000L)  // refresh per chunk
-                            db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
-                            lastProgressAt = System.currentTimeMillis()
-                            networkRetries = 0
-                            tooEarlyBackoffMs = 1000L
-                            i++
+            outcome = java.io.BufferedOutputStream(fos).use { out ->
+                downloadStreamLoop(
+                    chunkCount = chunkCount,
+                    downloadChunk = { index -> api.downloadChunkTyped(transferId, index) },
+                    decrypt = { bytes ->
+                        try {
+                            CryptoUtils.decryptBlob(bytes, symmetricKey)
+                        } catch (e: Exception) {
+                            AppLog.log("Recv",
+                                "transfer.chunk.decrypt_failed chunk_index=? error_kind=${e.javaClass.simpleName}",
+                                "warning")
+                            null
                         }
-                        is ChunkDownloadResult.TooEarly -> {
-                            // Prefer server's hint; clamp our own ramp in
-                            // case the server returned an unreasonably
-                            // large value.
-                            val sleepMs = result.retryAfterMs.coerceAtMost(maxTooEarlyBackoffMs)
-                                .coerceAtLeast(tooEarlyBackoffMs.coerceAtMost(maxTooEarlyBackoffMs))
-                            AppLog.log("Recv", "transfer.chunk.too_early transfer_id=${transferId.take(12)} chunk_index=$i retry_ms=$sleepMs", "debug")
-                            delay(sleepMs)
-                            tooEarlyBackoffMs = (tooEarlyBackoffMs * 2).coerceAtMost(maxTooEarlyBackoffMs)
-                            // Don't reset lastProgressAt — the 5 min budget
-                            // above is precisely the "continuous TooEarly"
-                            // counter.
+                    },
+                    writeChunk = { _, plaintext ->
+                        out.write(plaintext)
+                        out.flush()
+                        // fsync — see durability contract in KDoc above.
+                        try { fos.fd.sync() } catch (_: Exception) {}
+                    },
+                    ackChunk = { index ->
+                        val acked = try { api.ackChunk(transferId, index) } catch (_: Exception) { false }
+                        if (!acked) {
+                            AppLog.log("Recv",
+                                "transfer.chunk.ack_failed transfer_id=${transferId.take(12)} chunk_index=$index",
+                                "warning")
                         }
-                        is ChunkDownloadResult.Aborted -> {
-                            val reason = result.reason ?: "sender_abort"
-                            AppLog.log("Recv", "transfer.download.aborted_by_sender transfer_id=${transferId.take(12)} reason=$reason chunk_index=$i")
-                            db.transferDao().markAborted(dbRowId, reason)
-                            terminalState = "aborted"
-                            return
-                        }
-                        is ChunkDownloadResult.NetworkError, is ChunkDownloadResult.ServerError -> {
-                            networkRetries++
-                            if (networkRetries >= maxNetworkRetries) {
-                                AppLog.log("Recv", "transfer.download.network_budget_exceeded transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
-                                try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
-                                db.transferDao().markAborted(dbRowId, "recipient_abort")
-                                db.transferDao().markFailedWithReason(dbRowId, "network")
-                                terminalState = "failed"
-                                return
-                            }
-                            delay(2000L * networkRetries)
-                        }
-                        is ChunkDownloadResult.AuthError -> {
-                            // auth-observation flow already emitted;
-                            // re-pair banner will show. Stop this transfer;
-                            // the poll loop will pick it up again once
-                            // auth recovers (or never, if the user leaves).
-                            AppLog.log("Recv", "transfer.download.auth_error transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
-                            terminalState = "failed"
-                            return
-                        }
-                    }
-                }
+                        acked
+                    },
+                    onProgress = { index ->
+                        wakeLock.acquire(2 * 60 * 1000L)  // refresh per chunk
+                        db.transferDao().updateProgress(dbRowId, index + 1, chunkCount)
+                    },
+                    isCancelled = { db.transferDao().exists(dbRowId) == 0 },
+                )
             }
         } catch (e: Exception) {
             Log.e(TAG, "Streaming write failed: ${e.message}", e)
             db.transferDao().markFailedWithReason(dbRowId, "write_failed")
-            terminalState = "failed"
+            tempFile.delete()
             return
-        } finally {
-            if (terminalState != "running" && terminalState != "complete") {
+        }
+
+        // Map the pure state machine's outcome onto Room + terminal
+        // side-effects. Caller keeps DB / server-DELETE wiring here so
+        // the state machine stays pure.
+        when (outcome) {
+            is StreamReceiveOutcome.Complete -> {
+                terminalState = "complete"  // .part survives to finalize below
+            }
+            is StreamReceiveOutcome.AbortedByUpstream -> {
+                val reason = outcome.reason ?: "sender_abort"
+                AppLog.log("Recv",
+                    "transfer.download.aborted_by_sender transfer_id=${transferId.take(12)} reason=$reason")
+                db.transferDao().markAborted(dbRowId, reason)
                 tempFile.delete()
+                return
+            }
+            is StreamReceiveOutcome.RecipientAborted -> {
+                AppLog.log("Recv",
+                    "transfer.download.recipient_aborted transfer_id=${transferId.take(12)} reason=${outcome.reason}",
+                    "warning")
+                try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
+                db.transferDao().markAborted(dbRowId, "recipient_abort")
+                if (outcome.reason != "recipient_abort") {
+                    // Additionally mark FAILED with a typed failureReason
+                    // for the non-user-cancel paths (stall_timeout, network).
+                    db.transferDao().markFailedWithReason(dbRowId, outcome.reason)
+                }
+                tempFile.delete()
+                return
+            }
+            is StreamReceiveOutcome.AuthLost -> {
+                AppLog.log("Recv",
+                    "transfer.download.auth_error transfer_id=${transferId.take(12)}",
+                    "warning")
+                tempFile.delete()
+                return
             }
         }
 
