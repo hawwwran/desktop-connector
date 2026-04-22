@@ -16,7 +16,12 @@
   round-trips multi-megabyte payloads with peak on-disk ≤ one chunk.
   See `docs/plans/desktop-streaming-relay-plan.md` for the per-phase
   breakdown.
-- **Android client (Phase D): NOT STARTED.**
+- **Android client (Phase D): LANDED.** See
+  `docs/plans/android-streaming-relay-plan.md` for the per-sub-phase
+  breakdown. Desktop↔phone streaming works end-to-end in both
+  directions with per-chunk ACK, 507 backpressure, either-party
+  abort, and the UI walk `UPLOADING → SENDING → Delivered` on both
+  sender and receiver sides.
 - **Integration / cleanup (Phase E): NOT STARTED.**
 
 Clients will land streaming afterward against the shared server
@@ -745,10 +750,19 @@ streaming AND talk to a `stream_v1`-capable server get streaming;
 every other combination falls back to classic. Classic flows are
 byte-for-byte identical to pre-streaming behaviour.
 
-### Phase D — Android client (Kotlin) — NOT STARTED
+### Phase D — Android client (Kotlin) — LANDED
 
-12. Same scope as C on the Android side. Reuse the shared message model
-    where possible; new `TransferState` enum values.
+12. Same scope as C on the Android side. Landed in 10 commits on
+    `main` (plan `c135f6b` + `bc98533`; code D.1 `93a8b00`, D.2
+    `5896189`, D.3 `ac3902a`, D.4a `8195830`, D.4b `f5f0a63`, D.5
+    `0eaa20f`, D.6a `fafee26`, D.6b `6a7083c`; bugfixes that came
+    out of manual testing: `9fa2fbe`, `492f0e3`, `fa855d7`).
+    `docs/plans/android-streaming-relay-plan.md` records the
+    per-sub-phase shape. 41 JVM unit tests cover the state
+    machines (`UploadStreamLoopTest`, `SenderDeliveryPhaseTest`,
+    `ReceiveStreamingTransferTest`); `test_loop.sh` (D.6a)
+    exercises the full protocol round-trip desktop-to-desktop in
+    streaming mode alongside the classic path.
 
 ### Phase E — integration + cleanup — NOT STARTED
 
@@ -927,5 +941,39 @@ streaming smoke checks pass against the deployed build.
 See `docs/plans/desktop-streaming-relay-plan.md` for the per-phase
 breakdown (C.1 through C.7).
 
-**Phase D (Android client)**: not started. Implementation will live at
-`docs/plans/android-streaming-relay-plan.md` once it begins.
+**Phase D (Android client)**: LANDED. Implementation breakdown lives
+at `docs/plans/android-streaming-relay-plan.md`. See this doc's
+intro (line ~19) and per-phase section (line ~753) for the summary
++ commit list. Surface added on top of Phase C:
+- `android/app/src/main/kotlin/com/desktopconnector/network/ApiClient.kt`
+  — typed `ChunkUploadResult` / `ChunkDownloadResult`, `InitResult`
+  with negotiated mode, `ackChunk`, `abortTransfer(reason)`,
+  `getCapabilities()` with 60 s TTL.
+- `android/app/src/main/kotlin/com/desktopconnector/network/UploadStreamLoop.kt`
+  — pure sender state machine (12 unit tests).
+- `android/app/src/main/kotlin/com/desktopconnector/network/DownloadStreamLoop.kt`
+  — pure recipient state machine (15 unit tests).
+- `android/app/src/main/kotlin/com/desktopconnector/network/UploadWorker.kt`
+  — streaming branch wrapping `uploadStreamLoop` with wake + WiFi
+  locks, Room status writes, `SENDING` flip via
+  `maybeFlipToSending`.
+- `android/app/src/main/kotlin/com/desktopconnector/service/PollService.kt`
+  — receiver branches on `mode`, new `receiveStreamingTransfer`,
+  delivery tracker extended to in-flight streaming rows with
+  mode-aware stall semantics, FCM `stream_ready` / `abort` wakes.
+- `android/app/src/main/kotlin/com/desktopconnector/data/QueuedTransfer.kt`
+  — `mode` / `negotiatedMode` / `abortReason` / `failureReason` /
+  `waitingStartedAt` columns (Room v7→v8 via
+  `Migrations.MIGRATION_7_8`); new `TransferStatus` values
+  `SENDING`, `WAITING_STREAM`, `DELIVERING`, `ABORTED`.
+- `android/app/src/main/kotlin/com/desktopconnector/ui/HomeScreen.kt`
+  — status pills + progress bars for SENDING / WAITING_STREAM /
+  ABORTED; direction-aware swipe-delete confirmation dialog.
+- `android/app/src/main/kotlin/com/desktopconnector/ui/transfer/TransferViewModel.kt`
+  — zombie scrub extended to WAITING_STREAM,
+  direction-aware abort reason in `cancelAndDelete`, in-flight
+  incoming streaming rows now treated as cancellable.
+- `android/app/src/test/kotlin/com/desktopconnector/network/*Test.kt`
+  — 41 JVM unit tests.
+- `test_loop.sh` — streaming round-trip section (D.6a) alongside
+  the classic path.

@@ -234,15 +234,6 @@ class ApiClient(
         }
     }
 
-    /** Sender-initiated cancel. Server deletes chunks + rows; a
-     *  still-downloading recipient gets 404 / 410 on next chunk fetch
-     *  and abandons gracefully. Back-compat wrapper — streaming-aware
-     *  callers land in D.5 and pick `abortTransfer(tid, reason)`
-     *  directly so the abort reason flows through the wire typed. */
-    fun cancelTransfer(transferId: String): Boolean {
-        return abortTransfer(transferId, "sender_abort")
-    }
-
     /**
      * Either-party abort. `reason ∈ {sender_abort, sender_failed,
      * recipient_abort}` — the server validates that the reason lines

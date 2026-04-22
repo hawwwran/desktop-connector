@@ -648,11 +648,10 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
      *
      *  D.5: reason is direction-aware so streaming transfers (where
      *  either party can abort) use the protocol-correct reason. Classic
-     *  outgoing rows land on `sender_abort` exactly as before (the
-     *  legacy `cancelTransfer` wrapper in ApiClient delegates to
-     *  `abortTransfer(tid, "sender_abort")`). Classic incoming rows
-     *  rarely reach this path (classic receivers finish synchronously
-     *  in the poller) but the branch is correct if they do.
+     *  outgoing rows land on `sender_abort` — byte-for-byte the same
+     *  wire as the pre-streaming flow. Classic incoming rows rarely
+     *  reach this path (classic receivers finish synchronously in the
+     *  poller) but the branch is correct if they do.
      */
     fun cancelAndDelete(transfer: QueuedTransfer) {
         viewModelScope.launch(Dispatchers.IO) {
