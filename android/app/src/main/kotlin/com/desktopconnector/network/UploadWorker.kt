@@ -2,6 +2,7 @@ package com.desktopconnector.network
 
 import android.content.Context
 import android.net.Uri
+import android.os.PowerManager
 import android.util.Log
 import androidx.work.*
 import com.desktopconnector.crypto.CryptoUtils
@@ -120,9 +121,32 @@ class UploadWorker(
         )
         val transferId = UUID.randomUUID().toString()
 
-        val initOutcome = api.initTransfer(transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount)
+        // Capability probe. Request streaming only when the server
+        // advertises `stream_v1` AND the file isn't a `.fn.*` command
+        // (those are force-classic per plan §9 non-goal — too small to
+        // benefit, extra round-trips hurt). Server may still downgrade
+        // streaming → classic in its response; we honour what it
+        // negotiated via `initTransferTyped`'s return.
+        val capabilities = try { api.getCapabilities() } catch (_: Exception) { emptySet() }
+        val requestedMode = if ("stream_v1" in capabilities && !transfer.displayName.startsWith(".fn.")) {
+            "streaming"
+        } else {
+            "classic"
+        }
+
+        val initResult = api.initTransferTyped(
+            transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount, requestedMode,
+        )
+        val initOutcome = initResult.outcome
+        val negotiatedMode = initResult.negotiatedMode
         when (initOutcome) {
-            ApiClient.InitOutcome.OK -> { /* proceed below */ }
+            ApiClient.InitOutcome.OK -> {
+                // Stamp what the server accepted so the history row,
+                // D.4b's tracker extension, and D.5's UI all know which
+                // branch was taken. Safe to call with negotiatedMode
+                // even for classic (it just writes mode=classic).
+                db.transferDao().setNegotiatedMode(transferDbId, requestedMode, negotiatedMode)
+            }
             ApiClient.InitOutcome.TOO_LARGE -> {
                 // 413 — terminal. The transfer is bigger than the
                 // server's configured quota; no amount of waiting makes
@@ -178,37 +202,193 @@ class UploadWorker(
 
         db.transferDao().updateStatus(transferDbId, TransferStatus.UPLOADING)
         db.transferDao().updateProgress(transferDbId, 0, chunkCount)
-        AppLog.log("Upload", "transfer.init.accepted transfer_id=${transferId.take(12)} recipient=${transfer.recipientDeviceId.take(12)} chunks=$chunkCount")
+        AppLog.log("Upload", "transfer.init.accepted transfer_id=${transferId.take(12)} recipient=${transfer.recipientDeviceId.take(12)} chunks=$chunkCount requested_mode=$requestedMode negotiated_mode=$negotiatedMode")
 
-        try {
-            sourceOpener().use { input ->
-                val buf = ByteArray(CryptoUtils.CHUNK_SIZE)
-                for (index in 0 until chunkCount) {
-                    val plaintext = readFullChunk(input, buf, sourceSize, index, chunkCount)
-                    val encrypted = keyManager.encryptChunk(plaintext, baseNonce, index, symmetricKey)
-                    val terminal = uploadChunkWithRetry(api, transferId, index, chunkCount, encrypted)
-                    if (terminal != null) {
-                        AppLog.log("Upload", "transfer.upload.failed transfer_id=${transferId.take(12)} reason=$terminal")
-                        db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, terminal)
-                        return Result.failure()
-                    }
-                    db.transferDao().updateProgress(transferDbId, index + 1, chunkCount)
-                }
+        return try {
+            if (negotiatedMode == "streaming") {
+                runStreamingUpload(
+                    api, transferId, transferDbId, chunkCount, sourceOpener, sourceSize,
+                    baseNonce, symmetricKey, keyManager, transfer.displayName, db,
+                )
+            } else {
+                runClassicUpload(
+                    api, transferId, transferDbId, chunkCount, sourceOpener, sourceSize,
+                    baseNonce, symmetricKey, keyManager, transfer.displayName, db,
+                )
             }
-
-            db.transferDao().setTransferId(transferDbId, transferId)
-            // Upload logic cleans up its own progress fields; DeliveryTracker owns deliveryChunks/deliveryTotal from here.
-            db.transferDao().updateProgress(transferDbId, 0, 0)
-            db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
-            AppLog.log("Upload", "transfer.upload.completed transfer_id=${transferId.take(12)} name=${transfer.displayName}")
-            return Result.success()
         } catch (e: Exception) {
             Log.e(TAG, "Upload failed: ${e.message}", e)
             AppLog.log("Upload", "transfer.upload.failed transfer_id=${transferId.take(12)} error_kind=${e.javaClass.simpleName}")
             db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, e.message ?: "Upload error")
-            return Result.failure()
+            Result.failure()
         } finally {
             spoolFile?.delete()
+        }
+    }
+
+    /**
+     * Classic upload loop — byte-for-byte the pre-streaming behaviour.
+     * Kept separate from the streaming path so D.4a's diff is reviewable
+     * without a through-the-middle merge: nothing in this function changes.
+     */
+    private suspend fun runClassicUpload(
+        api: ApiClient,
+        transferId: String,
+        transferDbId: Long,
+        chunkCount: Int,
+        sourceOpener: () -> InputStream,
+        sourceSize: Long,
+        baseNonce: ByteArray,
+        symmetricKey: ByteArray,
+        keyManager: KeyManager,
+        displayName: String,
+        db: AppDatabase,
+    ): Result {
+        sourceOpener().use { input ->
+            val buf = ByteArray(CryptoUtils.CHUNK_SIZE)
+            for (index in 0 until chunkCount) {
+                val plaintext = readFullChunk(input, buf, sourceSize, index, chunkCount)
+                val encrypted = keyManager.encryptChunk(plaintext, baseNonce, index, symmetricKey)
+                val terminal = uploadChunkWithRetry(api, transferId, index, chunkCount, encrypted)
+                if (terminal != null) {
+                    AppLog.log("Upload", "transfer.upload.failed transfer_id=${transferId.take(12)} reason=$terminal")
+                    db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, terminal)
+                    return Result.failure()
+                }
+                db.transferDao().updateProgress(transferDbId, index + 1, chunkCount)
+            }
+        }
+
+        db.transferDao().setTransferId(transferDbId, transferId)
+        // Upload logic cleans up its own progress fields; DeliveryTracker owns deliveryChunks/deliveryTotal from here.
+        db.transferDao().updateProgress(transferDbId, 0, 0)
+        db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
+        AppLog.log("Upload", "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName mode=classic")
+        return Result.success()
+    }
+
+    /**
+     * Streaming upload loop (D.4a).
+     *
+     * Drives chunks through the server via the pure-function state
+     * machine [uploadStreamLoop], wrapping it with:
+     *   - Wake + WiFi locks for the duration of the loop (mirrors the
+     *     receiver's existing download policy). 30 min WAITING_STREAM
+     *     windows span well past Android's idle thresholds otherwise.
+     *   - Sequential stream reader + encryption per chunk.
+     *   - Progress writes to Room every chunk.
+     *   - Mapping [StreamOutcome] onto Room status + Worker [Result].
+     *
+     * Row status transitions in D.4a:
+     *   UPLOADING (+ WAITING_STREAM ↔ UPLOADING during 507 episodes)
+     *     → COMPLETE on the final chunk's Ok
+     *     → ABORTED on recipient DELETE
+     *     → FAILED(failureReason=…) on sender give-up.
+     *
+     * SENDING / delivery-tracker integration is D.4b — the classic
+     * delivery tracker picks up COMPLETE+undelivered rows and paints
+     * `deliveryChunks` the same way it does for classic transfers.
+     */
+    private suspend fun runStreamingUpload(
+        api: ApiClient,
+        transferId: String,
+        transferDbId: Long,
+        chunkCount: Int,
+        sourceOpener: () -> InputStream,
+        sourceSize: Long,
+        baseNonce: ByteArray,
+        symmetricKey: ByteArray,
+        keyManager: KeyManager,
+        displayName: String,
+        db: AppDatabase,
+    ): Result {
+        // Wake + WiFi locks. Released deterministically in `finally`.
+        val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DesktopConnector:streaming-upload")
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+        @Suppress("DEPRECATION")
+        val wifiMode = if (android.os.Build.VERSION.SDK_INT >= 29)
+            android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        else
+            android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        val wifiLock = wifiManager.createWifiLock(wifiMode, "DesktopConnector:streaming-upload")
+        wakeLock.acquire(2 * 60 * 1000L)  // 2 min refreshed per chunk
+        wifiLock.acquire()
+
+        return try {
+            sourceOpener().use { input ->
+                val buf = ByteArray(CryptoUtils.CHUNK_SIZE)
+                // Pre-encrypt-and-upload per chunk via a closure that the
+                // state machine invokes. Keeping it inside sourceOpener's
+                // `use {}` means the stream is closed on exit regardless
+                // of outcome.
+                val outcome = uploadStreamLoop(
+                    chunkCount = chunkCount,
+                    uploadChunk = { index ->
+                        val plaintext = readFullChunk(input, buf, sourceSize, index, chunkCount)
+                        val encrypted = keyManager.encryptChunk(plaintext, baseNonce, index, symmetricKey)
+                        // Per-chunk wake refresh keeps us alive across
+                        // long WAITING_STREAM episodes.
+                        wakeLock.acquire(2 * 60 * 1000L)
+                        api.uploadChunkTyped(transferId, index, encrypted)
+                    },
+                    onChunkOk = { index ->
+                        db.transferDao().updateProgress(transferDbId, index + 1, chunkCount)
+                    },
+                    onEnterWaitingStream = { startedAtMs ->
+                        AppLog.log("Upload",
+                            "transfer.stream.waiting_quota transfer_id=${transferId.take(12)}",
+                            "warning")
+                        db.transferDao().markWaitingStream(transferDbId, startedAtMs)
+                    },
+                    onExitWaitingStream = {
+                        db.transferDao().clearWaitingStream(transferDbId, TransferStatus.UPLOADING)
+                    },
+                )
+
+                when (outcome) {
+                    is StreamOutcome.Delivered -> {
+                        db.transferDao().setTransferId(transferDbId, transferId)
+                        // DeliveryTracker owns delivery{Chunks,Total} from here.
+                        db.transferDao().updateProgress(transferDbId, 0, 0)
+                        db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
+                        AppLog.log("Upload",
+                            "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName mode=streaming")
+                        Result.success()
+                    }
+                    is StreamOutcome.AbortedByRecipient -> {
+                        val reason = outcome.reason ?: "recipient_abort"
+                        AppLog.log("Upload",
+                            "transfer.abort.recipient transfer_id=${transferId.take(12)} reason=$reason")
+                        db.transferDao().setTransferId(transferDbId, transferId)
+                        db.transferDao().markAborted(transferDbId, reason)
+                        Result.failure()
+                    }
+                    is StreamOutcome.SenderFailed -> {
+                        AppLog.log("Upload",
+                            "transfer.upload.failed transfer_id=${transferId.take(12)} reason=${outcome.reason} mode=streaming")
+                        db.transferDao().setTransferId(transferDbId, transferId)
+                        // Best-effort tell server so recipient gets 410 on
+                        // its next chunk GET instead of 425'ing forever.
+                        try { api.abortTransfer(transferId, "sender_failed") } catch (_: Exception) {}
+                        db.transferDao().markFailedWithReason(transferDbId, outcome.reason)
+                        Result.failure()
+                    }
+                    is StreamOutcome.AuthLost -> {
+                        // Banner latch is already firing via authObservations.
+                        // Don't flip the row terminal — let WorkManager retry
+                        // once auth recovers (or never, if user re-pairs and
+                        // a new transferId is used).
+                        AppLog.log("Upload",
+                            "transfer.upload.auth_lost transfer_id=${transferId.take(12)} mode=streaming",
+                            "warning")
+                        Result.retry()
+                    }
+                }
+            }
+        } finally {
+            if (wakeLock.isHeld) wakeLock.release()
+            if (wifiLock.isHeld) wifiLock.release()
         }
     }
 
