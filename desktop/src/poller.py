@@ -1013,7 +1013,28 @@ class Poller:
                     recipient_chunks_total=0,
                     delivered=True)
                 log.info("delivery.acked transfer_id=%s", tid[:12])
+            elif state == "aborted":
+                # Counterpart aborted (either sender or recipient). Flip
+                # the row terminal so the tracker stops polling and UI
+                # renders "Aborted" instead of a stuck "Sending".
+                abort_reason = s.get("abort_reason")
+                log.info("transfer.abort.observed transfer_id=%s reason=%s",
+                         tid[:12], abort_reason or "unspecified")
+                self.history.update(tid,
+                    status=TransferStatus.ABORTED,
+                    abort_reason=abort_reason,
+                    recipient_chunks_downloaded=0,
+                    recipient_chunks_total=0)
             elif state == "in_progress":
+                self.history.update(tid,
+                    recipient_chunks_downloaded=chunks_dl,
+                    recipient_chunks_total=chunk_count)
+            elif state == "not_started" and chunks_dl > 0:
+                # Streaming overlap: server's delivery_state stays
+                # "not_started" until complete=1, but chunks_downloaded
+                # climbs as the recipient drains. Paint it. Classic
+                # rows never reach this branch (chunks_dl=0 while
+                # complete=0).
                 self.history.update(tid,
                     recipient_chunks_downloaded=chunks_dl,
                     recipient_chunks_total=chunk_count)
@@ -1048,11 +1069,22 @@ class Poller:
             chunk_count = s.get("chunk_count", 0)
 
             # Decide action under a single lock acquisition per transfer.
-            action: str  # "skip" | "delivered" | "advanced" | "stalled"
+            action: str  # "skip" | "delivered" | "aborted" | "advanced" | "stalled"
             stall_seconds = 0.0
             with self._tracker_state_lock:
                 if tid in self._tracker_gave_up:
                     action = "skip"
+                elif state == "aborted":
+                    # Either-party abort observed via sent-status. For a
+                    # sender whose upload completed before the recipient
+                    # aborted, this is the ONLY way it learns — the
+                    # upload loop already exited, so no 410 Gone will
+                    # fire on a follow-up chunk upload. Without this
+                    # branch the row stays in SENDING/COMPLETE forever
+                    # (user's bug report: "phone swipe-deletes a
+                    # download, desktop row stays stuck").
+                    self._tracker_last_progress.pop(tid, None)
+                    action = "aborted"
                 elif state == "delivered":
                     self._tracker_last_progress.pop(tid, None)
                     any_just_delivered = True
@@ -1077,15 +1109,31 @@ class Poller:
                 self.history.update(tid,
                     recipient_chunks_downloaded=0,
                     recipient_chunks_total=0)
+            elif action == "aborted":
+                abort_reason = s.get("abort_reason")
+                log.info("transfer.abort.observed_via_tracker transfer_id=%s reason=%s",
+                         tid[:12], abort_reason or "unspecified")
+                self.history.update(tid,
+                    status=TransferStatus.ABORTED,
+                    abort_reason=abort_reason,
+                    recipient_chunks_downloaded=0,
+                    recipient_chunks_total=0)
             elif action == "advanced":
                 if state == "in_progress":
                     self.history.update(tid,
                         recipient_chunks_downloaded=chunks_dl,
                         recipient_chunks_total=chunk_count)
                 elif state == "not_started":
-                    # Keep bar visible at 0/N so user sees "Delivering 0/N".
+                    # Streaming overlap: during the upload phase (server
+                    # lifecycle still UPLOADING → delivery_state maps to
+                    # "not_started"), chunks_downloaded climbs as the
+                    # recipient drains. Painting whatever the server
+                    # reports keeps the "Sending X→Y/N" label accurate.
+                    # Classic rows always see chunks_dl=0 here (no
+                    # download while complete=0) so byte-for-byte same
+                    # as before for classic.
                     self.history.update(tid,
-                        recipient_chunks_downloaded=0,
+                        recipient_chunks_downloaded=chunks_dl,
                         recipient_chunks_total=chunk_count)
         return any_just_delivered
 
