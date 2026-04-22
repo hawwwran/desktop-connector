@@ -525,46 +525,86 @@ tracker to paint on in-flight streaming rows.
   (yellow `#FDD00C` for WAITING_STREAM in dark theme, `#FAA602` in
   light; orange `#EA7601` for ABORTED).
 
-### D.6 — Integration test + test_loop.sh coverage
+### D.6a — `test_loop.sh` streaming round-trip
 
 **What changes:**
 
-1. Extend `tests/protocol/test_server_contract.py` if D.1 / D.4
-   surface any new contract shape not already covered — most
-   likely unnecessary; Phase A server tests already pin the
-   surface. Re-check after D.4 lands.
-2. New pure-Kotlin unit tests (local JVM, no emulator) for the
-   state machines:
-   - `UploadStreamLoopTest` — drive the state machine with a
-     hand-built fake `ApiClient`; exercise 507 backoff + 30 min
-     cap, 410 abort, final-chunk happy path, and the interleaving
-     where delivery overtakes upload.
-   - `ReceiveStreamingTransferTest` — same shape for the recipient
-     loop (425 budget, 410 mid-stream, network-error abort path).
-   - Both live under `android/app/src/test/kotlin/` and run via
-     `./gradlew test` in CI-lite fashion (the user runs them
-     locally before commits).
-3. New `tests/protocol/test_loop_android_streaming.sh` (or a flag
-   in the existing `test_loop.sh`): drives the hermetic PHP
-   server with `streamingEnabled=true`, pairs a scripted
-   `desktop/src/main.py --headless` against an Android build
-   installed on the connected test phone, runs one streaming
-   transfer in each direction on a ~20 MB payload, asserts:
-   - File hash identical across both sides.
-   - `server/storage/` peak size stays below `4 × CHUNK_SIZE = 8 MB`.
-   - `transfer.init.accepted mode=streaming` in server logs (no
-     classic reservation path hit).
-4. Abort tests — phone aborts at chunk K/N; desktop aborts at
-   chunk K/N. Assert the opposite side observes `Aborted`.
-5. Quota-gate test: tight `storageQuotaMB=2`, verify phone's
-   sender flips `WAITING_STREAM` and drains on recipient catch-up.
+Extend the existing `test_loop.sh` (which already pairs two hermetic
+desktop clients against a `php -S` server and runs a 10 MB classic
+round-trip) with a **streaming-mode** section:
+
+1. New bash section after the classic "Streaming large file" block,
+   using `ApiClient.send_file(streaming=True)` on the sender side
+   and a scripted per-chunk download + `ack_chunk` loop on the
+   recipient side (matching `_receive_streaming_transfer`'s protocol
+   exactly, but inline for script brevity).
+2. Assertions:
+   - SHA-256 match between source and reconstructed file.
+   - Server log grep: `transfer.init.accepted mode=streaming` for
+     the streaming transfer, `transfer.chunk.acked_and_deleted` per
+     chunk (proves the per-chunk ACK wipe is firing).
+   - No `mode=classic` in that transfer's log tail.
+3. Keep the classic section intact — two sections run back-to-back
+   in the same `test_loop.sh` invocation.
+
+**Why this scope:**
+
+The comprehensive streaming edge-case coverage already exists in
+`tests/protocol/test_desktop_streaming_integration.py` (Phase C —
+happy path, sender abort, recipient abort, quota gate). D.6a's
+contribution is a bash-level smoke test that runs alongside the
+classic round-trip, so `./test_loop.sh` gives a single pass/fail
+verdict on both protocol paths. Does not involve the Android phone
+— that's covered by the D.4a / D.4b JVM unit tests and D.6b's
+recipient-loop tests. Driving the Android app from bash would
+require the test to trigger `am start` / fire intents / wait on
+adb logcat, which is out of scope for a protocol smoke test.
 
 **Acceptance:**
 
-- `test_loop.sh` (classic) still green.
-- Both unit-test suites pass via `./gradlew test`.
-- `test_loop_android_streaming.sh` passes on a clean checkout with
-  the phone connected via USB.
+- `./test_loop.sh` green end-to-end (classic + streaming).
+- Existing `tests/protocol/test_desktop_streaming_integration.py`
+  continues to pass via `python3 -m unittest`.
+
+### D.6b — Android recipient loop unit tests
+
+**What changes:**
+
+Mirror the D.4a extraction-for-testability pattern on the Android
+recipient side:
+
+1. Extract the per-chunk state machine from
+   `PollService.receiveStreamingTransfer` into a pure function
+   `downloadStreamChunk(apiClient, transferId, index, ...)` in a
+   new `DownloadStreamLoop.kt` (or add to the existing
+   `UploadStreamLoop.kt`). Keep the Room writes + file IO in the
+   PollService caller; the extracted function returns a typed
+   outcome so tests can pin every branch.
+2. New `ReceiveStreamingTransferTest` JVM unit test covering:
+   - Happy path: `Ok` → plaintext returned.
+   - TooEarly retry: server-hinted `retry_after_ms` + own ramp,
+     reset on next non-TooEarly.
+   - TooEarly budget exhaustion: 5 min continuous → returns
+     "budget_exceeded".
+   - Aborted(reason) surfaced.
+   - NetworkError budget exhaustion: 3 attempts → returns
+     "network_exhausted".
+   - AuthError short-circuit.
+   - Decrypt failure retry: InvalidTag once, then Ok (belt-and-
+     suspenders against server atomic-rename race).
+
+Lands alongside an updated KDoc block on PollService noting the
+extraction + the field-ownership contract (mirrors D.4b's).
+
+**Acceptance:**
+
+- `./gradlew :app:testReleaseUnitTest` passes the new
+  `ReceiveStreamingTransferTest` (8–12 tests).
+- Combined JVM test count for streaming: 40+ green across
+  `UploadStreamLoopTest` (D.4a, 12),
+  `SenderDeliveryPhaseTest` (D.4b, 14), and
+  `ReceiveStreamingTransferTest` (D.6b, 8–12).
+- `test_loop.sh` (both paths from D.6a) still green.
 
 ### D.7 — Cleanup + plan status
 
@@ -657,7 +697,8 @@ D.3  recipient streaming loop    → depends on D.1 / D.2
 D.4a sender state machine        → depends on D.1 / D.2; parallel to D.3 in theory
 D.4b tracker wiring + SENDING    → depends on D.4a
 D.5  Compose UI + row actions    → depends on D.3 + D.4b
-D.6  integration tests           → ties it all together
+D.6a test_loop.sh streaming      → desktop-to-desktop bash smoke test
+D.6b recipient loop unit tests   → JVM test + extraction refactor
 D.7  docs + _devel_ decommission → final pass
 ```
 
