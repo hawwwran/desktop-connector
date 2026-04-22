@@ -115,12 +115,89 @@ class ApiClient(
 
     enum class InitOutcome { OK, STORAGE_FULL, TOO_LARGE, FAILED }
 
+    /**
+     * Init result for the streaming-aware call path. `outcome` carries
+     * the same coarse verdict as the legacy `initTransfer` returns;
+     * `negotiatedMode ∈ {"classic", "streaming"}` is what the server
+     * accepted (may be downgraded from what the sender requested).
+     * D.4a will make `UploadWorker` read this value to pick its loop.
+     */
+    data class InitResult(val outcome: InitOutcome, val negotiatedMode: String)
+
+    /**
+     * Typed outcome for a streaming chunk upload. Callers distinguish:
+     *   - Ok              — chunk stored.
+     *   - StorageFull     — 507: recipient quota full mid-stream;
+     *                       sender backs off and retries (WAITING_STREAM).
+     *   - Aborted(reason) — 410: counterparty aborted; sender stops.
+     *   - AuthError       — 401/403; ConnectionManager latches via
+     *                       the auth-observation flow (already emitted
+     *                       by the time this returns).
+     *   - NetworkError    — transport/read/connect error; transient.
+     *   - ServerError(n)  — any other 4xx/5xx; treat as transient.
+     *
+     * Legacy `uploadChunk` returning JSONObject? stays in place for
+     * the classic path until D.4a migrates it. Same shape for
+     * ChunkDownloadResult.
+     */
+    sealed class ChunkUploadResult {
+        object Ok : ChunkUploadResult()
+        object StorageFull : ChunkUploadResult()
+        data class Aborted(val reason: String?) : ChunkUploadResult()
+        object AuthError : ChunkUploadResult()
+        object NetworkError : ChunkUploadResult()
+        data class ServerError(val code: Int) : ChunkUploadResult()
+    }
+
+    /**
+     * Typed outcome for a streaming chunk download.
+     *   - Ok(bytes)          — raw encrypted chunk bytes.
+     *   - TooEarly(retryMs)  — 425: upstream hasn't produced this chunk
+     *                          yet. `retryMs` comes from the server's
+     *                          `retry_after_ms` JSON body (ms precision);
+     *                          falls back to `Retry-After` header * 1000
+     *                          and finally to 1000 ms.
+     *   - Aborted(reason)    — 410: counterparty aborted.
+     *   - AuthError / NetworkError / ServerError — as above.
+     */
+    sealed class ChunkDownloadResult {
+        data class Ok(val bytes: ByteArray) : ChunkDownloadResult()
+        data class TooEarly(val retryAfterMs: Long) : ChunkDownloadResult()
+        data class Aborted(val reason: String?) : ChunkDownloadResult()
+        object AuthError : ChunkDownloadResult()
+        object NetworkError : ChunkDownloadResult()
+        data class ServerError(val code: Int) : ChunkDownloadResult()
+    }
+
     fun initTransfer(transferId: String, recipientId: String, encryptedMeta: String, chunkCount: Int): InitOutcome {
+        return initTransferTyped(transferId, recipientId, encryptedMeta, chunkCount, "classic").outcome
+    }
+
+    /**
+     * Streaming-aware init. `mode = "streaming"` asks the server to run
+     * the transfer as an overlapping upload/delivery pipeline;
+     * `mode = "classic"` (default) keeps the store-then-forward path.
+     * The server may downgrade `streaming` → `classic` if the recipient
+     * isn't fresh enough, if streaming is disabled via config, or if
+     * the client didn't advertise the stream_v1 capability.
+     *
+     * Clients that want streaming should call `getCapabilities()` first
+     * and only pass `mode = "streaming"` when `"stream_v1"` is present.
+     * Guard against streaming for `.fn.*` transfers at the caller.
+     */
+    fun initTransferTyped(
+        transferId: String,
+        recipientId: String,
+        encryptedMeta: String,
+        chunkCount: Int,
+        mode: String = "classic",
+    ): InitResult {
         val body = JSONObject().apply {
             put("transfer_id", transferId)
             put("recipient_id", recipientId)
             put("encrypted_meta", encryptedMeta)
             put("chunk_count", chunkCount)
+            put("mode", mode)
         }
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/init")
@@ -129,7 +206,9 @@ class ApiClient(
         return try {
             client.newCall(request).execute().use { resp ->
                 reportAuthStatus(resp.code)
-                when (resp.code) {
+                val bodyStr = resp.body?.string()
+                val negotiated = parseNegotiatedMode(bodyStr) ?: "classic"
+                val outcome = when (resp.code) {
                     201 -> InitOutcome.OK
                     // 507 = recipient's pending-bytes quota exhausted.
                     // Transient; caller treats as WAITING and retries.
@@ -139,19 +218,50 @@ class ApiClient(
                     413 -> InitOutcome.TOO_LARGE
                     else -> InitOutcome.FAILED
                 }
+                InitResult(outcome, negotiated)
             }
         } catch (e: Exception) {
-            InitOutcome.FAILED
+            InitResult(InitOutcome.FAILED, "classic")
+        }
+    }
+
+    private fun parseNegotiatedMode(bodyStr: String?): String? {
+        if (bodyStr.isNullOrBlank()) return null
+        return try {
+            JSONObject(bodyStr).optString("negotiated_mode").takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
         }
     }
 
     /** Sender-initiated cancel. Server deletes chunks + rows; a
-     *  still-downloading recipient gets 404 on next chunk fetch and
-     *  abandons gracefully. */
+     *  still-downloading recipient gets 404 / 410 on next chunk fetch
+     *  and abandons gracefully. Back-compat wrapper — streaming-aware
+     *  callers land in D.5 and pick `abortTransfer(tid, reason)`
+     *  directly so the abort reason flows through the wire typed. */
     fun cancelTransfer(transferId: String): Boolean {
+        return abortTransfer(transferId, "sender_abort")
+    }
+
+    /**
+     * Either-party abort. `reason ∈ {sender_abort, sender_failed,
+     * recipient_abort}` — the server validates that the reason lines
+     * up with the caller's role and returns 400 on cross-role mistakes.
+     * Server accepts a body-less DELETE too (back-compat with old
+     * clients), but new code should always pass a typed reason.
+     *
+     * Returns true on 2xx (abort succeeded OR transfer was already
+     * delivered — the server reports this truthfully and doesn't flip
+     * a delivered row to aborted). Returns false on non-2xx or
+     * transport error; callers that care about the specific status
+     * can parse the JSON body out-of-band, but for Phase D's sender
+     * state machine the bool verdict is enough.
+     */
+    fun abortTransfer(transferId: String, reason: String): Boolean {
+        val body = JSONObject().apply { put("reason", reason) }
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId")
-            .delete()
+            .delete(body.toString().toRequestBody(jsonType))
             .build()
         return executeStatus(request)
     }
@@ -162,6 +272,46 @@ class ApiClient(
             .post(data.toRequestBody(binaryType))
             .build()
         return executeJson(request)
+    }
+
+    /**
+     * Streaming-aware chunk upload. Distinguishes the 507 mid-stream
+     * backpressure case (sender flips to WAITING_STREAM, keeps row
+     * alive, retries later) from 410 Gone (counterparty aborted,
+     * terminal) and from plain network flakes. The legacy
+     * `uploadChunk` above returns JSONObject? and collapses all of
+     * these into null; D.4a's streaming sender uses this typed path
+     * instead.
+     */
+    fun uploadChunkTyped(transferId: String, chunkIndex: Int, data: ByteArray): ChunkUploadResult {
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex")
+            .post(data.toRequestBody(binaryType))
+            .build()
+        return try {
+            client.newCall(request).execute().use { resp ->
+                reportAuthStatus(resp.code)
+                when {
+                    resp.isSuccessful -> ChunkUploadResult.Ok
+                    resp.code == 401 || resp.code == 403 -> ChunkUploadResult.AuthError
+                    resp.code == 507 -> ChunkUploadResult.StorageFull
+                    resp.code == 410 -> ChunkUploadResult.Aborted(parseAbortReason(resp.body?.string()))
+                    else -> ChunkUploadResult.ServerError(resp.code)
+                }
+            }
+        } catch (e: Exception) {
+            ChunkUploadResult.NetworkError
+        }
+    }
+
+    /** Parse `abort_reason` out of a 410 Gone JSON body, or null. */
+    private fun parseAbortReason(bodyStr: String?): String? {
+        if (bodyStr.isNullOrBlank()) return null
+        return try {
+            JSONObject(bodyStr).optString("abort_reason").takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun getPendingTransfers(): List<JSONObject> {
@@ -244,9 +394,83 @@ class ApiClient(
         }
     }
 
+    /**
+     * Streaming-aware chunk download. Distinguishes 425 (upstream
+     * hasn't produced this chunk yet — poll again after the server's
+     * `retry_after_ms` hint) from 410 (counterparty aborted) from
+     * plain network errors. The legacy `downloadChunk` above
+     * collapses all of these into null; D.3's streaming recipient
+     * uses this typed path instead.
+     */
+    fun downloadChunkTyped(transferId: String, chunkIndex: Int): ChunkDownloadResult {
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex")
+            .get()
+            .build()
+        return try {
+            client.newCall(request).execute().use { resp ->
+                reportAuthStatus(resp.code)
+                when {
+                    resp.isSuccessful -> {
+                        val bytes = resp.body?.bytes()
+                        if (bytes != null) ChunkDownloadResult.Ok(bytes)
+                        else ChunkDownloadResult.NetworkError
+                    }
+                    resp.code == 401 || resp.code == 403 -> ChunkDownloadResult.AuthError
+                    resp.code == 425 -> {
+                        val retryMs = parseRetryAfterMs(resp)
+                        ChunkDownloadResult.TooEarly(retryMs)
+                    }
+                    resp.code == 410 -> ChunkDownloadResult.Aborted(parseAbortReason(resp.body?.string()))
+                    else -> ChunkDownloadResult.ServerError(resp.code)
+                }
+            }
+        } catch (e: Exception) {
+            ChunkDownloadResult.NetworkError
+        }
+    }
+
+    /**
+     * Resolve a retry hint from a 425 response. Prefer the ms-precision
+     * `retry_after_ms` field in the JSON body (the server emits this
+     * explicitly); fall back to the standard `Retry-After` header
+     * (seconds → milliseconds); final fallback is 1 s.
+     */
+    private fun parseRetryAfterMs(resp: okhttp3.Response): Long {
+        val bodyStr = resp.body?.string()
+        val bodyMs = if (!bodyStr.isNullOrBlank()) {
+            try {
+                JSONObject(bodyStr).optLong("retry_after_ms", -1L)
+            } catch (_: Exception) {
+                -1L
+            }
+        } else -1L
+        if (bodyMs > 0) return bodyMs
+        val headerSec = resp.header("Retry-After")?.toLongOrNull()
+        if (headerSec != null && headerSec > 0) return headerSec * 1000L
+        return 1000L
+    }
+
     fun ackTransfer(transferId: String): Boolean {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId/ack")
+            .post("".toRequestBody(jsonType))
+            .build()
+        return executeStatus(request)
+    }
+
+    /**
+     * Per-chunk ACK for streaming transfers. Signals that the
+     * recipient has safely received and decrypted chunk `chunkIndex`;
+     * the server deletes that chunk's blob immediately (streaming's
+     * peak on-disk = ~1 chunk instead of N). The final chunk's ACK
+     * also flips the transfer to delivered — recipients should NOT
+     * send a transfer-level `ackTransfer` after per-chunk ACKing the
+     * last chunk.
+     */
+    fun ackChunk(transferId: String, chunkIndex: Int): Boolean {
+        val request = authHeaders(Request.Builder())
+            .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex/ack")
             .post("".toRequestBody(jsonType))
             .build()
         return executeStatus(request)
@@ -333,6 +557,51 @@ class ApiClient(
         .connectTimeout(1, TimeUnit.SECONDS)
         .readTimeout(1, TimeUnit.SECONDS)
         .build()
+
+    // --- Capability probe ---
+    //
+    // /api/health is optional-auth; we probe it without credentials so
+    // a client in a latched 401/403 state can still pick up streaming
+    // availability once pairing recovers. 60 s TTL is short enough to
+    // notice a server-side streamingEnabled flip reasonably quickly
+    // and long enough to avoid hammering the endpoint on every
+    // transfer init. Values are memoised per-ApiClient-instance;
+    // PollService / UploadWorker use their own instances so the cache
+    // does not outlive a process lifetime.
+    @Volatile private var capabilitiesCache: Set<String>? = null
+    @Volatile private var capabilitiesCacheExpiryMs: Long = 0L
+    private val capabilitiesTtlMs = 60_000L
+
+    fun getCapabilities(): Set<String> {
+        val now = System.currentTimeMillis()
+        val cached = capabilitiesCache
+        if (cached != null && now < capabilitiesCacheExpiryMs) {
+            return cached
+        }
+        val request = Request.Builder()
+            .url("$serverUrl/api/health")
+            .get()
+            .build()
+        val fresh: Set<String> = try {
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) return@use emptySet<String>()
+                val body = resp.body?.string() ?: return@use emptySet<String>()
+                val json = JSONObject(body)
+                val arr = json.optJSONArray("capabilities") ?: return@use emptySet<String>()
+                (0 until arr.length()).mapNotNull { idx ->
+                    arr.optString(idx).takeIf { it.isNotBlank() }
+                }.toSet()
+            }
+        } catch (e: Exception) {
+            // On a transient failure, fall through with an empty set
+            // (classic fallback is correct) and still cache briefly so
+            // extended outages don't turn into a probe loop.
+            emptySet()
+        }
+        capabilitiesCache = fresh
+        capabilitiesCacheExpiryMs = now + capabilitiesTtlMs
+        return fresh
+    }
 
     fun healthCheck(fast: Boolean = false): Boolean {
         // Use an authenticated endpoint so a 200 genuinely proves "we can
