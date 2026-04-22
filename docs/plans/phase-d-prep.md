@@ -310,11 +310,64 @@ that's the one commit this prep phase produces.
 
 ## Post-prep notes
 
-> _Filled in after the user has deployed the tool. Left empty
-> so we both remember to write down any surprises._
+Filled in after deploy on 2026-04-22.
 
-- Deployed URL: _TBD_
-- Token posted by user on: _TBD_
-- FCM confirmed working: _TBD_
-- Throwaway pair test ID: _TBD_
-- Any host-specific quirks: _TBD_
+### Deployed URL
+
+```
+https://hawwwran.com/SERVICES/desktop-connector/public/_devel_/index.php?t=<TOKEN>
+```
+
+**Note the explicit `index.php`** — the bare
+`/public/_devel_/?t=...` URL gets intercepted by the root
+`.htaccess`'s generic `!-f → public/index.php` rewrite before
+DirectoryIndex resolution, so it 404s through the Router. All
+the dashboard's internal links resolve to `.php` files directly
+(`logs.php`, `transfers.php`, …) so once you're in, every
+subsequent click works as expected. The README.md inside the
+`_devel_/` folder documents this gotcha.
+
+### Token generation
+
+Claude generated the token with `openssl rand -hex 24` and wrote
+it to `temp/_devel_/secret.php`. Because the whole `temp/` tree
+is gitignored, the token doesn't enter git history. User SFTP'd
+the folder straight to the server; no manual `secret.php`
+editing was needed.
+
+### FCM confirmed working
+
+`/_devel_/config.php` reports:
+```
+fcm_service_account_present: true
+google_services_present: true
+```
+Streaming is enabled (`streamingEnabled: true`). Observed
+live-classic transfers continue to wake the phone over FCM, so
+Phase D can proceed without FCM-side work.
+
+### Host-specific quirks
+
+- Direct access to `secret.php` / `lib.php` returns **404**,
+  not the expected 403 that our `.htaccess` `Require all denied`
+  would produce. Likely a host-level `ErrorDocument` remapping
+  403→404 (or mod_security). Functionally safe — the files
+  are inaccessible; the 404 actually leaks less than a 403 would.
+- Missing / wrong token returns 404 as intended. Cannot be
+  distinguished from "folder not deployed" — that's the point.
+
+### Throwaway pair test ID
+
+_To be filled in once the user registers a throwaway desktop
+and pairs it with the phone (useful-but-not-blocking item 4
+from the checklist above)._
+
+### Phase D kick-off readiness
+
+Claude has read access to the deployed server via `_devel_`
+over HTTPS. The tool covers every observability need the plan
+called for: transfer-row state, per-chunk storage bytes,
+per-recipient quota sum, live log tail, FCM probe, forced
+abort for test cleanup. Blocking items 1–3 from the "What the
+user needs to prepare" section are done. Phase D can begin
+once items 4 (throwaway pair) and 6 (ADB workflow) are sorted.
