@@ -134,19 +134,51 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
      *  pre-scrub state for a tick. */
     private suspend fun refreshTransfers() {
         val rows = withContext(Dispatchers.IO) {
-            val cutoffSec = System.currentTimeMillis() / 1000 - 30 * 60
+            val nowMs = System.currentTimeMillis()
+            val createdCutoffSec = nowMs / 1000 - 30 * 60
+            val waitingStreamCutoffMs = nowMs - 30 * 60 * 1000L
             val fetched = db.transferDao().getRecent()
-            val zombieIds = fetched
-                .filter { it.status == TransferStatus.WAITING && it.createdAt < cutoffSec }
+
+            // Classic WAITING scrub (pre-streaming): row created more than
+            // 30 min ago and still WAITING — no live UploadWorker. Mark
+            // FAILED("quota exceeded") so the UI stops spinning yellow.
+            val classicZombies = fetched
+                .filter { it.status == TransferStatus.WAITING && it.createdAt < createdCutoffSec }
                 .map { it.id }
-            zombieIds.forEach {
+
+            // D.5: streaming WAITING_STREAM scrub. Same 30-min window, but
+            // clocked from `waitingStartedAt` (ms) stamped by D.4a's
+            // markWaitingStream on the first 507. `quota_timeout` here
+            // matches the sender loop's terminal reason so scrubbed rows
+            // render with the typed failureReason.
+            val streamingZombies = fetched
+                .filter {
+                    it.status == TransferStatus.WAITING_STREAM
+                        && it.waitingStartedAt != null
+                        && it.waitingStartedAt < waitingStreamCutoffMs
+                }
+                .map { it.id }
+
+            classicZombies.forEach {
                 db.transferDao().updateStatus(it, TransferStatus.FAILED, "quota exceeded")
             }
-            if (zombieIds.isEmpty()) fetched
+            streamingZombies.forEach {
+                db.transferDao().markFailedWithReason(it, "quota_timeout")
+            }
+
+            val scrubbedIds = (classicZombies + streamingZombies).toSet()
+            if (scrubbedIds.isEmpty()) fetched
             else fetched.map { row ->
-                if (row.id in zombieIds) {
-                    row.copy(status = TransferStatus.FAILED, errorMessage = "quota exceeded")
-                } else row
+                if (row.id !in scrubbedIds) row
+                else if (row.status == TransferStatus.WAITING_STREAM) row.copy(
+                    status = TransferStatus.FAILED,
+                    failureReason = "quota_timeout",
+                    errorMessage = "quota_timeout",
+                )
+                else row.copy(
+                    status = TransferStatus.FAILED,
+                    errorMessage = "quota exceeded",
+                )
             }
         }
         _transfers.value = rows
@@ -605,27 +637,47 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** Cancel a still-in-flight outgoing transfer + remove from history.
-     *  Fires server DELETE so the recipient stops pulling; local row
-     *  goes away regardless of whether the server call succeeds (best
-     *  effort — server will GC the orphan on its own expiry timer). */
+    /** Cancel a still-in-flight transfer + remove from history.
+     *
+     *  Fires server DELETE with a typed abort reason so the other side
+     *  learns quickly (sender aborts → recipient gets 410 on next chunk
+     *  GET; recipient aborts → sender gets 410 on next chunk upload).
+     *  Local row goes away regardless of whether the server call
+     *  succeeds — best-effort; server GCs orphans via its own expiry
+     *  timer.
+     *
+     *  D.5: reason is direction-aware so streaming transfers (where
+     *  either party can abort) use the protocol-correct reason. Classic
+     *  outgoing rows land on `sender_abort` exactly as before (the
+     *  legacy `cancelTransfer` wrapper in ApiClient delegates to
+     *  `abortTransfer(tid, "sender_abort")`). Classic incoming rows
+     *  rarely reach this path (classic receivers finish synchronously
+     *  in the poller) but the branch is correct if they do.
+     */
     fun cancelAndDelete(transfer: QueuedTransfer) {
         viewModelScope.launch(Dispatchers.IO) {
             val tid = transfer.transferId
             if (tid != null && prefs.serverUrl != null
                 && prefs.deviceId != null && prefs.authToken != null) {
+                val reason = when (transfer.direction) {
+                    TransferDirection.OUTGOING -> "sender_abort"
+                    TransferDirection.INCOMING -> "recipient_abort"
+                }
                 try {
                     ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
-                        .cancelTransfer(tid)
+                        .abortTransfer(tid, reason)
                 } catch (_: Exception) {
                     // best effort
                 }
             }
-            // WorkManager may still re-trigger this transfer's worker
-            // for waiting/uploading rows; cancel the chain first so the
-            // row doesn't get recreated on retry.
-            androidx.work.WorkManager.getInstance(getApplication())
-                .cancelAllWorkByTag("upload-${transfer.id}")
+            // WorkManager may still re-trigger an outgoing worker for
+            // waiting/uploading rows; cancel the chain first so the row
+            // doesn't get recreated on retry. Incoming rows have no
+            // upload-* work tag, so skip.
+            if (transfer.direction == TransferDirection.OUTGOING) {
+                androidx.work.WorkManager.getInstance(getApplication())
+                    .cancelAllWorkByTag("upload-${transfer.id}")
+            }
             db.transferDao().delete(transfer.id)
             com.desktopconnector.network.StoragePressure.clear()
             refreshTransfers()
@@ -633,19 +685,28 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
     }
 
     /** Is this row still "in flight" on the server? Drives the
-     *  confirmation dialog: WAITING / UPLOADING / COMPLETE-but-not-
-     *  delivered all count as needing confirmation before delete.
+     *  confirmation dialog before delete.
      *
-     *  D.4b: `delivered=1` is terminal regardless of status — streaming
-     *  rows stay in SENDING after the tracker flips the delivered flag,
-     *  so the "delivered" check is status-agnostic now. ABORTED is
-     *  terminal too (user already saw the row fail).
+     *  Terminal statuses (never in-flight): FAILED, ABORTED.
+     *  Delivered rows (`delivered=1`) are terminal regardless of status
+     *  — streaming rows stay in SENDING after the tracker flips the
+     *  flag; classic rows stay in COMPLETE.
+     *
+     *  D.5: incoming streaming rows can legitimately sit in UPLOADING /
+     *  WAITING_STREAM for a long time while downloading chunks. Mark
+     *  them in-flight so the user gets a confirmation dialog before
+     *  aborting the download. Classic incoming receives finish
+     *  synchronously in the poller so they rarely reach the UI in a
+     *  non-terminal state; no behaviour change for them.
      */
     fun isInFlight(transfer: QueuedTransfer): Boolean {
-        if (transfer.direction == TransferDirection.INCOMING) return false
         if (transfer.status == TransferStatus.FAILED) return false
         if (transfer.status == TransferStatus.ABORTED) return false
         if (transfer.delivered) return false
+        if (transfer.direction == TransferDirection.INCOMING) {
+            return transfer.status == TransferStatus.UPLOADING
+                || transfer.status == TransferStatus.WAITING_STREAM
+        }
         return true
     }
 

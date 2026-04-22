@@ -77,12 +77,22 @@ fun HomeScreen(
     var confirmCandidate by remember { mutableStateOf<QueuedTransfer?>(null) }
 
     confirmCandidate?.let { target ->
+        // D.5: dialog branches on direction. Incoming streaming rows
+        // reach here when the user swipe-deletes mid-download
+        // (isInFlight returns true for streaming incoming rows).
+        // Outgoing rows hit the existing "Cancel delivery" messaging.
+        val isIncoming = target.direction == TransferDirection.INCOMING
+        val name = target.displayLabel.ifEmpty { target.displayName }
         AlertDialog(
             onDismissRequest = { confirmCandidate = null },
-            title = { Text("Cancel delivery?") },
+            title = { Text(if (isIncoming) "Cancel download?" else "Cancel delivery?") },
             text = {
-                val name = target.displayLabel.ifEmpty { target.displayName }
-                Text("The recipient will no longer receive \u201c$name\u201d.")
+                Text(
+                    if (isIncoming)
+                        "\u201c$name\u201d won't be saved."
+                    else
+                        "The recipient will no longer receive \u201c$name\u201d."
+                )
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -90,7 +100,10 @@ fun HomeScreen(
                     confirmCandidate = null
                     if (t != null) onCancelInFlight(t)
                 }) {
-                    Text("Cancel delivery", color = MaterialTheme.colorScheme.error)
+                    Text(
+                        if (isIncoming) "Cancel download" else "Cancel delivery",
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             },
             dismissButton = {
@@ -545,29 +558,74 @@ private fun TransferItem(transfer: QueuedTransfer, onClick: () -> Unit) {
                 }
             }
         }
-        // Progress bars: upload = bright blue, download = sky blue, delivering = light accent blue.
-        if (transfer.status == TransferStatus.UPLOADING && transfer.totalChunks > 0) {
-            val barColor = if (transfer.direction == TransferDirection.INCOMING) brand.transferIncoming else brand.transferOutgoing
-            LinearProgressIndicator(
-                progress = { transfer.chunksUploaded.toFloat() / transfer.totalChunks },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .padding(bottom = 6.dp),
-                color = barColor,
-            )
-        } else if (transfer.status == TransferStatus.COMPLETE
-            && transfer.direction == TransferDirection.OUTGOING
-            && !transfer.delivered
-            && transfer.deliveryTotal > 0) {
-            LinearProgressIndicator(
-                progress = { transfer.deliveryChunks.toFloat() / transfer.deliveryTotal },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .padding(bottom = 6.dp),
-                color = brand.transferDelivering,
-            )
+        // Progress bars. Colour per phase:
+        //   UPLOADING outgoing / WAITING_STREAM  → transferOutgoing (yellow)
+        //   UPLOADING incoming                   → transferIncoming (sky blue)
+        //   SENDING / DELIVERING / COMPLETE-delivering → transferDelivering (blue)
+        //
+        // Streaming SENDING prefers the delivery fraction (Y/N) when
+        // the tracker has painted `deliveryTotal`. Falls back to the
+        // upload fraction while the first chunk is still making its
+        // way to the recipient (tracker hasn't ticked yet).
+        val barModifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .padding(bottom = 6.dp)
+        when {
+            transfer.status == TransferStatus.UPLOADING && transfer.totalChunks > 0 -> {
+                val barColor = if (transfer.direction == TransferDirection.INCOMING) brand.transferIncoming else brand.transferOutgoing
+                LinearProgressIndicator(
+                    progress = { transfer.chunksUploaded.toFloat() / transfer.totalChunks },
+                    modifier = barModifier,
+                    color = barColor,
+                )
+            }
+            transfer.status == TransferStatus.WAITING_STREAM && transfer.totalChunks > 0 -> {
+                // Yellow bar pinned at the current upload cursor. The
+                // "stalled" feeling comes from the fraction not advancing
+                // — simpler than a pulse animation and still obvious.
+                LinearProgressIndicator(
+                    progress = { transfer.chunksUploaded.toFloat() / transfer.totalChunks },
+                    modifier = barModifier,
+                    color = brand.transferOutgoing,
+                )
+            }
+            transfer.status == TransferStatus.SENDING && !transfer.delivered -> {
+                val fraction = when {
+                    transfer.deliveryTotal > 0 ->
+                        transfer.deliveryChunks.toFloat() / transfer.deliveryTotal
+                    transfer.totalChunks > 0 ->
+                        transfer.chunksUploaded.toFloat() / transfer.totalChunks
+                    else -> 0f
+                }
+                LinearProgressIndicator(
+                    progress = { fraction },
+                    modifier = barModifier,
+                    color = brand.transferDelivering,
+                )
+            }
+            transfer.status == TransferStatus.DELIVERING && transfer.deliveryTotal > 0 -> {
+                // Reserved — no Android writer produces DELIVERING in
+                // the current sender state machine (streaming rows stay
+                // SENDING until delivered=1). Render for parity with
+                // desktop so an out-of-band writer doesn't produce a
+                // blank row.
+                LinearProgressIndicator(
+                    progress = { transfer.deliveryChunks.toFloat() / transfer.deliveryTotal },
+                    modifier = barModifier,
+                    color = brand.transferDelivering,
+                )
+            }
+            transfer.status == TransferStatus.COMPLETE
+                && transfer.direction == TransferDirection.OUTGOING
+                && !transfer.delivered
+                && transfer.deliveryTotal > 0 -> {
+                LinearProgressIndicator(
+                    progress = { transfer.deliveryChunks.toFloat() / transfer.deliveryTotal },
+                    modifier = barModifier,
+                    color = brand.transferDelivering,
+                )
+            }
         }
     }
 }
