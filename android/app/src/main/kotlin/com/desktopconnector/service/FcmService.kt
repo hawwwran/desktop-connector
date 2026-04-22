@@ -28,6 +28,18 @@ class FcmService : FirebaseMessagingService() {
                 AppLog.log("FCM", "ping.request.received")
                 sendPong()
             }
+            // Streaming wakes (D.3). Phase A server fires `stream_ready`
+            // when the first chunk is stored (so the recipient starts
+            // pulling before the sender finishes) and `abort` when either
+            // party DELETEs the transfer mid-stream. Both share the same
+            // wake pattern as a classic `transfer_ready`: flip the poll
+            // signal AND cancel the long poll so we pick up new chunk
+            // availability (or learn about the abort via the next 410)
+            // immediately rather than waiting out the 25s block.
+            "stream_ready", "abort" -> {
+                PollService.fcmWakeSignal = true
+                PollService.activeApi?.cancelLongPoll()
+            }
             else -> PollService.fcmWakeSignal = true
         }
     }

@@ -27,6 +27,7 @@ import com.desktopconnector.data.QueuedTransfer
 import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
 import com.desktopconnector.network.ApiClient
+import com.desktopconnector.network.ApiClient.ChunkDownloadResult
 import com.desktopconnector.network.AuthObservation
 import com.desktopconnector.network.FcmManager
 import com.desktopconnector.messaging.DeviceMessage
@@ -522,6 +523,11 @@ class PollService : Service() {
         val senderId = transfer.getString("sender_id")
         val encryptedMeta = transfer.getString("encrypted_meta")
         val chunkCount = transfer.getInt("chunk_count")
+        // Phase A server surfaces the negotiated mode on the pending-list
+        // row. Absent / unknown => classic (this is how the field is
+        // missing for pre-streaming clients or for servers that don't yet
+        // emit it). `.fn.*` transfers always run classic regardless.
+        val mode = transfer.optString("mode", "classic")
 
         // Defense-in-depth: transferId is used in a filename, so reject anything
         // that isn't an alphanumeric/UUID-shape id before touching the disk.
@@ -571,7 +577,8 @@ class PollService : Service() {
         try {
             handleIncomingTransferInner(
                 transferId, senderId, encryptedMeta, chunkCount, symmetricKey,
-                metaJson, fileName, mimeType, baseNonce, isFnTransfer, api, prefs, wakeLock
+                metaJson, fileName, mimeType, baseNonce, isFnTransfer, mode,
+                api, prefs, wakeLock
             )
         } finally {
             if (wakeLock.isHeld) wakeLock.release()
@@ -582,12 +589,16 @@ class PollService : Service() {
     private suspend fun handleIncomingTransferInner(
         transferId: String, senderId: String, encryptedMeta: String, chunkCount: Int,
         symmetricKey: ByteArray, metaJson: JSONObject, fileName: String, mimeType: String,
-        baseNonce: ByteArray, isFnTransfer: Boolean, api: ApiClient, prefs: AppPreferences,
-        wakeLock: PowerManager.WakeLock,
+        baseNonce: ByteArray, isFnTransfer: Boolean, mode: String,
+        api: ApiClient, prefs: AppPreferences, wakeLock: PowerManager.WakeLock,
     ) {
         val db = AppDatabase.getInstance(this)
         if (isFnTransfer) {
+            // `.fn.*` command transfers always classic — too small to benefit
+            // from streaming, extra round-trips hurt. Plan §9 non-goal.
             receiveFnTransfer(transferId, senderId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db)
+        } else if (mode == "streaming") {
+            receiveStreamingTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
         } else {
             receiveFileTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
         }
@@ -768,6 +779,242 @@ class PollService : Service() {
         if (stillExists) {
             showTransferNotification(fileName)
         }
+    }
+
+    /**
+     * Streaming recipient loop (D.3).
+     *
+     * Mirrors `receiveFileTransfer` structurally — same `.incoming_<tid>.part`
+     * file, same atomic rename, same wake + wifi lock ownership, same
+     * cancellation-via-row-deletion semantics — but uses the typed
+     * `downloadChunkTyped` path to distinguish 425 / 410 / network errors,
+     * per-chunk ACKs each chunk after durable write, and honours the
+     * streaming retry budgets per plan §10:
+     *   - 5 min of continuous `TooEarly` (no progress) → recipient aborts
+     *     with `recipient_abort`; row ends as FAILED(`stall_timeout`).
+     *   - 3 network errors in a row (total ~12 s budget with the 2 s/retry
+     *     ramp) → recipient aborts; row ends as FAILED(`network`).
+     *   - 410 on a chunk GET → sender aborted upstream; row ends as ABORTED
+     *     with the server-supplied reason.
+     *   - Row deleted from the Room DB mid-loop (user swipe-delete) → fire
+     *     `abortTransfer("recipient_abort")` so the sender learns; row
+     *     already gone locally.
+     *
+     * After the final chunk's ACK, NO transfer-level `ackTransfer` is sent
+     * — per-chunk ACKs already finalised delivery server-side (the server's
+     * last-chunk ACK handler flips `downloaded=1`).
+     *
+     * Durability contract: every chunk is fsync'd (`FileDescriptor.sync`)
+     * before we ack. That way if the process dies between ack and the next
+     * chunk, the bytes we told the server we had are actually on disk.
+     * Server has already deleted its copy once it saw the ack, so this
+     * matters.
+     */
+    private suspend fun receiveStreamingTransfer(
+        transferId: String, chunkCount: Int, symmetricKey: ByteArray,
+        fileName: String, mimeType: String, api: ApiClient, prefs: AppPreferences,
+        db: AppDatabase, wakeLock: PowerManager.WakeLock,
+    ) {
+        // Row handling — same "resume existing or insert new" pattern as
+        // classic. Tagged mode=streaming so the tracker / UI know what
+        // they're looking at. D.4b will own the sender-side
+        // negotiatedMode stamp; here on the recipient side we just
+        // record what we observed on the pending-list row.
+        val existing = db.transferDao().getByTransferId(transferId)
+        val dbRowId: Long = if (existing != null) {
+            db.transferDao().updateStatus(existing.id, TransferStatus.UPLOADING)
+            db.transferDao().updateProgress(existing.id, 0, chunkCount)
+            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)} mode=streaming")
+            existing.id
+        } else {
+            db.transferDao().insert(QueuedTransfer(
+                contentUri = "",
+                displayName = fileName,
+                displayLabel = fileName,
+                mimeType = mimeType,
+                sizeBytes = 0,
+                recipientDeviceId = prefs.deviceId ?: "",
+                direction = TransferDirection.INCOMING,
+                status = TransferStatus.UPLOADING,
+                totalChunks = chunkCount,
+                chunksUploaded = 0,
+                transferId = transferId,
+                mode = "streaming",
+                negotiatedMode = "streaming",
+            ))
+        }
+
+        val dir = java.io.File(android.os.Environment.getExternalStorageDirectory(), "DesktopConnector")
+        if (!dir.exists() && !dir.mkdirs()) {
+            Log.e(TAG, "Could not create DesktopConnector directory")
+            db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Cannot create download folder")
+            return
+        }
+        val partsDir = java.io.File(dir, ".parts")
+        if (!partsDir.exists() && !partsDir.mkdirs()) {
+            Log.e(TAG, "Could not create DesktopConnector/.parts directory")
+            db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Cannot create parts folder")
+            return
+        }
+        val finalFile = pickUniqueTarget(dir, fileName)
+        val tempFile = java.io.File(partsDir, ".incoming_${transferId}.part")
+        tempFile.delete()  // clear stale partial from a prior aborted run
+
+        // Retry budgets / backoff state (per plan §10).
+        val noProgressBudgetMs = 5 * 60 * 1000L
+        val maxNetworkRetries = 3
+        val maxTooEarlyBackoffMs = 10_000L
+        var lastProgressAt = System.currentTimeMillis()
+        var networkRetries = 0
+        var tooEarlyBackoffMs = 1000L
+        // Terminal flag — set before `return` so the finally block wipes
+        // the temp file only on failure / abort paths. "complete" means
+        // the rename below succeeds; anything else wipes the .part.
+        var terminalState = "running"
+
+        try {
+            val fos = java.io.FileOutputStream(tempFile)
+            java.io.BufferedOutputStream(fos).use { out ->
+                var i = 0
+                chunkLoop@ while (i < chunkCount) {
+                    // Bail if the user deleted the row (swipe-to-dismiss).
+                    // Tell the server explicitly so the sender stops pushing
+                    // new chunks — otherwise it'd keep uploading to a dead
+                    // recipient until the server expires the transfer.
+                    if (db.transferDao().exists(dbRowId) == 0) {
+                        AppLog.log("Recv", "transfer.download.cancelled transfer_id=${transferId.take(12)} chunk_index=${i + 1}/$chunkCount mode=streaming")
+                        try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
+                        terminalState = "aborted"
+                        return
+                    }
+
+                    // Overall "no progress" budget — if we've spent 5 min
+                    // getting only TooEarly / transient errors, give up and
+                    // let the sender abort our upload on its next attempt.
+                    val now = System.currentTimeMillis()
+                    if (now - lastProgressAt > noProgressBudgetMs) {
+                        AppLog.log("Recv", "transfer.stream.no_progress_budget_exceeded transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
+                        try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
+                        db.transferDao().markAborted(dbRowId, "recipient_abort")
+                        db.transferDao().markFailedWithReason(dbRowId, "stall_timeout")
+                        terminalState = "failed"
+                        return
+                    }
+
+                    when (val result = api.downloadChunkTyped(transferId, i)) {
+                        is ChunkDownloadResult.Ok -> {
+                            val plaintext = try {
+                                CryptoUtils.decryptBlob(result.bytes, symmetricKey)
+                            } catch (e: Exception) {
+                                // GCM auth failure — usually a concurrent
+                                // upload race on the server. Reuse classic's
+                                // backoff: 2 s then retry the same chunk.
+                                AppLog.log("Recv", "transfer.chunk.decrypt_failed chunk_index=$i error_kind=${e.javaClass.simpleName}", "warning")
+                                delay(2000L)
+                                continue@chunkLoop
+                            }
+                            out.write(plaintext)
+                            out.flush()
+                            // fsync — see durability contract in KDoc.
+                            try { fos.fd.sync() } catch (_: Exception) {}
+                            // Per-chunk ACK. If this fails we still have the
+                            // bytes durably on disk, so we don't retry the
+                            // download — we just log and move on. The server
+                            // will expire the un-acked blob eventually; the
+                            // next chunk's GET will either succeed (server
+                            // recovered) or surface the issue properly.
+                            val acked = try { api.ackChunk(transferId, i) } catch (_: Exception) { false }
+                            if (!acked) {
+                                AppLog.log("Recv", "transfer.chunk.ack_failed transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
+                            }
+                            wakeLock.acquire(2 * 60 * 1000L)  // refresh per chunk
+                            db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
+                            lastProgressAt = System.currentTimeMillis()
+                            networkRetries = 0
+                            tooEarlyBackoffMs = 1000L
+                            i++
+                        }
+                        is ChunkDownloadResult.TooEarly -> {
+                            // Prefer server's hint; clamp our own ramp in
+                            // case the server returned an unreasonably
+                            // large value.
+                            val sleepMs = result.retryAfterMs.coerceAtMost(maxTooEarlyBackoffMs)
+                                .coerceAtLeast(tooEarlyBackoffMs.coerceAtMost(maxTooEarlyBackoffMs))
+                            AppLog.log("Recv", "transfer.chunk.too_early transfer_id=${transferId.take(12)} chunk_index=$i retry_ms=$sleepMs", "debug")
+                            delay(sleepMs)
+                            tooEarlyBackoffMs = (tooEarlyBackoffMs * 2).coerceAtMost(maxTooEarlyBackoffMs)
+                            // Don't reset lastProgressAt — the 5 min budget
+                            // above is precisely the "continuous TooEarly"
+                            // counter.
+                        }
+                        is ChunkDownloadResult.Aborted -> {
+                            val reason = result.reason ?: "sender_abort"
+                            AppLog.log("Recv", "transfer.download.aborted_by_sender transfer_id=${transferId.take(12)} reason=$reason chunk_index=$i")
+                            db.transferDao().markAborted(dbRowId, reason)
+                            terminalState = "aborted"
+                            return
+                        }
+                        is ChunkDownloadResult.NetworkError, is ChunkDownloadResult.ServerError -> {
+                            networkRetries++
+                            if (networkRetries >= maxNetworkRetries) {
+                                AppLog.log("Recv", "transfer.download.network_budget_exceeded transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
+                                try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
+                                db.transferDao().markAborted(dbRowId, "recipient_abort")
+                                db.transferDao().markFailedWithReason(dbRowId, "network")
+                                terminalState = "failed"
+                                return
+                            }
+                            delay(2000L * networkRetries)
+                        }
+                        is ChunkDownloadResult.AuthError -> {
+                            // auth-observation flow already emitted;
+                            // re-pair banner will show. Stop this transfer;
+                            // the poll loop will pick it up again once
+                            // auth recovers (or never, if the user leaves).
+                            AppLog.log("Recv", "transfer.download.auth_error transfer_id=${transferId.take(12)} chunk_index=$i", "warning")
+                            terminalState = "failed"
+                            return
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Streaming write failed: ${e.message}", e)
+            db.transferDao().markFailedWithReason(dbRowId, "write_failed")
+            terminalState = "failed"
+            return
+        } finally {
+            if (terminalState != "running" && terminalState != "complete") {
+                tempFile.delete()
+            }
+        }
+
+        // Atomic finalize (same pattern as classic). No transfer-level ACK
+        // — the per-chunk ACK on the last chunk already set downloaded=1
+        // server-side.
+        if (!tempFile.renameTo(finalFile)) {
+            Log.e(TAG, "Rename temp → final failed for $transferId")
+            tempFile.delete()
+            db.transferDao().updateStatus(dbRowId, TransferStatus.FAILED, "Cannot finalize download")
+            return
+        }
+        val finalSize = finalFile.length()
+        AppLog.log("Recv", "transfer.download.completed transfer_id=${transferId.take(12)} bytes=$finalSize name=${finalFile.name} mode=streaming")
+
+        // Notify MediaStore so the file appears in gallery/pickers.
+        android.media.MediaScannerConnection.scanFile(
+            this, arrayOf(finalFile.absolutePath), null, null
+        )
+
+        val stillExists = db.transferDao().exists(dbRowId) > 0
+        db.transferDao().completeDownload(
+            dbRowId, TransferStatus.COMPLETE, Uri.fromFile(finalFile).toString(), fileName, finalSize
+        )
+        db.transferDao().trimHistory()
+        if (stillExists) {
+            showTransferNotification(fileName)
+        }
+        terminalState = "complete"
     }
 
     /** Choose a non-colliding filename in [dir] by appending _1, _2, ... before the extension. */
