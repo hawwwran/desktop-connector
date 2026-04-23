@@ -146,6 +146,21 @@ class TransferRepository
         );
     }
 
+    /**
+     * Aborted rows are terminal — their chunk blobs were already wiped by
+     * the abort handler — so we can GC the bare row much sooner than the
+     * 24h incomplete window. Keyed on `aborted_at` (not `created_at`) so
+     * the sender's sent-status still has a short window to observe the
+     * abort on its next poll.
+     */
+    public function findExpiredAborted(int $cutoff): array
+    {
+        return $this->db->queryAll(
+            'SELECT id FROM transfers WHERE aborted = 1 AND aborted_at < :cutoff',
+            [':cutoff' => $cutoff]
+        );
+    }
+
     public function delete(string $transferId): void
     {
         $this->db->execute(
@@ -301,11 +316,16 @@ class TransferRepository
         );
     }
 
-    /** Dashboard stats helper: count transfers by complete/downloaded flags. */
+    /**
+     * Dashboard stats helper: count transfers by complete/downloaded flags.
+     * Aborted rows are excluded — "Pending" and "Uploading" are live-state
+     * cards, and a terminal abort doesn't belong in either bucket.
+     */
     public function countPendingByCompleteDownloaded(int $complete, int $downloaded): int
     {
         $row = $this->db->querySingle(
-            'SELECT COUNT(*) as count FROM transfers WHERE complete = :c AND downloaded = :d',
+            'SELECT COUNT(*) as count FROM transfers
+             WHERE complete = :c AND downloaded = :d AND aborted = 0',
             [':c' => $complete, ':d' => $downloaded]
         );
         return (int)($row['count'] ?? 0);

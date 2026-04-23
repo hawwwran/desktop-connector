@@ -148,8 +148,21 @@ class DashboardController
             $chunks = (int)$t['chunks_received'] . '/' . (int)$t['chunk_count'];
             $bytes = self::formatBytes($t['total_bytes']);
             $age = self::timeAgo($now - $t['created_at']);
-            $status = $t['complete'] ? 'ready' : 'uploading';
-            $statusColor = $t['complete'] ? '#3986FC' : '#FDD00C';
+            // Three-state render: terminal-aborted rows are the third
+            // branch so a cancelled transfer doesn't masquerade as
+            // "uploading" for the ~1h it takes the cleanup sweep to
+            // reap it.
+            if ((int)($t['aborted'] ?? 0) === 1) {
+                $reason = htmlspecialchars((string)($t['abort_reason'] ?? ''));
+                $status = $reason !== '' ? 'aborted (' . $reason . ')' : 'aborted';
+                $statusColor = '#EA7601';
+            } elseif ($t['complete']) {
+                $status = 'ready';
+                $statusColor = '#3986FC';
+            } else {
+                $status = 'uploading';
+                $statusColor = '#FDD00C';
+            }
             $transferRows .= "<tr>
                 <td>{$tid}</td>
                 <td>{$from}</td>

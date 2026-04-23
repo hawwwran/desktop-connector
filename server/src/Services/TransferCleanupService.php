@@ -18,6 +18,7 @@ class TransferCleanupService
 {
     private const TRANSFER_EXPIRY = 7 * 24 * 3600;   // 7 days
     private const INCOMPLETE_EXPIRY = 24 * 3600;     // 24 hours
+    private const ABORTED_EXPIRY = 3600;             // 1 hour
     private const PAIRING_REQUEST_EXPIRY = 3600;     // 1 hour
 
     public static function run(Database $db): void
@@ -30,6 +31,14 @@ class TransferCleanupService
             self::deleteTransferFiles($db, $t['id']);
         }
 
+        // Aborted rows are terminal with no blobs left — reap them after
+        // a short grace window so the dashboard queue doesn't carry
+        // orphaned "uploading" ghosts for up to a day.
+        $aborted = $transfers->findExpiredAborted($now - self::ABORTED_EXPIRY);
+        foreach ($aborted as $t) {
+            self::deleteTransferFiles($db, $t['id']);
+        }
+
         $incomplete = $transfers->findExpiredIncomplete($now - self::INCOMPLETE_EXPIRY);
         foreach ($incomplete as $t) {
             self::deleteTransferFiles($db, $t['id']);
@@ -37,11 +46,11 @@ class TransferCleanupService
 
         (new PairingRepository($db))->deleteExpiredRequests($now - self::PAIRING_REQUEST_EXPIRY);
 
-        $total = count($expired) + count($incomplete);
+        $total = count($expired) + count($aborted) + count($incomplete);
         if ($total > 0) {
             AppLog::log('Transfer', sprintf(
-                'transfer.cleanup.expired count=%d expired=%d incomplete=%d',
-                $total, count($expired), count($incomplete)
+                'transfer.cleanup.expired count=%d expired=%d aborted=%d incomplete=%d',
+                $total, count($expired), count($aborted), count($incomplete)
             ));
         }
     }
