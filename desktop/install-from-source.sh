@@ -57,6 +57,44 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 step()  { echo -e "${BOLD}[·]${NC} $1"; }
 fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
+# Stop any running Desktop Connector — both shapes (AppImage child process
+# off a /tmp/.mount_*/ FUSE mount, and source-tree python3 -m src.main from
+# ~/.local/bin/desktop-connector). Matches AppImage instances by reading
+# /proc/$pid/environ for APPIMAGE=$target, and source-tree instances by
+# /proc/$pid/cwd inside the install dir. Avoids killing our own shell or
+# unrelated dev-tree runs of `python3 -m src.main`.
+stop_existing_instance() {
+    local target="$1"
+    local install_dir
+    install_dir=$(dirname "$target")
+    local pid match cwd stopped=0
+    for pid in $(pgrep -f 'python.*-m src\.main' 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        match=0
+        if [ -r "/proc/$pid/environ" ] && \
+           tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+             | grep -qx "APPIMAGE=$target"; then
+            match=1
+        else
+            cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+            case "$cwd" in
+                "$install_dir"|"$install_dir"/*) match=1 ;;
+            esac
+        fi
+        if [ "$match" -eq 1 ]; then
+            kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+        fi
+    done
+    for pid in $(pgrep -f "$target" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+    done
+    if [ "$stopped" -gt 0 ]; then
+        info "Stopped $stopped existing instance(s)"
+        sleep 2
+    fi
+}
+
 # --- Checks ---
 
 if [ "$(id -u)" = "0" ]; then
@@ -340,10 +378,12 @@ info "Cleared Python cache"
 
 # --- Start the app ---
 
-# Kill any existing instance
-pkill -f "desktop-connector" 2>/dev/null || true
-pkill -f "python3 -m src.main" 2>/dev/null || true
-sleep 1
+# Stop any prior instance — both shapes. The "target" we pass is the
+# canonical AppImage path (so an AppImage instance with APPIMAGE=that
+# matches), but the helper's CWD-fallback also catches source-tree
+# instances launched via ~/.local/bin/desktop-connector (whose CWD is
+# under $INSTALL_DIR).
+stop_existing_instance "$INSTALL_DIR/desktop-connector.AppImage"
 
 step "Starting Desktop Connector..."
 nohup "$BIN_DIR/$APP_NAME" > /dev/null 2>&1 &

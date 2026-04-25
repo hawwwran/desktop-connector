@@ -522,10 +522,12 @@ def _format_bytes(b):
 
 
 def show_settings(config_dir: Path):
+    import os as _os
     from .config import Config
     from .crypto import KeyManager
     from .connection import ConnectionManager, ConnectionState
     from .api_client import ApiClient
+    from .bootstrap.app_version import get_app_version
 
     config = Config(config_dir)
     crypto = KeyManager(config_dir)
@@ -808,6 +810,33 @@ def show_settings(config_dir: Path):
                 title="Pending outgoing",
                 subtitle=str(stats.get("pending_outgoing", 0)),
             ))
+
+        # --- Footer: version + install shape ---------------------------------
+        # $APPIMAGE is set by AppRun when running inside the AppImage; absent
+        # for install-from-source.sh layouts and for dev-tree runs of
+        # `python3 -m src.main`. Both non-AppImage paths get the same shape
+        # label since they share the lifecycle (manual install / no in-app
+        # updater).
+        version_str = get_app_version()
+        appimage_env = _os.environ.get("APPIMAGE")
+        if appimage_env:
+            shape_str = "AppImage release"
+        else:
+            shape_str = "Installed from source"
+
+        version_label = Gtk.Label(label=f"Desktop Connector {version_str}",
+                                   xalign=0.5)
+        version_label.add_css_class("dim-label")
+        version_label.add_css_class("caption-heading")
+        version_label.set_margin_top(8)
+        content.append(version_label)
+
+        shape_label = Gtk.Label(label=shape_str, xalign=0.5)
+        shape_label.add_css_class("dim-label")
+        shape_label.add_css_class("caption")
+        if appimage_env:
+            shape_label.set_tooltip_text(appimage_env)
+        content.append(shape_label)
 
         apply_pointer_cursors(win)
         win.present()
