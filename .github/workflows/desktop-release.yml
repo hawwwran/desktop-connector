@@ -99,16 +99,16 @@ jobs:
         # the matching .zsync. Without this, "Install update" fails with
         # exit 2 ("Could not find update information").
         #
-        # We use `latest` even though the repo also tags `android/v*` —
-        # AppImageUpdate's GitHub provider only accepts literal `latest`
-        # (or an exact tag), no wildcards. Risk: a chronologically-newer
-        # android release shadows the latest desktop release and the asset
-        # glob 404s. Followup: maintain a rolling `desktop-latest` GitHub
-        # Release that mirrors each `desktop/v*` build, and switch the
-        # tag here to `desktop-latest` for stream isolation.
+        # We point at a rolling `desktop-latest` GitHub Release rather
+        # than the API's `latest` — AppImageUpdate's provider only
+        # accepts literal tag values (no wildcards), and `latest` would
+        # mix in `android/v*` releases (any newer android release would
+        # shadow the desktop AppImage). The "Update rolling desktop-
+        # latest release" step at the end of this workflow keeps that
+        # rolling release pointed at this build's .zsync.
         run: |
           set -e
-          echo "UPDATE_INFORMATION=gh-releases-zsync|hawwwran|desktop-connector|latest|desktop-connector-*-x86_64.AppImage.zsync" >> "$GITHUB_ENV"
+          echo "UPDATE_INFORMATION=gh-releases-zsync|hawwwran|desktop-connector|desktop-latest|desktop-connector-*-x86_64.AppImage.zsync" >> "$GITHUB_ENV"
 
       - name: Build AppImage
         run: |
@@ -266,3 +266,30 @@ jobs:
             artefacts/SHA256SUMS.sig
           fail_on_unmatched_files: true
           generate_release_notes: true
+
+      - name: Update rolling desktop-latest release
+        # Stream isolation for in-app updates. The embedded
+        # UPDATE_INFORMATION points at the `desktop-latest` tag rather
+        # than `latest` so a newer android/v* release can't shadow the
+        # desktop update channel. We host only the .zsync (+ SHA256SUMS
+        # for integrity reference) on this rolling release; the .zsync's
+        # `URL:` header points back at the versioned release's AppImage,
+        # so zsync2 still pulls the actual ~150 MB bytes from there.
+        # Storage cost: ~150 KB extra per release.
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/artefacts"
+          # Idempotent re-run: nuke the previous rolling release + its
+          # tag so `gh release create` can plant both fresh at HEAD.
+          # `|| true` covers the first-ever run (nothing to delete).
+          gh release delete desktop-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create desktop-latest \
+            --target "$GITHUB_SHA" \
+            --title "Latest desktop release (${{ steps.artefact.outputs.version }})" \
+            --notes "Rolling pointer to the most recent desktop release for the in-app updater. See [desktop/v${{ steps.artefact.outputs.version }}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/desktop%2Fv${{ steps.artefact.outputs.version }}) for the changelog and full asset set (AppImage + .sig + SHA256SUMS). The .zsync attached here points back at that versioned AppImage." \
+            "${{ steps.artefact.outputs.appimage_name }}.zsync" \
+            SHA256SUMS \
+            SHA256SUMS.sig
