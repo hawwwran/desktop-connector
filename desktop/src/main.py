@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 from .bootstrap.app_version import get_app_version
+from .bootstrap.appimage_install_hook import ensure_appimage_integration
 from .bootstrap.args import parse_startup_args, resolve_startup_mode
 from .bootstrap.startup_context import build_startup_context, rebuild_authenticated_api
 from .bootstrap.dependency_check import check_dependencies, show_missing_deps_dialog
@@ -59,6 +60,11 @@ def main() -> int:
     setup_logging(args.verbose, Path(args.config_dir) if args.config_dir else None)
 
     context = build_startup_context(args)
+
+    # Drop / refresh AppImage desktop integration. No-op outside an
+    # AppImage; runs before register_device so the menu entry exists
+    # even if the relay is unreachable on first launch.
+    ensure_appimage_integration(context.config)
 
     if not register_device(context.config, context.api):
         return 1
