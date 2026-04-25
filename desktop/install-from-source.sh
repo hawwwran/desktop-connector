@@ -67,7 +67,11 @@ stop_existing_instance() {
     local target="$1"
     local install_dir
     install_dir=$(dirname "$target")
-    local pid match cwd stopped=0
+    local pid match cwd
+    # Dedupe PIDs across the two passes. An AppImage instance is two
+    # processes (runtime wrapper + python child) that would otherwise
+    # both match and inflate the count to 2 for one user-visible tray.
+    declare -A killed=()
     for pid in $(pgrep -f 'python.*-m src\.main' 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         match=0
@@ -82,15 +86,16 @@ stop_existing_instance() {
             esac
         fi
         if [ "$match" -eq 1 ]; then
-            kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+            kill -TERM "$pid" 2>/dev/null && killed[$pid]=1
         fi
     done
     for pid in $(pgrep -f "$target" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
-        kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+        [ -n "${killed[$pid]:-}" ] && continue
+        kill -TERM "$pid" 2>/dev/null && killed[$pid]=1
     done
-    if [ "$stopped" -gt 0 ]; then
-        info "Stopped $stopped existing instance(s)"
+    if [ "${#killed[@]}" -gt 0 ]; then
+        info "Stopped existing Desktop Connector"
         sleep 2
     fi
 }

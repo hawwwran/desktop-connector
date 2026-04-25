@@ -146,11 +146,27 @@ def relocate_to_canonical_if_needed() -> bool:
     args = [str(canonical)] + sys.argv[1:]
     spawn_env = _clean_env_for_spawn()
     try:
-        subprocess.Popen(args, env=spawn_env, start_new_session=True)
+        # Detach: new session + null FDs so the spawned canonical doesn't
+        # keep writing to the user's terminal after we exit. Without this,
+        # running the AppImage from a shell would leave the prompt
+        # "stuck" while canonical's tray logs leaked into stdout.
+        subprocess.Popen(
+            args,
+            env=spawn_env,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError as e:
         log.warning("appimage.relocate.spawn_failed error=%s", e)
         return False
     log.info("appimage.relocate.spawned target=%s", canonical)
+    print(
+        f"Installed Desktop Connector at {canonical}.\n"
+        "Tray launching in background — look for the icon in your panel.",
+        flush=True,
+    )
     return True
 
 
