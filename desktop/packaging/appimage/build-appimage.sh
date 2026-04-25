@@ -26,6 +26,11 @@ LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/co
 # linuxdeploy-plugin-gtk has no releases; sourced from the master branch.
 # When upstream cuts releases (open issue), pin to a tag.
 LINUXDEPLOY_PLUGIN_GTK_URL="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
+# appimageupdatetool — the CLI half of AppImageUpdate. Bundled into the
+# AppImage at $APPDIR/opt/appimageupdate/ so the in-app updater (P.6b)
+# can invoke it against the live $APPIMAGE without depending on a host
+# install of AppImageUpdate.
+APPIMAGEUPDATETOOL_URL="https://github.com/AppImageCommunity/AppImageUpdate/releases/download/continuous/appimageupdatetool-x86_64.AppImage"
 
 TOOLS_DIR="${TOOLS_DIR:-$SCRIPT_DIR/.tools}"
 
@@ -131,6 +136,7 @@ ensure_tool python-appimage.AppImage "$PYTHON_APPIMAGE_URL"
 ensure_tool appimagetool-x86_64.AppImage "$APPIMAGETOOL_URL"
 ensure_tool linuxdeploy-x86_64.AppImage "$LINUXDEPLOY_URL"
 ensure_tool linuxdeploy-plugin-gtk.sh "$LINUXDEPLOY_PLUGIN_GTK_URL"
+ensure_tool appimageupdatetool-x86_64.AppImage "$APPIMAGEUPDATETOOL_URL"
 
 # Pre-flight: verify host has GTK4 + libadwaita 1.5+ for the plugin to
 # pull from. The plugin uses pkg-config to find the source paths.
@@ -262,6 +268,17 @@ for typelib in WebKit-6.0.typelib WebKitWebProcessExtension-6.0.typelib; do
     cp "$HOST_LIBDIR/girepository-1.0/$typelib" "$GIR_DST/"
   fi
 done
+
+# Bundle appimageupdatetool — the CLI used by the in-app updater (P.6b)
+# to update $APPIMAGE in place via zsync delta download. Copied as-is;
+# update_runner.py runs it with --appimage-extract-and-run so users
+# without FUSE on their desktop still get updates.
+echo "$PROG: bundling appimageupdatetool ..."
+APPIMAGEUPDATE_DST="$APPDIR/opt/appimageupdate"
+mkdir -p -- "$APPIMAGEUPDATE_DST"
+cp "$TOOLS_DIR/appimageupdatetool-x86_64.AppImage" \
+   "$APPIMAGEUPDATE_DST/appimageupdatetool.AppImage"
+chmod +x -- "$APPIMAGEUPDATE_DST/appimageupdatetool.AppImage"
 
 # Copy desktop source.
 mkdir -p -- "$APPDIR/usr/lib/desktop-connector"

@@ -83,6 +83,29 @@ def cache_path() -> Path:
     return base / "desktop-connector" / "update-check.json"
 
 
+def is_version_dismissed(version: str) -> bool:
+    """True iff the user previously dismissed an "Update available" prompt for
+    this exact version. Used by the tray (P.6b) to decide whether to surface
+    an update banner — once dismissed, stays dismissed for that version, but
+    the next release re-surfaces because the version string differs.
+    """
+    cache = _read_cache()
+    if not cache:
+        return False
+    return version in (cache.get("dismissed_versions") or [])
+
+
+def dismiss_version(version: str) -> None:
+    """Persist user's "don't bug me about this version" choice."""
+    cache = _read_cache() or {}
+    dismissed = list(cache.get("dismissed_versions") or [])
+    if version not in dismissed:
+        dismissed.append(version)
+        cache["dismissed_versions"] = dismissed
+        _write_cache(cache)
+        log.info("update_check.dismissed version=%s", version)
+
+
 def check_for_update(*, force: bool = False) -> UpdateInfo | None:
     """Return ``UpdateInfo`` describing the latest desktop release, or None.
 
