@@ -23,6 +23,9 @@ SCRIPT_DIR="$(dirname -- "$(readlink -f -- "$0")")"
 PYTHON_APPIMAGE_URL="https://github.com/niess/python-appimage/releases/download/python3.11/python3.11.14-cp311-cp311-manylinux2014_x86_64.AppImage"
 APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
 LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+# linuxdeploy-plugin-gtk has no releases; sourced from the master branch.
+# When upstream cuts releases (open issue), pin to a tag.
+LINUXDEPLOY_PLUGIN_GTK_URL="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
 
 TOOLS_DIR="${TOOLS_DIR:-$SCRIPT_DIR/.tools}"
 
@@ -127,6 +130,27 @@ ensure_tool() {
 ensure_tool python-appimage.AppImage "$PYTHON_APPIMAGE_URL"
 ensure_tool appimagetool-x86_64.AppImage "$APPIMAGETOOL_URL"
 ensure_tool linuxdeploy-x86_64.AppImage "$LINUXDEPLOY_URL"
+ensure_tool linuxdeploy-plugin-gtk.sh "$LINUXDEPLOY_PLUGIN_GTK_URL"
+
+# Pre-flight: verify host has GTK4 + libadwaita 1.5+ for the plugin to
+# pull from. The plugin uses pkg-config to find the source paths.
+need_pc_min() {
+  local pkg="$1" min="$2"
+  if ! pkg-config --exists "$pkg"; then
+    echo "$PROG: host pkg-config can't find $pkg — install dev headers." >&2
+    return 1
+  fi
+  if ! pkg-config --atleast-version="$min" "$pkg"; then
+    local got
+    got="$(pkg-config --modversion "$pkg")"
+    echo "$PROG: host $pkg is $got but $min+ is required for libadwaita 1.5+ paint paths." >&2
+    echo "       on Ubuntu 22.04 enable the GNOME 46 PPA and re-run." >&2
+    return 1
+  fi
+}
+need_pc_min gtk4 4.10 || exit 1
+need_pc_min libadwaita-1 1.5 || exit 1
+need_pc_min girepository-2.0 2.80 || exit 1
 
 # Extract python-appimage. Provides relocatable CPython under squashfs-root/.
 echo "$PROG: extracting bundled Python ..."
@@ -160,6 +184,75 @@ echo "$PROG: installing Python deps ..."
 PIP_DISABLE_PIP_VERSION_CHECK=1 \
 "$PYTHON_BIN" -m pip install --no-cache-dir --no-warn-script-location \
   -r "$SOURCE_DIR/desktop/requirements.txt"
+
+# PyGObject + pycairo provide the Python bindings to GObject Introspection
+# (the `gi` package). Not in requirements.txt because the apt-pip install
+# gets them from `python3-gi` / `python3-cairo` system packages — adding
+# them to requirements.txt would needlessly compile-from-source on hosts
+# that already have the apt versions. AppImage installs explicitly here.
+#
+# Build-time deps (the recipe's pre-flight ensures these): GLib 2.80+
+# brought girepository-2.0; PyGObject 3.50+ requires it. On Ubuntu 24.04
+# / Zorin 18 install `libgirepository-2.0-dev` to get the .pc file.
+echo "$PROG: installing GObject bindings ..."
+PIP_DISABLE_PIP_VERSION_CHECK=1 \
+"$PYTHON_BIN" -m pip install --no-cache-dir --no-warn-script-location \
+  "PyGObject>=3.50.0" "pycairo>=1.26.0"
+
+# Bundle GTK4 + libadwaita + GIO + pixbuf loaders + GI typelibs (P.2a)
+# via linuxdeploy-plugin-gtk. The plugin needs LINUXDEPLOY pointing at
+# an extracted linuxdeploy binary (not the AppImage) — otherwise its
+# inner deploy calls require FUSE, which not every host has.
+echo "$PROG: extracting linuxdeploy ..."
+LD_EXTRACT="$WORK_DIR/linuxdeploy-extract"
+mkdir -p -- "$LD_EXTRACT"
+(cd "$LD_EXTRACT" && "$TOOLS_DIR/linuxdeploy-x86_64.AppImage" --appimage-extract >/dev/null)
+LINUXDEPLOY_BIN="$LD_EXTRACT/squashfs-root/AppRun"
+if [[ ! -x "$LINUXDEPLOY_BIN" ]]; then
+  echo "$PROG: extracted linuxdeploy AppRun not executable at $LINUXDEPLOY_BIN" >&2
+  exit 1
+fi
+
+echo "$PROG: bundling GTK4 + libadwaita ..."
+LINUXDEPLOY="$LINUXDEPLOY_BIN" \
+DEPLOY_GTK_VERSION=4 \
+  bash "$TOOLS_DIR/linuxdeploy-plugin-gtk.sh" --appdir "$APPDIR"
+
+# WebKit (libwebkitgtk-6.0) — linuxdeploy-plugin-gtk doesn't pick this
+# up because Python loads it lazily via `gi.require_version("WebKit",
+# "6.0")` at runtime, not via ELF dependency. Force-deploy the .so files
+# via linuxdeploy --library, then copy the helper processes (WebKit
+# launches its own sandbox subprocesses) and typelibs by hand.
+echo "$PROG: bundling WebKit ..."
+WEBKIT_LIBDIR="/usr/lib/x86_64-linux-gnu"
+ld_lib_args=()
+for lib in libwebkitgtk-6.0.so.4 libjavascriptcoregtk-6.0.so.1; do
+  if [[ -f "$WEBKIT_LIBDIR/$lib" ]]; then
+    ld_lib_args+=( --library "$WEBKIT_LIBDIR/$lib" )
+  fi
+done
+if (( ${#ld_lib_args[@]} > 0 )); then
+  "$LINUXDEPLOY_BIN" --appdir "$APPDIR" "${ld_lib_args[@]}"
+fi
+
+# Helper process binaries (WebKitWebProcess / WebKitNetworkProcess /
+# WebKitGPUProcess + the injected bundle .so). WEBKIT_EXEC_PATH (set
+# by AppRun) points WebKit at this dir.
+WEBKIT_HELPER_SRC="$WEBKIT_LIBDIR/webkitgtk-6.0"
+WEBKIT_HELPER_DST="$APPDIR/usr/lib/webkitgtk-6.0"
+if [[ -d "$WEBKIT_HELPER_SRC" ]]; then
+  mkdir -p -- "$WEBKIT_HELPER_DST"
+  cp -a "$WEBKIT_HELPER_SRC/"* "$WEBKIT_HELPER_DST/"
+fi
+
+# Typelibs read by `from gi.repository import WebKit`.
+GIR_DST="$APPDIR/usr/lib/girepository-1.0"
+mkdir -p -- "$GIR_DST"
+for typelib in WebKit-6.0.typelib WebKitWebProcessExtension-6.0.typelib; do
+  if [[ -f "$WEBKIT_LIBDIR/girepository-1.0/$typelib" ]]; then
+    cp "$WEBKIT_LIBDIR/girepository-1.0/$typelib" "$GIR_DST/"
+  fi
+done
 
 # Copy desktop source.
 mkdir -p -- "$APPDIR/usr/lib/desktop-connector"

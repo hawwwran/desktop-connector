@@ -3,10 +3,13 @@
 Linux AppImage packaging for the desktop client. See
 `docs/plans/desktop-appimage-packaging-plan.md` for the full plan.
 
-**Status:** P.1b. `build-appimage.sh` produces a runnable AppImage with
-bundled Python + pure-Python deps. GTK4 bundling lands in P.2a; until
-then anything that imports `gi` (settings/history/find-phone subprocess
-windows) fails at runtime — `--version` and `--headless` work.
+**Status:** P.2a. `build-appimage.sh` produces a runnable ~107 MB
+AppImage with bundled Python + pure-Python deps + GTK4 + libadwaita +
+WebKitGTK 6.0. All four subprocess windows (send-files, settings,
+history, find-phone) render with bundled libs. Subprocess
+re-entry via `$APPIMAGE` lands in P.2b — until then `tray.py` /
+`windows.py` still spawn `python3 -m src.windows`, which only works in
+the dev tree.
 
 ## Layout
 
@@ -54,9 +57,15 @@ re-runs.
 ## Smoke test the build
 
 ```bash
-./desktop-connector-x86_64.AppImage --version    # prints "Desktop Connector <ver>"
-./desktop-connector-x86_64.AppImage --headless   # enters receiver loop
+./desktop-connector-x86_64.AppImage --version            # prints "Desktop Connector <ver>"
+./desktop-connector-x86_64.AppImage --headless           # enters receiver loop
+./desktop-connector-x86_64.AppImage --gtk-window=settings --config-dir=/tmp/dc
+./desktop-connector-x86_64.AppImage --gtk-window=find-phone --config-dir=/tmp/dc
 ```
+
+`--gtk-window=<NAME>` is an AppRun-internal dispatch that runs
+`python -m src.windows <NAME>` against the bundled GTK4. NAME is one of
+`send-files`, `settings`, `history`, `pairing`, `find-phone`.
 
 ## Not here
 
