@@ -25,6 +25,7 @@ import logging
 import sys
 from pathlib import Path
 
+from .bootstrap.app_version import get_app_version
 from .bootstrap.args import parse_startup_args, resolve_startup_mode
 from .bootstrap.startup_context import build_startup_context, rebuild_authenticated_api
 from .bootstrap.dependency_check import check_dependencies, show_missing_deps_dialog
@@ -37,8 +38,17 @@ from .runners.send_runner import run_send_file
 log = logging.getLogger("desktop-connector")
 
 def main() -> int:
-    # Check dependencies before anything else
-    missing = check_dependencies()
+    # --version short-circuits before dep checks so it works on a
+    # minimal AppImage that doesn't yet bundle GTK4 (P.1b).
+    if "--version" in sys.argv[1:]:
+        print(f"Desktop Connector {get_app_version()}")
+        return 0
+
+    # Headless receivers skip GUI dep checks (no tray, no GTK4 subprocess
+    # windows, no tkinter pairing UI). Peek at argv since args haven't
+    # been parsed yet — full parse needs args we'd rather check first.
+    headless = "--headless" in sys.argv[1:]
+    missing = check_dependencies(headless=headless)
     if missing:
         show_missing_deps_dialog(missing)
         return 1

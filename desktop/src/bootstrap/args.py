@@ -6,6 +6,8 @@ import argparse
 from dataclasses import dataclass
 from typing import Literal
 
+from .app_version import get_app_version
+
 
 @dataclass(frozen=True)
 class StartupArgs:
@@ -24,6 +26,11 @@ StartupMode = Literal["send_file", "headless_receive", "tray_receive"]
 def parse_startup_args() -> StartupArgs:
     """Parse CLI arguments for desktop startup."""
     parser = argparse.ArgumentParser(description="Desktop Connector")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"Desktop Connector {get_app_version()}",
+    )
     parser.add_argument("--headless", action="store_true", help="Run without GUI")
     parser.add_argument("--send", type=str, help="Send a file and exit")
     parser.add_argument("--pair", action="store_true", help="Start pairing flow")
