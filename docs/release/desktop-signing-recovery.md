@@ -142,6 +142,40 @@ URL is hardcoded into the AppImage at build time (via
 `zsyncmake -u <url>`); changing it requires re-building the AppImage,
 which requires re-signing.
 
+Two release-pipeline details are load-bearing here:
+
+1. **`UPDATE_INFORMATION` embedded into the AppImage at pack time**
+   (the release workflow's "Pin UPDATE_INFORMATION" step → `appimagetool -u`).
+   Without this the bundled `appimageupdatetool` exits 2 with
+   "Could not find update information" — the `.zsync` sidecar alone
+   isn't enough; AppImageUpdate reads the in-binary update string to
+   decide where to fetch the `.zsync` from. The string format is
+   `gh-releases-zsync|hawwwran|desktop-connector|desktop-latest|desktop-connector-*-x86_64.AppImage.zsync`.
+
+2. **Rolling `desktop-latest` GitHub Release** (stream isolation).
+   AppImageUpdate's GitHub provider only accepts literal tag values
+   (`latest`, `latest-pre`, or an exact tag string) — no wildcards.
+   Using `latest` would break desktop in-app updates whenever a
+   chronologically-newer `android/v*` release shadows the desktop
+   one (the asset glob 404s). To dodge that, the release workflow
+   force-updates a rolling `desktop-latest` GitHub Release on each
+   `desktop/v*` build, hosting only the `.zsync` (+ SHA256SUMS for
+   integrity reference). The `.zsync`'s `URL:` header still points
+   back at the versioned release's AppImage, so zsync2 fetches the
+   actual ~150 MB bytes from there. Storage cost: ~150 KB extra per
+   release. Anyone deleting `desktop-latest` after a release breaks
+   in-app updates until the next desktop release re-creates it.
+
+A third detail lives on the runtime side: `appimageupdatetool` writes
+the new bytes at the `.zsync`'s `Filename:` header (the published
+asset name, e.g. `desktop-connector-0.2.2-x86_64.AppImage`), which
+differs from our canonical install path (`desktop-connector.AppImage`).
+`update_runner.py` parses the tool's "New file created: `<PATH>`"
+output line and, when the path differs from `$APPIMAGE`, atomically
+relocates the new bytes onto the canonical path (with a `.zs-old`
+backup) so the install hook's stable path keeps pointing at the
+current bytes.
+
 This catches: corrupted downloads, MITM that modifies blocks
 mid-flight, GitHub Releases tampering with just the AppImage (the
 zsync hashes won't match). It does NOT catch: an attacker who
