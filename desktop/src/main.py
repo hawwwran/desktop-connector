@@ -27,6 +27,7 @@ from pathlib import Path
 
 from .bootstrap.app_version import get_app_version
 from .bootstrap.appimage_install_hook import ensure_appimage_integration
+from .bootstrap.appimage_onboarding import OnboardingResult, run_onboarding_if_needed
 from .bootstrap.args import parse_startup_args, resolve_startup_mode
 from .bootstrap.startup_context import build_startup_context, rebuild_authenticated_api
 from .bootstrap.dependency_check import check_dependencies, show_missing_deps_dialog
@@ -61,27 +62,49 @@ def main() -> int:
 
     context = build_startup_context(args)
 
+    # First-launch GTK4 onboarding (AppImage only, no-op otherwise).
+    # Runs before the install hook so an "autostart off" choice can
+    # drop a .no-autostart marker the install hook will honour.
+    onboarding_result = run_onboarding_if_needed(
+        context.config, headless=args.headless
+    )
+
     # Drop / refresh AppImage desktop integration. No-op outside an
     # AppImage; runs before register_device so the menu entry exists
     # even if the relay is unreachable on first launch.
     ensure_appimage_integration(context.config)
 
+    unconfigured = False
     if not register_device(context.config, context.api):
-        return 1
-
-    rebuild_authenticated_api(context)
-
-    if args.pair or not context.config.is_paired:
-        if args.send:
-            log.error("Not paired yet. Run with --pair first.")
+        # Soft-fail iff the user just cancelled onboarding from interactive
+        # tray mode — per the plan, the tray runs unconfigured and the
+        # Settings window can complete setup later. Send/pair/headless
+        # callers still hard-fail because they can't proceed without creds.
+        soft_fail = (
+            onboarding_result is OnboardingResult.CANCELLED
+            and not args.headless
+            and not args.send
+            and not args.pair
+        )
+        if not soft_fail:
             return 1
-        if run_pairing_flow(
-            context.config,
-            context.crypto,
-            context.api,
-            headless=args.headless,
-        ) != 0:
-            return 1
+        log.info("appimage.onboarding.deferred running tray unregistered")
+        unconfigured = True
+
+    if not unconfigured:
+        rebuild_authenticated_api(context)
+
+        if args.pair or not context.config.is_paired:
+            if args.send:
+                log.error("Not paired yet. Run with --pair first.")
+                return 1
+            if run_pairing_flow(
+                context.config,
+                context.crypto,
+                context.api,
+                headless=args.headless,
+            ) != 0:
+                return 1
 
     mode = resolve_startup_mode(args)
     if mode == "send_file":

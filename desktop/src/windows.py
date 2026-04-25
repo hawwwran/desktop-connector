@@ -2183,9 +2183,171 @@ def _setup_subprocess_logging(config_dir: Path) -> None:
     logging.getLogger().setLevel(logging.INFO)
 
 
+def show_onboarding(config_dir: Path):
+    """First-launch onboarding dialog (P.4a).
+
+    Asks for the relay server URL (with /api/health probe button) and an
+    autostart toggle. Persists answers via the same Config object the
+    parent uses; the parent detects Save vs Cancel by re-reading
+    config.server_url.
+
+    Runs as a subprocess (spawned by appimage_onboarding) for the same
+    reason all other GTK4 windows do — pystray's appindicator backend
+    loads GTK3 in the parent process at dep-check time, locking GTK to
+    3.0 there.
+    """
+    from .config import Config
+    from .bootstrap.appimage_onboarding import (
+        NO_AUTOSTART_MARKER,
+        probe_server,
+    )
+
+    config = Config(config_dir)
+    app = _make_app()
+
+    def on_activate(app):
+        apply_brand_css()
+        win = Adw.ApplicationWindow(
+            application=app,
+            title="Welcome to Desktop Connector",
+            default_width=480,
+            default_height=420,
+        )
+
+        toolbar = Adw.ToolbarView()
+        win.set_content(toolbar)
+        toolbar.add_top_bar(Adw.HeaderBar())
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=16,
+            margin_top=24, margin_bottom=24,
+            margin_start=24, margin_end=24,
+        )
+        toolbar.set_content(outer)
+
+        title = Gtk.Label(label="Welcome to Desktop Connector", xalign=0)
+        title.add_css_class("title-2")
+        outer.append(title)
+
+        subtitle = Gtk.Label(
+            label="Connect to your relay server to pair with your phone.",
+            xalign=0, wrap=True,
+        )
+        subtitle.add_css_class("dim-label")
+        outer.append(subtitle)
+
+        url_label = Gtk.Label(label="Relay server URL", xalign=0)
+        url_label.add_css_class("heading")
+        outer.append(url_label)
+
+        url_entry = Gtk.Entry(
+            placeholder_text="https://example.com/SERVICES/desktop-connector",
+        )
+        outer.append(url_entry)
+
+        probe_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        outer.append(probe_row)
+        probe_btn = Gtk.Button(label="Test connection")
+        probe_row.append(probe_btn)
+        probe_status = Gtk.Label(xalign=0, hexpand=True)
+        probe_status.add_css_class("dim-label")
+        probe_row.append(probe_status)
+
+        def run_probe(url):
+            if probe_server(url):
+                probe_status.set_text("✓ Server reachable")
+                probe_status.add_css_class("success")
+                return True
+            probe_status.remove_css_class("success")
+            probe_status.set_text("✗ Could not reach server")
+            return False
+
+        def on_probe(_btn):
+            url = url_entry.get_text().strip().rstrip("/")
+            if not url:
+                probe_status.set_text("Enter a URL first.")
+                return
+            probe_status.set_text("Checking…")
+            GLib.idle_add(lambda: (run_probe(url), False)[1])
+
+        probe_btn.connect("clicked", on_probe)
+
+        autostart_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        outer.append(autostart_row)
+        autostart_label = Gtk.Label(
+            label="Start automatically on login",
+            xalign=0, hexpand=True,
+        )
+        autostart_row.append(autostart_label)
+        autostart_switch = Gtk.Switch()
+        autostart_switch.set_active(True)
+        autostart_switch.set_valign(Gtk.Align.CENTER)
+        autostart_row.append(autostart_switch)
+
+        outer.append(Gtk.Box(vexpand=True))
+        button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        button_row.set_halign(Gtk.Align.END)
+        outer.append(button_row)
+
+        cancel_btn = Gtk.Button(label="Cancel")
+        button_row.append(cancel_btn)
+        save_btn = Gtk.Button(label="Save")
+        save_btn.add_css_class("suggested-action")
+        button_row.append(save_btn)
+
+        def commit(url):
+            config.server_url = url
+            marker = config_dir / NO_AUTOSTART_MARKER
+            if autostart_switch.get_active():
+                if marker.exists():
+                    marker.unlink()
+            else:
+                marker.touch()
+
+        cancel_btn.connect("clicked", lambda _b: win.close())
+
+        def on_save(_btn):
+            url = url_entry.get_text().strip().rstrip("/")
+            if not url:
+                probe_status.set_text("Enter a URL first.")
+                return
+            if probe_server(url):
+                commit(url)
+                win.close()
+                return
+            # Server unreachable — confirm "Save anyway?" (mirrors install.sh).
+            dlg = Adw.AlertDialog(
+                heading="Server did not respond",
+                body=(
+                    f"{url}/api/health did not return a healthy response. "
+                    "Save anyway? You can update the URL in Settings later."
+                ),
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("save", "Save anyway")
+            dlg.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+            dlg.set_default_response("cancel")
+            dlg.set_close_response("cancel")
+
+            def on_resp(_d, response):
+                if response == "save":
+                    commit(url)
+                    win.close()
+
+            dlg.connect("response", on_resp)
+            dlg.present(win)
+
+        save_btn.connect("clicked", on_save)
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run(None)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("window", choices=["send-files", "settings", "history", "pairing", "find-phone"])
+    parser.add_argument("window", choices=["send-files", "settings", "history", "pairing", "find-phone", "onboarding"])
     parser.add_argument("--config-dir", required=True)
     args = parser.parse_args()
 
@@ -2202,6 +2364,8 @@ def main():
         show_pairing(config_dir)
     elif args.window == "find-phone":
         show_find_phone(config_dir)
+    elif args.window == "onboarding":
+        show_onboarding(config_dir)
 
 
 if __name__ == "__main__":
