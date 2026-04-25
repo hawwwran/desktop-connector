@@ -29,6 +29,10 @@ from .bootstrap.app_version import get_app_version
 from .bootstrap.appimage_install_hook import ensure_appimage_integration
 from .bootstrap.appimage_migration import migrate_from_apt_pip_if_needed
 from .bootstrap.appimage_onboarding import OnboardingResult, run_onboarding_if_needed
+from .bootstrap.appimage_relocate import (
+    enforce_single_instance,
+    relocate_to_canonical_if_needed,
+)
 from .bootstrap.args import parse_startup_args, resolve_startup_mode
 from .bootstrap.startup_context import build_startup_context, rebuild_authenticated_api
 from .bootstrap.dependency_check import check_dependencies, show_missing_deps_dialog
@@ -45,6 +49,20 @@ def main() -> int:
     # minimal AppImage that doesn't yet bundle GTK4 (P.1b).
     if "--version" in sys.argv[1:]:
         print(f"Desktop Connector {get_app_version()}")
+        return 0
+
+    # Single-instance enforcement: SIGTERM every other Desktop Connector
+    # process on the machine before we set up our own bootstrap. No-op
+    # in transient modes (--send / --pair). Catches AppImage at any path,
+    # install-from-source layouts, and dev-tree runs.
+    enforce_single_instance()
+
+    # Self-install: when the AppImage is run from anywhere other than
+    # ~/.local/share/desktop-connector/desktop-connector.AppImage, copy
+    # ourselves there, spawn the canonical copy, and exit. No-op outside
+    # an AppImage and in transient modes. Override with DC_NO_RELOCATE=1
+    # when testing a non-canonical build.
+    if relocate_to_canonical_if_needed():
         return 0
 
     # Headless receivers skip GUI dep checks (no tray, no GTK4 subprocess
