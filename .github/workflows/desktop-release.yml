@@ -13,14 +13,6 @@ on:
     tags:
       - 'desktop/v*'
   workflow_dispatch: {}  # manual trigger never publishes — see publish step's gate
-  # TEMPORARY (P.5a iteration): exercise the build + smoke on every PR
-  # to main so we can verify the pipeline before promoting to a real
-  # tag-driven release. Remove this `pull_request:` block before merging
-  # the appimage-packaging branch — publish gate blocks releases on PR
-  # events anyway, but the trigger itself is just iteration noise.
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: write  # required by softprops/action-gh-release to create the release

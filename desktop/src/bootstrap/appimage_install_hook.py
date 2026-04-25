@@ -158,9 +158,18 @@ def _write_or_update_entry(
 
 
 def _exec_line(text: str) -> str | None:
+    """Return just the executable path from a `.desktop`'s ``Exec=`` line.
+
+    Strips off any trailing args. Without this, an entry whose Exec is
+    e.g. ``Exec={appimage} --headless --send=%f`` (Dolphin service menu)
+    would always compare unequal to the bare AppImage path and the
+    "unchanged-path" idempotency check would re-rewrite the file on
+    every launch.
+    """
     for line in text.splitlines():
         if line.startswith("Exec="):
-            return line[len("Exec=") :].strip()
+            rest = line[len("Exec=") :].strip()
+            return rest.split(None, 1)[0] if rest else ""
     return None
 
 

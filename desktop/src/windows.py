@@ -2227,7 +2227,7 @@ def show_onboarding(config_dir: Path):
     """
     from .config import Config
     from .bootstrap.appimage_onboarding import (
-        NO_AUTOSTART_MARKER,
+        commit_onboarding_settings,
         probe_server,
     )
 
@@ -2326,13 +2326,13 @@ def show_onboarding(config_dir: Path):
         button_row.append(save_btn)
 
         def commit(url):
-            config.server_url = url
-            marker = config_dir / NO_AUTOSTART_MARKER
-            if autostart_switch.get_active():
-                if marker.exists():
-                    marker.unlink()
-            else:
-                marker.touch()
+            # Delegate to the free function in appimage_onboarding so
+            # the persistence logic is unit-testable without GTK4.
+            commit_onboarding_settings(
+                config_dir,
+                server_url=url,
+                autostart_enabled=autostart_switch.get_active(),
+            )
 
         cancel_btn.connect("clicked", lambda _b: win.close())
 

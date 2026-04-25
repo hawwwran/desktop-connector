@@ -40,6 +40,17 @@ export XDG_DATA_DIRS="$APPDIR/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}:/usr/lo
 # WEBKIT_EXEC_PATH. Without this, find-phone's Leaflet WebView fails to
 # load. Sandbox disabled because we only ever load our own bundled
 # Leaflet+OSM map — no untrusted content goes through this WebView.
+#
+# !!! CODE-REVIEW GATE !!! If find-phone (or any other window) ever
+# loads remote / untrusted / attacker-influenced content through this
+# WebView, the sandbox-disable MUST be revisited. Examples that
+# would trigger this: changing the OSM tile-server URL, fetching a
+# remote map style sheet, embedding any user-supplied URL in the
+# webview, allowing decrypted GPS payload data to be rendered as
+# HTML. The bundled WebKit's helper-process sandbox is the only
+# barrier between a malicious payload and arbitrary code execution
+# in the user's session — do not remove this without a security
+# review.
 export WEBKIT_EXEC_PATH="$APPDIR/usr/lib/webkitgtk-6.0"
 export WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 

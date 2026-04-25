@@ -107,6 +107,78 @@ class ProbeServerTests(unittest.TestCase):
             self.assertFalse(onboarding.probe_server("https://relay.example"))
 
 
+class CommitOnboardingSettingsTests(unittest.TestCase):
+    """Persistence logic extracted from the GTK4 dialog's button
+    closure. Direct unit tests so we don't need to drive a GTK4
+    event loop to verify the user's choices land where they should."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._config_dir = Path(self._tmp.name)
+        self._marker = self._config_dir / onboarding.NO_AUTOSTART_MARKER
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_writes_server_url_to_config(self):
+        onboarding.commit_onboarding_settings(
+            self._config_dir,
+            server_url="https://relay.example.com",
+            autostart_enabled=True,
+        )
+        # Verify by re-loading the config from disk
+        from src.config import Config
+        cfg = Config(self._config_dir)
+        self.assertEqual(cfg.server_url, "https://relay.example.com")
+
+    def test_autostart_enabled_does_not_create_marker(self):
+        onboarding.commit_onboarding_settings(
+            self._config_dir,
+            server_url="https://relay.example.com",
+            autostart_enabled=True,
+        )
+        self.assertFalse(self._marker.exists())
+
+    def test_autostart_disabled_creates_marker(self):
+        onboarding.commit_onboarding_settings(
+            self._config_dir,
+            server_url="https://relay.example.com",
+            autostart_enabled=False,
+        )
+        self.assertTrue(self._marker.exists())
+
+    def test_autostart_re_enabled_removes_existing_marker(self):
+        # Pre-create the marker as if the user had previously disabled
+        # autostart, then run commit with autostart_enabled=True.
+        self._marker.touch()
+        self.assertTrue(self._marker.exists())
+        onboarding.commit_onboarding_settings(
+            self._config_dir,
+            server_url="https://relay.example.com",
+            autostart_enabled=True,
+        )
+        self.assertFalse(self._marker.exists())
+
+    def test_preserves_other_config_keys(self):
+        # Seed an existing config with unrelated keys; commit must not
+        # clobber them.
+        from src.config import Config
+        cfg = Config(self._config_dir)
+        cfg.device_id = "fake-device"
+        cfg.auth_token = "fake-token"
+
+        onboarding.commit_onboarding_settings(
+            self._config_dir,
+            server_url="https://new.example.com",
+            autostart_enabled=False,
+        )
+
+        cfg2 = Config(self._config_dir)
+        self.assertEqual(cfg2.device_id, "fake-device")
+        self.assertEqual(cfg2.auth_token, "fake-token")
+        self.assertEqual(cfg2.server_url, "https://new.example.com")
+
+
 class RunOnboardingIfNeededTests(unittest.TestCase):
     """Verify SAVED vs CANCELLED detection by inspecting config.json
     after the (mocked) subprocess returns. Save-path stub writes
@@ -202,6 +274,31 @@ class SpawnSubprocessTests(unittest.TestCase):
             ):
                 # Must not raise — caller treats this as cancellation.
                 onboarding._spawn_onboarding_subprocess(self._config_dir)
+
+    def test_timeout_treated_as_cancellation(self):
+        """A hung onboarding dialog (GTK4 init stall, missing fonts) must
+        not block the tray boot indefinitely. subprocess.run timeouts
+        out at 600 s; the parent sees TimeoutExpired and returns
+        normally — caller treats it as Cancel because no server_url
+        was written."""
+        import subprocess as _sp
+
+        with mock.patch.dict(os.environ, {"APPIMAGE": "/x.AppImage"}):
+            with mock.patch.object(
+                onboarding.subprocess, "run",
+                side_effect=_sp.TimeoutExpired(cmd="x", timeout=600),
+            ):
+                # Must not raise — caller treats as cancellation.
+                onboarding._spawn_onboarding_subprocess(self._config_dir)
+
+    def test_run_called_with_timeout(self):
+        """Sanity: the spawn call passes a non-None timeout so a hung
+        child can't block forever."""
+        with mock.patch.dict(os.environ, {"APPIMAGE": "/x.AppImage"}):
+            with mock.patch.object(onboarding.subprocess, "run") as r:
+                onboarding._spawn_onboarding_subprocess(self._config_dir)
+            self.assertIsNotNone(r.call_args.kwargs.get("timeout"))
+            self.assertGreater(r.call_args.kwargs["timeout"], 60)
 
 
 if __name__ == "__main__":

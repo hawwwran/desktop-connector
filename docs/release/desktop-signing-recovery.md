@@ -24,6 +24,19 @@ encrypted secondary, two physically distinct copies) is the same.
 The fingerprint is the canonical identifier. Anyone receiving a release
 should verify against this fingerprint, not the short key id.
 
+### Supported distros
+
+The released AppImage is built on `ubuntu-24.04` (glibc 2.39). Coverage
+floor: **Zorin 17+, Mint 22+, Pop! 24.04+, Ubuntu 24.04+, Debian 13+,
+Fedora 40+**. Earlier releases (Ubuntu 22.04 / Mint 21 / Zorin 16)
+should use `install-from-source.sh` (apt+pip path) — the AppImage
+won't run on glibc < 2.39. Build base decision is recorded in
+[`docs/plans/desktop-appimage-packaging-plan.md`](../plans/desktop-appimage-packaging-plan.md).
+
+Manual smoke checklist before announcing a release widely: at minimum
+one Ubuntu, one Mint or Zorin, and one Fedora install. Sign-off
+recorded against the tag in the release notes.
+
 ## Where the materials live
 
 | Material | Location | Sensitive? |
@@ -83,6 +96,83 @@ gpg --pinentry-mode loopback --passphrase '<from password manager>' \
     --detach-sign /tmp/in.txt
 gpg --verify /tmp/in.txt.sig /tmp/in.txt   # expect "Good signature"
 ```
+
+## Trust model — install vs update
+
+Two different verification paths cover two different attack surfaces.
+This section is the explicit map.
+
+### Install (`install.sh` path)
+
+`desktop/install.sh` does end-to-end GPG verification before placing
+or running anything:
+
+1. Fetch the public key from `raw.githubusercontent.com/.../main/docs/release/desktop-signing.pub.asc`.
+2. Compute its fingerprint, compare against the literal hardcoded
+   in `install.sh` (`FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`).
+   Mismatch → refuse to proceed.
+3. Import into a throwaway `GNUPGHOME`, fetch the AppImage + the
+   detached `.sig`, run `gpg --batch --verify` against it.
+4. Only on success: move the AppImage into the canonical location,
+   `chmod +x`, launch.
+
+This catches: post-CI tampering of release artefacts on
+`releases.github.com` (releases assets can be edited by anyone with
+repo write access — but the signing private key is only in CI
+secrets, so any post-CI edit invalidates the signature). It does
+NOT catch: a repo-level compromise that updates BOTH `install.sh`
+and the public key file together — that's the same root of trust as
+`curl | bash` itself, called out in the script's header comment.
+
+### In-app update (`AppImageUpdate` / tray "Check for updates")
+
+P.6's in-app updater wraps the bundled `appimageupdatetool`. Its
+verification model is **different**: it relies on zsync block-hash
+verification anchored in the running AppImage's embedded `.zsync`
+URL, not a fresh `gpg --verify`.
+
+Concretely: `zsyncmake` builds the `.zsync` metadata at release
+time (in CI, after the AppImage is built and signed). The metadata
+contains SHA-1 hashes of every 2 KB block of the published AppImage,
+plus a master SHA-256. `appimageupdatetool` fetches the new
+`.zsync`, computes which blocks of the local AppImage already match,
+HTTP Range-fetches the missing blocks, assembles the new AppImage,
+verifies the master SHA-256 + per-block hashes match. The `.zsync`
+URL is hardcoded into the AppImage at build time (via
+`zsyncmake -u <url>`); changing it requires re-building the AppImage,
+which requires re-signing.
+
+This catches: corrupted downloads, MITM that modifies blocks
+mid-flight, GitHub Releases tampering with just the AppImage (the
+zsync hashes won't match). It does NOT catch: an attacker who
+replaces both the AppImage and the `.zsync` atomically on
+`releases.github.com`. Defending against that requires either:
+
+(a) re-doing GPG signature verification on every update (not what
+    AppImageUpdate does today), or
+(b) a repo-write-access compromise (which would also let the
+    attacker control the next `install.sh` fetch — same root of
+    trust as the install path).
+
+We accept the asymmetric model because (a) requires a substantial
+patch to `appimageupdatetool` and (b) is already covered by the
+install-time root of trust. **If the AppImage update path ever
+needs to be hardened to (a), it would be its own dedicated change
+captured in a new plan doc.**
+
+### Re-running `install.sh` as a re-verify
+
+A user who wants to manually re-anchor trust can re-run
+`install.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
+```
+
+This pulls a fresh AppImage + `.sig` and verifies before placing.
+Equivalent to the original install. Useful as an out-of-band
+re-verification after a long sequence of in-app updates, or after
+a security advisory recommends it.
 
 ## Re-uploading the GitHub Actions secrets
 

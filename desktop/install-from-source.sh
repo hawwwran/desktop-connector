@@ -15,8 +15,12 @@ set -e
 # Use this if:
 #   - You're hacking on the Python source and want changes to land
 #     locally without rebuilding an AppImage every time.
-#   - You're on a distro the AppImage doesn't support (we'll add it
-#     once we know about it).
+#   - You're on a distro older than the AppImage's coverage floor
+#     (which is glibc 2.39 / Zorin 17+, Mint 22+, Pop! 24.04+,
+#     Ubuntu 24.04+, Debian 13+, Fedora 40+). Older Ubuntu LTSes
+#     like 22.04 / Mint 21 / Zorin 16 — use this script. The
+#     apt+pip path follows the host's distro versions and works
+#     anywhere with python3 + GTK4-via-apt available.
 #   - You're auditing the install steps and want them visible.
 #
 # Bouncing between this and the AppImage installer is safe (last
@@ -96,7 +100,22 @@ stop_existing_instance() {
     done
     if [ "${#killed[@]}" -gt 0 ]; then
         info "Stopped existing Desktop Connector"
-        sleep 2
+        # Wait up to 3 s (30 × 100 ms) for the SIGTERM'd processes to exit.
+        # Then SIGKILL anything still alive.
+        local i
+        for i in $(seq 1 30); do
+            local still=0
+            for pid in "${!killed[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then still=1; break; fi
+            done
+            [ "$still" -eq 0 ] && break
+            sleep 0.1
+        done
+        for pid in "${!killed[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null && warn "SIGKILLed unresponsive pid $pid"
+            fi
+        done
     fi
 }
 

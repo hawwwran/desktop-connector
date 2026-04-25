@@ -792,8 +792,9 @@ class TrayApp:
             last_status[0] = line
             log.info("update_runner.status %s", line)
 
-        ok = update_runner.run_update(on_status=on_status)
-        if not ok:
+        outcome = update_runner.run_update(on_status=on_status)
+
+        if outcome is update_runner.UpdateOutcome.FAILED:
             try:
                 self.platform.notifications.notify(
                     "Update failed",
@@ -803,7 +804,20 @@ class TrayApp:
                 pass
             return
 
-        # Successfully written new AppImage at the original path. The running
+        if outcome is update_runner.UpdateOutcome.NO_CHANGE:
+            # Tool ran but the AppImage on disk is byte-identical — the user
+            # was already on the latest version (likely manually clicked
+            # "Check for updates" / "Install update"). Notify and stay put.
+            try:
+                self.platform.notifications.notify(
+                    "Already up to date",
+                    f"Desktop Connector is on the latest version ({target_version}).",
+                )
+            except Exception:
+                pass
+            return
+
+        # UPDATED: new bytes on disk at the original path. The running
         # process is still on the OLD content (mmap'd before the swap), so
         # we relaunch from $APPIMAGE and quit. Pairings/history live in
         # ~/.config/desktop-connector/ and survive untouched.

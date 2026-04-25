@@ -18,12 +18,21 @@ No GTK / GUI deps here. Progress is exposed as a callback so the tray
 (or anything else) can show it however suits — desktop notifications,
 status text in the menu, a Gtk progress bar in a subprocess window.
 Module is import-safe outside an AppImage; the actual ``run_update``
-call returns ``False`` with a clear log line if the bundled tool isn't
-findable.
+call returns ``UpdateOutcome.FAILED`` with a clear log line if the
+bundled tool isn't findable.
+
+The outcome enum distinguishes ``UPDATED`` (new bytes on disk, caller
+should relaunch), ``NO_CHANGE`` (we ran but the file didn't change —
+user manually clicked "Check for updates" while already on the latest
+version), and ``FAILED`` (tool missing, network down, etc.). Without
+this distinction, manually checking-while-current would needlessly
+notify "Update applied — Restarting" and bounce the tray.
 """
 
 from __future__ import annotations
 
+import enum
+import hashlib
 import logging
 import os
 import subprocess
@@ -40,6 +49,16 @@ log = logging.getLogger(__name__)
 APPIMAGEUPDATETOOL_RELATIVE = "opt/appimageupdate/appimageupdatetool.AppImage"
 
 ProgressCallback = Callable[[str], None]
+
+
+class UpdateOutcome(enum.Enum):
+    """What ``run_update`` did. The tray uses this to decide whether to
+    notify "Update applied" + relaunch, or "Already up to date" and
+    leave the tray running."""
+
+    UPDATED = "updated"      # bytes on disk changed → relaunch
+    NO_CHANGE = "no_change"  # tool ran but no update available
+    FAILED = "failed"        # tool missing, network down, signature mismatch, …
 
 
 def appimageupdatetool_path() -> Path | None:
@@ -61,13 +80,17 @@ def appimage_path() -> Path | None:
     return path if path.exists() else None
 
 
-def run_update(*, on_status: ProgressCallback | None = None) -> bool:
-    """Invoke ``appimageupdatetool $APPIMAGE`` and stream its output.
+def run_update(*, on_status: ProgressCallback | None = None) -> UpdateOutcome:
+    """Invoke ``appimageupdatetool $APPIMAGE`` and report the outcome.
 
-    Returns True iff the tool exited 0 AND $APPIMAGE was successfully
-    updated in place. False otherwise (tool missing, $APPIMAGE missing,
-    network failure, no-update-available, signature mismatch, …) — the
-    failure mode is in the log + the on_status callback's last message.
+    Returns ``UpdateOutcome.UPDATED`` when the tool exits 0 AND the
+    AppImage's bytes on disk actually changed. Returns ``NO_CHANGE``
+    when the tool exits 0 but the AppImage is unchanged (the user is
+    already on the latest version — appimageupdatetool exits 0 in
+    both cases, so we sha256-compare to disambiguate). Returns
+    ``FAILED`` for tool-missing / spawn-failed / non-zero exit /
+    appimage-missing — the failure mode is in the log + the
+    on_status callback's last message.
 
     Streams each output line to ``on_status`` so the caller can surface
     progress (e.g. notification + tray-menu status text). Output is also
@@ -75,23 +98,32 @@ def run_update(*, on_status: ProgressCallback | None = None) -> bool:
     """
     tool = appimageupdatetool_path()
     if tool is None:
-        msg = "update_runner.tool_missing — appimageupdatetool not bundled"
-        log.warning(msg)
+        log.warning(
+            "update_runner.tool_missing reason=appimageupdatetool_not_bundled"
+        )
         if on_status:
             on_status("Update tool not bundled in this AppImage")
-        return False
+        return UpdateOutcome.FAILED
 
     target = appimage_path()
     if target is None:
-        msg = "update_runner.appimage_missing — $APPIMAGE unset or path gone"
-        log.warning(msg)
+        log.warning(
+            "update_runner.appimage_missing reason=appimage_env_unset_or_path_gone"
+        )
         if on_status:
             on_status("AppImage path not available; cannot update")
-        return False
+        return UpdateOutcome.FAILED
 
     log.info("update_runner.started target=%s tool=%s", target, tool)
     if on_status:
         on_status("Starting update…")
+
+    # Snapshot the AppImage's sha256 before + after so we can tell
+    # "successfully updated" from "no update needed" — appimageupdatetool
+    # exits 0 in both cases. Hash cost: ~100ms / 100 MB on SSD; the
+    # user clicks Update at most once per release, so the extra second
+    # is negligible.
+    pre_sha = _file_sha256(target)
 
     # The bundled appimageupdatetool itself is an AppImage. Most distros
     # have FUSE; if not, --appimage-extract-and-run is appimagetool's own
@@ -99,7 +131,40 @@ def run_update(*, on_status: ProgressCallback | None = None) -> bool:
     # without FUSE — passing it unconditionally costs us ~1 s on FUSE-OK
     # systems too, but the user only does this once per release.
     cmd = [str(tool), "--appimage-extract-and-run", str(target)]
-    return _stream_subprocess(cmd, on_status=on_status)
+    if not _stream_subprocess(cmd, on_status=on_status):
+        return UpdateOutcome.FAILED
+
+    post_sha = _file_sha256(target)
+    if pre_sha is not None and post_sha is not None and pre_sha == post_sha:
+        log.info("update_runner.no_change sha=%s", pre_sha[:12])
+        if on_status:
+            on_status("Already up to date.")
+        return UpdateOutcome.NO_CHANGE
+
+    log.info(
+        "update_runner.updated pre_sha=%s post_sha=%s",
+        (pre_sha or "?")[:12],
+        (post_sha or "?")[:12],
+    )
+    return UpdateOutcome.UPDATED
+
+
+def _file_sha256(path: Path) -> str | None:
+    """Hex sha256 of ``path``. None on read error (caller treats as
+    "couldn't sample" — falls through to UPDATED on the post-side or
+    skips the comparison on the pre-side)."""
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(1 << 20)  # 1 MiB chunks
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError as e:
+        log.warning("update_runner.sha_failed path=%s error=%s", path, e)
+        return None
 
 
 def _stream_subprocess(cmd: list[str], *, on_status: ProgressCallback | None) -> bool:

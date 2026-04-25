@@ -213,7 +213,7 @@ def _do_install_steps(running_path: Path, canonical: Path, set_status) -> bool:
     try:
         # Detach: new session + null FDs so the spawned canonical doesn't
         # keep writing to the user's terminal after we exit.
-        subprocess.Popen(
+        proc = subprocess.Popen(
             args,
             env=spawn_env,
             start_new_session=True,
@@ -225,7 +225,21 @@ def _do_install_steps(running_path: Path, canonical: Path, set_status) -> bool:
         log.warning("appimage.relocate.spawn_failed error=%s", e)
         set_status(f"Failed to start: {e}")
         return False
-    log.info("appimage.relocate.spawned target=%s", canonical)
+
+    # Give the spawn 500 ms to fail fast on broken libc / missing FUSE /
+    # ENOEXEC. Without this, a child that dies immediately after Popen
+    # leaves the user with the modal saying "Installation complete" and
+    # no tray icon.
+    time.sleep(0.5)
+    if proc.poll() is not None:
+        log.warning("appimage.relocate.spawn_died_early rc=%d", proc.returncode)
+        set_status(
+            f"Canonical process exited immediately (rc={proc.returncode}). "
+            "See ~/.config/desktop-connector/logs/ if logging is enabled."
+        )
+        return False
+
+    log.info("appimage.relocate.spawned target=%s pid=%d", canonical, proc.pid)
     set_status("Done.")
     return True
 
@@ -424,6 +438,10 @@ def _resolve_canonical() -> Path:
 
 _PROJECT_NEEDLE = "desktop-connector"
 
+# Module-level so tests can patch this onto a fake /proc tree without
+# threading the path through every call site. Production: always /proc.
+_PROC_ROOT = Path("/proc")
+
 
 def _stop_other_instances() -> None:
     """SIGTERM every running ``python -m src.main`` whose env or cwd marks
@@ -438,12 +456,11 @@ def _stop_other_instances() -> None:
     """
     self_pid = str(os.getpid())
     parent_pid = str(os.getppid())
-    stopped = 0
-    proc = Path("/proc")
-    if not proc.is_dir():
+    killed_pids: list[int] = []
+    if not _PROC_ROOT.is_dir():
         return
 
-    for entry in proc.iterdir():
+    for entry in _PROC_ROOT.iterdir():
         if not entry.name.isdigit():
             continue
         if entry.name in (self_pid, parent_pid):
@@ -460,17 +477,49 @@ def _stop_other_instances() -> None:
             continue
 
         try:
-            os.kill(int(entry.name), signal.SIGTERM)
-            stopped += 1
+            pid = int(entry.name)
+            os.kill(pid, signal.SIGTERM)
+            killed_pids.append(pid)
         except OSError:
             pass
 
-    if stopped:
-        log.info("appimage.relocate.stopped_other_instances count=%d", stopped)
-        # Give the FUSE mount + child python a beat to wind down before we
-        # potentially overwrite the canonical file. Otherwise the in-flight
-        # process might still hold an exclusive open on it.
-        time.sleep(1)
+    if not killed_pids:
+        return
+
+    log.info(
+        "appimage.relocate.stopped_other_instances count=%d", len(killed_pids)
+    )
+
+    # Wait up to 3 s for processes to actually exit, polling each 100 ms.
+    # SIGTERM is typically respected within milliseconds, but a frozen
+    # tray (deadlocked GTK loop, blocked on a syscall) needs SIGKILL or
+    # we'd race with rename + spawn. The FUSE mount also needs a beat
+    # to unmount before we overwrite the canonical file.
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if not any(_pid_alive(p) for p in killed_pids):
+            return
+        time.sleep(0.1)
+
+    # Anything still alive after 3 s gets SIGKILL.
+    for pid in killed_pids:
+        if _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                log.warning("appimage.relocate.sigkilled pid=%d", pid)
+            except OSError:
+                pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """True iff sending signal 0 to pid succeeds (process exists +
+    we have permission to signal it). False on ESRCH / EPERM /
+    other OSError."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def _process_is_ours(entry: Path) -> bool:

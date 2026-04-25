@@ -87,6 +87,31 @@ def run_onboarding_if_needed(
     return OnboardingResult.CANCELLED
 
 
+def commit_onboarding_settings(
+    config_dir: Path, *, server_url: str, autostart_enabled: bool
+) -> None:
+    """Persist the user's onboarding choices.
+
+    Writes ``server_url`` into the config (so subsequent launches skip
+    onboarding via the ``"server_url" in config._data`` gate in
+    :func:`needs_onboarding`) and toggles the
+    ``~/.config/desktop-connector/.no-autostart`` marker file based on
+    whether the user wants the AppImage's install hook to drop an
+    autostart entry on first launch.
+
+    Extracted from the GTK4 dialog's commit-button closure so it's
+    unit-testable without spinning up GTK4.
+    """
+    config = Config(config_dir)
+    config.server_url = server_url
+    marker = config_dir / NO_AUTOSTART_MARKER
+    if autostart_enabled:
+        if marker.exists():
+            marker.unlink()
+    else:
+        marker.touch()
+
+
 def probe_server(server_url: str) -> bool:
     """GET <server>/api/health and check the response shape.
 
@@ -129,7 +154,15 @@ def _spawn_onboarding_subprocess(config_dir: Path) -> None:
         cwd = str(Path(__file__).resolve().parents[2])
 
     try:
-        subprocess.run(cmd, cwd=cwd, check=False)
+        # 10-min timeout — if the dialog hasn't been dismissed by then,
+        # the user has either acted or abandoned. Without a timeout, a
+        # GTK4 init stall (Wayland-quirk, locked-down XDG_RUNTIME_DIR,
+        # missing fonts that block Pango) blocks the tray boot
+        # indefinitely on every fresh-machine launch.
+        subprocess.run(cmd, cwd=cwd, check=False, timeout=600)
+    except subprocess.TimeoutExpired:
+        # subprocess.run has already SIGKILL'd the child by now.
+        log.warning("appimage.onboarding.timeout treated_as=cancelled")
     except OSError as e:
         # Spawn failed (missing binary, ENOEXEC). Don't crash the parent —
         # log and let the caller treat it as cancellation.

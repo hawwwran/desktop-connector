@@ -85,10 +85,23 @@ Non-goals (out of scope for this plan):
 
 ---
 
-## Build base decision — local on host, releases on Ubuntu 22.04 CI
+## Build base decision — Ubuntu 24.04 for both local + CI
 
-Two build environments, two purposes — kept deliberately separate
-so neither has to compromise.
+The plan originally specified `ubuntu-22.04` on the CI runner for
+glibc 2.35 / wider distro coverage. That target became impractical
+during P.5a implementation: 22.04's default apt has libadwaita 1.0
+and glib 2.72, while the build script's pre-flight requires
+libadwaita 1.5+ and girepository-2.0 2.80+ (added in glib 2.80).
+Reaching those on 22.04 needs an unofficial backport PPA, and the
+candidate PPAs are sporadically broken, version-skewed against each
+other, and routinely fall behind upstream security fixes — fragile
+for a CI step that runs on every release tag.
+
+Decision: **target Ubuntu 24.04 (Noble) for both local and CI
+builds.** Coverage floor is glibc 2.39 (Zorin 17+, Mint 22+,
+Pop! 24.04+, Debian 13+, Fedora 40+). Re-target 22.04 only if a
+high-volume user reports they're stuck on 22.04 AND a stable
+backport path materialises.
 
 ### Local builds (your laptop) — host-native
 
@@ -102,18 +115,21 @@ This is **fine for development, demos, and your own machine** —
 it isn't the published release artefact. The local build exists
 so you can iterate fast without waiting on CI.
 
-### Release builds (GitHub Actions) — Ubuntu 22.04 runner
+### Release builds (GitHub Actions) — Ubuntu 24.04 runner
 
-CI runs on `ubuntu-22.04` (glibc 2.35) to produce the canonical
-wide-compatibility AppImage published to GitHub Releases. This is
-what users download. Coverage floor: Zorin 16+, Mint 21+,
-Pop! 22.04+, Debian 12+, Fedora 36+. Same one binary as
-`appimage-distro-support-plan.md` calls for.
+CI runs on `ubuntu-24.04` (glibc 2.39). Same coverage floor as a
+Zorin 18 / Ubuntu 24.04 local build. This is what users download.
 
 | Build | Where | glibc | Coverage |
 |---|---|---|---|
 | Local (you) | Host (Zorin 18 / Ubuntu 24.04+) | 2.39 | 24.04+ family |
-| Release | GitHub Actions `ubuntu-22.04` | 2.35 | 22.04+ family |
+| Release | GitHub Actions `ubuntu-24.04` | 2.39 | 24.04+ family |
+
+If a user on Ubuntu 22.04 / Mint 21 / Zorin 16 reports the AppImage
+won't run, the workaround is `install-from-source.sh` (apt+pip path,
+follows host's distro versions). The plan's
+`appimage-distro-support-plan.md` companion will be updated to
+record this support reality.
 
 ### What's bundled either way
 
@@ -121,11 +137,10 @@ GTK4, libadwaita, Python, all native deps — all bundled inside the
 AppImage. The host's GTK/Python is just where `linuxdeploy` copies
 from; the finished AppImage doesn't depend on host runtime.
 
-If your host can't satisfy a dep `linuxdeploy` wants to copy
-(libadwaita 1.5+ on Ubuntu 22.04, say), the local build fails fast
-and points at what's missing. Solution is `apt install` on the
-host — not a container. CI runner provisions its own deps via the
-workflow file (P.5).
+If your host can't satisfy a dep `linuxdeploy` wants to copy, the
+local build fails fast and points at what's missing. Solution is
+`apt install` on the host — not a container. CI runner provisions
+its own deps via the workflow file (P.5).
 
 ### Why no Docker
 
@@ -163,7 +178,7 @@ two separate clones build independently without stepping on each other.
 | `zsync` | apt | Build (delta metadata) |
 | `AppImageUpdate` | Vendored AppImage | **Runtime** inside the released app, not the build |
 | GPG | apt | Release signing only (P.5) |
-| GitHub Actions | — | Release CI on `ubuntu-22.04` runner |
+| GitHub Actions | — | Release CI on `ubuntu-24.04` runner |
 
 **Not** chosen and why:
 - **Docker / podman** — adds a multi-GB image layer for what amounts
@@ -708,11 +723,16 @@ signing + reproducibility pinning.
 
 1. New workflow `.github/workflows/desktop-release.yml` triggers
    on `desktop/v*` tag push.
-2. Runs on `ubuntu-22.04` runner (this is what gives the
-   wide-compat glibc 2.35 floor — no Docker layer needed).
+2. Runs on `ubuntu-24.04` runner. Original plan was `ubuntu-22.04`
+   for a glibc 2.35 floor; revisited because 22.04's default apt
+   has libadwaita 1.0 (need 1.5+) and glib 2.72 (need 2.80+ for
+   girepository-2.0), and the candidate backport PPAs are too
+   fragile to anchor a per-release CI step on. Coverage floor
+   becomes glibc 2.39 / Zorin 17+, Mint 22+, Pop! 24.04+, Debian
+   13+, Fedora 40+. See "Build base decision" above.
 3. Workflow:
-   - Installs host build deps via apt (GTK4, libadwaita 1.5+ via
-     PPA, Python 3.11+, zsync).
+   - Installs host build deps via apt (GTK4, libadwaita 1.5+,
+     Python 3.11+, zsync — all in 24.04 default repos).
    - Calls `desktop/packaging/appimage/build-appimage.sh
      --source=$GITHUB_WORKSPACE --output=artefacts/`.
    - Runs the P.1b acceptance smoke (`--version` + `--headless`
@@ -727,8 +747,10 @@ signing + reproducibility pinning.
 - `git tag desktop/v0.2.0 && git push origin desktop/v0.2.0`
   produces a published GitHub Release with AppImage + zsync +
   SHA256SUMS within ~10 minutes.
-- Released AppImage runs on Ubuntu 22.04, 24.04, Mint 21,
-  Zorin 17 (manual smoke).
+- Released AppImage runs on Ubuntu 24.04+, Mint 22+, Zorin 17+,
+  Pop! 24.04+, Debian 13+, Fedora 40+ (manual smoke checklist —
+  do at least one Ubuntu, one Mint/Zorin, one Fedora before
+  announcing a release widely).
 - Workflow re-run on the same tag produces identical SHA256s
   (caveat: `SOURCE_DATE_EPOCH` not pinned until P.5b — small
   drift OK at this step).
@@ -871,14 +893,16 @@ Two sub-steps. P.7a rewrites `install.sh` / `uninstall.sh` /
    prompt).
 
 **Acceptance:**
-- `curl ... install.sh | bash` on a clean Ubuntu 22.04 / Mint
-  21 / Zorin 17 install ends with the app running and a
-  configured server URL.
+- `curl ... install.sh | bash` on a clean Ubuntu 24.04+ / Mint 22+
+  / Zorin 17+ install ends with the app running and a configured
+  server URL.
 - `curl ... install.sh | bash` on a machine with the old apt-pip
   install replaces it cleanly (uses P.4b migration path).
 - Documented uninstall leaves nothing behind except optionally-
   kept config.
-- `install-from-source.sh` works on a clean Ubuntu 22.04 host.
+- `install-from-source.sh` works on a clean Ubuntu 22.04 / 24.04
+  host (apt-pip path is distro-agnostic — the only path that
+  supports older Ubuntu LTSes once the AppImage path drops them).
 
 #### P.7b — Documentation
 
@@ -958,7 +982,7 @@ before it merges to `main`.
 
 | Risk | Mitigation |
 |---|---|
-| GTK4 + libadwaita 1.5+ bundling on Ubuntu 22.04 CI runner is intractable. | P.2a acceptance includes the bundling smoke on `ubuntu-22.04`. If it fails, fall back to Ubuntu 24.04 runner and accept narrower distro floor. Document the decision explicitly in the workflow file. |
+| GTK4 + libadwaita 1.5+ bundling on Ubuntu 22.04 CI runner is intractable. | **Realised during P.5a.** Decision: target `ubuntu-24.04` instead, accept narrower distro floor (24.04+ family). 22.04's default apt has libadwaita 1.0 + glib 2.72 (need 1.5+ / 2.80+); candidate backport PPAs are too fragile for a per-release CI step. Workflow file + recovery doc + install-from-source.sh header all reflect 24.04 as the target. Re-target 22.04 only if a high-volume user reports they're stuck AND a stable backport path emerges. |
 | Local build behaves differently from the released AppImage. | Acceptable trade for fast iteration. CI is the canonical reference; if a CI artefact breaks on a distro the local build said worked, debug against CI logs. Don't try to make local match CI bit-for-bit. |
 | Host can't satisfy GTK 4.14+ / libadwaita 1.5+ for local builds. | `build.sh` pre-flight prints the exact apt one-liner (with the GNOME 46 PPA). User runs it; build proceeds. Don't auto-install — host package management is the user's call. |
 | AppImage size > 200 MB after GTK + WebKit bundling (find-phone map). | Audit at end of P.2a. If WebKit is a major contributor, evaluate switching find-phone map to a static / pure-Cairo render before P.5. |

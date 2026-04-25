@@ -87,7 +87,24 @@ stop_existing_instance() {
     done
     if [ "${#killed[@]}" -gt 0 ]; then
         info "Stopped existing Desktop Connector"
-        sleep 2
+        # Wait up to 3 s (30 × 100 ms) for the SIGTERM'd processes to exit.
+        # Then SIGKILL anything still alive — a frozen tray + blocked GTK
+        # loop won't honour SIGTERM but rename+spawn need it gone before
+        # they're safe.
+        local i
+        for i in $(seq 1 30); do
+            local still=0
+            for pid in "${!killed[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then still=1; break; fi
+            done
+            [ "$still" -eq 0 ] && break
+            sleep 0.1
+        done
+        for pid in "${!killed[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null && warn "SIGKILLed unresponsive pid $pid"
+            fi
+        done
     fi
 }
 
@@ -204,6 +221,14 @@ info "Installed AppImage: $APPIMAGE_PATH"
 
 # Drop a local copy of uninstall.sh next to the AppImage so users don't need
 # internet to remove the install.
+#
+# Trust note: this fetch is UNSIGNED. uninstall.sh comes from the same
+# raw.githubusercontent.com root as install.sh itself — if a
+# repo-level compromise can substitute one, it can substitute both, so
+# adding signature verification here would be theatre. The signature
+# matters when the attack surface is "post-CI release-assets tampering"
+# (which it isn't for repo-tracked files like uninstall.sh). See
+# docs/release/desktop-signing-recovery.md "Trust model" section.
 step "Fetching uninstaller..."
 if curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/desktop/uninstall.sh" \
         -o "$INSTALL_DIR/uninstall.sh"; then

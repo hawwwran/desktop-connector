@@ -136,6 +136,24 @@ class AppImageInstallHookTests(unittest.TestCase):
         # Same Exec=, same path → hook should NOT touch the file again.
         self.assertEqual(self._desktop.stat().st_mtime_ns, marker_mtime)
 
+    def test_unchanged_dolphin_path_does_not_rewrite(self):
+        """Dolphin's Exec= line carries arguments (`$APPIMAGE --headless
+        --send=%f`). The unchanged-path check has to extract just the
+        executable token; otherwise it always compares unequal and the
+        file gets rewritten on every launch (noisy logs + violates the
+        documented idempotency invariant)."""
+        self._set_file_managers("dolphin")
+        self._run_with_appimage(self._appimage)
+        self.assertTrue(self._dolphin.exists())
+        first_mtime = self._dolphin.stat().st_mtime_ns
+        # Tweak the file so any rewrite would bump mtime.
+        self._dolphin.write_text(self._dolphin.read_text() + "# user-comment\n")
+        marker_mtime = self._dolphin.stat().st_mtime_ns
+        self.assertGreater(marker_mtime, first_mtime)
+        self._run_with_appimage(self._appimage)
+        # Same path → hook MUST NOT touch the Dolphin entry again.
+        self.assertEqual(self._dolphin.stat().st_mtime_ns, marker_mtime)
+
     def test_file_manager_scripts_created_when_present(self):
         self._set_file_managers("nautilus", "nemo", "dolphin")
         self._run_with_appimage(self._appimage)

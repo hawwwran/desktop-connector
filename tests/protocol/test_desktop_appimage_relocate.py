@@ -46,6 +46,9 @@ class _Sandbox(unittest.TestCase):
             # Force the print branch — modal would try to load GTK4 which
             # may conflict with pystray's GTK3 if anything pulled it in.
             mock.patch.object(sys.stdout, "isatty", return_value=True),
+            # Skip the 500 ms spawn-poll wait + post-kill 100 ms loop —
+            # tests can't rely on real wall-clock pacing.
+            mock.patch.object(relocate.time, "sleep"),
         ]
         for p in self._patches:
             p.start()
@@ -98,6 +101,8 @@ class RelocationTests(_Sandbox):
         with mock.patch.dict(os.environ, {"APPIMAGE": str(src)}, clear=False):
             os.environ.pop("DC_NO_RELOCATE", None)
             with mock.patch.object(relocate.subprocess, "Popen") as popen:
+                # Spawn-poll guard: poll() returning None means "still alive".
+                popen.return_value.poll.return_value = None
                 ret = relocate.relocate_to_canonical_if_needed()
         self.assertTrue(ret)
         # Canonical now exists with the same bytes
@@ -119,6 +124,7 @@ class RelocationTests(_Sandbox):
         with mock.patch.dict(os.environ, {"APPIMAGE": str(src)}), \
              mock.patch.object(relocate.sys, "argv", argv), \
              mock.patch.object(relocate.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None
             self.assertTrue(relocate.relocate_to_canonical_if_needed())
         cmd = popen.call_args.args[0]
         # argv[0] is replaced with canonical; rest preserved
@@ -130,7 +136,8 @@ class RelocationTests(_Sandbox):
         # Canonical dir doesn't exist yet
         self.assertFalse(self._canonical_dir.exists())
         with mock.patch.dict(os.environ, {"APPIMAGE": str(src)}), \
-             mock.patch.object(relocate.subprocess, "Popen"):
+             mock.patch.object(relocate.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = None
             self.assertTrue(relocate.relocate_to_canonical_if_needed())
         self.assertTrue(self._canonical_dir.is_dir())
 
@@ -155,6 +162,23 @@ class RelocationTests(_Sandbox):
         self.assertFalse(ret)
         # File got copied, even though we couldn't spawn — caller proceeds
         # with the in-process bootstrap, on the OLD path's mmap.
+        self.assertTrue(self._canonical.exists())
+
+    def test_relocate_returns_false_on_spawn_died_early(self):
+        """Spawn poll guard: if the canonical exits in its first 500 ms
+        (broken libc, missing FUSE, ENOEXEC), we report failure instead
+        of leaving the user with the modal saying 'Installation complete'
+        and no tray icon."""
+        src = self._home / "Downloads/desktop-connector-x86_64.AppImage"
+        self._make_source_appimage(src)
+        with mock.patch.dict(os.environ, {"APPIMAGE": str(src)}), \
+             mock.patch.object(relocate.subprocess, "Popen") as popen:
+            popen.return_value.poll.return_value = 127  # exited with rc=127
+            popen.return_value.returncode = 127
+            ret = relocate.relocate_to_canonical_if_needed()
+        self.assertFalse(ret)
+        # File still got copied — there's a usable canonical on disk for
+        # the next launch attempt; we just couldn't *run* it this time.
         self.assertTrue(self._canonical.exists())
 
 
@@ -277,6 +301,204 @@ class RelocateGatesOnPersistentMode(_Sandbox):
                 with mock.patch.object(relocate.subprocess, "Popen") as p:
                     self.assertFalse(relocate.relocate_to_canonical_if_needed())
                 p.assert_not_called()
+
+
+class FakeProcKillMatcherTests(unittest.TestCase):
+    """Lay down a fake /proc tree under a tmp dir, point relocate's
+    _PROC_ROOT at it, exercise the kill-matcher logic without mocking
+    it out wholesale. Catches regressions in less-tested environments
+    (containers with restricted procfs, processes whose environ isn't
+    readable, /proc entries that disappear mid-scan)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._proc = Path(self._tmp.name) / "proc"
+        self._proc.mkdir()
+        self._patches = [
+            mock.patch.object(relocate, "_PROC_ROOT", self._proc),
+            # Don't actually SIGTERM real processes; record calls.
+            mock.patch.object(relocate.os, "kill"),
+            # is_persistent_mode reads sys.argv; force "tray mode" for these tests.
+            mock.patch.object(relocate.sys, "argv", ["dc"]),
+            # Same time-skip as _Sandbox so the post-kill 3 s wait
+            # doesn't make tests slow.
+            mock.patch.object(relocate.time, "sleep"),
+            mock.patch.object(relocate.time, "monotonic", side_effect=[0, 999]),
+            # _pid_alive is called after the kill loop; with mocked kill
+            # the real pid never existed → kill(0) returns ESRCH → False.
+            # Force the helper to short-circuit on our fake pids.
+            mock.patch.object(relocate, "_pid_alive", return_value=False),
+        ]
+        for p in self._patches:
+            p.start()
+        self._kill_mock = relocate.os.kill
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        self._tmp.cleanup()
+
+    def _make_fake_proc(
+        self,
+        pid: int,
+        *,
+        cmdline: str = "python3.11\x00-m\x00src.main\x00",
+        environ_lines: list[str] | None = None,
+        cwd: str | None = None,
+        unreadable_environ: bool = False,
+    ):
+        d = self._proc / str(pid)
+        d.mkdir()
+        (d / "cmdline").write_bytes(cmdline.encode())
+        if not unreadable_environ:
+            env_blob = "\x00".join(environ_lines or [])
+            (d / "environ").write_bytes(env_blob.encode())
+        else:
+            # Simulate a process whose environ we can't read (other user,
+            # restricted procfs). Symlink at path that won't resolve.
+            (d / "environ").symlink_to("/nonexistent/proc/environ")
+        if cwd:
+            (d / "cwd").symlink_to(cwd)
+
+    # --- match shape ------------------------------------------------------
+
+    def test_match_by_appimage_env(self):
+        self._make_fake_proc(
+            42,
+            environ_lines=["APPIMAGE=/home/u/desktop-connector/foo.AppImage"],
+            cwd="/tmp/whatever",
+        )
+        relocate._stop_other_instances()
+        self.assertEqual(self._kill_mock.call_args_list[0].args[0], 42)
+        self.assertEqual(self._kill_mock.call_args_list[0].args[1], relocate.signal.SIGTERM)
+
+    def test_match_by_cwd_substring(self):
+        self._make_fake_proc(
+            43,
+            environ_lines=["HOME=/home/u"],  # no APPIMAGE
+            cwd="/home/u/.local/share/desktop-connector",
+        )
+        relocate._stop_other_instances()
+        self.assertTrue(
+            any(c.args[0] == 43 for c in self._kill_mock.call_args_list)
+        )
+
+    def test_no_match_without_src_main_cmdline(self):
+        # python process but doing something else — must not be killed.
+        self._make_fake_proc(
+            44,
+            cmdline="python3\x00-m\x00other.module\x00",
+            environ_lines=["APPIMAGE=/home/u/desktop-connector/foo.AppImage"],
+        )
+        relocate._stop_other_instances()
+        self.assertFalse(
+            any(c.args[0] == 44 for c in self._kill_mock.call_args_list)
+        )
+
+    def test_no_match_when_neither_env_nor_cwd_match(self):
+        self._make_fake_proc(
+            45,
+            environ_lines=["HOME=/home/u", "PATH=/usr/bin"],
+            cwd="/some/unrelated/dir",
+        )
+        relocate._stop_other_instances()
+        self.assertFalse(
+            any(c.args[0] == 45 for c in self._kill_mock.call_args_list)
+        )
+
+    def test_no_match_when_environ_unreadable_and_cwd_doesnt_match(self):
+        # Restricted procfs case: environ unreadable, cwd doesn't match.
+        # Must NOT be killed (we can't confirm it's ours).
+        self._make_fake_proc(
+            46,
+            unreadable_environ=True,
+            cwd="/home/u/somewhere-else",
+        )
+        relocate._stop_other_instances()
+        self.assertFalse(
+            any(c.args[0] == 46 for c in self._kill_mock.call_args_list)
+        )
+
+    def test_match_when_environ_unreadable_but_cwd_matches(self):
+        # Restricted environ but cwd is ours — still a match.
+        self._make_fake_proc(
+            47,
+            unreadable_environ=True,
+            cwd="/home/u/git/desktop-connector",
+        )
+        relocate._stop_other_instances()
+        self.assertTrue(
+            any(c.args[0] == 47 for c in self._kill_mock.call_args_list)
+        )
+
+    # --- skip filters -----------------------------------------------------
+
+    def test_skips_self_pid(self):
+        self_pid = os.getpid()
+        self._make_fake_proc(
+            self_pid,
+            environ_lines=["APPIMAGE=/x/desktop-connector/y.AppImage"],
+        )
+        relocate._stop_other_instances()
+        self.assertFalse(
+            any(c.args[0] == self_pid for c in self._kill_mock.call_args_list)
+        )
+
+    def test_skips_parent_pid(self):
+        parent_pid = os.getppid()
+        self._make_fake_proc(
+            parent_pid,
+            environ_lines=["APPIMAGE=/x/desktop-connector/y.AppImage"],
+        )
+        relocate._stop_other_instances()
+        self.assertFalse(
+            any(c.args[0] == parent_pid for c in self._kill_mock.call_args_list)
+        )
+
+    def test_skips_non_pid_proc_entries(self):
+        # /proc has lots of non-pid entries (self, sys, kcore, etc.) —
+        # those have non-numeric names and must be skipped without
+        # raising.
+        (self._proc / "self").mkdir()
+        (self._proc / "sys").mkdir()
+        (self._proc / "kallsyms").write_text("")
+        # Plus one real match to confirm the loop didn't bail early.
+        self._make_fake_proc(
+            48, environ_lines=["APPIMAGE=/x/desktop-connector/y.AppImage"]
+        )
+        relocate._stop_other_instances()
+        self.assertTrue(
+            any(c.args[0] == 48 for c in self._kill_mock.call_args_list)
+        )
+
+    def test_handles_cmdline_unreadable(self):
+        # Process exists but we can't read /proc/<pid>/cmdline (race +
+        # perms). Skip it.
+        d = self._proc / "49"
+        d.mkdir()
+        (d / "cmdline").symlink_to("/nonexistent/cmdline")
+        relocate._stop_other_instances()
+        # Just shouldn't crash; nothing was killed.
+        self.assertEqual(self._kill_mock.call_count, 0)
+
+    def test_kill_oserror_swallowed(self):
+        self._make_fake_proc(
+            50,
+            environ_lines=["APPIMAGE=/x/desktop-connector/y.AppImage"],
+        )
+        # Simulate the process disappearing between scan and kill.
+        self._kill_mock.side_effect = ProcessLookupError()
+        relocate._stop_other_instances()
+        # Single kill attempt was made; OSError was swallowed.
+        self.assertEqual(self._kill_mock.call_count, 1)
+
+    def test_proc_not_a_dir_returns_silently(self):
+        # Containers / minimal namespaces sometimes lack /proc.
+        with mock.patch.object(
+            relocate, "_PROC_ROOT", Path("/nonexistent-proc-root")
+        ):
+            relocate._stop_other_instances()
+        self.assertEqual(self._kill_mock.call_count, 0)
 
 
 if __name__ == "__main__":

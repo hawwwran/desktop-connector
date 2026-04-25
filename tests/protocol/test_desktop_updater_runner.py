@@ -96,29 +96,35 @@ class _RunUpdateTests(unittest.TestCase):
         proc.wait.return_value = returncode
         return proc
 
-    def test_returns_false_when_tool_missing(self):
+    def test_returns_failed_when_tool_missing(self):
         env = dict(os.environ)
         env.pop("APPDIR", None)
         with mock.patch.dict(os.environ, env, clear=True):
             statuses = []
-            self.assertFalse(update_runner.run_update(on_status=statuses.append))
+            outcome = update_runner.run_update(on_status=statuses.append)
+        self.assertEqual(outcome, update_runner.UpdateOutcome.FAILED)
         self.assertTrue(any("not bundled" in s.lower() for s in statuses))
 
-    def test_returns_false_when_appimage_missing(self):
+    def test_returns_failed_when_appimage_missing(self):
         # clear=True wipes os.environ first; we need APPDIR back so the
         # tool resolves, but APPIMAGE absent so the second check fails.
         with mock.patch.dict(
             os.environ, {"APPDIR": str(self._appdir)}, clear=True
         ):
             statuses = []
-            self.assertFalse(update_runner.run_update(on_status=statuses.append))
+            outcome = update_runner.run_update(on_status=statuses.append)
+        self.assertEqual(outcome, update_runner.UpdateOutcome.FAILED)
         self.assertTrue(any("appimage path" in s.lower() for s in statuses))
 
     def test_invokes_appimageupdatetool_with_extract_and_run(self):
         proc = self._stub_proc(stdout_lines=["Update completed"], returncode=0)
-        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc) as p:
-            ok = update_runner.run_update()
-        self.assertTrue(ok)
+        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc) as p, \
+             mock.patch.object(
+                 update_runner, "_file_sha256",
+                 side_effect=["sha-before", "sha-after"],  # different = updated
+             ):
+            outcome = update_runner.run_update()
+        self.assertEqual(outcome, update_runner.UpdateOutcome.UPDATED)
         cmd = p.call_args.args[0]
         self.assertEqual(cmd[0], str(self._tool))
         self.assertIn("--appimage-extract-and-run", cmd)
@@ -133,27 +139,58 @@ class _RunUpdateTests(unittest.TestCase):
         ]
         proc = self._stub_proc(stdout_lines=lines, returncode=0)
         statuses = []
-        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc):
+        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(
+                 update_runner, "_file_sha256",
+                 side_effect=["sha-before", "sha-after"],
+             ):
             update_runner.run_update(on_status=statuses.append)
         # Each non-empty line should reach the callback in order.
-        self.assertEqual(statuses[1:], lines)  # statuses[0] is "Starting update…"
+        self.assertEqual(statuses[1:1 + len(lines)], lines)
 
-    def test_returns_false_on_non_zero_exit(self):
+    def test_returns_failed_on_non_zero_exit(self):
         proc = self._stub_proc(stdout_lines=["Network error"], returncode=2)
         statuses = []
-        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc):
-            ok = update_runner.run_update(on_status=statuses.append)
-        self.assertFalse(ok)
+        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(update_runner, "_file_sha256", return_value="x"):
+            outcome = update_runner.run_update(on_status=statuses.append)
+        self.assertEqual(outcome, update_runner.UpdateOutcome.FAILED)
         self.assertTrue(any("Update failed (exit 2)" in s for s in statuses))
 
-    def test_returns_false_on_spawn_oserror(self):
+    def test_returns_failed_on_spawn_oserror(self):
         statuses = []
         with mock.patch.object(
             update_runner.subprocess, "Popen", side_effect=OSError("ENOENT")
-        ):
-            ok = update_runner.run_update(on_status=statuses.append)
-        self.assertFalse(ok)
+        ), mock.patch.object(update_runner, "_file_sha256", return_value="x"):
+            outcome = update_runner.run_update(on_status=statuses.append)
+        self.assertEqual(outcome, update_runner.UpdateOutcome.FAILED)
         self.assertTrue(any("Could not start" in s for s in statuses))
+
+    def test_returns_no_change_when_sha_unchanged(self):
+        """Tool exits 0 (success) but the AppImage on disk is byte-
+        identical — user was already on the latest version. Tray will
+        notify "Already up to date" and skip the relaunch."""
+        proc = self._stub_proc(stdout_lines=["No update available"], returncode=0)
+        statuses = []
+        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(
+                 update_runner, "_file_sha256",
+                 # Both pre and post return the same hash → NO_CHANGE.
+                 return_value="sha-identical",
+             ):
+            outcome = update_runner.run_update(on_status=statuses.append)
+        self.assertEqual(outcome, update_runner.UpdateOutcome.NO_CHANGE)
+        self.assertTrue(any("up to date" in s.lower() for s in statuses))
+
+    def test_treats_sha_read_failure_as_updated(self):
+        """If we couldn't sample the sha (file unreadable for some reason)
+        we conservatively assume an update happened — better to relaunch
+        unnecessarily than to silently swallow a real update."""
+        proc = self._stub_proc(stdout_lines=["Update completed"], returncode=0)
+        with mock.patch.object(update_runner.subprocess, "Popen", return_value=proc), \
+             mock.patch.object(update_runner, "_file_sha256", return_value=None):
+            outcome = update_runner.run_update()
+        self.assertEqual(outcome, update_runner.UpdateOutcome.UPDATED)
 
 
 class _DismissalTests(unittest.TestCase):
