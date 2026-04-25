@@ -27,6 +27,7 @@ from pathlib import Path
 
 from .bootstrap.app_version import get_app_version
 from .bootstrap.appimage_install_hook import ensure_appimage_integration
+from .bootstrap.appimage_migration import migrate_from_apt_pip_if_needed
 from .bootstrap.appimage_onboarding import OnboardingResult, run_onboarding_if_needed
 from .bootstrap.args import parse_startup_args, resolve_startup_mode
 from .bootstrap.startup_context import build_startup_context, rebuild_authenticated_api
@@ -67,6 +68,13 @@ def main() -> int:
     # drop a .no-autostart marker the install hook will honour.
     onboarding_result = run_onboarding_if_needed(
         context.config, headless=args.headless
+    )
+
+    # Migrate from a classic apt-pip install if one is present (P.4b).
+    # Must run before the install hook so the hook then sees the old
+    # autostart entry's stale Exec= and rewrites it to point at $APPIMAGE.
+    migrate_from_apt_pip_if_needed(
+        context.config, context.crypto, context.platform.notifications
     )
 
     # Drop / refresh AppImage desktop integration. No-op outside an
