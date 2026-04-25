@@ -323,10 +323,22 @@ cp "$SCRIPT_DIR/desktop-connector.desktop" "$APPDIR/desktop-connector.desktop"
 
 # Pack with appimagetool. --no-appstream skips an optional metainfo
 # validation we don't ship metainfo for yet (could revisit in P.7).
+#
+# UPDATE_INFORMATION (optional, set by the release workflow): embeds a
+# zsync source string into the AppImage's binary header so the bundled
+# `appimageupdatetool` knows where to fetch the matching .zsync. Without
+# this string, in-app update fails with exit 2 ("Could not find update
+# information"). Local builds leave it unset on purpose — those AppImages
+# don't auto-update.
+APPIMAGETOOL_ARGS=( --no-appstream )
+if [[ -n "${UPDATE_INFORMATION:-}" ]]; then
+  APPIMAGETOOL_ARGS+=( -u "$UPDATE_INFORMATION" )
+  echo "$PROG: embedding update info: $UPDATE_INFORMATION"
+fi
 OUTPUT_PATH="$OUTPUT_DIR/desktop-connector-x86_64.AppImage"
 rm -f -- "$OUTPUT_PATH"
 echo "$PROG: packing AppImage ..."
-ARCH=x86_64 "$TOOLS_DIR/appimagetool-x86_64.AppImage" --no-appstream "$APPDIR" "$OUTPUT_PATH"
+ARCH=x86_64 "$TOOLS_DIR/appimagetool-x86_64.AppImage" "${APPIMAGETOOL_ARGS[@]}" "$APPDIR" "$OUTPUT_PATH"
 
 sha256="$(sha256sum "$OUTPUT_PATH" | awk '{print $1}')"
 size="$(du -h "$OUTPUT_PATH" | awk '{print $1}')"

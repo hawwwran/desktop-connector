@@ -35,6 +35,7 @@ import enum
 import hashlib
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -131,8 +132,20 @@ def run_update(*, on_status: ProgressCallback | None = None) -> UpdateOutcome:
     # without FUSE — passing it unconditionally costs us ~1 s on FUSE-OK
     # systems too, but the user only does this once per release.
     cmd = [str(tool), "--appimage-extract-and-run", str(target)]
-    if not _stream_subprocess(cmd, on_status=on_status):
+    success, new_file = _stream_subprocess(cmd, on_status=on_status)
+    if not success:
         return UpdateOutcome.FAILED
+
+    # appimageupdatetool writes the new bytes at the .zsync's `Filename:`
+    # header, which is the published asset name (e.g.
+    # "desktop-connector-0.2.1-x86_64.AppImage") — not necessarily our
+    # canonical install path ("desktop-connector.AppImage"). When the two
+    # differ, the running file isn't actually replaced. Detect via the
+    # parsed "New file created" path and move it over $APPIMAGE so the
+    # install hook's stable path keeps pointing at the current bytes.
+    if new_file is not None and new_file.resolve() != target.resolve():
+        if not _relocate_new_file(new_file, target, on_status=on_status):
+            return UpdateOutcome.FAILED
 
     post_sha = _file_sha256(target)
     if pre_sha is not None and post_sha is not None and pre_sha == post_sha:
@@ -147,6 +160,40 @@ def run_update(*, on_status: ProgressCallback | None = None) -> UpdateOutcome:
         (post_sha or "?")[:12],
     )
     return UpdateOutcome.UPDATED
+
+
+def _relocate_new_file(new_file: Path, target: Path, *, on_status: ProgressCallback | None) -> bool:
+    """Move ``new_file`` onto ``target``, backing up the current target.
+
+    appimageupdatetool may write to a path different from the running
+    AppImage when the published asset name doesn't match the local
+    install filename. Linux's open-file semantics let us rename the
+    in-use target out from under the running process — its mmap'd
+    inode persists for the rest of the session; future launches load
+    the new bytes from the canonical path.
+    """
+    if not new_file.exists():
+        log.warning("update_runner.relocate_missing path=%s", new_file)
+        if on_status:
+            on_status(f"Update tool reported a new file at {new_file} but it's gone")
+        return False
+    backup = target.with_name(target.name + ".zs-old")
+    try:
+        if backup.exists():
+            backup.unlink()
+        target.rename(backup)
+        new_file.rename(target)
+        target.chmod(target.stat().st_mode | 0o111)
+    except OSError as e:
+        log.warning("update_runner.relocate_failed error=%s", e)
+        if on_status:
+            on_status(f"Update downloaded but couldn't replace running file: {e}")
+        return False
+    log.info(
+        "update_runner.relocated from=%s to=%s backup=%s",
+        new_file, target, backup,
+    )
+    return True
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -167,8 +214,19 @@ def _file_sha256(path: Path) -> str | None:
         return None
 
 
-def _stream_subprocess(cmd: list[str], *, on_status: ProgressCallback | None) -> bool:
-    """Run ``cmd``, forward each stdout line to ``on_status`` + log.info."""
+_NEW_FILE_RE = re.compile(r"New file created:\s*(.+)$")
+
+
+def _stream_subprocess(
+    cmd: list[str], *, on_status: ProgressCallback | None
+) -> tuple[bool, Path | None]:
+    """Run ``cmd``, forward each stdout line to ``on_status`` + log.info.
+
+    Returns ``(success, new_file_path)``. ``new_file_path`` is parsed from
+    the tool's "Update successful. New file created: <PATH>" line — the
+    caller uses it to relocate when appimageupdatetool wrote to a path
+    different from the running AppImage.
+    """
     try:
         proc = subprocess.Popen(
             cmd,
@@ -181,10 +239,11 @@ def _stream_subprocess(cmd: list[str], *, on_status: ProgressCallback | None) ->
         log.warning("update_runner.spawn_failed error=%s", e)
         if on_status:
             on_status(f"Could not start update tool: {e}")
-        return False
+        return False, None
 
     assert proc.stdout is not None
     last_line = ""
+    new_file: Path | None = None
     for line in proc.stdout:
         line = line.rstrip()
         if not line:
@@ -193,8 +252,11 @@ def _stream_subprocess(cmd: list[str], *, on_status: ProgressCallback | None) ->
         last_line = line
         if on_status:
             on_status(line)
+        m = _NEW_FILE_RE.search(line)
+        if m:
+            new_file = Path(m.group(1).strip())
     rc = proc.wait()
     log.info("update_runner.finished rc=%d last=%s", rc, last_line)
     if rc != 0 and on_status:
         on_status(f"Update failed (exit {rc})")
-    return rc == 0
+    return rc == 0, new_file

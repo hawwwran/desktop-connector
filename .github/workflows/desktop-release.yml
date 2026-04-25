@@ -93,6 +93,23 @@ jobs:
           echo "SOURCE_DATE_EPOCH=${SDE}" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH = ${SDE}  ($(date -u -d @${SDE}))"
 
+      - name: Pin UPDATE_INFORMATION for in-app update
+        # Embeds the zsync URL pattern into the AppImage's binary header
+        # so the bundled `appimageupdatetool` (P.6b) knows where to fetch
+        # the matching .zsync. Without this, "Install update" fails with
+        # exit 2 ("Could not find update information").
+        #
+        # We use `latest` even though the repo also tags `android/v*` —
+        # AppImageUpdate's GitHub provider only accepts literal `latest`
+        # (or an exact tag), no wildcards. Risk: a chronologically-newer
+        # android release shadows the latest desktop release and the asset
+        # glob 404s. Followup: maintain a rolling `desktop-latest` GitHub
+        # Release that mirrors each `desktop/v*` build, and switch the
+        # tag here to `desktop-latest` for stream isolation.
+        run: |
+          set -e
+          echo "UPDATE_INFORMATION=gh-releases-zsync|hawwwran|desktop-connector|latest|desktop-connector-*-x86_64.AppImage.zsync" >> "$GITHUB_ENV"
+
       - name: Build AppImage
         run: |
           set -e
