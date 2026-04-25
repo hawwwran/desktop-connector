@@ -1,0 +1,177 @@
+name: desktop-release
+
+# Triggered by `desktop/v*` tag pushes (matches install.sh:107's tag
+# convention and version.json's `desktop` field). manual workflow_dispatch
+# is also wired up so we can dry-run the build off a non-tag commit
+# without publishing — useful while iterating on the workflow itself.
+#
+# Plan: docs/plans/desktop-appimage-packaging-plan.md (P.5a). GPG
+# signing + SOURCE_DATE_EPOCH reproducibility pin lands in P.5b.
+
+on:
+  push:
+    tags:
+      - 'desktop/v*'
+  workflow_dispatch: {}  # manual trigger never publishes — see publish step's gate
+
+permissions:
+  contents: write  # required by softprops/action-gh-release to create the release
+
+jobs:
+  build:
+    name: Build + publish AppImage
+    # Plan called for ubuntu-22.04 (glibc 2.35 → wide-compat floor).
+    # Targeting ubuntu-24.04 because libadwaita 1.5+ and
+    # girepository-2.0 2.80+ ship in default apt there; on 22.04 we'd
+    # need a fragile backport PPA. Coverage floor on 24.04: Zorin 17+,
+    # Mint 22+, Pop! 24.04+, Debian 13+, Fedora 40+. Re-target 22.04
+    # when a stable backport path is identified — see plan's "Risks +
+    # mitigations" entry on the GTK4 bundling risk.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # Full history so future P.5b can resolve the tag's commit
+          # timestamp for SOURCE_DATE_EPOCH without a fetch hop.
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 python3-pip \
+            libgtk-4-dev libadwaita-1-dev \
+            libgirepository-2.0-dev libgirepository1.0-dev \
+            libwebkitgtk-6.0-dev \
+            libgtk-3-dev libayatana-appindicator3-dev \
+            libcairo2-dev \
+            libfuse3-3 fuse3 \
+            zsync \
+            file desktop-file-utils \
+            curl ca-certificates
+
+      - name: Verify host has compatible GTK4 + libadwaita
+        # Mirrors the pre-flight inside build-appimage.sh — fail fast with
+        # a clear message instead of letting the script error mid-bundling.
+        run: |
+          set -e
+          for pair in 'gtk4 4.10' 'libadwaita-1 1.5' 'girepository-2.0 2.80'; do
+            pkg="${pair% *}"
+            min="${pair#* }"
+            got=$(pkg-config --modversion "$pkg")
+            echo "$pkg: $got (need >= $min)"
+            pkg-config --atleast-version="$min" "$pkg" || {
+              echo "::error::host $pkg is $got but $min+ is required"; exit 1;
+            }
+          done
+
+      - name: Verify tag matches version.json
+        # Tag-triggered runs only — workflow_dispatch may run off a
+        # non-tagged commit deliberately for smoke testing.
+        if: github.ref_type == 'tag'
+        run: |
+          set -e
+          TAG_VERSION="${GITHUB_REF_NAME#desktop/v}"
+          JSON_VERSION=$(python3 -c 'import json; print(json.load(open("version.json"))["desktop"])')
+          if [ "$TAG_VERSION" != "$JSON_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} (=${TAG_VERSION}) does not match version.json desktop=${JSON_VERSION}. Bump version.json before tagging."
+            exit 1
+          fi
+          echo "tag and version.json agree on ${TAG_VERSION}"
+
+      - name: Build AppImage
+        run: |
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/artefacts"
+          ./desktop/packaging/appimage/build-appimage.sh \
+            --source="$GITHUB_WORKSPACE" \
+            --output="$GITHUB_WORKSPACE/artefacts"
+
+      - name: Resolve version + apply versioned name
+        id: artefact
+        run: |
+          set -e
+          VERSION=$(python3 -c 'import json; print(json.load(open("version.json"))["desktop"])')
+          OLD="$GITHUB_WORKSPACE/artefacts/desktop-connector-x86_64.AppImage"
+          NEW_NAME="desktop-connector-${VERSION}-x86_64.AppImage"
+          NEW="$GITHUB_WORKSPACE/artefacts/${NEW_NAME}"
+          mv "$OLD" "$NEW"
+          {
+            echo "version=${VERSION}"
+            echo "appimage_path=${NEW}"
+            echo "appimage_name=${NEW_NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test (--version)
+        run: |
+          set -e
+          OUT=$("${{ steps.artefact.outputs.appimage_path }}" --version)
+          echo "$OUT"
+          # The output should mention the version we just stamped on the file.
+          echo "$OUT" | grep -q "${{ steps.artefact.outputs.version }}"
+
+      - name: Smoke test (--headless, 5s)
+        # Boot the headless receiver, give it 5 s to survive past
+        # bootstrap + register attempt, then SIGTERM. We just want to
+        # confirm the AppImage runs end-to-end on this runner.
+        run: |
+          set +e
+          "${{ steps.artefact.outputs.appimage_path }}" \
+            --headless --config-dir=/tmp/dc-smoke &
+          PID=$!
+          sleep 5
+          kill -TERM $PID 2>/dev/null
+          wait $PID
+          # Exit code is non-zero (registration fails against no relay,
+          # or SIGTERM); only the "did the AppImage start running" check
+          # matters here.
+          echo "smoke ok"
+
+      - name: Generate zsync delta metadata
+        # Embeds the eventual download URL so AppImageUpdate can fetch
+        # binary deltas instead of the full AppImage on update (P.6).
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/artefacts"
+          ZSYNC_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${{ steps.artefact.outputs.appimage_name }}"
+          zsyncmake -u "$ZSYNC_URL" "${{ steps.artefact.outputs.appimage_name }}"
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/artefacts"
+          sha256sum \
+            "${{ steps.artefact.outputs.appimage_name }}" \
+            "${{ steps.artefact.outputs.appimage_name }}.zsync" \
+            > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artefacts (manual / dry-run builds)
+        # Anything that isn't a tag-push lands here — manual dispatch,
+        # or a tag-push that failed before the publish step. The
+        # AppImage becomes downloadable from the run summary instead.
+        if: github.event_name != 'push' || github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-connector-${{ steps.artefact.outputs.version }}-x86_64
+          path: |
+            artefacts/desktop-connector-*-x86_64.AppImage
+            artefacts/desktop-connector-*-x86_64.AppImage.zsync
+            artefacts/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Publish to GitHub Releases
+        # Tag PUSH events only — workflow_dispatch dispatched against a
+        # tag would also have ref_type=tag, which we explicitly do NOT
+        # want to publish (manual runs are dry-runs by convention).
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artefacts/desktop-connector-*-x86_64.AppImage
+            artefacts/desktop-connector-*-x86_64.AppImage.zsync
+            artefacts/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: true
