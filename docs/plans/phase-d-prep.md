@@ -1,8 +1,15 @@
 # Phase D preparation — `_devel_` server-side debug tool
 
-**Status: DESIGN — not implemented.** User will start the prep
-tomorrow; this doc is the checklist of what they need to have
-ready AND the scope of the PHP tool Claude will build.
+**Status: DONE (2026-04-22).** `_devel_` was deployed and used
+throughout Phase D (now LANDED — see
+`docs/plans/android-streaming-relay-plan.md`). Source still lives
+uncommitted under `temp/_devel_/`; the deployed `public/_devel_/`
+folder is intentionally retained on the live server in case a
+future plan needs the same observability surface (D.7 originally
+called for removal — that step is deferred, not cancelled).
+Kept as the historical record of the prep checklist + tool scope;
+see "Post-prep notes" below for the deployed URL gotcha and
+host-specific quirks.
 
 ## Why this exists
 

@@ -1,16 +1,26 @@
 # Phase D — Android streaming client
 
-**Status: DRAFT** — not yet started. Drops in the Android equivalent
-of the desktop Phase C streaming client. Server Phase A + B are
+**Status: LANDED** (all 9 sub-phases). Commits:
+- `93a8b00` — D.1 typed chunk outcomes + per-chunk ack + capability probe
+- `5896189` — D.2 Room v7→v8 migration + streaming fields + status vocabulary
+- `ac3902a` — D.3 recipient streaming receive loop
+- `8195830` — D.4a sender state machine
+- `f5f0a63` — D.4b SENDING transitions + tracker wiring
+- `0eaa20f` — D.5 HomeScreen UI + row actions
+- `fafee26` — D.6a streaming round-trip in `test_loop.sh`
+- `6a7083c` — D.6b recipient loop + unit tests
+- `cfb783b` — D.7 cleanup (CLAUDE.md entry + dead-code sweep + `streaming-improvement.md` status flip)
+
+Kept as a historical record of the breakdown. Server Phase A + B are
 landed and deployed at `https://hawwwran.com/SERVICES/desktop-connector/`;
 desktop Phase C is landed. Classic transfers still work byte-for-byte.
 
 Companion to `docs/plans/streaming-improvement.md` (protocol + invariants)
 and `docs/plans/desktop-streaming-relay-plan.md` (desktop mirror).
-Phase D sub-phases intentionally mirror C.1 → C.7 one-to-one so the
-review shape, ordering, and acceptance criteria match. Sub-phase
-boundaries are where we land commits and stop to confirm the
-phone's behaviour over ADB before moving on.
+Phase D sub-phases mirror C.1 → C.7 one-to-one so the review shape,
+ordering, and acceptance criteria match. Sub-phase boundaries are where
+commits landed and we stopped to confirm the phone's behaviour over ADB
+before moving on.
 
 Correctness over speed. Each sub-phase is independently landable. Old
 client (classic) + new server keeps working; new client (streaming) +
