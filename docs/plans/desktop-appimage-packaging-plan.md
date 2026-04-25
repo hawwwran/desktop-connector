@@ -904,6 +904,38 @@ Two sub-steps. P.7a rewrites `install.sh` / `uninstall.sh` /
 - A first-time visitor reading the README knows how to install
   in <1 minute of reading.
 
+### P.8 — Drop the pull_request iteration trigger
+
+**Estimated effort:** ~5 minutes. Last step before merge.
+
+**Context:** while iterating on P.5a → P.7 the
+`appimage-packaging` branch carries a temporary
+`pull_request: { branches: [main] }` trigger on
+`.github/workflows/desktop-release.yml` so every PR push exercises
+the build + smoke on a real `ubuntu-24.04` runner without
+publishing. The publish gate
+(`event_name == 'push' && ref_type == 'tag'`) blocks releases on
+PR events regardless, but the trigger itself should not survive
+the merge — once `main` is the AppImage path, every unrelated PR
+(docs typo, server-side fix, …) would otherwise spin up a
+~5-minute AppImage build for no benefit.
+
+**What changes:**
+
+1. Remove the `pull_request:` block from the workflow's `on:`
+   list, leaving only `push: { tags: [desktop/v*] }` and
+   `workflow_dispatch: {}`.
+
+**Acceptance:**
+
+- Opening a non-release PR no longer triggers `desktop-release`.
+- Pushing a `desktop/v*` tag still triggers a real release build.
+- `workflow_dispatch` against the default branch still works for
+  manual smoke runs.
+
+This is the final commit on the `appimage-packaging` branch
+before it merges to `main`.
+
 ---
 
 ## Versioning + release process
@@ -963,7 +995,7 @@ Two sub-steps. P.7a rewrites `install.sh` / `uninstall.sh` /
 
 ## Suggested order of operations
 
-The 7 phases (P.1 → P.7) split into 16 sub-steps. Each sub-step
+The 8 phases (P.1 → P.8) split into 17 sub-steps. Each sub-step
 is one focused sitting; you don't have to hold the whole plan in
 your head at any point.
 
@@ -989,6 +1021,11 @@ needs it. Neither has user-facing visibility until P.7.
 **P.7a → P.7b are the cutover.** After P.7b the old install.sh
 path is dead and the project's primary distribution shape is the
 AppImage.
+
+**P.8 is the final pre-merge cleanup** — drop the temporary
+`pull_request:` trigger that exercised the workflow on every PR
+during iteration. After P.8 the `appimage-packaging` branch is
+ready to merge to `main`.
 
 Each sub-step ends on a landable commit. Don't merge a sub-step
 until its acceptance criteria pass; don't merge a phase boundary
