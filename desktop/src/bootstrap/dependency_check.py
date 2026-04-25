@@ -7,6 +7,7 @@ platform-neutral as additional desktop runtimes are introduced.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from ..interfaces.shell import ShellBackend
@@ -20,7 +21,16 @@ def check_dependencies(*, headless: bool = False) -> list[tuple[str, str]]:
     that bundles only Python + pure-Python deps run --headless without
     tripping on missing system GTK4. qrcode stays in the always-on set
     since pairing can fire from any startup mode.
+
+    Inside an AppImage every dependency is pinned in the bundle — host
+    apt / pip state is irrelevant. Skip the whole dep check; if a
+    bundled import actually fails at runtime, that's a packaging bug
+    for us to fix in the build, not a missing system package the user
+    can install with `sudo apt install`.
     """
+    if os.environ.get("APPIMAGE"):
+        return []
+
     missing: list[tuple[str, str]] = []
 
     core = [
