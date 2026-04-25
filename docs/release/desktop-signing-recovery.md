@@ -50,7 +50,7 @@ gpg --import docs/release/desktop-signing.pub.asc
 # Per release: download AppImage + .sig + SHA256SUMS, then:
 gpg --verify desktop-connector-X.Y.Z-x86_64.AppImage.sig \
             desktop-connector-X.Y.Z-x86_64.AppImage
-gpg --verify SHA256SUMS.asc SHA256SUMS
+gpg --verify SHA256SUMS.sig SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 

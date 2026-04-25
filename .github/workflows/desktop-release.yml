@@ -89,6 +89,18 @@ jobs:
           fi
           echo "tag and version.json agree on ${TAG_VERSION}"
 
+      - name: Pin SOURCE_DATE_EPOCH from commit timestamp
+        # Reproducibility (P.5b): freezes mksquashfs / appimagetool
+        # timestamps to the committer date, so re-running the workflow on
+        # the same commit produces a byte-identical AppImage. appimagetool
+        # and mksquashfs both honour SOURCE_DATE_EPOCH automatically when
+        # set in the environment.
+        run: |
+          set -e
+          SDE=$(git log -1 --pretty=%ct HEAD)
+          echo "SOURCE_DATE_EPOCH=${SDE}" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH = ${SDE}  ($(date -u -d @${SDE}))"
+
       - name: Build AppImage
         run: |
           set -e
@@ -156,6 +168,66 @@ jobs:
             > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Sign artefacts with release GPG key
+        # Tag PUSH only. The signing key + passphrase live in repo secrets
+        # (DESKTOP_SIGNING_KEY, DESKTOP_SIGNING_PASS) — see
+        # docs/release/desktop-signing-recovery.md for the storage model.
+        # Imports the secret key into a fresh, throwaway GNUPGHOME so it
+        # doesn't pollute the runner's home, then produces detached binary
+        # signatures over the AppImage and SHA256SUMS, then verifies them
+        # against the public key shipped in the repo as a final sanity
+        # check before publish.
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          DESKTOP_SIGNING_KEY: ${{ secrets.DESKTOP_SIGNING_KEY }}
+          DESKTOP_SIGNING_PASS: ${{ secrets.DESKTOP_SIGNING_PASS }}
+          EXPECTED_FP: FBEFCEC13D7AEC0810812975491C904390F4E03B
+        run: |
+          set -e
+          if [ -z "${DESKTOP_SIGNING_KEY}" ] || [ -z "${DESKTOP_SIGNING_PASS}" ]; then
+            echo "::error::DESKTOP_SIGNING_KEY / DESKTOP_SIGNING_PASS secrets are not set"
+            exit 1
+          fi
+
+          export GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+
+          # Import the secret key. --batch suppresses prompts; --no-tty
+          # ensures GPG never tries to read from the (non-existent) tty.
+          printf '%s' "${DESKTOP_SIGNING_KEY}" | gpg --batch --import
+
+          FOUND=$(gpg --list-secret-keys --with-colons \
+            | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ "${FOUND}" != "${EXPECTED_FP}" ]; then
+            echo "::error::imported secret key fingerprint ${FOUND} does not match expected ${EXPECTED_FP}. Re-upload DESKTOP_SIGNING_KEY from the password manager."
+            exit 1
+          fi
+
+          cd "$GITHUB_WORKSPACE/artefacts"
+          APPIMAGE="${{ steps.artefact.outputs.appimage_name }}"
+
+          gpg --pinentry-mode loopback --batch --yes \
+              --passphrase "${DESKTOP_SIGNING_PASS}" \
+              --local-user "${EXPECTED_FP}" \
+              --detach-sign --output "${APPIMAGE}.sig" "${APPIMAGE}"
+          gpg --pinentry-mode loopback --batch --yes \
+              --passphrase "${DESKTOP_SIGNING_PASS}" \
+              --local-user "${EXPECTED_FP}" \
+              --detach-sign --output "SHA256SUMS.sig" "SHA256SUMS"
+
+          # Independent verify: import the public key shipped in the
+          # repo into a separate GNUPGHOME and check both signatures.
+          # Catches the case where the secret key in the GitHub secret
+          # has drifted from the public key in the repo.
+          VERIFY_HOME="$(mktemp -d)"
+          chmod 700 "$VERIFY_HOME"
+          GNUPGHOME="$VERIFY_HOME" gpg --import \
+            "$GITHUB_WORKSPACE/docs/release/desktop-signing.pub.asc"
+          GNUPGHOME="$VERIFY_HOME" gpg --verify "${APPIMAGE}.sig" "${APPIMAGE}"
+          GNUPGHOME="$VERIFY_HOME" gpg --verify "SHA256SUMS.sig" "SHA256SUMS"
+          rm -rf "$VERIFY_HOME" "$GNUPGHOME"
+          unset GNUPGHOME
+
       - name: Upload artefacts (manual / dry-run builds)
         # Anything that isn't a tag-push lands here — manual dispatch,
         # or a tag-push that failed before the publish step. The
@@ -179,7 +251,9 @@ jobs:
         with:
           files: |
             artefacts/desktop-connector-*-x86_64.AppImage
+            artefacts/desktop-connector-*-x86_64.AppImage.sig
             artefacts/desktop-connector-*-x86_64.AppImage.zsync
             artefacts/SHA256SUMS
+            artefacts/SHA256SUMS.sig
           fail_on_unmatched_files: true
           generate_release_notes: true
