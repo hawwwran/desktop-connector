@@ -226,21 +226,28 @@ DEPLOY_GTK_VERSION=4 \
 
 # Force-deploy libs that gi.require_version() loads lazily — linuxdeploy
 # only follows direct ELF deps, so anything Python pulls in via GI at
-# runtime needs to be added by hand. Three groups:
+# runtime needs to be added by hand. Four groups:
 #
-#  - WebKit  (find-phone Leaflet WebView)
-#  - GTK3    (pystray tray backend imports Gtk-3.0 internally)
-#  - libayatana-appindicator3  (pystray's _appindicator backend)
+#  - WebKit       (find-phone Leaflet WebView)
+#  - GTK3         (pystray tray backend imports Gtk-3.0 internally)
+#  - AppIndicator (pystray's _appindicator backend)
+#  - libadwaita   (loaded via `gi.require_version("Adw", "1")` — needs
+#                  to be the SAME build as our bundled libgtk-4 or
+#                  rendering ends up half-styled when the bundled
+#                  GTK4 is mixed with the host's libadwaita and the
+#                  two builds disagree on theme + styling internals)
 #
 # The typelibs themselves (Gtk-3.0.typelib, AyatanaAppIndicator3-0.1.typelib,
-# WebKit-6.0.typelib) are already pulled in by linuxdeploy-plugin-gtk's
-# typelib sweep; we only need to ensure the matching .so files arrive.
-echo "$PROG: bundling WebKit + GTK3 + AppIndicator ..."
+# WebKit-6.0.typelib, Adw-1.typelib) are already pulled in by
+# linuxdeploy-plugin-gtk's typelib sweep; we only need to ensure the
+# matching .so files arrive.
+echo "$PROG: bundling WebKit + GTK3 + AppIndicator + libadwaita ..."
 HOST_LIBDIR="/usr/lib/x86_64-linux-gnu"
 ld_lib_args=()
 for lib in \
   libwebkitgtk-6.0.so.4 libjavascriptcoregtk-6.0.so.1 \
   libgtk-3.so.0 libayatana-appindicator3.so.1 \
+  libadwaita-1.so.0 \
 ; do
   if [[ -f "$HOST_LIBDIR/$lib" ]]; then
     ld_lib_args+=( --library "$HOST_LIBDIR/$lib" )

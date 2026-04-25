@@ -53,6 +53,29 @@ if [[ -d "$APPDIR/apprun-hooks" ]]; then
   done
 fi
 
+# linuxdeploy-plugin-gtk's hook is conservative on theming: it forces
+# GTK_THEME=Adwaita ("Custom themes are broken" — its words) and
+# GDK_BACKEND=x11 regardless of session. That makes the AppImage look
+# stark white-Adwaita on systems with Zorin / Yaru / Pop! GTK themes,
+# and forces XWayland on Wayland sessions (worse fractional scaling +
+# extra D-Bus hops). Override after the hook runs:
+#
+#   - Drop GTK_THEME so libadwaita/GTK4 read `gtk-theme` from
+#     org.gnome.desktop.interface and find the matching CSS at
+#     $XDG_DATA_DIRS/themes/<name>/gtk-4.0/gtk.css (system /usr/share
+#     is in XDG_DATA_DIRS via the line above).
+#   - Drop GDK_BACKEND so GTK4 picks Wayland on Wayland sessions, X11
+#     elsewhere. Bundled GTK4 4.10+ + libadwaita 1.5+ are stable on
+#     both backends; the hook's "crashes on Wayland" warning predates
+#     that and applied to GTK3 + older builds.
+#   - Extend GSETTINGS_SCHEMA_DIR to include system schema dirs. The
+#     hook hard-pins it to $APPDIR-only; without system schemas the
+#     dconf settings backend can't deserialise system-only settings
+#     (custom Zorin/Yaru schemas, third-party apps' schemas).
+unset GTK_THEME
+unset GDK_BACKEND
+export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas:/usr/share/glib-2.0/schemas:/usr/local/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
+
 PYTHON_BIN="$PYTHONHOME/bin/python3.11"
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "AppRun: bundled Python not found at $PYTHON_BIN" >&2

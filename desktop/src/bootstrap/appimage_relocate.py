@@ -172,16 +172,33 @@ def _do_install_steps(running_path: Path, canonical: Path, set_status) -> bool:
 
     set_status(f"Installing to {canonical.parent}…")
     canonical.parent.mkdir(parents=True, exist_ok=True)
+
+    # Atomic replacement: copy the new bytes into a sibling tmp file,
+    # chmod, then `rename` over the canonical. Direct overwrite would
+    # trip ETXTBSY ("Text file busy") when the canonical is still
+    # mapped by the just-SIGTERM'd process — the kernel forbids opening
+    # a running executable for WRITE, but allows unlink/rename. Doing
+    # it through a tmp file means there's never a moment where
+    # canonical doesn't exist on disk either.
+    tmp = canonical.with_name(canonical.name + ".new")
     try:
-        shutil.copy2(running_path, canonical)
+        shutil.copy2(running_path, tmp)
     except OSError as e:
         log.warning("appimage.relocate.copy_failed error=%s", e)
         set_status(f"Failed: {e}")
         return False
     try:
-        canonical.chmod(0o755)
+        tmp.chmod(0o755)
     except OSError as e:
+        tmp.unlink(missing_ok=True)
         log.warning("appimage.relocate.chmod_failed error=%s", e)
+        set_status(f"Failed: {e}")
+        return False
+    try:
+        tmp.replace(canonical)
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        log.warning("appimage.relocate.rename_failed error=%s", e)
         set_status(f"Failed: {e}")
         return False
     try:
