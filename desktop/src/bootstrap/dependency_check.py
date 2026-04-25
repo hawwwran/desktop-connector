@@ -7,6 +7,8 @@ platform-neutral as additional desktop runtimes are introduced.
 
 from __future__ import annotations
 
+import sys
+
 from ..interfaces.shell import ShellBackend
 from ..platform.compose import compose_desktop_platform
 
@@ -55,12 +57,14 @@ def check_dependencies(*, headless: bool = False) -> list[tuple[str, str]]:
         missing.append(("Pillow-ImageTk", "sudo apt install python3-pil.imagetk"))
 
     # GTK4/libadwaita check forks a subprocess to avoid GTK3/4 conflict
-    # with pystray in the main process.
+    # with pystray in the main process. Uses sys.executable so an AppImage
+    # run probes its own bundled Python (where GTK4 lives in $APPDIR/usr/),
+    # not the host's python3 which may be a different version with no `gi`.
     import subprocess as _sp
 
     result = _sp.run(
         [
-            "python3",
+            sys.executable,
             "-c",
             "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw",
         ],

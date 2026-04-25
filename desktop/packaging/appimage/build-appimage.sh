@@ -218,17 +218,26 @@ LINUXDEPLOY="$LINUXDEPLOY_BIN" \
 DEPLOY_GTK_VERSION=4 \
   bash "$TOOLS_DIR/linuxdeploy-plugin-gtk.sh" --appdir "$APPDIR"
 
-# WebKit (libwebkitgtk-6.0) — linuxdeploy-plugin-gtk doesn't pick this
-# up because Python loads it lazily via `gi.require_version("WebKit",
-# "6.0")` at runtime, not via ELF dependency. Force-deploy the .so files
-# via linuxdeploy --library, then copy the helper processes (WebKit
-# launches its own sandbox subprocesses) and typelibs by hand.
-echo "$PROG: bundling WebKit ..."
-WEBKIT_LIBDIR="/usr/lib/x86_64-linux-gnu"
+# Force-deploy libs that gi.require_version() loads lazily — linuxdeploy
+# only follows direct ELF deps, so anything Python pulls in via GI at
+# runtime needs to be added by hand. Three groups:
+#
+#  - WebKit  (find-phone Leaflet WebView)
+#  - GTK3    (pystray tray backend imports Gtk-3.0 internally)
+#  - libayatana-appindicator3  (pystray's _appindicator backend)
+#
+# The typelibs themselves (Gtk-3.0.typelib, AyatanaAppIndicator3-0.1.typelib,
+# WebKit-6.0.typelib) are already pulled in by linuxdeploy-plugin-gtk's
+# typelib sweep; we only need to ensure the matching .so files arrive.
+echo "$PROG: bundling WebKit + GTK3 + AppIndicator ..."
+HOST_LIBDIR="/usr/lib/x86_64-linux-gnu"
 ld_lib_args=()
-for lib in libwebkitgtk-6.0.so.4 libjavascriptcoregtk-6.0.so.1; do
-  if [[ -f "$WEBKIT_LIBDIR/$lib" ]]; then
-    ld_lib_args+=( --library "$WEBKIT_LIBDIR/$lib" )
+for lib in \
+  libwebkitgtk-6.0.so.4 libjavascriptcoregtk-6.0.so.1 \
+  libgtk-3.so.0 libayatana-appindicator3.so.1 \
+; do
+  if [[ -f "$HOST_LIBDIR/$lib" ]]; then
+    ld_lib_args+=( --library "$HOST_LIBDIR/$lib" )
   fi
 done
 if (( ${#ld_lib_args[@]} > 0 )); then
@@ -238,7 +247,7 @@ fi
 # Helper process binaries (WebKitWebProcess / WebKitNetworkProcess /
 # WebKitGPUProcess + the injected bundle .so). WEBKIT_EXEC_PATH (set
 # by AppRun) points WebKit at this dir.
-WEBKIT_HELPER_SRC="$WEBKIT_LIBDIR/webkitgtk-6.0"
+WEBKIT_HELPER_SRC="$HOST_LIBDIR/webkitgtk-6.0"
 WEBKIT_HELPER_DST="$APPDIR/usr/lib/webkitgtk-6.0"
 if [[ -d "$WEBKIT_HELPER_SRC" ]]; then
   mkdir -p -- "$WEBKIT_HELPER_DST"
@@ -249,8 +258,8 @@ fi
 GIR_DST="$APPDIR/usr/lib/girepository-1.0"
 mkdir -p -- "$GIR_DST"
 for typelib in WebKit-6.0.typelib WebKitWebProcessExtension-6.0.typelib; do
-  if [[ -f "$WEBKIT_LIBDIR/girepository-1.0/$typelib" ]]; then
-    cp "$WEBKIT_LIBDIR/girepository-1.0/$typelib" "$GIR_DST/"
+  if [[ -f "$HOST_LIBDIR/girepository-1.0/$typelib" ]]; then
+    cp "$HOST_LIBDIR/girepository-1.0/$typelib" "$GIR_DST/"
   fi
 done
 
