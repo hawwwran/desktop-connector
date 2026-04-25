@@ -3,13 +3,15 @@
 Linux AppImage packaging for the desktop client. See
 `docs/plans/desktop-appimage-packaging-plan.md` for the full plan.
 
-**Status:** P.2a. `build-appimage.sh` produces a runnable ~107 MB
-AppImage with bundled Python + pure-Python deps + GTK4 + libadwaita +
-WebKitGTK 6.0. All four subprocess windows (send-files, settings,
-history, find-phone) render with bundled libs. Subprocess
-re-entry via `$APPIMAGE` lands in P.2b — until then `tray.py` /
-`windows.py` still spawn `python3 -m src.windows`, which only works in
-the dev tree.
+**Status:** P.3 complete. `build-appimage.sh` produces a runnable
+~111 MB AppImage with bundled Python + pure-Python deps + GTK4 +
+libadwaita + WebKitGTK 6.0 + GTK3 + libayatana-appindicator3 (for
+pystray's tray backend). All four GTK4 subprocess windows (send-files,
+settings, history, find-phone) render with bundled libs and re-enter
+the AppImage via `$APPIMAGE`. First launch drops a `.desktop` menu
+entry, autostart entry, and Nautilus / Nemo / Dolphin "Send to Phone"
+scripts pointing at `$APPIMAGE`; all rewrite-on-move and respect user
+deletion (see `src/bootstrap/appimage_install_hook.py`).
 
 ## Layout
 

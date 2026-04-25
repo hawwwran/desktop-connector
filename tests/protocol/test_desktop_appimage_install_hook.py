@@ -31,13 +31,24 @@ class AppImageInstallHookTests(unittest.TestCase):
         (self._home / ".config/autostart").mkdir(parents=True, exist_ok=True)
         self._desktop = self._home / ".local/share/applications/desktop-connector.desktop"
         self._autostart = self._home / ".config/autostart/desktop-connector.desktop"
+        self._nautilus = self._home / ".local/share/nautilus/scripts/Send to Phone"
+        self._nemo = self._home / ".local/share/nemo/scripts/Send to Phone"
+        self._dolphin = (
+            self._home / ".local/share/kservices5/ServiceMenus/desktop-connector-send.desktop"
+        )
 
         self._patches = [
             mock.patch.object(hook, "DESKTOP_ENTRY_PATH", self._desktop),
             mock.patch.object(hook, "AUTOSTART_ENTRY_PATH", self._autostart),
+            mock.patch.object(hook, "NAUTILUS_SCRIPT_PATH", self._nautilus),
+            mock.patch.object(hook, "NEMO_SCRIPT_PATH", self._nemo),
+            mock.patch.object(hook, "DOLPHIN_SERVICE_PATH", self._dolphin),
         ]
         for p in self._patches:
             p.start()
+        # By default no file managers exist; individual tests opt in.
+        self._which_patch = mock.patch.object(hook.shutil, "which", return_value=None)
+        self._which_mock = self._which_patch.start()
 
         self._config_dir = self._home / ".config/desktop-connector"
         self._config_dir.mkdir(parents=True, exist_ok=True)
@@ -49,9 +60,15 @@ class AppImageInstallHookTests(unittest.TestCase):
         self._appimage.chmod(0o755)
 
     def tearDown(self):
+        self._which_patch.stop()
         for p in self._patches:
             p.stop()
         self._tmp.cleanup()
+
+    def _set_file_managers(self, *names):
+        """Make hook.shutil.which see the named binaries as installed."""
+        names_set = set(names)
+        self._which_mock.side_effect = lambda x: f"/usr/bin/{x}" if x in names_set else None
 
     def _run_with_appimage(self, appimage_path):
         with mock.patch.dict(os.environ, {"APPIMAGE": str(appimage_path)}):
@@ -118,6 +135,51 @@ class AppImageInstallHookTests(unittest.TestCase):
         self._run_with_appimage(self._appimage)
         # Same Exec=, same path → hook should NOT touch the file again.
         self.assertEqual(self._desktop.stat().st_mtime_ns, marker_mtime)
+
+    def test_file_manager_scripts_created_when_present(self):
+        self._set_file_managers("nautilus", "nemo", "dolphin")
+        self._run_with_appimage(self._appimage)
+        self.assertTrue(self._nautilus.exists())
+        self.assertTrue(self._nemo.exists())
+        self.assertTrue(self._dolphin.exists())
+        self.assertTrue(self._nautilus.stat().st_mode & 0o111)
+        self.assertIn(str(self._appimage), self._nautilus.read_text())
+        self.assertIn(
+            f"Exec={self._appimage} --headless --send=%f",
+            self._dolphin.read_text(),
+        )
+
+    def test_file_manager_scripts_skipped_when_absent(self):
+        self._set_file_managers()
+        self._run_with_appimage(self._appimage)
+        self.assertFalse(self._nautilus.exists())
+        self.assertFalse(self._nemo.exists())
+        self.assertFalse(self._dolphin.exists())
+
+    def test_only_installed_file_manager_gets_script(self):
+        self._set_file_managers("nemo")
+        self._run_with_appimage(self._appimage)
+        self.assertFalse(self._nautilus.exists())
+        self.assertTrue(self._nemo.exists())
+        self.assertFalse(self._dolphin.exists())
+
+    def test_file_manager_script_rewrites_on_move(self):
+        self._set_file_managers("nautilus", "dolphin")
+        self._run_with_appimage(self._appimage)
+        moved = self._home / "Apps2/desktop-connector-x86_64.AppImage"
+        moved.parent.mkdir(parents=True, exist_ok=True)
+        moved.write_text("#!/bin/bash\n")
+        moved.chmod(0o755)
+        self._run_with_appimage(moved)
+        self.assertIn(str(moved), self._nautilus.read_text())
+        self.assertIn(f"Exec={moved}", self._dolphin.read_text())
+
+    def test_file_manager_removed_stays_gone(self):
+        self._set_file_managers("nautilus")
+        self._run_with_appimage(self._appimage)
+        self._nautilus.unlink()
+        self._run_with_appimage(self._appimage)
+        self.assertFalse(self._nautilus.exists())
 
     def test_missing_appimage_path_skips(self):
         # $APPIMAGE points to a path that doesn't exist (race during update)
