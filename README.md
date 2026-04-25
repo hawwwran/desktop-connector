@@ -6,7 +6,9 @@ The relay server never sees your data — all content is encrypted on-device bef
 
 <p align="center">
   <b>Android</b><br/>
-  <img src="images/android-app.jpg" alt="Android app" width="200"/>
+  <img src="images/android-app-dark.jpg" alt="Android app - Dark" width="200"/>
+  &nbsp;&nbsp;
+  <img src="images/android-app-light.jpg" alt="Android app - Light" width="200"/>
 </p>
 
 <p align="center">
@@ -16,6 +18,8 @@ The relay server never sees your data — all content is encrypted on-device bef
   <img src="images/desktop-app-send-to-phone.png" alt="Send to Phone" width="280"/>
   &nbsp;&nbsp;
   <img src="images/desktop-app-history.png" alt="Transfer History" width="280"/>
+  &nbsp;&nbsp;
+  <img src="images/find-my-phone.png" alt="Find my phone" width="280"/>
 </p>
 
 ## Features
