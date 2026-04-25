@@ -7,47 +7,74 @@ platform-neutral as additional desktop runtimes are introduced.
 
 from __future__ import annotations
 
+import os
+import sys
+
 from ..interfaces.shell import ShellBackend
 from ..platform.compose import compose_desktop_platform
 
-def check_dependencies() -> list[tuple[str, str]]:
-    """Check all required dependencies. Returns list of missing ones."""
+def check_dependencies(*, headless: bool = False) -> list[tuple[str, str]]:
+    """Check required dependencies for the planned startup mode.
+
+    Headless receivers (no tray, no GUI pairing, no subprocess windows)
+    skip pystray / tkinter / PIL.ImageTk / GTK4. Lets a minimal AppImage
+    that bundles only Python + pure-Python deps run --headless without
+    tripping on missing system GTK4. qrcode stays in the always-on set
+    since pairing can fire from any startup mode.
+
+    Inside an AppImage every dependency is pinned in the bundle — host
+    apt / pip state is irrelevant. Skip the whole dep check; if a
+    bundled import actually fails at runtime, that's a packaging bug
+    for us to fix in the build, not a missing system package the user
+    can install with `sudo apt install`.
+    """
+    if os.environ.get("APPIMAGE"):
+        return []
+
     missing: list[tuple[str, str]] = []
 
-    checks = [
+    core = [
         ("nacl", "PyNaCl", "python3-nacl or: pip install PyNaCl"),
         ("cryptography", "cryptography", "pip install cryptography"),
         ("requests", "requests", "pip install requests"),
         ("PIL", "Pillow", "python3-pil or: pip install Pillow"),
-        ("pystray", "pystray", "pip install --user --break-system-packages pystray"),
         ("qrcode", "qrcode", "pip install --user --break-system-packages qrcode"),
     ]
-
-    for module, name, fix in checks:
+    for module, name, fix in core:
         try:
             __import__(module)
         except ImportError:
             missing.append((name, fix))
 
-    # Check tkinter
+    if headless:
+        return missing
+
+    try:
+        __import__("pystray")
+    except ImportError:
+        missing.append(
+            ("pystray", "pip install --user --break-system-packages pystray")
+        )
+
     try:
         import tkinter  # noqa: F401
     except ImportError:
         missing.append(("tkinter", "sudo apt install python3-tk"))
 
-    # Check PIL.ImageTk
     try:
         from PIL import ImageTk  # noqa: F401
     except ImportError:
         missing.append(("Pillow-ImageTk", "sudo apt install python3-pil.imagetk"))
 
-    # Check GTK4/libadwaita (for subprocess windows) — test in a subprocess
-    # to avoid GTK3/4 conflict with pystray in the main process
+    # GTK4/libadwaita check forks a subprocess to avoid GTK3/4 conflict
+    # with pystray in the main process. Uses sys.executable so an AppImage
+    # run probes its own bundled Python (where GTK4 lives in $APPDIR/usr/),
+    # not the host's python3 which may be a different version with no `gi`.
     import subprocess as _sp
 
     result = _sp.run(
         [
-            "python3",
+            sys.executable,
             "-c",
             "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw",
         ],

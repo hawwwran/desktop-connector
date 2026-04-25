@@ -38,16 +38,24 @@ The relay server never sees your data — all content is encrypted on-device bef
 
 ## Install (Linux Desktop)
 
+A single signed AppImage. No system Python, no apt packages, no setup.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
 ```
 
-Then run `desktop-connector` or find it in your app menu.
+The installer fetches the latest release from GitHub, GPG-verifies the signature against the public key shipped in this repo, places the AppImage at `~/.local/share/desktop-connector/`, and runs it once. A welcome dialog asks for your relay server URL.
+
+**Prefer to download manually?** Grab the latest `desktop-connector-*-x86_64.AppImage` from [Releases](../../releases), `chmod +x`, double-click. Verify with `gpg --verify` against [`docs/release/desktop-signing.pub.asc`](docs/release/desktop-signing.pub.asc) (fingerprint `FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`).
+
+Future updates land via the in-app updater — tray menu → "Check for updates" pulls only the changed blocks (~few hundred KB), no full re-download.
 
 To uninstall:
 ```bash
 ~/.local/share/desktop-connector/uninstall.sh
 ```
+
+**For contributors / dev work**, `install-from-source.sh` in this repo installs the source tree via apt + pip instead of the AppImage. See [`desktop/README.md`](desktop/README.md).
 
 ## Install (Android)
 

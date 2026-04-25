@@ -1,329 +1,268 @@
-#!/bin/bash
-set -e
-
-# Desktop Connector — Linux installer
-# Idempotent: safe to run multiple times (install, update, repair)
+#!/usr/bin/env bash
+# Desktop Connector — AppImage installer.
+#
+# Bootstraps a fresh install:
+#   1. Fetch the public release-signing key from this repo.
+#   2. Resolve the latest desktop/v* release on GitHub.
+#   3. Download the AppImage + its detached .sig.
+#   4. GPG-verify the signature against the public key.
+#   5. Place the AppImage at ~/.local/share/desktop-connector/.
+#   6. Launch it once. The AppImage's first-launch hook drops the
+#      .desktop entry, autostart entry, and file-manager scripts; the
+#      onboarding dialog asks for your relay server URL.
+#
+# Idempotent: re-running upgrades by replacing the AppImage and the
+# in-app updater (P.6b) takes over future updates automatically.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
-#   curl -fsSL ... | bash -s -- --version=0.1.1
+#
+# Trust model: install.sh and the public key both come from
+# raw.githubusercontent.com/hawwwran/desktop-connector/main. If the
+# repo is compromised, both are malicious — verify the public key
+# fingerprint against multiple sources before trusting an installer
+# (the recovery doc at docs/release/desktop-signing-recovery.md, the
+# README, the project's social-media presence, etc.):
+#
+#   FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B
+#
+# The signature itself protects against post-CI tampering of the
+# AppImage on releases.github.com.
+#
+# To install from the source tree (contributors / dev work) instead of
+# the AppImage, see install-from-source.sh in this folder.
+set -euo pipefail
 
-APP_NAME="desktop-connector"
-INSTALL_VERSION=""
+REPO="hawwwran/desktop-connector"
+INSTALL_DIR="$HOME/.local/share/desktop-connector"
+APPIMAGE_PATH="$INSTALL_DIR/desktop-connector.AppImage"
+PUBKEY_URL="https://raw.githubusercontent.com/${REPO}/main/docs/release/desktop-signing.pub.asc"
+EXPECTED_FP="FBEFCEC13D7AEC0810812975491C904390F4E03B"
 
-# Parse arguments
-for arg in "$@"; do
-    case "$arg" in
-        --version=*) INSTALL_VERSION="${arg#--version=}" ;;
-    esac
-done
-INSTALL_DIR="$HOME/.local/share/$APP_NAME"
-BIN_DIR="$HOME/.local/bin"
-DESKTOP_FILE="$HOME/.local/share/applications/$APP_NAME.desktop"
-AUTOSTART_FILE="$HOME/.config/autostart/$APP_NAME.desktop"
-REPO_URL="https://github.com/hawwwran/desktop-connector"
-
-# Colors
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BOLD='\033[1m'
-NC='\033[0m'
-
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[✓]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 step()  { echo -e "${BOLD}[·]${NC} $1"; }
 fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
-# --- Checks ---
-
-if [ "$(id -u)" = "0" ]; then
-    fail "Do not run as root. The installer will use sudo when needed."
-fi
-
-echo ""
-echo -e "${BOLD}Desktop Connector — Installer${NC}"
-echo ""
-
-# --- System packages ---
-
-SYSTEM_PKGS="python3 python3-pip python3-tk python3-pil.imagetk python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-ayatanaappindicator3-0.1 xclip"
-MISSING_PKGS=""
-
-for pkg in $SYSTEM_PKGS; do
-    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-        MISSING_PKGS="$MISSING_PKGS $pkg"
+# Stop any running Desktop Connector instance that points at our canonical
+# AppImage path or the canonical install dir. Matches the python child by
+# its APPIMAGE env var (correct even when it's running off a FUSE mount at
+# /tmp/.mount_*/), and the legacy apt-pip child by its CWD. Avoids the
+# brittle `pkill -f 'python3 -m src.main'` pattern, which would also match
+# unrelated dev-tree runs (and sometimes our own shell when the literal
+# string appears in argv).
+stop_existing_instance() {
+    local target="$1"
+    local install_dir
+    install_dir=$(dirname "$target")
+    local pid match cwd
+    # Track killed PIDs to dedupe across the two passes — an AppImage
+    # instance is two processes (runtime wrapper + python child) that
+    # would otherwise both match and inflate the visible count to 2 for
+    # what the user sees as one tray icon.
+    declare -A killed=()
+    for pid in $(pgrep -f 'python.*-m src\.main' 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        match=0
+        if [ -r "/proc/$pid/environ" ] && \
+           tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+             | grep -qx "APPIMAGE=$target"; then
+            match=1
+        else
+            cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+            case "$cwd" in
+                "$install_dir"|"$install_dir"/*) match=1 ;;
+            esac
+        fi
+        if [ "$match" -eq 1 ]; then
+            kill -TERM "$pid" 2>/dev/null && killed[$pid]=1
+        fi
+    done
+    # AppImage runtime wrapper (matches by argv = canonical path).
+    for pid in $(pgrep -f "$target" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        [ -n "${killed[$pid]:-}" ] && continue
+        kill -TERM "$pid" 2>/dev/null && killed[$pid]=1
+    done
+    if [ "${#killed[@]}" -gt 0 ]; then
+        info "Stopped existing Desktop Connector"
+        # Wait up to 3 s (30 × 100 ms) for the SIGTERM'd processes to exit.
+        # Then SIGKILL anything still alive — a frozen tray + blocked GTK
+        # loop won't honour SIGTERM but rename+spawn need it gone before
+        # they're safe.
+        local i
+        for i in $(seq 1 30); do
+            local still=0
+            for pid in "${!killed[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then still=1; break; fi
+            done
+            [ "$still" -eq 0 ] && break
+            sleep 0.1
+        done
+        for pid in "${!killed[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null && warn "SIGKILLed unresponsive pid $pid"
+            fi
+        done
     fi
-done
+}
 
-if [ -n "$MISSING_PKGS" ]; then
-    step "Installing system packages:$MISSING_PKGS"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq $MISSING_PKGS
-    info "System packages installed"
-else
-    info "System packages already installed"
+# --- pre-flight ----------------------------------------------------------------
+
+[ "$(id -u)" = "0" ] && fail "Don't run this as root — installs to your \$HOME."
+command -v curl    >/dev/null || fail "curl is required. sudo apt install curl"
+command -v gpg     >/dev/null || fail "gpg is required. sudo apt install gnupg"
+command -v python3 >/dev/null || fail "python3 is required for parsing the GitHub Releases JSON."
+
+echo
+echo -e "${BOLD}Desktop Connector — AppImage installer${NC}"
+echo
+
+# --- resolve latest desktop/v* release -----------------------------------------
+
+step "Resolving latest desktop release on GitHub..."
+RELEASES_JSON=$(curl -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/${REPO}/releases?per_page=30") \
+    || fail "GitHub Releases API unreachable."
+
+# Pick the most recent non-draft, non-prerelease desktop/v* release that
+# has both an .AppImage asset AND a matching .AppImage.sig. python3 -c
+# (not "python3 -") so stdin carries the JSON and the script lives in
+# argv — they otherwise compete for /dev/stdin.
+RESULT=$(printf '%s' "$RELEASES_JSON" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for r in data:
+    if r.get("draft") or r.get("prerelease"):
+        continue
+    tag = r.get("tag_name", "")
+    if not tag.startswith("desktop/v"):
+        continue
+    appimage_url = ""
+    sig_url = ""
+    for a in r.get("assets", []):
+        n = a.get("name", "")
+        if n.endswith(".AppImage"):
+            appimage_url = a.get("browser_download_url", "")
+        elif n.endswith(".AppImage.sig"):
+            sig_url = a.get("browser_download_url", "")
+    if appimage_url and sig_url:
+        print(tag)
+        print(appimage_url)
+        print(sig_url)
+        break
+') || fail "Could not parse GitHub Releases response."
+
+TAG=$(printf '%s' "$RESULT" | sed -n 1p)
+APPIMAGE_URL=$(printf '%s' "$RESULT" | sed -n 2p)
+SIG_URL=$(printf '%s' "$RESULT" | sed -n 3p)
+
+[ -n "$TAG" ] && [ -n "$APPIMAGE_URL" ] && [ -n "$SIG_URL" ] \
+    || fail "No signed desktop/v* release found on GitHub yet."
+info "Found release: $TAG"
+
+# --- tmp area ------------------------------------------------------------------
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# --- public key ----------------------------------------------------------------
+
+step "Fetching release-signing public key..."
+curl -fsSL "$PUBKEY_URL" -o "$TMP/pubkey.asc" \
+    || fail "Could not fetch $PUBKEY_URL"
+
+GOT_FP=$(gpg --show-keys --with-colons "$TMP/pubkey.asc" 2>/dev/null \
+    | awk -F: '/^fpr:/ {print $10; exit}')
+[ "$GOT_FP" = "$EXPECTED_FP" ] \
+    || fail "Public key fingerprint mismatch.\n    got:      $GOT_FP\n    expected: $EXPECTED_FP\n    Either the key was rotated or the repo has been tampered with — STOP and verify against docs/release/desktop-signing-recovery.md."
+info "Public key fingerprint matches ($EXPECTED_FP)"
+
+# Throwaway GNUPGHOME so we don't pollute the user's keyring with our key.
+export GNUPGHOME="$TMP/gnupg"
+mkdir -p "$GNUPGHOME"
+chmod 700 "$GNUPGHOME"
+gpg --batch --import "$TMP/pubkey.asc" >/dev/null 2>&1 \
+    || fail "Could not import public key into $GNUPGHOME."
+
+# --- download AppImage + signature --------------------------------------------
+
+step "Downloading AppImage..."
+curl -fSL --progress-bar "$APPIMAGE_URL" -o "$TMP/desktop-connector.AppImage" \
+    || fail "AppImage download failed."
+
+step "Downloading signature..."
+curl -fsSL "$SIG_URL" -o "$TMP/desktop-connector.AppImage.sig" \
+    || fail "Signature download failed."
+
+# --- verify --------------------------------------------------------------------
+
+step "Verifying signature..."
+if ! gpg --batch --verify \
+        "$TMP/desktop-connector.AppImage.sig" \
+        "$TMP/desktop-connector.AppImage" 2> "$TMP/verify.log"; then
+    cat "$TMP/verify.log"
+    fail "Signature verification failed — refusing to install."
 fi
+info "Signature OK."
 
-# --- Python packages ---
-
-PY_PKGS="pystray qrcode PyNaCl cryptography requests Pillow"
-MISSING_PY=""
-
-for pkg in $PY_PKGS; do
-    if ! python3 -c "import importlib; importlib.import_module('${pkg%%[>=]*}')" >/dev/null 2>&1; then
-        # Some package names differ from import names
-        case $pkg in
-            PyNaCl)      python3 -c "import nacl" 2>/dev/null || MISSING_PY="$MISSING_PY $pkg" ;;
-            Pillow)      python3 -c "import PIL" 2>/dev/null || MISSING_PY="$MISSING_PY $pkg" ;;
-            *)           MISSING_PY="$MISSING_PY $pkg" ;;
-        esac
-    fi
-done
-
-if [ -n "$MISSING_PY" ]; then
-    step "Installing Python packages:$MISSING_PY"
-    pip3 install --user --break-system-packages $MISSING_PY 2>/dev/null || \
-    pip3 install --user $MISSING_PY
-    info "Python packages installed"
-else
-    info "Python packages already installed"
-fi
-
-# --- Download / update app ---
+# --- place ---------------------------------------------------------------------
 
 mkdir -p "$INSTALL_DIR"
 
-# Detect if running from inside the repo (local install) or via curl (remote install)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Replace any prior AppImage at the canonical path. Move-then-mark-executable
+# is atomic from the launcher's perspective: even if a prior instance is
+# running, its mmap'd file descriptor stays valid until that process exits.
+mv -f "$TMP/desktop-connector.AppImage" "$APPIMAGE_PATH"
+chmod +x "$APPIMAGE_PATH"
+info "Installed AppImage: $APPIMAGE_PATH"
 
-if [ -f "$SCRIPT_DIR/src/main.py" ]; then
-    step "Installing from local files..."
-    cp -r "$SCRIPT_DIR/." "$INSTALL_DIR/"
-    info "App files installed from local copy"
-elif [ -n "$INSTALL_VERSION" ]; then
-    step "Downloading version ${INSTALL_VERSION}..."
-    TMP=$(mktemp -d)
-    RELEASE_URL="$REPO_URL/releases/download/desktop/v${INSTALL_VERSION}/desktop-connector-${INSTALL_VERSION}.tar.gz"
-    if curl -fsSL "$RELEASE_URL" | tar xz -C "$INSTALL_DIR"; then
-        info "Installed v${INSTALL_VERSION} from release"
-    else
-        echo -e "${RED}Failed to download v${INSTALL_VERSION}. Check the version exists.${NC}"
-        rm -rf "$TMP"
-        exit 1
-    fi
-    rm -rf "$TMP"
+# Drop a local copy of uninstall.sh next to the AppImage so users don't need
+# internet to remove the install.
+#
+# Trust note: this fetch is UNSIGNED. uninstall.sh comes from the same
+# raw.githubusercontent.com root as install.sh itself — if a
+# repo-level compromise can substitute one, it can substitute both, so
+# adding signature verification here would be theatre. The signature
+# matters when the attack surface is "post-CI release-assets tampering"
+# (which it isn't for repo-tracked files like uninstall.sh). See
+# docs/release/desktop-signing-recovery.md "Trust model" section.
+step "Fetching uninstaller..."
+if curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/desktop/uninstall.sh" \
+        -o "$INSTALL_DIR/uninstall.sh"; then
+    chmod +x "$INSTALL_DIR/uninstall.sh"
+    info "Installed uninstaller: $INSTALL_DIR/uninstall.sh"
 else
-    step "Downloading latest from main..."
-    TMP=$(mktemp -d)
-    if command -v git >/dev/null 2>&1; then
-        git clone --quiet --depth 1 "$REPO_URL.git" "$TMP/repo" 2>/dev/null && \
-            cp -r "$TMP/repo/desktop/." "$INSTALL_DIR/" || \
-        { curl -fsSL "$REPO_URL/archive/refs/heads/main.tar.gz" | tar xz -C "$TMP" --strip-components=1 && \
-          cp -r "$TMP/desktop/." "$INSTALL_DIR/"; }
-    else
-        curl -fsSL "$REPO_URL/archive/refs/heads/main.tar.gz" | tar xz -C "$TMP" --strip-components=1
-        cp -r "$TMP/desktop/." "$INSTALL_DIR/"
-    fi
-    rm -rf "$TMP"
-    info "App files installed from GitHub"
+    warn "Could not fetch uninstall.sh — to remove later, re-curl from this repo."
 fi
 
-# --- Brand icon (hicolor theme) ---
+# --- launch --------------------------------------------------------------------
 
-ICON_SRC="$INSTALL_DIR/assets/brand"
-if [ -d "$ICON_SRC" ]; then
-    for size in 48 64 128 256; do
-        SRC="$ICON_SRC/desktop-connector-$size.png"
-        DEST_DIR="$HOME/.local/share/icons/hicolor/${size}x${size}/apps"
-        if [ -f "$SRC" ]; then
-            mkdir -p "$DEST_DIR"
-            cp -f "$SRC" "$DEST_DIR/$APP_NAME.png"
-        fi
-    done
-    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-        gtk-update-icon-cache -q -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
-    fi
-    info "Brand icon installed (hicolor)"
-fi
+# Stop any prior instance so the new AppImage's tray icon takes over the slot.
+stop_existing_instance "$APPIMAGE_PATH"
 
-# --- Create launcher ---
-
-mkdir -p "$BIN_DIR"
-
-cat > "$BIN_DIR/$APP_NAME" << 'EOF'
-#!/bin/bash
-cd "$HOME/.local/share/desktop-connector"
-exec python3 -m src.main "$@"
-EOF
-chmod +x "$BIN_DIR/$APP_NAME"
-
-# Ensure ~/.local/bin is on PATH
-if ! echo "$PATH" | grep -q "$BIN_DIR"; then
-    warn "$BIN_DIR is not on your PATH. Add this to your ~/.bashrc:"
-    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
-
-info "Launcher installed: $BIN_DIR/$APP_NAME"
-
-# --- Desktop entry (app menu) ---
-
-mkdir -p "$(dirname "$DESKTOP_FILE")"
-
-cat > "$DESKTOP_FILE" << EOF
-[Desktop Entry]
-Type=Application
-Name=Desktop Connector
-Comment=E2E encrypted file and clipboard sharing
-Exec=$BIN_DIR/$APP_NAME
-Icon=$APP_NAME
-Terminal=false
-Categories=Network;Utility;
-StartupNotify=false
-StartupWMClass=com.desktopconnector.Desktop
-EOF
-
-info "App menu entry installed"
-
-# --- File manager "Send to Phone" integration ---
-
-FM_INSTALLED=false
-
-# Nautilus (GNOME, Ubuntu, Zorin)
-if command -v nautilus >/dev/null 2>&1; then
-    NAUTILUS_SCRIPTS="$HOME/.local/share/nautilus/scripts"
-    mkdir -p "$NAUTILUS_SCRIPTS"
-    cp "$INSTALL_DIR/nautilus-send-to-phone.py" "$NAUTILUS_SCRIPTS/Send to Phone"
-    chmod +x "$NAUTILUS_SCRIPTS/Send to Phone"
-    info "Nautilus: Scripts → 'Send to Phone' installed"
-    FM_INSTALLED=true
-fi
-
-# Nemo (Cinnamon, Mint)
-if command -v nemo >/dev/null 2>&1; then
-    NEMO_SCRIPTS="$HOME/.local/share/nemo/scripts"
-    mkdir -p "$NEMO_SCRIPTS"
-    cp "$INSTALL_DIR/nautilus-send-to-phone.py" "$NEMO_SCRIPTS/Send to Phone"
-    chmod +x "$NEMO_SCRIPTS/Send to Phone"
-    info "Nemo: Scripts → 'Send to Phone' installed"
-    FM_INSTALLED=true
-fi
-
-# Dolphin (KDE)
-if command -v dolphin >/dev/null 2>&1; then
-    DOLPHIN_SERVICES="$HOME/.local/share/kservices5/ServiceMenus"
-    mkdir -p "$DOLPHIN_SERVICES"
-    cat > "$DOLPHIN_SERVICES/desktop-connector-send.desktop" << DOLPHIN_EOF
-[Desktop Entry]
-Type=Service
-ServiceTypes=KonqPopupMenu/Plugin
-MimeType=application/octet-stream;
-Actions=sendToPhone
-
-[Desktop Action sendToPhone]
-Name=Send to Phone
-Icon=$APP_NAME
-Exec=$BIN_DIR/$APP_NAME --headless --send=%f
-DOLPHIN_EOF
-    info "Dolphin: 'Send to Phone' service menu installed"
-    FM_INSTALLED=true
-fi
-
-if [ "$FM_INSTALLED" = false ]; then
-    warn "No supported file manager found (Nautilus, Nemo, Dolphin). Right-click integration skipped."
-fi
-
-# --- Autostart (optional, don't overwrite if user removed it) ---
-
-if [ ! -f "$AUTOSTART_FILE" ] && [ ! -f "$HOME/.config/$APP_NAME/.no-autostart" ]; then
-    mkdir -p "$(dirname "$AUTOSTART_FILE")"
-    cat > "$AUTOSTART_FILE" << EOF
-[Desktop Entry]
-Type=Application
-Name=Desktop Connector
-Exec=$BIN_DIR/$APP_NAME
-Icon=$APP_NAME
-Hidden=false
-NoDisplay=false
-X-GNOME-Autostart-enabled=true
-StartupWMClass=com.desktopconnector.Desktop
-EOF
-    info "Autostart enabled (remove $AUTOSTART_FILE to disable)"
-else
-    info "Autostart entry unchanged"
-fi
-
-# --- Server URL ---
-
-CONFIG_DIR="$HOME/.config/$APP_NAME"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-mkdir -p "$CONFIG_DIR"
-
-if [ -f "$CONFIG_FILE" ] && grep -q "server_url" "$CONFIG_FILE"; then
-    CURRENT_URL=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('server_url',''))" 2>/dev/null)
-    info "Server URL already set: $CURRENT_URL"
-else
-    echo ""
-    echo -e "${BOLD}Where is your relay server?${NC}"
-    echo -e "  Example: https://example.com/SERVICES/desktop-connector"
-    echo -e "  Press Enter to skip (you can set it later in Settings)"
-    echo ""
-    read -r -p "Server URL: " SERVER_URL
-    if [ -n "$SERVER_URL" ]; then
-        # Validate: must respond to /api/health
-        SERVER_URL="${SERVER_URL%/}"
-        step "Checking server..."
-        if curl -fsSL --max-time 5 "$SERVER_URL/api/health" 2>/dev/null | grep -q '"ok"'; then
-            info "Server is reachable"
-        else
-            warn "Server did not respond at $SERVER_URL/api/health"
-            read -r -p "Save anyway? [y/N] " confirm
-            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-                warn "Skipped — set the server URL in Settings after starting the app"
-                SERVER_URL=""
-            fi
-        fi
-    fi
-    if [ -n "$SERVER_URL" ]; then
-        if [ -f "$CONFIG_FILE" ]; then
-            python3 -c "
-import json
-c = json.load(open('$CONFIG_FILE'))
-c['server_url'] = '$SERVER_URL'
-json.dump(c, open('$CONFIG_FILE', 'w'), indent=2)
-"
-        else
-            echo "{\"server_url\": \"$SERVER_URL\"}" > "$CONFIG_FILE"
-        fi
-        info "Server URL set to: $SERVER_URL"
-    else
-        warn "Skipped — set the server URL in Settings after starting the app"
-    fi
-fi
-
-# --- Done ---
-
-echo ""
-echo -e "${GREEN}${BOLD}Installation complete!${NC}"
-echo ""
-echo -e "  Starts automatically on login."
-echo -e "  Uninstall:  ${BOLD}$INSTALL_DIR/uninstall.sh${NC}"
-echo ""
-
-# --- Clear Python cache ---
-
-find "$INSTALL_DIR" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null
-find "$INSTALL_DIR" -name "*.pyc" -delete 2>/dev/null
-info "Cleared Python cache"
-
-# --- Start the app ---
-
-# Kill any existing instance
-pkill -f "desktop-connector" 2>/dev/null || true
-pkill -f "python3 -m src.main" 2>/dev/null || true
-sleep 1
-
-step "Starting Desktop Connector..."
-nohup "$BIN_DIR/$APP_NAME" > /dev/null 2>&1 &
+echo
+echo -e "${BOLD}Starting Desktop Connector...${NC}"
+nohup "$APPIMAGE_PATH" > /dev/null 2>&1 &
 disown
-info "Running in background (check system tray)"
+sleep 1
+info "Running in background. Look for the tray icon in your panel."
+
+echo
+echo -e "${BOLD}First launch?${NC}"
+echo "  - A welcome dialog will ask for your relay server URL."
+echo "  - The AppImage drops its menu entry, autostart, and file-manager"
+echo "    'Send to Phone' scripts on first run automatically."
+echo "  - Future updates land via the in-app updater (tray menu →"
+echo "    'Check for updates'); no need to re-run this installer."
+echo
+echo -e "${BOLD}Don't see a tray icon?${NC}"
+echo "  GNOME needs the AppIndicator extension:"
+echo "    sudo apt install gnome-shell-extension-appindicator"
+echo "    (then enable it in Extensions and log out/in)"
+echo "  Cinnamon, KDE, Mate, XFCE — should work out of the box."
+echo
+echo "Uninstall: $INSTALL_DIR/uninstall.sh"
+echo

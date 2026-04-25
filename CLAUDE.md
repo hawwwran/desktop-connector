@@ -30,18 +30,21 @@ For commands too small for the full transfer pipeline. `fasttrack_messages` tabl
 # Server
 php -S 0.0.0.0:4441 -t server/public/
 
-# Desktop (deps: python3-tk, pystray, qrcode, PyNaCl, cryptography, requests)
+# Desktop dev tree (deps: python3-tk, pystray, qrcode, PyNaCl, cryptography, requests)
 cd desktop && python3 -m src.main              # tray
 cd desktop && python3 -m src.main --headless   # headless receiver
 cd desktop && python3 -m src.main --send=PATH  # one-shot send
 cd desktop && python3 -m src.main --pair       # pairing flow
 
 # GTK4 windows (must be subprocesses)
-python3 -m src.windows {send-files|settings|history|find-phone} --config-dir=~/.config/desktop-connector
+python3 -m src.windows {send-files|settings|history|pairing|find-phone} --config-dir=~/.config/desktop-connector
 
 # Android
 export ANDROID_HOME=/opt/android-sdk
 cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
+
+# Desktop AppImage (release shape — packaging plan: docs/plans/desktop-appimage-packaging-plan.md)
+./desktop/packaging/appimage/build-appimage.sh --source=$PWD --output=/tmp/dc-out
 
 # Full integration loop
 ./test_loop.sh
@@ -49,11 +52,15 @@ cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-de
 
 ## Installation (desktop)
 
-Idempotent one-liner:
+The release shape is a **signed AppImage** fetched from GitHub Releases — single self-contained file, no host apt/pip touched, in-app updates via the tray menu. The dev-tree apt+pip path stays available as `install-from-source.sh` for contributors.
+
+Idempotent installer:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
 ```
-Installs apt + pip deps, drops app into `~/.local/share/desktop-connector/`, creates `~/.local/bin/desktop-connector` + app menu entry + autostart, installs file manager "Send to Phone" (Nautilus/Nemo/Dolphin). Uninstall: `~/.local/share/desktop-connector/uninstall.sh`. Startup dependency checker shows a GTK4 "Install" dialog if anything is missing.
+Fetches the latest `desktop/v*` release, GPG-verifies against `docs/release/desktop-signing.pub.asc` (fingerprint `FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`), drops the AppImage at `~/.local/share/desktop-connector/desktop-connector.AppImage`, runs it once. The AppImage's first-launch hook (`bootstrap/appimage_install_hook.py`) writes the `.desktop` menu entry + autostart entry + Nautilus/Nemo "Send to Phone" scripts + Dolphin service menu, all pointing at `$APPIMAGE`. The onboarding dialog (`bootstrap/appimage_onboarding.py`) asks for the relay server URL on a fresh machine. P.4b's migration removes any prior install-from-source layout cleanly. Uninstall: `~/.local/share/desktop-connector/uninstall.sh`. Releases are signed + reproducibly built by `.github/workflows/desktop-release.yml` on `desktop/v*` tag push; see `docs/release/desktop-signing-recovery.md` for the signing key's storage / rotation runbook.
+
+Contributors can use `install-from-source.sh` (the old apt+pip+`src/`-copy path) — drops `src/` into `~/.local/share/desktop-connector/`, creates `~/.local/bin/desktop-connector` shell wrapper, runs `python3 -m src.main`. Bouncing between AppImage and source-tree installs is safe (last install wins for system integration; `~/.config/desktop-connector/` is shared and preserved).
 
 ## Server deployment
 
@@ -186,10 +193,22 @@ server/
   migrations/001_initial.sql
 
 desktop/
-  install.sh  uninstall.sh  nautilus-send-to-phone.py
+  install.sh                           # AppImage installer: fetch + GPG-verify + place + run (release path)
+  install-from-source.sh               # apt+pip dev-tree path (contributors / older distros)
+  uninstall.sh  nautilus-send-to-phone.py
+  packaging/appimage/                  # build-appimage.sh, AppRun.sh, recipe + vendored linuxdeploy
+  assets/brand/                        # bundled icon + sparkle PNGs (tray composites these)
   src/
-    main.py                            # thin entrypoint: deps → args → logging → context → register → pair? → dispatch
-    bootstrap/                         # args, dependency_check, logging_setup, startup_context
+    main.py                            # thin entrypoint: relocate → enforce-single → deps → args → logging → context → onboard → migrate → install hook → register → pair? → dispatch
+    bootstrap/                         # cross-cutting startup pieces
+      args.py logging_setup.py app_version.py startup_context.py dependency_check.py
+      appimage_relocate.py             # self-install + single-instance enforcement on AppImage launch
+      appimage_install_hook.py         # writes .desktop / autostart / Nautilus / Nemo / Dolphin entries pointing at $APPIMAGE
+      appimage_migration.py            # surgical removal of apt-pip artefacts on first AppImage launch (preserves AppImage + uninstall.sh)
+      appimage_onboarding.py           # first-launch GTK4 dialog (subprocess via windows.py); commit_onboarding_settings + probe_server are unit-testable
+    updater/                           # in-app updater (AppImage installs only)
+      version_check.py                 # GitHub Releases JSON poll + 24h cache + If-Modified-Since; UpdateInfo dataclass; dismissal helpers
+      update_runner.py                 # wraps appimageupdatetool; UpdateOutcome.{UPDATED,NO_CHANGE,FAILED} via sha256 compare
     runners/                           # registration, pairing, send, receiver (tray/headless)
     interfaces/                        # Protocols: clipboard, dialogs, notifications, shell
     backends/linux/                    # Linux implementations of the 4 Protocols
@@ -199,8 +218,8 @@ desktop/
     poller.py                          # poll/download/decrypt/delivery; platform via self.platform.*
     history.py                         # JSON history (50 items); TransferStatus enum
     pairing.py                         # QR + tkinter pairing window
-    tray.py                            # pystray; spawns GTK4 windows as subprocesses
-    windows.py                         # GTK4/libadwaita windows (send-files, settings, history, find-phone)
+    tray.py                            # pystray; spawns GTK4 windows as subprocesses; update menu items + 24h check thread
+    windows.py                         # GTK4/libadwaita windows (send-files, settings, history, pairing, find-phone, onboarding)
     clipboard.py  dialogs.py  notifications.py   # Linux helpers (wl-copy/xclip, zenity, notify-send)
 
 android/app/src/main/kotlin/com/desktopconnector/
@@ -215,10 +234,14 @@ android/app/src/main/kotlin/com/desktopconnector/
   ui/transfer/             # TransferViewModel
 
 test_loop.sh                          # full closed-loop integration test
-tests/protocol/                       # test_desktop_message_contract, test_server_contract, test_platform_contract
+tests/protocol/                       # test_desktop_message_contract, test_server_contract, test_platform_contract,
+                                      #   test_desktop_appimage_{install_hook,migration,onboarding,relocate},
+                                      #   test_desktop_updater_{version_check,runner}
 docs/protocol.compatibility.md  docs/protocol.examples.md  docs/diagnostics.events.md
 docs/plans/                           # local working notes (refactor + bugfix plans)
+docs/release/                         # AppImage signing pubkey + recovery / trust-model runbook
 docs/visual-identity-guide.md
+.github/workflows/desktop-release.yml # CI: build + sign + publish AppImage on desktop/v* tag push
 version.json
 ```
 

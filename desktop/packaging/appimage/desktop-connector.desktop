@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Desktop Connector
+Comment=E2E encrypted file and clipboard sharing
+Exec=AppRun
+Icon=desktop-connector
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=false
+StartupWMClass=com.desktopconnector.Desktop

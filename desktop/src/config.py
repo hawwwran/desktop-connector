@@ -150,6 +150,15 @@ class Config:
         self.save()
 
     @property
+    def appimage_install_hook_done(self) -> bool:
+        return bool(self._data.get("appimage_install_hook_done", False))
+
+    @appimage_install_hook_done.setter
+    def appimage_install_hook_done(self, value: bool) -> None:
+        self._data["appimage_install_hook_done"] = bool(value)
+        self.save()
+
+    @property
     def is_registered(self) -> bool:
         return self.auth_token is not None and self.device_id is not None
 
