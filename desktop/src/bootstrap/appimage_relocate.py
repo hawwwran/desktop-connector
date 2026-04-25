@@ -103,9 +103,13 @@ def enforce_single_instance() -> None:
 def relocate_to_canonical_if_needed() -> bool:
     """Return True iff the caller should ``return 0`` (relocation happened).
 
+    Drives an Adw progress modal (or terminal print, depending on
+    ``sys.stdout`` being a TTY) over the kill / copy / spawn steps so
+    GUI launches aren't silent. A desktop notification fires regardless
+    so the user gets feedback even without watching the modal.
+
     Side effects: writes the canonical AppImage file, spawns the
-    canonical AppImage as a detached child. Caller is expected to have
-    already invoked :func:`enforce_single_instance`.
+    canonical AppImage as a detached child.
     """
     if not is_persistent_mode():
         return False
@@ -126,16 +130,59 @@ def relocate_to_canonical_if_needed() -> bool:
         "appimage.relocate.detected from=%s to=%s", running_path, canonical
     )
 
+    # Kick off a desktop notification immediately so GUI launches see
+    # *something* even before the modal renders. notify-send is
+    # widely-installed and lingers ~5 s on most desktops.
+    _notify(
+        "Installing Desktop Connector",
+        f"Setting up at {canonical}",
+    )
+
+    def steps(set_status):
+        return _do_install_steps(running_path, canonical, set_status)
+
+    if sys.stdout.isatty():
+        # Terminal launch: print plain status text, no modal.
+        success = steps(lambda text: print(f"  [·] {text}", flush=True))
+    else:
+        # GUI launch: progress modal. Falls back to silent if GTK4 fails.
+        success = _show_install_modal(canonical, steps)
+
+    if sys.stdout.isatty():
+        if success:
+            print(
+                f"Installed Desktop Connector at {canonical}.\n"
+                "Tray launching in background — look for the icon in your panel.",
+                flush=True,
+            )
+        else:
+            print("Installation failed — see logs above.", flush=True)
+    return success
+
+
+def _do_install_steps(running_path: Path, canonical: Path, set_status) -> bool:
+    """Kill any existing canonical → copy → spawn. Returns True on success.
+
+    Calls ``set_status(text)`` between steps so a wrapping UI can paint
+    progress. Idempotent w.r.t. the kill step (safe even if
+    enforce_single_instance has already run).
+    """
+    set_status("Stopping running Desktop Connector…")
+    _stop_other_instances()
+
+    set_status(f"Installing to {canonical.parent}…")
     canonical.parent.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copy2(running_path, canonical)
     except OSError as e:
         log.warning("appimage.relocate.copy_failed error=%s", e)
+        set_status(f"Failed: {e}")
         return False
     try:
         canonical.chmod(0o755)
     except OSError as e:
         log.warning("appimage.relocate.chmod_failed error=%s", e)
+        set_status(f"Failed: {e}")
         return False
     try:
         size = canonical.stat().st_size
@@ -143,13 +190,12 @@ def relocate_to_canonical_if_needed() -> bool:
         size = -1
     log.info("appimage.relocate.copied bytes=%d", size)
 
+    set_status("Starting Desktop Connector…")
     args = [str(canonical)] + sys.argv[1:]
     spawn_env = _clean_env_for_spawn()
     try:
         # Detach: new session + null FDs so the spawned canonical doesn't
-        # keep writing to the user's terminal after we exit. Without this,
-        # running the AppImage from a shell would leave the prompt
-        # "stuck" while canonical's tray logs leaked into stdout.
+        # keep writing to the user's terminal after we exit.
         subprocess.Popen(
             args,
             env=spawn_env,
@@ -160,14 +206,161 @@ def relocate_to_canonical_if_needed() -> bool:
         )
     except OSError as e:
         log.warning("appimage.relocate.spawn_failed error=%s", e)
+        set_status(f"Failed to start: {e}")
         return False
     log.info("appimage.relocate.spawned target=%s", canonical)
-    print(
-        f"Installed Desktop Connector at {canonical}.\n"
-        "Tray launching in background — look for the icon in your panel.",
-        flush=True,
-    )
+    set_status("Done.")
     return True
+
+
+def _notify(title: str, body: str = "") -> None:
+    """Best-effort desktop notification via ``notify-send``. Silent if
+    notify-send isn't installed or the daemon isn't running. Broad
+    except — notifications are decorative and must never crash the
+    install path."""
+    try:
+        cmd = [
+            "notify-send",
+            "--app-name=Desktop Connector",
+            "--icon=desktop-connector",
+            title,
+        ]
+        if body:
+            cmd.append(body)
+        subprocess.run(cmd, check=False, timeout=2)
+    except Exception:  # noqa: BLE001 — defensive on purpose
+        pass
+
+
+def _show_install_modal(canonical: Path, work) -> bool:
+    """Pulse-progress Adw modal that drives ``work`` on a worker thread.
+
+    ``work(set_status)`` runs on the worker thread and returns a bool —
+    True on success, False on failure. The modal pulses during the
+    work, switches to a terminal success/failure state when ``work``
+    returns, and waits for the user to dismiss via the Close button.
+
+    The window is non-deletable while ``work`` is running so the user
+    can't accidentally interrupt the install. Becomes deletable +
+    Close-button-active when ``work`` returns.
+
+    Returns the bool ``work`` returned (or False if the modal couldn't
+    load GTK4 — caller decides whether to fall back).
+    """
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Gtk, Adw, Gio, GLib
+    except (ValueError, ImportError):
+        log.warning("appimage.relocate.modal_unavailable falling back to silent")
+        try:
+            return bool(work(lambda _t: None))
+        except Exception:
+            log.exception("appimage.relocate.fallback_work_failed")
+            return False
+
+    import threading
+
+    state = {"done": False, "success": False, "last_status": ""}
+    app = Adw.Application(
+        application_id="com.desktopconnector.installer",
+        flags=Gio.ApplicationFlags.NON_UNIQUE,
+    )
+
+    def on_activate(_app):
+        win = Adw.ApplicationWindow(
+            application=app,
+            title="Install Desktop Connector",
+            default_width=460,
+            default_height=240,
+        )
+        win.set_resizable(False)
+        # Block window-close while work is running. Re-enabled in finalize().
+        win.set_deletable(False)
+
+        toolbar = Adw.ToolbarView()
+        win.set_content(toolbar)
+        header = Adw.HeaderBar()
+        # Hide the X (and min/max) during work — re-enable in finalize().
+        header.set_show_end_title_buttons(False)
+        header.set_show_start_title_buttons(False)
+        toolbar.add_top_bar(header)
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=16,
+            margin_top=24,
+            margin_bottom=24,
+            margin_start=24,
+            margin_end=24,
+        )
+        toolbar.set_content(outer)
+
+        heading = Gtk.Label(label="Installing Desktop Connector", xalign=0)
+        heading.add_css_class("title-2")
+        outer.append(heading)
+
+        sub = Gtk.Label(label=str(canonical), xalign=0, wrap=True)
+        sub.add_css_class("dim-label")
+        sub.add_css_class("caption")
+        outer.append(sub)
+
+        progress = Gtk.ProgressBar()
+        outer.append(progress)
+
+        status_label = Gtk.Label(label="Preparing…", xalign=0, wrap=True)
+        status_label.add_css_class("caption")
+        outer.append(status_label)
+
+        def pulse():
+            if state["done"]:
+                return False
+            progress.pulse()
+            return True
+        GLib.timeout_add(120, pulse)
+
+        def update_status(text):
+            state["last_status"] = text
+            GLib.idle_add(status_label.set_text, text)
+
+        def finalize():
+            success = state["success"]
+            if success:
+                heading.set_text("Installation complete")
+                progress.set_fraction(1.0)
+                status_label.set_text(
+                    "Desktop Connector is running in the tray."
+                )
+            else:
+                heading.set_text("Installation failed")
+                progress.set_fraction(0.0)
+                # Show the last status text (which _do_install_steps sets to
+                # the failure reason) so the user knows WHY it failed.
+                reason = state["last_status"] or "Unknown error — see logs."
+                status_label.set_text(reason)
+                status_label.add_css_class("error")
+            # Reveal the window's X button + re-enable Esc-to-close.
+            header.set_show_end_title_buttons(True)
+            win.set_deletable(True)
+            return False  # one-shot idle callback
+
+        def worker():
+            try:
+                state["success"] = bool(work(update_status))
+            except Exception:
+                log.exception("appimage.relocate.modal_worker_failed")
+                state["success"] = False
+            finally:
+                state["done"] = True
+                GLib.idle_add(finalize)
+
+        threading.Thread(target=worker, daemon=True).start()
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run([])
+    return state["success"]
 
 
 def _clean_env_for_spawn() -> dict:

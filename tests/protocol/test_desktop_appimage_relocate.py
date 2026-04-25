@@ -26,7 +26,12 @@ from src.bootstrap import appimage_relocate as relocate  # noqa: E402
 
 class _Sandbox(unittest.TestCase):
     """Each test runs in its own tmp tree with the canonical-path
-    constants patched onto it."""
+    constants patched onto it.
+
+    Also mocks the user-feedback surfaces (_notify, the GTK4 modal,
+    sys.stdout.isatty) so tests exercise the relocate *logic* without
+    shelling out to notify-send or popping windows.
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -36,6 +41,11 @@ class _Sandbox(unittest.TestCase):
         self._patches = [
             mock.patch.object(relocate, "CANONICAL_INSTALL_DIR", self._canonical_dir),
             mock.patch.object(relocate, "CANONICAL_APPIMAGE_PATH", self._canonical),
+            # Don't shell out to notify-send during tests.
+            mock.patch.object(relocate, "_notify"),
+            # Force the print branch — modal would try to load GTK4 which
+            # may conflict with pystray's GTK3 if anything pulled it in.
+            mock.patch.object(sys.stdout, "isatty", return_value=True),
         ]
         for p in self._patches:
             p.start()
