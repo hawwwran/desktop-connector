@@ -45,6 +45,47 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 step()  { echo -e "${BOLD}[·]${NC} $1"; }
 fail()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
+# Stop any running Desktop Connector instance that points at our canonical
+# AppImage path or the canonical install dir. Matches the python child by
+# its APPIMAGE env var (correct even when it's running off a FUSE mount at
+# /tmp/.mount_*/), and the legacy apt-pip child by its CWD. Avoids the
+# brittle `pkill -f 'python3 -m src.main'` pattern, which would also match
+# unrelated dev-tree runs (and sometimes our own shell when the literal
+# string appears in argv).
+stop_existing_instance() {
+    local target="$1"
+    local install_dir
+    install_dir=$(dirname "$target")
+    local pid match cwd stopped=0
+    for pid in $(pgrep -f 'python.*-m src\.main' 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        match=0
+        if [ -r "/proc/$pid/environ" ] && \
+           tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+             | grep -qx "APPIMAGE=$target"; then
+            match=1
+        else
+            cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+            case "$cwd" in
+                "$install_dir"|"$install_dir"/*) match=1 ;;
+            esac
+        fi
+        if [ "$match" -eq 1 ]; then
+            kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+        fi
+    done
+    # Plus the AppImage runtime wrapper if it's still alive (rare — it
+    # usually exec()s into AppRun before we get here, but harmless).
+    for pid in $(pgrep -f "$target" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+    done
+    if [ "$stopped" -gt 0 ]; then
+        info "Stopped $stopped existing instance(s)"
+        sleep 2
+    fi
+}
+
 # --- pre-flight ----------------------------------------------------------------
 
 [ "$(id -u)" = "0" ] && fail "Don't run this as root — installs to your \$HOME."
@@ -169,10 +210,8 @@ fi
 
 # --- launch --------------------------------------------------------------------
 
-# Kill any prior instance so the new AppImage's tray icon takes over the slot.
-pkill -f 'desktop-connector\.AppImage' 2>/dev/null || true
-pkill -f 'python3 -m src.main' 2>/dev/null || true
-sleep 1
+# Stop any prior instance so the new AppImage's tray icon takes over the slot.
+stop_existing_instance "$APPIMAGE_PATH"
 
 echo
 echo -e "${BOLD}Starting Desktop Connector...${NC}"

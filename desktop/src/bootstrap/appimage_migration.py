@@ -49,6 +49,14 @@ OLD_LAUNCHER = Path.home() / ".local/bin/desktop-connector"
 # marker; absence (orphan keys, etc.) means there's nothing to migrate.
 OLD_INSTALL_MARKER = OLD_INSTALL_DIR / "src" / "main.py"
 
+# Files inside OLD_INSTALL_DIR that the new (AppImage) install drops there
+# and we must NOT delete during migration: the AppImage itself, and the
+# local copy of uninstall.sh that install.sh fetches alongside it.
+_PRESERVE_DURING_MIGRATION = frozenset({
+    "desktop-connector.AppImage",
+    "uninstall.sh",
+})
+
 
 def migrate_from_apt_pip_if_needed(
     config: Config,
@@ -124,17 +132,29 @@ def _derive_device_id(crypto: KeyManager) -> str:
 
 
 def _remove_old_install() -> None:
-    """Wipe the apt-pip install dir + launcher wrapper.
+    """Remove apt-pip artifacts from OLD_INSTALL_DIR + launcher wrapper.
 
-    The whole `~/.local/share/desktop-connector/` tree is owned by
-    install.sh's layout (every file in there came from the installer,
-    no user data lives at this path), so a recursive delete is safe.
+    Surgical, NOT a recursive wipe of OLD_INSTALL_DIR — the new install.sh
+    places the AppImage at OLD_INSTALL_DIR/desktop-connector.AppImage and
+    drops a local uninstall.sh next to it, both of which we must preserve
+    or we'd delete the running AppImage from under ourselves.
+    Everything else in OLD_INSTALL_DIR was produced by install-from-source.sh
+    (src/, assets/, install.sh, README.md, …) and gets cleaned up.
     """
-    try:
-        shutil.rmtree(OLD_INSTALL_DIR)
-        log.info("appimage.migration.removed_install_dir path=%s", OLD_INSTALL_DIR)
-    except OSError as e:
-        log.warning("appimage.migration.remove_install_dir_failed error=%s", e)
+    if OLD_INSTALL_DIR.is_dir():
+        for child in OLD_INSTALL_DIR.iterdir():
+            if child.name in _PRESERVE_DURING_MIGRATION:
+                continue
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except OSError as e:
+                log.warning(
+                    "appimage.migration.remove_failed path=%s error=%s", child, e
+                )
+        log.info("appimage.migration.cleaned_install_dir path=%s", OLD_INSTALL_DIR)
 
     try:
         if OLD_LAUNCHER.exists() or OLD_LAUNCHER.is_symlink():

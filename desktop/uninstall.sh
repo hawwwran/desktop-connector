@@ -31,15 +31,47 @@ GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[✓]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 
+# Stop any running Desktop Connector instance, identifying our processes
+# specifically by APPIMAGE env var (catches the python child off the FUSE
+# mount) or by CWD (catches legacy apt-pip launches). Avoids killing the
+# user's own shell or unrelated dev-tree `python3 -m src.main` runs.
+stop_existing_instance() {
+    local target="$1"
+    local install_dir
+    install_dir=$(dirname "$target")
+    local pid match cwd stopped=0
+    for pid in $(pgrep -f 'python.*-m src\.main' 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        match=0
+        if [ -r "/proc/$pid/environ" ] && \
+           tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+             | grep -qx "APPIMAGE=$target"; then
+            match=1
+        else
+            cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+            case "$cwd" in
+                "$install_dir"|"$install_dir"/*) match=1 ;;
+            esac
+        fi
+        if [ "$match" -eq 1 ]; then
+            kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+        fi
+    done
+    for pid in $(pgrep -f "$target" 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        kill -TERM "$pid" 2>/dev/null && stopped=$((stopped+1))
+    done
+    if [ "$stopped" -gt 0 ]; then
+        info "Stopped $stopped running instance(s)"
+        sleep 2
+    fi
+}
+
 echo
 echo -e "${BOLD}Desktop Connector — uninstaller${NC}"
 echo
 
-# Stop any running instance first so file removal isn't racing the AppImage.
-pkill -f "${APPIMAGE_PATH}" 2>/dev/null || true
-pkill -f "$APP_NAME\.AppImage" 2>/dev/null || true
-pkill -f 'python3 -m src.main' 2>/dev/null || true
-sleep 1
+stop_existing_instance "$APPIMAGE_PATH"
 
 # If the user moved the AppImage elsewhere, the .desktop entry's Exec=
 # points at the actual path. Read it before we delete the entry so we

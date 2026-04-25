@@ -280,9 +280,13 @@ cp "$TOOLS_DIR/appimageupdatetool-x86_64.AppImage" \
    "$APPIMAGEUPDATE_DST/appimageupdatetool.AppImage"
 chmod +x -- "$APPIMAGEUPDATE_DST/appimageupdatetool.AppImage"
 
-# Copy desktop source.
+# Copy desktop source + brand assets. tray.py and brand.py both look for
+# the brand-asset dir at "<src-parent>/assets/brand/" — without these the
+# tray falls back to flat-coloured circle icons (not the sparkle star)
+# and the GTK4 windows lose their bundled launcher icon.
 mkdir -p -- "$APPDIR/usr/lib/desktop-connector"
 cp -a "$SOURCE_DIR/desktop/src" "$APPDIR/usr/lib/desktop-connector/"
+cp -a "$SOURCE_DIR/desktop/assets" "$APPDIR/usr/lib/desktop-connector/"
 
 # Embed version.json so --version (and runtime version checks) can find it.
 mkdir -p -- "$APPDIR/usr/share/desktop-connector"

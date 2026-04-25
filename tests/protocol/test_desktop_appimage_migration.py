@@ -127,15 +127,23 @@ class MigrationTests(unittest.TestCase):
 
     # --- Happy path --------------------------------------------------------
 
-    def test_successful_migration_removes_install_and_launcher(self):
+    def test_successful_migration_removes_apt_pip_files_and_launcher(self):
         """Acceptance: migration completes silently; old install files
         gone; one info notification."""
         self._seed_old_install()
         self._run()
 
-        self.assertFalse(self._old_install.exists())
+        # apt-pip artifacts gone (src/, install.sh)…
+        self.assertFalse(self._old_marker.exists())
+        self.assertFalse((self._old_install / "install.sh").exists())
+        # …launcher wrapper gone…
         self.assertFalse(self._old_launcher.exists())
-        # User-data dir is untouched.
+        # …uninstall.sh PRESERVED (install.sh re-drops the AppImage-shape
+        # one with the same filename; we conservatively keep it because
+        # we can't tell apart "left over from apt-pip" from "just dropped
+        # by the new install.sh" without content-sniffing).
+        self.assertTrue((self._old_install / "uninstall.sh").exists())
+        # …user-data dir untouched.
         self.assertTrue((self._config_dir / "config.json").exists())
         self.assertTrue((self._config_dir / "keys" / "private_key.pem").exists())
         # Exactly one info notification with the expected wording.
@@ -143,6 +151,31 @@ class MigrationTests(unittest.TestCase):
         title, body = self._notifications.events[0]
         self.assertIn("Migrated", title)
         self.assertIn("preserved", body)
+
+    def test_migration_preserves_appimage_and_local_uninstaller(self):
+        """install.sh places the AppImage AND an uninstall.sh into
+        OLD_INSTALL_DIR. Migration must NOT delete those — otherwise it
+        wipes the running AppImage from under itself on first launch.
+        """
+        self._seed_old_install()
+        # Lay down what install.sh would have placed there alongside the
+        # apt-pip leftovers.
+        appimage = self._old_install / "desktop-connector.AppImage"
+        appimage.write_text("#!/bin/bash\nfake AppImage\n")
+        appimage.chmod(0o755)
+        new_uninstaller = self._old_install / "uninstall.sh"
+        new_uninstaller.write_text("#!/bin/bash\nfake new uninstaller\n")
+        new_uninstaller.chmod(0o755)
+
+        self._run()
+
+        # Preserved
+        self.assertTrue(appimage.exists())
+        self.assertEqual(appimage.read_text(), "#!/bin/bash\nfake AppImage\n")
+        self.assertTrue(new_uninstaller.exists())
+        # apt-pip artifacts gone
+        self.assertFalse(self._old_marker.exists())
+        self.assertFalse((self._old_install / "install.sh").exists())
 
     def test_successful_migration_with_unregistered_config(self):
         """Pre-register apt-pip install (no device_id yet) — verification
@@ -153,7 +186,7 @@ class MigrationTests(unittest.TestCase):
         self._config.save()
         self._seed_old_install()
         self._run()
-        self.assertFalse(self._old_install.exists())
+        self.assertFalse(self._old_marker.exists())
         self.assertEqual(len(self._notifications.events), 1)
 
     # --- Verification failure ---------------------------------------------
@@ -188,7 +221,7 @@ class MigrationTests(unittest.TestCase):
                 self._config, self._crypto, Boom()
             )
         # Cleanup still happened despite the broken notifier.
-        self.assertFalse(self._old_install.exists())
+        self.assertFalse(self._old_marker.exists())
 
 
 class _DeriveTests(unittest.TestCase):
