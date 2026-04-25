@@ -5,6 +5,7 @@ GTK4 windows run as subprocesses to avoid GTK3/4 conflict (pystray loads GTK3).
 
 import base64
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -552,11 +553,26 @@ class TrayApp:
 
     def _open_gtk4_window(self, window_name: str) -> None:
         log.info("platform.subprocess.spawned window=%s", window_name)
-        subprocess.Popen(
-            [sys.executable, "-m", "src.windows", window_name,
-             f"--config-dir={self.config.config_dir}"],
-            cwd=str(_DESKTOP_DIR),
-        )
+        appimage_path = os.environ.get("APPIMAGE")
+        if appimage_path:
+            # Inside an AppImage: re-enter via $APPIMAGE so the child gets
+            # the bundled GTK4 / libadwaita / WebKitGTK and survives the
+            # parent's FUSE mount lifetime. AppRun's --gtk-window=<NAME>
+            # dispatch routes to `python -m src.windows <NAME>` inside.
+            cmd = [
+                appimage_path,
+                f"--gtk-window={window_name}",
+                f"--config-dir={self.config.config_dir}",
+            ]
+            cwd = None
+        else:
+            # Dev tree: run the source-tree windows entrypoint directly.
+            cmd = [
+                sys.executable, "-m", "src.windows", window_name,
+                f"--config-dir={self.config.config_dir}",
+            ]
+            cwd = str(_DESKTOP_DIR)
+        subprocess.Popen(cmd, cwd=cwd)
 
     def _send_files(self, *_) -> None:
         self._open_gtk4_window("send-files")
