@@ -25,7 +25,12 @@ log = logging.getLogger(__name__)
 RECEIVE_KIND_OTHER = "other"
 
 _URL_RE = re.compile(r"https?://\S+")
-_TRAILING_URL_PUNCTUATION = ".,;:!?)]}\"'"
+_TRAILING_URL_PUNCTUATION = ".,;:!?\"'"
+_TRAILING_URL_DELIMITERS = {
+    ")": "(",
+    "]": "[",
+    "}": "{",
+}
 
 _DOCUMENT_MIME_TYPES = {
     "application/msword",
@@ -92,7 +97,18 @@ def _valid_http_url(value: str) -> bool:
 
 
 def _clean_url_candidate(value: str) -> str:
-    return value.rstrip(_TRAILING_URL_PUNCTUATION)
+    candidate = value
+    while candidate:
+        last = candidate[-1]
+        if last in _TRAILING_URL_PUNCTUATION:
+            candidate = candidate[:-1]
+            continue
+        opener = _TRAILING_URL_DELIMITERS.get(last)
+        if opener and candidate.count(last) > candidate.count(opener):
+            candidate = candidate[:-1]
+            continue
+        break
+    return candidate
 
 
 def classify_received_text(text: str) -> tuple[str | None, str | None]:

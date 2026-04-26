@@ -122,6 +122,32 @@ class TextClassificationTests(unittest.TestCase):
             ["https://example.com/report.pdf"],
         )
 
+    def test_embedded_url_preserves_balanced_parentheses(self):
+        self.assertEqual(
+            extract_received_urls(
+                "See https://en.wikipedia.org/wiki/Function_(mathematics) today",
+            ),
+            ["https://en.wikipedia.org/wiki/Function_(mathematics)"],
+        )
+
+    def test_embedded_url_preserves_balanced_brackets(self):
+        self.assertEqual(
+            extract_received_urls("See https://example.com/path[section] today"),
+            ["https://example.com/path[section]"],
+        )
+
+    def test_embedded_url_strips_unmatched_wrapper_delimiters(self):
+        self.assertEqual(
+            extract_received_urls("See (https://example.com/report.pdf)."),
+            ["https://example.com/report.pdf"],
+        )
+
+    def test_embedded_url_strips_only_extra_closing_delimiter(self):
+        self.assertEqual(
+            extract_received_urls("See https://example.com/path[section]) today"),
+            ["https://example.com/path[section]"],
+        )
+
 
 class FileClassificationTests(unittest.TestCase):
     def test_image_mime_is_classified(self):
