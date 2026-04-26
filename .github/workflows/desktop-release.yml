@@ -251,6 +251,22 @@ jobs:
             artefacts/SHA256SUMS
           if-no-files-found: error
 
+      - name: Resolve previous desktop tag
+        # Pin the auto-generated changelog's base tag to the prior
+        # desktop/v* release. Without this, GitHub's "generate release
+        # notes" API picks `desktop-latest` (which this same workflow
+        # repoints at HEAD a few steps later) as the comparison base
+        # and the "Full Changelog" link diffs the release against
+        # itself.
+        id: prevtag
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          set -e
+          PREV=$(git tag -l 'desktop/v*' --sort=-v:refname \
+                  | grep -v "^${GITHUB_REF_NAME}$" | head -n1)
+          echo "previous desktop tag: ${PREV:-<none>}"
+          echo "tag=${PREV}" >> "$GITHUB_OUTPUT"
+
       - name: Publish to GitHub Releases
         # Tag PUSH events only — workflow_dispatch dispatched against a
         # tag would also have ref_type=tag, which we explicitly do NOT
@@ -266,6 +282,7 @@ jobs:
             artefacts/SHA256SUMS.sig
           fail_on_unmatched_files: true
           generate_release_notes: true
+          previous_tag: ${{ steps.prevtag.outputs.tag }}
 
       - name: Update rolling desktop-latest release
         # Stream isolation for in-app updates. The embedded
