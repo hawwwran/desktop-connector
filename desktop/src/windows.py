@@ -523,7 +523,17 @@ def _format_bytes(b):
 
 def show_settings(config_dir: Path):
     import os as _os
-    from .config import Config
+    from .config import (
+        Config,
+        RECEIVE_ACTION_COPY,
+        RECEIVE_ACTION_NONE,
+        RECEIVE_ACTION_OPEN,
+        RECEIVE_KIND_DOCUMENT,
+        RECEIVE_KIND_IMAGE,
+        RECEIVE_KIND_TEXT,
+        RECEIVE_KIND_URL,
+        RECEIVE_KIND_VIDEO,
+    )
     from .crypto import KeyManager
     from .connection import ConnectionManager, ConnectionState
     from .api_client import ApiClient
@@ -606,15 +616,6 @@ def show_settings(config_dir: Path):
         refresh_lp_status()
         GLib.timeout_add(3000, refresh_lp_status)
 
-        # Auto-open links toggle
-        link_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
-        link_switch.set_active(config.auto_open_links)
-        link_switch.connect("notify::active", lambda sw, _: setattr(config, 'auto_open_links', sw.get_active()))
-        link_row = Adw.ActionRow(title="Auto-open links", subtitle="Open received URLs in browser automatically")
-        link_row.add_suffix(link_switch)
-        link_row.set_activatable_widget(link_switch)
-        conn_group.add(link_row)
-
         save_btn = Gtk.Button(label="Save", valign=Gtk.Align.CENTER)
         save_btn.add_css_class("suggested-action")
         server_row.add_suffix(save_btn)
@@ -629,71 +630,146 @@ def show_settings(config_dir: Path):
 
         save_btn.connect("clicked", on_save)
 
-        # Logs
-        logs_group = Adw.PreferencesGroup(title="Logs")
-        content.append(logs_group)
+        # Receive actions
+        receive_group = Adw.PreferencesGroup(title="Receive Actions")
+        content.append(receive_group)
 
-        log_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
-        log_switch.set_active(config.allow_logging)
-        log_switch.connect("notify::active", lambda sw, _: setattr(config, 'allow_logging', sw.get_active()))
-        log_toggle_row = Adw.ActionRow(title="Allow logging", subtitle="Write logs to file (requires restart)")
-        log_toggle_row.add_suffix(log_switch)
-        log_toggle_row.set_activatable_widget(log_switch)
-        logs_group.add(log_toggle_row)
+        receive_action_rows = (
+            (
+                RECEIVE_KIND_URL,
+                "URL",
+                "What to do when received text is detected as a URL.",
+                (
+                    ("Open in default browser", RECEIVE_ACTION_OPEN),
+                    ("Copy to clipboard", RECEIVE_ACTION_COPY),
+                    ("No action", RECEIVE_ACTION_NONE),
+                ),
+            ),
+            (
+                RECEIVE_KIND_TEXT,
+                "Text",
+                "What to do after receiving text that is not only a URL.",
+                (
+                    ("Copy to clipboard", RECEIVE_ACTION_COPY),
+                    ("No action", RECEIVE_ACTION_NONE),
+                ),
+            ),
+            (
+                RECEIVE_KIND_IMAGE,
+                "Image",
+                "What to do after receiving an image file.",
+                (
+                    ("Open in default image viewer", RECEIVE_ACTION_OPEN),
+                    ("No action", RECEIVE_ACTION_NONE),
+                ),
+            ),
+            (
+                RECEIVE_KIND_VIDEO,
+                "Video",
+                "What to do after receiving a video file.",
+                (
+                    ("Open in default video viewer", RECEIVE_ACTION_OPEN),
+                    ("No action", RECEIVE_ACTION_NONE),
+                ),
+            ),
+            (
+                RECEIVE_KIND_DOCUMENT,
+                "Document",
+                "What to do after receiving a document file.",
+                (
+                    ("Open in default document viewer", RECEIVE_ACTION_OPEN),
+                    ("No action", RECEIVE_ACTION_NONE),
+                ),
+            ),
+        )
 
-        log_dir = config_dir / "logs"
-        log_files = sorted(log_dir.glob("desktop-connector.log*")) if log_dir.exists() else []
-        total_size = sum(f.stat().st_size for f in log_files) if log_files else 0
-        log_size_text = _format_bytes(total_size) if total_size > 0 else "No logs"
+        for kind, title, subtitle, options in receive_action_rows:
+            labels = [label for label, _action in options]
+            actions = [action for _label, action in options]
+            row = Adw.ComboRow(
+                title=title,
+                subtitle=subtitle,
+                model=Gtk.StringList.new(labels),
+            )
+            current_action = config.get_receive_action(kind)
+            try:
+                row.set_selected(actions.index(current_action))
+            except ValueError:
+                row.set_selected(0)
 
-        log_row = Adw.ActionRow(title="Log files", subtitle=log_size_text)
-        download_btn = Gtk.Button(label="Download Logs", valign=Gtk.Align.CENTER)
+            def on_receive_action_changed(combo, _pspec, k=kind, acts=actions):
+                selected = combo.get_selected()
+                if 0 <= selected < len(acts):
+                    config.set_receive_action(k, acts[selected])
 
-        def on_download_logs(btn):
-            import shutil, subprocess as _sp
-            downloads = Path.home() / "Downloads"
-            downloads.mkdir(exist_ok=True)
-            dest = downloads / f"desktop-connector-logs-{time.strftime('%Y%m%d-%H%M%S')}"
-            dest.mkdir(exist_ok=True)
-            copied = 0
-            for f in (log_dir.glob("desktop-connector.log*") if log_dir.exists() else []):
-                shutil.copy2(f, dest / f.name)
-                copied += 1
-            if copied > 0:
-                _sp.Popen(["xdg-open", str(dest)])
-                btn.set_label(f"\u2713 Saved to Downloads")
+            row.connect("notify::selected", on_receive_action_changed)
+            receive_group.add(row)
+
+        def add_logs_group():
+            logs_group = Adw.PreferencesGroup(title="Logs")
+            content.append(logs_group)
+
+            log_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+            log_switch.set_active(config.allow_logging)
+            log_switch.connect("notify::active", lambda sw, _: setattr(config, 'allow_logging', sw.get_active()))
+            log_toggle_row = Adw.ActionRow(title="Allow logging", subtitle="Write logs to file (requires restart)")
+            log_toggle_row.add_suffix(log_switch)
+            log_toggle_row.set_activatable_widget(log_switch)
+            logs_group.add(log_toggle_row)
+
+            log_dir = config_dir / "logs"
+            log_files = sorted(log_dir.glob("desktop-connector.log*")) if log_dir.exists() else []
+            total_size = sum(f.stat().st_size for f in log_files) if log_files else 0
+            log_size_text = _format_bytes(total_size) if total_size > 0 else "No logs"
+
+            log_row = Adw.ActionRow(title="Log files", subtitle=log_size_text)
+            download_btn = Gtk.Button(label="Download Logs", valign=Gtk.Align.CENTER)
+
+            def on_download_logs(btn):
+                import shutil, subprocess as _sp
+                downloads = Path.home() / "Downloads"
+                downloads.mkdir(exist_ok=True)
+                dest = downloads / f"desktop-connector-logs-{time.strftime('%Y%m%d-%H%M%S')}"
+                dest.mkdir(exist_ok=True)
+                copied = 0
+                for f in (log_dir.glob("desktop-connector.log*") if log_dir.exists() else []):
+                    shutil.copy2(f, dest / f.name)
+                    copied += 1
+                if copied > 0:
+                    _sp.Popen(["xdg-open", str(dest)])
+                    btn.set_label(f"\u2713 Saved to Downloads")
+                    btn.set_sensitive(False)
+                    GLib.timeout_add(3000, lambda: (btn.set_label("Download Logs"), btn.set_sensitive(True), False)[-1])
+                else:
+                    btn.set_label("No logs found")
+                    GLib.timeout_add(2000, lambda: (btn.set_label("Download Logs"), btn.set_sensitive(True), False)[-1])
+
+            download_btn.connect("clicked", on_download_logs)
+            log_row.add_suffix(download_btn)
+
+            clear_btn = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
+            clear_btn.add_css_class("destructive-action")
+
+            def on_clear_logs(btn):
+                cleared = 0
+                # Truncate (don't unlink) so any running logger keeps its file handle.
+                for f in (log_dir.glob("desktop-connector.log*") if log_dir.exists() else []):
+                    try:
+                        f.open("w").close()
+                        cleared += 1
+                    except OSError:
+                        pass
+                log_row.set_subtitle("No logs")
+                if cleared > 0:
+                    btn.set_label("\u2713 Cleared")
+                else:
+                    btn.set_label("No logs found")
                 btn.set_sensitive(False)
-                GLib.timeout_add(3000, lambda: (btn.set_label("Download Logs"), btn.set_sensitive(True), False)[-1])
-            else:
-                btn.set_label("No logs found")
-                GLib.timeout_add(2000, lambda: (btn.set_label("Download Logs"), btn.set_sensitive(True), False)[-1])
+                GLib.timeout_add(2000, lambda: (btn.set_label("Clear"), btn.set_sensitive(True), False)[-1])
 
-        download_btn.connect("clicked", on_download_logs)
-        log_row.add_suffix(download_btn)
-
-        clear_btn = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
-        clear_btn.add_css_class("destructive-action")
-
-        def on_clear_logs(btn):
-            cleared = 0
-            # Truncate (don't unlink) so any running logger keeps its file handle.
-            for f in (log_dir.glob("desktop-connector.log*") if log_dir.exists() else []):
-                try:
-                    f.open("w").close()
-                    cleared += 1
-                except OSError:
-                    pass
-            log_row.set_subtitle("No logs")
-            if cleared > 0:
-                btn.set_label("\u2713 Cleared")
-            else:
-                btn.set_label("No logs found")
-            btn.set_sensitive(False)
-            GLib.timeout_add(2000, lambda: (btn.set_label("Clear"), btn.set_sensitive(True), False)[-1])
-
-        clear_btn.connect("clicked", on_clear_logs)
-        log_row.add_suffix(clear_btn)
-        logs_group.add(log_row)
+            clear_btn.connect("clicked", on_clear_logs)
+            log_row.add_suffix(clear_btn)
+            logs_group.add(log_row)
 
         # This device
         device_group = Adw.PreferencesGroup(title="This Device")
@@ -810,6 +886,8 @@ def show_settings(config_dir: Path):
                 title="Pending outgoing",
                 subtitle=str(stats.get("pending_outgoing", 0)),
             ))
+
+        add_logs_group()
 
         # --- Footer: version + install shape ---------------------------------
         # $APPIMAGE is set by AppRun when running inside the AppImage; absent

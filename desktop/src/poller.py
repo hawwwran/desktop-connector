@@ -26,6 +26,13 @@ from .crypto import KeyManager
 from .history import TransferHistory, TransferStatus
 from .messaging import FnTransferAdapter, MessageDispatcher, MessageType
 from .platform import DesktopPlatform
+from .receive_actions import (
+    RECEIVE_KIND_OTHER,
+    apply_receive_action,
+    apply_receive_text_actions,
+    classify_received_file,
+    extract_received_urls,
+)
 
 log = logging.getLogger(__name__)
 
@@ -422,6 +429,7 @@ class Poller:
             chunks_downloaded=0,
             chunks_total=0,
         )
+        self._apply_receive_file_action(final_path)
         for cb in self._on_file_received:
             try:
                 cb(final_path)
@@ -595,11 +603,23 @@ class Poller:
             chunks_downloaded=0,
             chunks_total=0,
         )
+        self._apply_receive_file_action(final_path)
         for cb in self._on_file_received:
             try:
                 cb(final_path)
             except Exception:
                 log.exception("File received callback error")
+
+    def _apply_receive_file_action(self, filepath: Path) -> None:
+        kind = classify_received_file(filepath)
+        if kind == RECEIVE_KIND_OTHER:
+            return
+        if not apply_receive_action(self.config, self.platform, kind, path=filepath):
+            log.warning(
+                "receive_action.file.failed kind=%s path=%s",
+                kind,
+                filepath,
+            )
 
     def _stream_download_chunk(self, transfer_id: str, index: int,
                                chunk_count: int,
@@ -846,24 +866,14 @@ class Poller:
 
     def _handle_message_clipboard_text(self, message) -> None:
         text = str(message.payload.get("text", ""))
-        if not self.platform.clipboard.write_text(text):
-            log.warning("clipboard.write_text.failed")
-            return
 
-        log.info("clipboard.write_text.succeeded length=%d", len(text))
-        import re
-        urls = re.findall(r'https?://\S+', text)
+        urls = extract_received_urls(text)
         preview = text if len(urls) == 1 else (text[:60] + "..." if len(text) > 60 else text)
         self.platform.notifications.notify("Clipboard received", preview[:60])
         self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.text"),
                          display_label=preview, direction="received", size=len(text))
-        if (
-            len(urls) == 1
-            and self.config.auto_open_links
-            and self.platform.capabilities.auto_open_urls
-        ):
-            if self.platform.shell.open_url(urls[0]):
-                log.info("platform.open_url.succeeded length=%d", len(urls[0]))
+        if not apply_receive_text_actions(self.config, self.platform, text):
+            log.warning("receive_action.text.failed length=%d", len(text))
 
     def _handle_message_clipboard_image(self, message) -> None:
         data = message.payload.get("image_bytes", b"")

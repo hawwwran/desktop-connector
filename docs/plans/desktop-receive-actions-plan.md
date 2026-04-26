@@ -17,6 +17,7 @@ The user can choose what the desktop app should do after receiving an item:
 | Item type | Actions |
 |---|---|
 | URL | Open in default browser / Copy to clipboard / No action |
+| Text | Copy to clipboard / No action |
 | Image | Open in default image viewer / No action |
 | Video | Open in default video viewer / No action |
 | Document | Open in default document viewer / No action |
@@ -27,6 +28,7 @@ Default values:
 {
   "receive_actions": {
     "url": "open",
+    "text": "copy",
     "image": "none",
     "video": "none",
     "document": "none"
@@ -37,6 +39,7 @@ Default values:
 Reasoning:
 
 - `url: open` preserves the current auto-open URL behavior.
+- `text: copy` preserves the current behavior for received non-URL text.
 - Files default to `none`, so they are only saved as they are today.
 - “No action” means: save normally, update history normally, show existing notifications normally, but do not auto-open or copy.
 
@@ -81,6 +84,9 @@ Receive Actions
 URL
 [ Open in default browser  ▾ ]
 
+Text
+[ Copy to clipboard        ▾ ]
+
 Image
 [ No action                ▾ ]
 
@@ -97,6 +103,9 @@ Suggested subtitles:
 URL
 What to do when received text is detected as a URL.
 
+Text
+What to do after receiving text that is not only a URL.
+
 Image
 What to do after receiving an image file.
 
@@ -111,6 +120,9 @@ Suggested user-facing labels:
 
 ```text
 Open in default browser
+Copy to clipboard
+No action
+
 Copy to clipboard
 No action
 
@@ -132,6 +144,7 @@ New canonical config key:
 {
   "receive_actions": {
     "url": "open",
+    "text": "copy",
     "image": "none",
     "video": "none",
     "document": "none"
@@ -143,6 +156,7 @@ Allowed internal values:
 
 ```text
 url:      open | copy | none
+text:     copy | none
 image:    open | none
 video:    open | none
 document: open | none
@@ -157,6 +171,7 @@ RECEIVE_ACTION_NONE = "none"
 
 DEFAULT_RECEIVE_ACTIONS = {
     "url": RECEIVE_ACTION_OPEN,
+    "text": RECEIVE_ACTION_COPY,
     "image": RECEIVE_ACTION_NONE,
     "video": RECEIVE_ACTION_NONE,
     "document": RECEIVE_ACTION_NONE,
@@ -214,6 +229,7 @@ Migration behavior:
 If receive_actions is missing:
     receive_actions.url = "open" if auto_open_links is true/missing
     receive_actions.url = "none" if auto_open_links is false
+    receive_actions.text = "copy"
     image/video/document = "none"
 ```
 
@@ -258,7 +274,9 @@ other
 For text payloads:
 
 - Trim whitespace.
-- Treat as URL only if the entire text is a single URL.
+- Treat as URL-only only if the entire text is a single URL.
+- If text contains a URL plus other text, run URL action processing for
+  the detected URL and text action processing for the full text.
 - Accept `http://` and `https://`.
 - Optionally accept common schemes later: `mailto:`, `tel:`, `geo:`.
 - Avoid auto-opening arbitrary shell-like strings or partial text.
@@ -366,12 +384,19 @@ Desired order for URL/text:
 
 ```text
 1. Receive/decrypt text payload.
-2. Detect whether it is a single URL.
-3. If URL:
-   - apply URL receive action.
-4. If not URL:
-   - keep existing text/clipboard behavior.
+2. Detect whether the whole payload is a single URL.
+3. If the whole payload is a single URL:
+   - apply URL receive action only.
+4. If the payload is not only a URL:
+   - apply URL receive action if an embedded URL exists.
+   - apply text receive action to the full text.
+5. Stage any clipboard-producing action in memory.
+6. If a staged clipboard value exists, write it to the real clipboard once.
 ```
+
+For embedded URL text, run the URL action first and the Text action
+second. This means `url=copy` plus `text=copy` produces one clipboard
+write containing the full received text.
 
 Do not change server protocol for v1.
 
@@ -394,6 +419,8 @@ If the current behavior is more nuanced than the name suggests, preserve the saf
 url = open → current default URL behavior
 url = copy → copy to clipboard
 url = none → do nothing beyond saving/history/notification
+text = copy → copy full received text to clipboard
+text = none → do not copy received text
 ```
 
 ## Error handling
@@ -443,14 +470,20 @@ none
 
 ## Files to modify
 
-Likely files:
+Expected files:
 
 ```text
 desktop/src/config.py
+desktop/src/receive_actions.py
 desktop/src/windows.py
-desktop/src/main.py or receiver/polling handler where incoming items are processed
-desktop/src/clipboard.py if URL copy should reuse clipboard helper
-desktop/src/history.py only if action result should be visible later
+desktop/src/poller.py
+desktop/src/interfaces/shell.py
+desktop/src/backends/linux/shell_backend.py
+desktop/README.md
+tests/protocol/test_desktop_receive_actions_config.py
+tests/protocol/test_desktop_receive_actions.py
+tests/protocol/test_desktop_receive_actions_poller.py
+tests/protocol/test_platform_contract.py
 ```
 
 Expected changes:
@@ -461,6 +494,27 @@ Expected changes:
 - Add getter/setter/helper methods.
 - Add migration from `auto_open_links`.
 - Keep `auto_open_links` property temporarily.
+- Run normalization during `Config.__init__` so callers always see a
+  canonical mapping.
+- Save the config when migration or normalization changes stored data.
+
+### `desktop/src/receive_actions.py`
+
+- Add URL and file classification helpers.
+- Add a small executor that maps `(kind, action)` to safe built-in work.
+- Add a text executor that can run URL and Text actions for one payload.
+- Use `platform.shell.open_url()` for URLs.
+- Use `platform.shell.open_path()` for files.
+- Stage clipboard-producing URL/Text actions in memory, then call
+  `platform.clipboard.write_text()` at most once.
+- Return a boolean or small result object for tests/logging; never raise
+  into the receive loop.
+
+### `desktop/src/interfaces/shell.py` and Linux backend
+
+- Add `open_path(path: Path) -> bool`.
+- Implement it with `subprocess.Popen(["xdg-open", str(path)])`.
+- Keep `open_folder()` unchanged for save-folder behavior.
 
 ### `desktop/src/windows.py`
 
@@ -478,79 +532,475 @@ Expected changes:
 
 ### Receiver code
 
-- Add item classification after receive/save.
-- Apply configured action.
-- Keep action execution non-blocking.
+- In `desktop/src/poller.py`, call the helper from both classic and
+  streaming file receive paths after history is updated to `complete`
+  and before file-received callbacks fire.
+- In `_handle_message_clipboard_text`, route text payloads through the
+  receive action helper. Exact single-URL payloads use only
+  `receive_actions.url`; text with an embedded URL uses both URL and
+  Text actions.
+- Keep open actions fire-and-forget. URL copy can use the existing
+  bounded clipboard helper.
+- Do not apply file actions to `.fn.*` command transfers or clipboard
+  image mirroring in v1.
 
-## Suggested implementation phases
+## Execution plan
 
-### Phase 1 — Config only
+Parts:
 
-- Add `receive_actions`.
-- Migrate from `auto_open_links`.
-- Add unit tests for config defaults and migration.
+```text
+P.0 Baseline and current-behavior check
+P.1 Config model and migration
+P.2 Receive action helper
+P.3 Platform shell open-path support
+P.4 Settings UI
+P.5 URL and text receive integration
+P.6 File receive integration
+P.7 Documentation and verification
+```
+
+### P.0 - Baseline
+
+Status: completed 2026-04-26.
+
+Baseline result:
+
+```text
+python is not installed in this environment; use python3 for local tests.
+python3 -m unittest tests.protocol.test_platform_contract: passed, 6 tests.
+python3 -m unittest tests.protocol.test_desktop_streaming_recipient: passed, 17 tests.
+Current settings order: Connection, Logs, This Device, Paired Device, Connection Statistics.
+Current URL behavior: clipboard text is written first, then regex-detected URLs open when auto_open_links is true.
+```
+
+- Run the focused existing tests before editing receiver behavior:
+
+```bash
+python -m unittest tests.protocol.test_platform_contract
+python -m unittest tests.protocol.test_desktop_streaming_recipient
+```
+
+- Confirm current settings order in `desktop/src/windows.py`:
+  Connection, Logs, This Device, Paired Device, Connection Statistics.
+- Confirm current URL behavior in `desktop/src/poller.py`:
+  clipboard text is written first, then any regex-detected URL is opened
+  when `auto_open_links` is true.
+
+Exit criteria:
+
+```text
+Existing focused tests pass, or any pre-existing failure is recorded.
+```
+
+### P.1 - Config model and migration
+
+Status: completed 2026-04-26.
+
+Result:
+
+```text
+Added receive action constants, defaults, kind-specific validation, migration, accessors, and reload normalization.
+Added text receive action defaulting to copy.
+Added tests/protocol/test_desktop_receive_actions_config.py.
+python3 -m unittest tests.protocol.test_desktop_receive_actions_config: passed, 11 tests.
+python3 -m unittest tests.protocol.test_platform_contract tests.protocol.test_desktop_streaming_recipient: passed, 23 tests.
+python3 -m unittest tests.protocol.test_desktop_appimage_onboarding tests.protocol.test_desktop_appimage_install_hook tests.protocol.test_desktop_appimage_migration: passed, 48 tests.
+```
+
+Implementation:
+
+- Add constants:
+
+```python
+RECEIVE_ACTION_OPEN = "open"
+RECEIVE_ACTION_COPY = "copy"
+RECEIVE_ACTION_NONE = "none"
+RECEIVE_KIND_URL = "url"
+RECEIVE_KIND_TEXT = "text"
+RECEIVE_KIND_IMAGE = "image"
+RECEIVE_KIND_VIDEO = "video"
+RECEIVE_KIND_DOCUMENT = "document"
+DEFAULT_RECEIVE_ACTIONS = {...}
+```
+
+- Add `allowed_receive_actions(kind: str) -> set[str]`.
+- Add `_normalize_receive_actions(value: object) -> dict[str, str]`.
+- Add `_migrate_receive_actions()` called from `Config.__init__` after
+  `_load()`.
+- Migration rules:
+  - If `receive_actions` is missing, seed defaults and map
+    `auto_open_links=false` to `url=none`.
+  - If `receive_actions` is present but partial or invalid, normalize it
+    with defaults.
+  - Keep `auto_open_links` readable/writable for compatibility.
+- Add:
+
+```python
+@property
+def receive_actions(self) -> dict[str, str]: ...
+
+@receive_actions.setter
+def receive_actions(self, value: dict[str, str]) -> None: ...
+
+def get_receive_action(self, kind: str) -> str: ...
+def set_receive_action(self, kind: str, action: str) -> None: ...
+```
+
+Tests:
+
+- Add `tests/protocol/test_desktop_receive_actions_config.py`.
+- Cover empty config, `auto_open_links=true`, `auto_open_links=false`,
+  partial mappings, invalid actions, unknown item types, and setter
+  persistence.
 
 Acceptance criteria:
 
 ```text
-New config file gets default receive_actions.
-Old config with auto_open_links=true maps URL to open.
-Old config with auto_open_links=false maps URL to none.
-Invalid values are ignored and replaced with defaults.
+Config.receive_actions always returns all five keys.
+Legacy auto_open_links=false maps URL action to none.
+Invalid stored values do not leak into runtime behavior.
+Existing auto_open_links property still works.
 ```
 
-### Phase 2 — Settings UI
+### P.2 - Receive action helper
 
-- Add Receive Actions group.
-- Use ComboRows.
-- Remove Auto-open links from Connection.
-- Move Logs to last section.
+Status: completed 2026-04-26.
+
+Result:
+
+```text
+Added desktop/src/receive_actions.py with exact URL detection, embedded URL extraction, text action orchestration, file classification, and best-effort action execution.
+Clipboard-producing URL/Text actions are staged and flushed to the real clipboard at most once per received text payload.
+Added tests/protocol/test_desktop_receive_actions.py.
+python3 -m unittest tests.protocol.test_desktop_receive_actions: passed, 26 tests.
+python3 -m unittest tests.protocol.test_desktop_receive_actions_config: passed, 11 tests.
+python3 -m unittest tests.protocol.test_platform_contract tests.protocol.test_desktop_streaming_recipient: passed, 23 tests.
+```
+
+Implementation:
+
+- Add `desktop/src/receive_actions.py`.
+- Implement:
+
+```python
+def classify_received_text(text: str) -> tuple[str | None, str | None]:
+    ...
+
+def extract_received_urls(text: str) -> list[str]:
+    ...
+
+def classify_received_file(path: Path) -> str:
+    ...
+
+def apply_receive_action(config, platform, kind: str, *, url: str | None = None,
+                         text: str | None = None,
+                         path: Path | None = None) -> bool:
+    ...
+
+def apply_receive_text_actions(config, platform, text: str) -> bool:
+    ...
+```
+
+- URL classification must trim whitespace and require the whole payload
+  to be one `http://` or `https://` URL using `urllib.parse.urlparse`.
+- File classification should prefer `mimetypes.guess_type(path.name)`,
+  then extension fallback, then `other`.
+- `apply_receive_action()` behavior:
+  - `none`: return true without side effects.
+  - `url/open`: call `platform.shell.open_url(url)`.
+  - `url/copy`: stage `url` as the pending clipboard value.
+  - `text/copy`: stage the full received text as the pending clipboard value.
+  - `image|video|document/open`: call `platform.shell.open_path(path)`.
+  - Unsupported combinations: log and return false.
+- `apply_receive_text_actions()` behavior:
+  - exact single URL: URL action only.
+  - text with embedded URL: URL action for the first detected URL, then
+    Text action for the full text.
+  - plain text: Text action only.
+  - flush pending clipboard once after all selected actions have run.
+- Catch exceptions inside the helper. The receive loop must never fail
+  because a post-receive action failed.
+
+Tests:
+
+- Add `tests/protocol/test_desktop_receive_actions.py`.
+- Use fake config/platform objects; do not call real `xdg-open` or real
+  clipboard tools.
+- Cover exact URL detection, embedded URL extraction, staged clipboard
+  flushing, MIME families, archive rejection, and each action branch.
 
 Acceptance criteria:
+
+```text
+URL-only helper accepts only whole http/https payloads.
+Embedded URL helper extracts http/https URLs inside text.
+Image/video/document helpers classify common MIME types.
+Archive and unknown files classify as other.
+Action helper is best-effort and side-effect-free for none/other.
+```
+
+### P.3 - Platform shell open-path support
+
+Status: completed 2026-04-26.
+
+Result:
+
+```text
+Added ShellBackend.open_path(path).
+Implemented LinuxShellBackend.open_path() with xdg-open.
+Updated platform contract test to assert shell.open_path exists.
+python3 -m unittest tests.protocol.test_platform_contract: passed, 6 tests.
+python3 -m unittest tests.protocol.test_desktop_receive_actions tests.protocol.test_desktop_receive_actions_config: passed, 37 tests.
+python3 -m unittest tests.protocol.test_desktop_streaming_recipient: passed, 17 tests.
+```
+
+Implementation:
+
+- Extend `ShellBackend` protocol with `open_path(path: Path) -> bool`.
+- Implement `LinuxShellBackend.open_path()` with `xdg-open`.
+- Leave `open_url()` and `open_folder()` unchanged.
+- Update platform contract tests to assert the new method exists.
+
+Tests:
+
+- Update `tests/protocol/test_platform_contract.py`.
+- Unit test can assert method shape only; do not spawn external apps.
+
+Acceptance criteria:
+
+```text
+Linux platform exposes shell.open_path.
+Existing shell.open_url/open_folder behavior remains available.
+Platform contract tests pass.
+```
+
+### P.4 - Settings UI
+
+Status: completed 2026-04-26.
+
+Result:
+
+```text
+Removed the old Auto-open links switch from Connection.
+Added Receive Actions ComboRows for URL, Text, Image, Video, and Document.
+Moved Logs to the final PreferencesGroup position before the footer labels.
+Added tests/protocol/test_desktop_receive_actions_settings.py.
+python3 -m unittest tests.protocol.test_desktop_receive_actions_settings: passed, 3 tests.
+python3 -m unittest tests.protocol.test_desktop_receive_actions tests.protocol.test_desktop_receive_actions_config tests.protocol.test_platform_contract: passed, 43 tests.
+python3 -m unittest tests.protocol.test_desktop_streaming_recipient: passed, 17 tests.
+Interactive settings smoke was not possible in this sandbox: GTK could not initialize under Xvfb.
+```
+
+Implementation:
+
+- In `show_settings()`, remove the `Auto-open links` switch from the
+  Connection group.
+- Add a `Receive Actions` `Adw.PreferencesGroup` immediately after
+  Connection.
+- Add one ComboRow per kind:
+  - URL: Open in default browser, Copy to clipboard, No action.
+  - Text: Copy to clipboard, No action.
+  - Image: Open in default image viewer, No action.
+  - Video: Open in default video viewer, No action.
+  - Document: Open in default document viewer, No action.
+- Keep a local label/action mapping so row labels are user-facing and
+  config values remain stable strings.
+- On `notify::selected`, call `config.set_receive_action(kind, action)`.
+- Move Logs group creation so it is appended after Connection
+  Statistics. Footer labels may remain after Logs because they are not a
+  preferences section.
+
+Manual checks:
 
 ```text
 Settings shows Receive Actions after Connection.
-Changing a ComboRow persists to config.json.
-Logs section appears last.
-Existing URL behavior default remains open.
+ComboRows show migrated/default values.
+Changing a ComboRow updates config.json.
+Closing and reopening Settings preserves selections.
+Logs is the final PreferencesGroup.
 ```
-
-### Phase 3 — URL action
-
-- Route received URL through `receive_actions.url`.
-- Support `open`, `copy`, `none`.
 
 Acceptance criteria:
 
 ```text
-url=open opens URL as current behavior does.
-url=copy copies URL and does not open browser.
-url=none does not open browser and does not copy.
-Non-URL text is unaffected.
+The old Auto-open links switch is no longer visible.
+URL default is Open in default browser.
+Text default is Copy to clipboard.
+File defaults are No action.
+Settings section order matches this plan.
 ```
 
-### Phase 4 — File type actions
+### P.5 - URL and text receive integration
 
-- Add classification for image/video/document.
-- Apply `open` action via `xdg-open`.
-- Keep default `none`.
+Status: completed 2026-04-26.
+
+Result:
+
+```text
+Replaced direct clipboard write and regex auto-open in Poller._handle_message_clipboard_text().
+Text payloads now route through apply_receive_text_actions().
+Exact URL payloads run URL action only.
+Embedded URL payloads run URL action and Text action, with at most one real clipboard write.
+Plain text payloads run Text action.
+Added tests/protocol/test_desktop_receive_actions_poller.py.
+python3 -m unittest tests.protocol.test_desktop_receive_actions_poller tests.protocol.test_desktop_receive_actions tests.protocol.test_desktop_receive_actions_config tests.protocol.test_desktop_receive_actions_settings tests.protocol.test_platform_contract tests.protocol.test_desktop_streaming_recipient: passed, 71 tests.
+```
+
+Implementation:
+
+- In `_handle_message_clipboard_text`, replace direct clipboard write
+  and regex-based auto-open with `apply_receive_text_actions()`.
+- For exact URL payloads:
+  - Add the received history entry.
+  - Show the existing notification.
+  - Apply `receive_actions.url`.
+  - Do not apply `receive_actions.text`.
+- For text containing a URL plus other text:
+  - Add the received history entry.
+  - Show the existing notification.
+  - Apply `receive_actions.url` for the detected URL.
+  - Apply `receive_actions.text` for the full text.
+- For text without a URL:
+  - Apply `receive_actions.text` for the full text.
+- Clipboard-producing actions must stage a pending value and write the
+  real clipboard at most once.
+- Log helper failures, but do not return early after history/notification
+  are recorded.
+
+Tests:
+
+- Add `tests/protocol/test_desktop_receive_actions_poller.py`.
+- Build a Poller with fake config/platform/history.
+- Cover:
+  - `url=open` calls `open_url` and not `write_text`.
+  - `url=copy` calls `write_text` and not `open_url`.
+  - `url=none` calls neither.
+  - `text=copy` copies plain text.
+  - `text=none` does not copy plain text.
+  - Embedded URL with `url=copy` and `text=copy` performs one clipboard
+    write containing the full text.
 
 Acceptance criteria:
 
 ```text
-image=open opens received image in default image viewer.
-video=open opens received video in default video viewer.
-document=open opens received PDF/document in default viewer.
-none only saves the file as before.
-Unsupported files are saved as before.
+URL actions are mutually exclusive.
+Text actions are mutually exclusive.
+Exact URL payloads do not run Text action.
+Embedded URL payloads run both URL and Text action.
+Post-action failure does not block receive history.
 ```
 
-### Phase 5 — Polish
+### P.6 - File receive integration
 
-- Add lightweight logging for action failures.
-- Optional notification on action failure.
-- Add small docs section in README or docs/plans.
-- Add screenshots later if UI stabilizes.
+Status: completed 2026-04-26.
+
+Result:
+
+```text
+Added Poller._apply_receive_file_action().
+Classic and streaming file receive paths classify final_path after history completion.
+Image/video/document actions run before file-received callbacks.
+Other file types skip action execution.
+Action failures are logged and do not block callbacks or mark transfers failed.
+Extended tests/protocol/test_desktop_receive_actions_poller.py for classic and streaming file actions.
+python3 -m unittest tests.protocol.test_desktop_receive_actions_poller tests.protocol.test_desktop_receive_actions tests.protocol.test_desktop_receive_actions_config tests.protocol.test_desktop_receive_actions_settings tests.protocol.test_platform_contract tests.protocol.test_desktop_streaming_recipient: passed, 76 tests.
+python3 -m unittest tests.protocol.test_desktop_streaming_integration could not run in this environment because php is not installed.
+```
+
+Implementation:
+
+- After final file history is updated to complete in
+  `_receive_file_transfer`, classify `final_path` and apply the action.
+- Do the same in `_receive_streaming_transfer`.
+- Run the action before `_on_file_received` callbacks so notification
+  behavior remains a separate callback concern.
+- Skip action execution when classification is `other`.
+- Do not touch `.fn.*` command transfer handling.
+
+Tests:
+
+- Extend or add Poller unit tests with patched/fake
+  `apply_receive_action()` to confirm both classic and streaming paths
+  invoke it after a successful finalize.
+- Add at least one negative test proving failed downloads/finalize paths
+  do not run actions.
+- Existing streaming recipient tests should still pass.
+
+Acceptance criteria:
+
+```text
+image=open opens received images after save.
+video=open opens received videos after save.
+document=open opens received documents after save.
+none and other only save files as before.
+Classic and streaming receive paths behave the same.
+```
+
+### P.7 - Documentation and verification
+
+Status: completed 2026-04-26.
+
+Result:
+
+```text
+Updated desktop/README.md with Receive Actions behavior, defaults, embedded URL handling, and single clipboard-write semantics.
+python3 -m unittest tests.protocol.test_desktop_receive_actions_config tests.protocol.test_desktop_receive_actions tests.protocol.test_desktop_receive_actions_poller tests.protocol.test_desktop_receive_actions_settings tests.protocol.test_platform_contract tests.protocol.test_desktop_streaming_recipient: passed, 76 tests.
+python3 -m py_compile desktop/src/config.py desktop/src/receive_actions.py desktop/src/poller.py desktop/src/windows.py desktop/src/interfaces/shell.py desktop/src/backends/linux/shell_backend.py tests/protocol/test_desktop_receive_actions_config.py tests/protocol/test_desktop_receive_actions.py tests/protocol/test_desktop_receive_actions_poller.py tests/protocol/test_desktop_receive_actions_settings.py tests/protocol/test_platform_contract.py: passed.
+git diff --check: passed.
+Manual Settings smoke was not possible in this sandbox because GTK could not initialize under Xvfb.
+Streaming integration tests could not run in this environment because php is not installed.
+```
+
+Implementation:
+
+- Add a short `desktop/README.md` settings note after behavior is
+  implemented.
+- Leave future action types out of user docs until implemented.
+- Do not add custom command support.
+
+Verification:
+
+```bash
+python -m unittest tests.protocol.test_desktop_receive_actions_config
+python -m unittest tests.protocol.test_desktop_receive_actions
+python -m unittest tests.protocol.test_desktop_receive_actions_poller
+python -m unittest tests.protocol.test_platform_contract
+python -m unittest tests.protocol.test_desktop_streaming_recipient
+```
+
+Manual smoke:
+
+```text
+Open Settings and check section order.
+Change each dropdown and inspect config.json.
+Send https://example.com with url=open/copy/none.
+Send plain text with an embedded URL and confirm URL and Text actions both run.
+Send jpg/png/mp4/pdf/docx/zip and confirm only configured file kinds open.
+```
+
+Done when:
+
+```text
+No server or Android code changed.
+All focused tests pass.
+Manual receive smoke matches configured actions.
+Existing default behavior remains acceptable: URL opens by default, files save only.
+```
+
+## Commit sequence
+
+```text
+P.1 config: add receive_actions defaults and migration
+P.2 receive-actions: add classifier and safe action executor
+P.3 platform: add shell open_path support
+P.4 settings: add Receive Actions group
+P.5 receiver: apply URL and text receive actions
+P.6 receiver: apply file receive actions
+P.7 docs: document receive action settings
+```
+
+Each `P.X` part should leave focused tests passing for the layer it
+touches.
 
 ## Test plan
 
@@ -651,10 +1101,12 @@ Do not start with this shape unless you want immediate extensibility. For v1, a 
 
 ```text
 1. config: add receive_actions defaults and migration
-2. settings: add Receive Actions group and move Logs last
-3. receiver: apply URL receive action
-4. receiver: classify files and apply open action
-5. docs: add receive actions plan / update README
+2. receive-actions: add classifier and safe action executor
+3. platform: add shell open_path support
+4. settings: add Receive Actions group and move Logs last
+5. receiver: apply URL and text receive actions
+6. receiver: classify files and apply open action
+7. docs: add receive actions plan / update README
 ```
 
 ## Final recommendation

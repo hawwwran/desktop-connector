@@ -79,9 +79,26 @@ $APPIMAGE --gtk-window={send-files|settings|history|pairing|find-phone} \
 - Drag-and-drop files onto the Send Files window
 - Right-click "Send to Phone" in file managers (Nautilus, Nemo, Dolphin)
 - Clipboard sharing (text and images)
+- Configurable receive actions for URLs, text, images, videos, and documents
 - Transfer history with delivery state (Sent / Delivered / Received), swipe-to-delete
 - Long polling for near-instant delivery (~1 s latency)
 - In-app updater (AppImage installs only)
+
+### Receive actions
+
+Settings includes a **Receive Actions** section for choosing what happens
+after content arrives on the desktop.
+
+Defaults preserve existing behavior where practical:
+
+- URL: open in the default browser
+- Text: copy to clipboard
+- Image, video, document: no action beyond saving and history/notification updates
+
+For text that contains a URL plus other text, the URL action runs for the
+detected URL and the Text action runs for the full text. Clipboard updates
+from receive actions are applied once after actions are evaluated, so a
+single received item does not make repeated clipboard writes.
 
 ## AppImage build (for maintainers / CI)
 

@@ -26,6 +26,14 @@ class LinuxShellBackend(ShellBackend):
             log.warning("platform.open_folder.failed error_kind=%s", type(e).__name__)
             return False
 
+    def open_path(self, path: Path) -> bool:
+        try:
+            subprocess.Popen(["xdg-open", str(path)])
+            return True
+        except Exception as e:
+            log.warning("platform.open_path.failed error_kind=%s", type(e).__name__)
+            return False
+
     def launch_installer_terminal(self, command: str) -> bool:
         terminals = [
             ["konsole", "-e", "bash", "-c", command],

@@ -33,6 +33,7 @@ class LinuxPlatformContractTests(unittest.TestCase):
         self.assertTrue(hasattr(p.clipboard, "write_text"))
         self.assertTrue(hasattr(p.notifications, "notify"))
         self.assertTrue(hasattr(p.dialogs, "pick_files"))
+        self.assertTrue(hasattr(p.shell, "open_path"))
         self.assertTrue(hasattr(p.shell, "launch_installer_terminal"))
 
     def test_linux_capabilities_match_expected_defaults(self):

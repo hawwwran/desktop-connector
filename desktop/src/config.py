@@ -13,6 +13,52 @@ DEFAULT_POLL_INTERVAL = 30  # seconds when idle
 FAST_POLL_INTERVAL = 5      # seconds after a transfer is found
 FAST_POLL_DURATION = 120    # seconds to stay in fast-poll mode
 
+RECEIVE_ACTION_OPEN = "open"
+RECEIVE_ACTION_COPY = "copy"
+RECEIVE_ACTION_NONE = "none"
+
+RECEIVE_KIND_URL = "url"
+RECEIVE_KIND_TEXT = "text"
+RECEIVE_KIND_IMAGE = "image"
+RECEIVE_KIND_VIDEO = "video"
+RECEIVE_KIND_DOCUMENT = "document"
+
+DEFAULT_RECEIVE_ACTIONS = {
+    RECEIVE_KIND_URL: RECEIVE_ACTION_OPEN,
+    RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY,
+    RECEIVE_KIND_IMAGE: RECEIVE_ACTION_NONE,
+    RECEIVE_KIND_VIDEO: RECEIVE_ACTION_NONE,
+    RECEIVE_KIND_DOCUMENT: RECEIVE_ACTION_NONE,
+}
+
+_RECEIVE_ACTIONS_BY_KIND = {
+    RECEIVE_KIND_URL: {
+        RECEIVE_ACTION_OPEN,
+        RECEIVE_ACTION_COPY,
+        RECEIVE_ACTION_NONE,
+    },
+    RECEIVE_KIND_TEXT: {RECEIVE_ACTION_COPY, RECEIVE_ACTION_NONE},
+    RECEIVE_KIND_IMAGE: {RECEIVE_ACTION_OPEN, RECEIVE_ACTION_NONE},
+    RECEIVE_KIND_VIDEO: {RECEIVE_ACTION_OPEN, RECEIVE_ACTION_NONE},
+    RECEIVE_KIND_DOCUMENT: {RECEIVE_ACTION_OPEN, RECEIVE_ACTION_NONE},
+}
+
+
+def allowed_receive_actions(kind: str) -> set[str]:
+    """Return valid receive-action values for an item kind."""
+    return set(_RECEIVE_ACTIONS_BY_KIND.get(kind, set()))
+
+
+def _normalize_receive_actions(value: object) -> dict[str, str]:
+    actions = dict(DEFAULT_RECEIVE_ACTIONS)
+    if not isinstance(value, dict):
+        return actions
+
+    for kind, action in value.items():
+        if kind in actions and action in allowed_receive_actions(kind):
+            actions[kind] = action
+    return actions
+
 
 class Config:
     """Manages persistent configuration."""
@@ -22,6 +68,7 @@ class Config:
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_file = self.config_dir / "config.json"
         self._data = self._load()
+        self._migrate_receive_actions()
 
     def _load(self) -> dict:
         if self.config_file.exists():
@@ -32,6 +79,21 @@ class Config:
     def save(self) -> None:
         with open(self.config_file, "w") as f:
             json.dump(self._data, f, indent=2)
+
+    def _migrate_receive_actions(self) -> None:
+        stored = self._data.get("receive_actions")
+        if stored is None:
+            actions = dict(DEFAULT_RECEIVE_ACTIONS)
+            if self._data.get("auto_open_links", True) is False:
+                actions[RECEIVE_KIND_URL] = RECEIVE_ACTION_NONE
+            self._data["receive_actions"] = actions
+            self.save()
+            return
+
+        normalized = _normalize_receive_actions(stored)
+        if stored != normalized:
+            self._data["receive_actions"] = normalized
+            self.save()
 
     @property
     def server_url(self) -> str:
@@ -83,6 +145,7 @@ class Config:
     def reload(self) -> None:
         """Reload config from disk (picks up changes from subprocesses)."""
         self._data = self._load()
+        self._migrate_receive_actions()
 
     @property
     def paired_devices(self) -> dict:
@@ -139,6 +202,27 @@ class Config:
     def auto_open_links(self, value: bool) -> None:
         self._data["auto_open_links"] = value
         self.save()
+
+    @property
+    def receive_actions(self) -> dict[str, str]:
+        return _normalize_receive_actions(self._data.get("receive_actions"))
+
+    @receive_actions.setter
+    def receive_actions(self, value: dict[str, str]) -> None:
+        self._data["receive_actions"] = _normalize_receive_actions(value)
+        self.save()
+
+    def get_receive_action(self, kind: str) -> str:
+        return self.receive_actions.get(
+            kind,
+            DEFAULT_RECEIVE_ACTIONS.get(kind, RECEIVE_ACTION_NONE),
+        )
+
+    def set_receive_action(self, kind: str, action: str) -> None:
+        actions = self.receive_actions
+        if kind in actions and action in allowed_receive_actions(kind):
+            actions[kind] = action
+        self.receive_actions = actions
 
     @property
     def allow_logging(self) -> bool:

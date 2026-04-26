@@ -1,0 +1,335 @@
+"""Poller integration tests for URL/Text receive actions."""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+sys.path.insert(0, os.path.dirname(__file__))
+from _paths import REPO_ROOT  # noqa: E402
+
+sys.path.insert(0, REPO_ROOT)
+
+from desktop.src.config import (  # noqa: E402
+    RECEIVE_ACTION_COPY,
+    RECEIVE_ACTION_NONE,
+    RECEIVE_ACTION_OPEN,
+    RECEIVE_KIND_IMAGE,
+    RECEIVE_KIND_TEXT,
+    RECEIVE_KIND_URL,
+    RECEIVE_KIND_VIDEO,
+)
+from desktop.src.messaging.message_model import DeviceMessage  # noqa: E402
+from desktop.src.messaging.message_types import MessageTransport, MessageType  # noqa: E402
+from desktop.src.poller import Poller  # noqa: E402
+
+
+class _Config:
+    def __init__(self, actions: dict[str, str]):
+        self.actions = actions
+        self.config_dir = Path(tempfile.mkdtemp(prefix="dc-recv-action-config-"))
+        self.save_directory = self.config_dir / "save"
+        self.save_directory.mkdir()
+        self.paired_devices = {}
+
+    def get_receive_action(self, kind: str) -> str:
+        return self.actions.get(kind, RECEIVE_ACTION_NONE)
+
+
+class _Clipboard:
+    def __init__(self, *, result: bool = True):
+        self.result = result
+        self.written_text: list[str] = []
+
+    def write_text(self, text: str) -> bool:
+        self.written_text.append(text)
+        return self.result
+
+
+class _Shell:
+    def __init__(self, *, result: bool = True):
+        self.result = result
+        self.opened_urls: list[str] = []
+        self.opened_paths: list[Path] = []
+
+    def open_url(self, url: str) -> bool:
+        self.opened_urls.append(url)
+        return self.result
+
+    def open_path(self, path: Path) -> bool:
+        self.opened_paths.append(path)
+        return self.result
+
+
+class _Notifications:
+    def __init__(self):
+        self.events: list[tuple[str, str]] = []
+
+    def notify(self, title: str, body: str, icon: str = "dialog-information") -> None:
+        self.events.append((title, body))
+
+
+class _Platform:
+    def __init__(
+        self,
+        *,
+        clipboard: _Clipboard | None = None,
+        shell: _Shell | None = None,
+    ):
+        self.clipboard = clipboard or _Clipboard()
+        self.shell = shell or _Shell()
+        self.notifications = _Notifications()
+
+
+class ReceiveActionsPollerTests(unittest.TestCase):
+    def _build_poller(self, actions: dict[str, str], *, platform: _Platform | None = None):
+        history = MagicMock()
+        poller = Poller(
+            config=_Config(actions),
+            connection=MagicMock(),
+            api=MagicMock(),
+            crypto=MagicMock(),
+            history=history,
+            platform=platform or _Platform(),
+        )
+        return poller, history
+
+    def _message(self, text: str) -> DeviceMessage:
+        return DeviceMessage(
+            type=MessageType.CLIPBOARD_TEXT,
+            transport=MessageTransport.TRANSFER_FILE,
+            payload={"text": text},
+            metadata={"filename": ".fn.clipboard.text"},
+        )
+
+    def test_exact_url_open_runs_url_action_only(self):
+        poller, history = self._build_poller({
+            RECEIVE_KIND_URL: RECEIVE_ACTION_OPEN,
+            RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY,
+        })
+
+        poller._handle_message_clipboard_text(self._message("https://example.com"))
+
+        self.assertEqual(poller.platform.shell.opened_urls, ["https://example.com"])
+        self.assertEqual(poller.platform.clipboard.written_text, [])
+        self.assertEqual(
+            poller.platform.notifications.events,
+            [("Clipboard received", "https://example.com")],
+        )
+        history.add.assert_called_once()
+
+    def test_exact_url_copy_copies_url_once(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_URL: RECEIVE_ACTION_COPY,
+            RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY,
+        })
+
+        poller._handle_message_clipboard_text(self._message("https://example.com"))
+
+        self.assertEqual(poller.platform.shell.opened_urls, [])
+        self.assertEqual(poller.platform.clipboard.written_text, ["https://example.com"])
+
+    def test_exact_url_none_does_not_copy_or_open(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_URL: RECEIVE_ACTION_NONE,
+            RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY,
+        })
+
+        poller._handle_message_clipboard_text(self._message("https://example.com"))
+
+        self.assertEqual(poller.platform.shell.opened_urls, [])
+        self.assertEqual(poller.platform.clipboard.written_text, [])
+
+    def test_plain_text_copy_uses_text_action(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY,
+        })
+
+        poller._handle_message_clipboard_text(self._message("hello"))
+
+        self.assertEqual(poller.platform.shell.opened_urls, [])
+        self.assertEqual(poller.platform.clipboard.written_text, ["hello"])
+
+    def test_plain_text_none_does_not_copy(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_TEXT: RECEIVE_ACTION_NONE,
+        })
+
+        poller._handle_message_clipboard_text(self._message("hello"))
+
+        self.assertEqual(poller.platform.shell.opened_urls, [])
+        self.assertEqual(poller.platform.clipboard.written_text, [])
+
+    def test_embedded_url_runs_url_and_text_with_one_clipboard_write(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_URL: RECEIVE_ACTION_COPY,
+            RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY,
+        })
+
+        text = "See https://example.com/report.pdf when ready"
+        poller._handle_message_clipboard_text(self._message(text))
+
+        self.assertEqual(poller.platform.shell.opened_urls, [])
+        self.assertEqual(poller.platform.clipboard.written_text, [text])
+
+    def test_embedded_url_open_and_text_none_opens_only(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_URL: RECEIVE_ACTION_OPEN,
+            RECEIVE_KIND_TEXT: RECEIVE_ACTION_NONE,
+        })
+
+        text = "See https://example.com/report.pdf when ready"
+        poller._handle_message_clipboard_text(self._message(text))
+
+        self.assertEqual(
+            poller.platform.shell.opened_urls,
+            ["https://example.com/report.pdf"],
+        )
+        self.assertEqual(poller.platform.clipboard.written_text, [])
+
+    def test_action_failure_does_not_block_history_or_notification(self):
+        platform = _Platform(clipboard=_Clipboard(result=False))
+        poller, history = self._build_poller(
+            {RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY},
+            platform=platform,
+        )
+
+        poller._handle_message_clipboard_text(self._message("hello"))
+
+        history.add.assert_called_once()
+        self.assertEqual(platform.notifications.events, [("Clipboard received", "hello")])
+        self.assertEqual(platform.clipboard.written_text, ["hello"])
+
+    def test_classic_file_receive_runs_action_before_callbacks(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_IMAGE: RECEIVE_ACTION_OPEN,
+        })
+        poller.api.ack_transfer.return_value = True
+        events: list[tuple[str, str]] = []
+        poller.on_file_received(lambda p: events.append(("callback", p.name)))
+
+        def record_action(_config, _platform, kind, *, path):
+            events.append(("action", path.name))
+            self.assertEqual(kind, RECEIVE_KIND_IMAGE)
+            return True
+
+        with patch.object(
+            poller,
+            "_download_and_decrypt_chunk",
+            return_value=b"image",
+        ), patch("desktop.src.poller.apply_receive_action", side_effect=record_action) as action:
+            poller._receive_file_transfer(
+                "tid-file",
+                "sender",
+                "photo.jpg",
+                1,
+                b"nonce",
+                b"key",
+            )
+
+        self.assertTrue((poller.config.save_directory / "photo.jpg").exists())
+        action.assert_called_once()
+        self.assertEqual(events, [("action", "photo.jpg"), ("callback", "photo.jpg")])
+
+    def test_streaming_file_receive_runs_action_before_callbacks(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_VIDEO: RECEIVE_ACTION_OPEN,
+        })
+        poller.api.ack_chunk.return_value = True
+        events: list[tuple[str, str]] = []
+        poller.on_file_received(lambda p: events.append(("callback", p.name)))
+
+        def record_action(_config, _platform, kind, *, path):
+            events.append(("action", path.name))
+            self.assertEqual(kind, RECEIVE_KIND_VIDEO)
+            return True
+
+        with patch.object(
+            poller,
+            "_stream_download_chunk",
+            return_value=("ok", b"video"),
+        ), patch("desktop.src.poller.apply_receive_action", side_effect=record_action) as action:
+            poller._receive_streaming_transfer(
+                "tid-stream",
+                "sender",
+                "movie.mp4",
+                1,
+                b"nonce",
+                b"key",
+            )
+
+        self.assertTrue((poller.config.save_directory / "movie.mp4").exists())
+        action.assert_called_once()
+        self.assertEqual(events, [("action", "movie.mp4"), ("callback", "movie.mp4")])
+
+    def test_file_action_is_not_run_after_failed_download(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_IMAGE: RECEIVE_ACTION_OPEN,
+        })
+
+        with patch.object(
+            poller,
+            "_download_and_decrypt_chunk",
+            return_value=None,
+        ), patch("desktop.src.poller.apply_receive_action") as action:
+            poller._receive_file_transfer(
+                "tid-fail",
+                "sender",
+                "photo.jpg",
+                1,
+                b"nonce",
+                b"key",
+            )
+
+        action.assert_not_called()
+
+    def test_file_action_failure_still_runs_callbacks(self):
+        poller, _history = self._build_poller({
+            RECEIVE_KIND_IMAGE: RECEIVE_ACTION_OPEN,
+        })
+        poller.api.ack_transfer.return_value = True
+        callbacks: list[str] = []
+        poller.on_file_received(lambda p: callbacks.append(p.name))
+
+        with patch.object(
+            poller,
+            "_download_and_decrypt_chunk",
+            return_value=b"image",
+        ), patch("desktop.src.poller.apply_receive_action", return_value=False):
+            poller._receive_file_transfer(
+                "tid-action-fail",
+                "sender",
+                "photo.jpg",
+                1,
+                b"nonce",
+                b"key",
+            )
+
+        self.assertEqual(callbacks, ["photo.jpg"])
+
+    def test_other_file_type_does_not_run_action(self):
+        poller, _history = self._build_poller({})
+
+        with patch.object(
+            poller,
+            "_download_and_decrypt_chunk",
+            return_value=b"archive",
+        ), patch("desktop.src.poller.apply_receive_action") as action:
+            poller._receive_file_transfer(
+                "tid-archive",
+                "sender",
+                "archive.zip",
+                1,
+                b"nonce",
+                b"key",
+            )
+
+        action.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
