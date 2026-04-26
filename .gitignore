@@ -11,6 +11,8 @@ desktop/src/__pycache__/
 desktop/assets/*
 !desktop/assets/brand/
 *.pyc
+*.AppImage
+*.zsync
 
 # Android
 android/.gradle/
