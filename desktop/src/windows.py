@@ -1535,11 +1535,22 @@ def show_history(config_dir: Path):
             content_path = item.get("content_path", "")
             filename = item.get("filename", "")
             import mimetypes as _mt
-            mime, _ = _mt.guess_type(filename or content_path)
+            mime, _ = _mt.guess_type(filename)
+            if not mime and content_path:
+                mime, _ = _mt.guess_type(content_path)
             thumb_widget = None
             is_clipboard = item.get("filename", "").startswith(".fn.clipboard")
+            is_clipboard_image = filename.endswith(".fn.clipboard.image")
+            has_existing_content = bool(content_path and Path(content_path).exists())
+            can_thumbnail = (
+                has_existing_content
+                and (
+                    is_clipboard_image
+                    or bool(mime and (mime.startswith("image/") or mime.startswith("video/")))
+                )
+            )
 
-            if content_path and Path(content_path).exists() and mime and (mime.startswith("image/") or mime.startswith("video/")):
+            if can_thumbnail:
                 try:
                     pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(content_path, 100, 100, True)
                     w, h = pixbuf.get_width(), pixbuf.get_height()
@@ -1563,6 +1574,8 @@ def show_history(config_dir: Path):
             if thumb_widget is None:
                 if is_link:
                     icon = Gtk.Image.new_from_icon_name("web-browser-symbolic")
+                elif is_clipboard_image:
+                    icon = Gtk.Image.new_from_icon_name("image-x-generic-symbolic")
                 elif is_clipboard:
                     icon = Gtk.Image.new_from_icon_name("edit-paste-symbolic")
                 elif mime and mime.startswith("image/"):

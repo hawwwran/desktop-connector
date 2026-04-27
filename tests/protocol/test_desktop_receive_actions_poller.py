@@ -16,6 +16,7 @@ sys.path.insert(0, REPO_ROOT)
 
 from desktop.src.config import (  # noqa: E402
     RECEIVE_ACTION_COPY,
+    RECEIVE_ACTION_KEY_IMAGE_OPEN,
     RECEIVE_ACTION_KEY_TEXT_COPY,
     RECEIVE_ACTION_KEY_URL_OPEN,
     RECEIVE_ACTION_LIMIT_BATCH,
@@ -378,6 +379,69 @@ class ReceiveActionsPollerTests(unittest.TestCase):
         self.assertEqual(
             poller._receive_action_limiter.finish_batch(batch).suppressed_counts,
             {RECEIVE_ACTION_KEY_TEXT_COPY: 1},
+        )
+
+    def test_fn_clipboard_image_is_saved_as_image_transfer(self):
+        poller, history = self._build_poller({
+            RECEIVE_KIND_IMAGE: RECEIVE_ACTION_OPEN,
+        })
+        callbacks: list[str] = []
+        poller.on_file_received(lambda p: callbacks.append(p.name))
+
+        source = poller.config.save_directory / ".fn.clipboard.image"
+        source.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+
+        poller._handle_fn_transfer(
+            source,
+            sender_id="sender-1",
+            transfer_id="tid-image",
+            mime_type="image/png",
+        )
+
+        final_path = poller.config.save_directory / "clipboard-image.png"
+        self.assertTrue(final_path.exists())
+        self.assertFalse(source.exists())
+        self.assertEqual(poller.platform.shell.opened_paths, [final_path])
+        self.assertEqual(callbacks, ["clipboard-image.png"])
+        history.add.assert_called_once_with(
+            filename="clipboard-image.png",
+            display_label="clipboard-image.png",
+            direction="received",
+            size=13,
+            content_path=str(final_path),
+            sender_id="sender-1",
+            transfer_id="tid-image",
+        )
+
+    def test_fn_clipboard_image_uses_receive_action_batch_limits(self):
+        poller, _history = self._build_poller(
+            {RECEIVE_KIND_IMAGE: RECEIVE_ACTION_OPEN},
+            limits={
+                RECEIVE_ACTION_KEY_IMAGE_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 0,
+                },
+            },
+        )
+        batch = poller._receive_action_limiter.start_batch(2)
+
+        first = poller.config.save_directory / ".fn.clipboard.image"
+        first.write_bytes(b"\x89PNG\r\n\x1a\nfirst")
+        poller._handle_fn_transfer(first, receive_action_batch=batch)
+
+        second = poller.config.save_directory / ".fn.clipboard.image"
+        second.write_bytes(b"\x89PNG\r\n\x1a\nsecond")
+        poller._handle_fn_transfer(second, receive_action_batch=batch)
+
+        self.assertEqual(
+            [path.name for path in poller.platform.shell.opened_paths],
+            ["clipboard-image.png"],
+        )
+        self.assertTrue((poller.config.save_directory / "clipboard-image.png").exists())
+        self.assertTrue((poller.config.save_directory / "clipboard-image_1.png").exists())
+        self.assertEqual(
+            poller._receive_action_limiter.finish_batch(batch).suppressed_counts,
+            {RECEIVE_ACTION_KEY_IMAGE_OPEN: 1},
         )
 
     def test_poll_once_batches_receive_action_limits_and_notifies_summary(self):

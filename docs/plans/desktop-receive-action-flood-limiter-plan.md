@@ -29,6 +29,7 @@ Rules:
 - If a limit is exceeded, the received item is still saved and marked complete; only the configured side effect is skipped.
 - If actions are skipped, show one concise summary notification, for example: `Received 18 files. Skipped 15 automatic opens to prevent flooding.`
 - Do not include file paths, URLs, or clipboard text in flood logs or summary text.
+- Clipboard image `.fn` transfers are compatibility transport only: desktop and Android save them as `clipboard-image.<ext>` using MIME type or image signature, then treat them as normal received image files. They must not write directly into the recipient clipboard.
 
 ## Configuration model
 
@@ -204,6 +205,7 @@ Implementation notes:
 - Added one `ReceiveActionLimiter` to `Poller` and create one batch context per pending-transfer poll result.
 - Threaded the batch context through `_download_transfer`, `.fn` text handling, classic file receives, streaming file receives, and `_apply_receive_file_action`.
 - Added limiter gates for Open URL, Copy URL to clipboard, Copy text to clipboard, and file open actions in `desktop/src/receive_actions.py`.
+- Converted `.fn.clipboard.image` receives into saved `clipboard-image.<ext>` image files before applying image receive actions, so they participate in batch/minute limiting like normal image transfers.
 - Treat limiter suppression as a successful no-op, so transfers stay complete and callbacks still run.
 - Added one summary notification after a poll batch when actions were suppressed; the summary includes only counts, not file paths, URLs, or clipboard contents.
 
@@ -255,10 +257,23 @@ Notes:
 - Removed the receive-action file failure path from the log message while verifying this phase.
 - Interactive GTK smoke testing was not run in the sandbox; the Settings window is covered here by source-level structure tests and Python compile checks.
 
+## Review follow-up
+
+Status: completed 2026-04-27
+
+- Desktop `.fn.clipboard.image` receives should be saved as `clipboard-image.<ext>`, recorded as normal incoming image files, passed through image receive actions, and included in flood-limit batch/minute accounting.
+- Android `.fn.clipboard.image` receives should use the same `clipboard-image.<ext>` save behavior and normal incoming file history row instead of writing the image into the recipient clipboard.
+- Extension selection should prefer the encrypted metadata MIME type and fall back to common image signatures; unknown clipboard images use `.png`.
+
+Verification:
+
+- `python3 -m unittest tests.protocol.test_desktop_receive_actions tests.protocol.test_desktop_receive_actions_poller tests.protocol.test_desktop_receive_actions_config tests.protocol.test_desktop_receive_actions_settings tests.protocol.test_desktop_streaming_recipient tests.protocol.test_desktop_message_contract tests.protocol.test_android_clipboard_image_source`
+- `./gradlew :app:compileDebugKotlin`
+
 ## Non-goals
 
 - No server protocol changes.
-- No Android changes.
+- No Android flood-limit settings in this phase.
 - No transfer rejection or sender throttling.
 - No prompt/confirmation dialog before every action.
 - No per-sender policy in v1; this can be added later if needed.

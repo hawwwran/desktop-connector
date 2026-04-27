@@ -70,6 +70,43 @@ STREAM_CHUNK_WAIT_RAMP_S = (1.0, 2.0, 4.0, 8.0, 10.0)
 STREAM_CHUNK_NETWORK_ATTEMPTS = 3
 
 
+def _clipboard_image_extension(mime_type: str | None, data: bytes) -> str:
+    normalized = (mime_type or "").split(";", 1)[0].strip().lower()
+    by_mime = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/bmp": ".bmp",
+        "image/tiff": ".tiff",
+        "image/heic": ".heic",
+        "image/heif": ".heif",
+        "image/svg+xml": ".svg",
+    }
+    if normalized in by_mime:
+        return by_mime[normalized]
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith(b"BM"):
+        return ".bmp"
+    if data.startswith((b"II*\x00", b"MM\x00*")):
+        return ".tiff"
+
+    return ".png"
+
+
+def _clipboard_image_filename(mime_type: str | None, data: bytes) -> str:
+    return f"clipboard-image{_clipboard_image_extension(mime_type, data)}"
+
+
 class Poller:
     """Polls server for pending transfers and downloads them."""
 
@@ -308,6 +345,7 @@ class Poller:
             log.error("Failed to decrypt metadata for %s", transfer_id[:12])
             return
         filename = meta_json["filename"]
+        mime_type = meta_json.get("mime_type", "application/octet-stream")
         base_nonce = base64.b64decode(meta_json["base_nonce"])
 
         log.info("transfer.download.started transfer_id=%s sender=%s chunks=%d name=%s",
@@ -323,6 +361,7 @@ class Poller:
         if filename.startswith(".fn."):
             self._receive_fn_transfer(
                 transfer_id, sender_id, filename, chunk_count, symmetric_key,
+                mime_type=mime_type,
                 receive_action_batch=receive_action_batch)
         elif mode == "streaming":
             self._receive_streaming_transfer(
@@ -337,6 +376,7 @@ class Poller:
 
     def _receive_fn_transfer(self, transfer_id: str, sender_id: str, filename: str,
                              chunk_count: int, symmetric_key: bytes, *,
+                             mime_type: str = "application/octet-stream",
                              receive_action_batch: ReceiveActionBatch | None = None) -> None:
         """Handle command-style .fn.* transfers: tiny payloads, in-memory path,
         write to a tmp file under the save_dir, dispatch, ACK."""
@@ -376,6 +416,8 @@ class Poller:
         self._handle_fn_transfer(
             save_path,
             sender_id=sender_id,
+            transfer_id=transfer_id,
+            mime_type=mime_type,
             receive_action_batch=receive_action_batch,
         )
 
@@ -917,6 +959,8 @@ class Poller:
         filepath: Path,
         *,
         sender_id: str | None = None,
+        transfer_id: str = "",
+        mime_type: str = "application/octet-stream",
         receive_action_batch: ReceiveActionBatch | None = None,
     ) -> None:
         """Handle special .fn. transfers through the unified message dispatcher."""
@@ -930,6 +974,17 @@ class Poller:
             if message.type == MessageType.CLIPBOARD_TEXT:
                 self._handle_message_clipboard_text(
                     message,
+                    receive_action_batch=receive_action_batch,
+                )
+                return
+
+            if message.type == MessageType.CLIPBOARD_IMAGE:
+                self._handle_message_clipboard_image(
+                    message,
+                    source_path=filepath,
+                    sender_id=sender_id,
+                    transfer_id=transfer_id,
+                    mime_type=mime_type,
                     receive_action_batch=receive_action_batch,
                 )
                 return
@@ -963,18 +1018,66 @@ class Poller:
         ):
             log.warning("receive_action.text.failed length=%d", len(text))
 
-    def _handle_message_clipboard_image(self, message) -> None:
+    def _handle_message_clipboard_image(
+        self,
+        message,
+        *,
+        source_path: Path | None = None,
+        sender_id: str | None = None,
+        transfer_id: str = "",
+        mime_type: str = "application/octet-stream",
+        receive_action_batch: ReceiveActionBatch | None = None,
+    ) -> None:
         data = message.payload.get("image_bytes", b"")
         if not isinstance(data, (bytes, bytearray)):
-            log.warning("clipboard.write_image.failed reason=invalid_payload")
+            log.warning("clipboard.image.save_failed reason=invalid_payload")
             return
-        if self.platform.clipboard.write_image(bytes(data)):
-            log.info("clipboard.write_image.succeeded size=%d", len(data))
-            self.platform.notifications.notify("Clipboard received", "Image copied to clipboard")
-            self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.image"),
-                             display_label="Clipboard image", direction="received", size=len(data))
-        else:
-            log.warning("clipboard.write_image.failed")
+
+        image_bytes = bytes(data)
+        save_dir = Path(self.config.save_directory)
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            log.exception("Cannot create save directory for clipboard image")
+            return
+
+        temp_path = source_path
+        if temp_path is None:
+            parts_dir = save_dir / ".parts"
+            try:
+                parts_dir.mkdir(parents=True, exist_ok=True)
+                temp_path = parts_dir / f".incoming_clipboard_image_{time.monotonic_ns()}.part"
+                temp_path.write_bytes(image_bytes)
+            except OSError:
+                log.exception("Failed to stage clipboard image")
+                return
+
+        filename = _clipboard_image_filename(mime_type, image_bytes)
+        final_path = self._finalize_temp_to_unique(temp_path, save_dir, filename)
+        if final_path is None:
+            log.warning("clipboard.image.save_failed")
+            return
+
+        final_size = final_path.stat().st_size
+        log.info("clipboard.image.saved bytes=%d name=%s", final_size, final_path.name)
+        self.history.add(
+            filename=final_path.name,
+            display_label=final_path.name,
+            direction="received",
+            size=final_size,
+            content_path=str(final_path),
+            sender_id=sender_id or "",
+            transfer_id=transfer_id,
+        )
+        self._apply_receive_file_action(
+            final_path,
+            receive_action_batch=receive_action_batch,
+        )
+        for cb in self._on_file_received:
+            try:
+                cb(final_path)
+            except Exception:
+                log.exception("File received callback error")
 
     def _handle_message_unpair(self, _message) -> None:
         log.info("pairing.unpair.received")

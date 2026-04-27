@@ -82,10 +82,6 @@ class PollService : Service() {
             val textPayload = msg.payload["text"] as? String ?: return@register
             pushTextToClipboard(textPayload)
         }
-        register(MessageType.CLIPBOARD_IMAGE) { msg ->
-            val imageBytes = msg.payload["image_bytes"] as? ByteArray ?: return@register
-            pushImageToClipboard(imageBytes)
-        }
         register(MessageType.PAIRING_UNPAIR) {
             AppLog.log("Pairing", "pairing.unpair.received")
             val keyManager = KeyManager(this@PollService)
@@ -626,17 +622,18 @@ class PollService : Service() {
         val data = parts.fold(ByteArray(0)) { acc, part -> acc + part }
         AppLog.log("Recv", "fasttrack.command.received fn=$fileName bytes=${data.size}")
 
+        if (fileName.startsWith(".fn.clipboard.image")) {
+            val displayLabel = saveClipboardImageTransfer(data, mimeType, transferId, prefs, db)
+                ?: return
+            AppLog.log("Recv", "fasttrack.command.handled fn=$fileName label=$displayLabel")
+            ackHandledTransfer(api, transferId)
+            return
+        }
+
         val displayLabel = handleFnTransfer(fileName, data, senderId = senderId)
         AppLog.log("Recv", "fasttrack.command.handled fn=$fileName label=$displayLabel")
 
-        try {
-            if (api.ackTransfer(transferId))
-                AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)}")
-            else
-                AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} reason=already_executed")
-        } catch (e: Exception) {
-            AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} error_kind=${e.javaClass.simpleName}")
-        }
+        ackHandledTransfer(api, transferId)
 
         if (fileName != ".fn.unpair") {
             db.transferDao().insert(QueuedTransfer(
@@ -651,6 +648,17 @@ class PollService : Service() {
             ))
             db.transferDao().trimHistory()
             showTransferNotification(displayLabel)
+        }
+    }
+
+    private fun ackHandledTransfer(api: ApiClient, transferId: String) {
+        try {
+            if (api.ackTransfer(transferId))
+                AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)}")
+            else
+                AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} reason=already_executed")
+        } catch (e: Exception) {
+            AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} error_kind=${e.javaClass.simpleName}")
         }
     }
 
@@ -1209,8 +1217,8 @@ class PollService : Service() {
                 return if (hasUrl) text else if (text.length > 40) text.take(40) + "..." else text
             }
             MessageType.CLIPBOARD_IMAGE -> {
-                messageDispatcher.dispatch(message)
-                return "Clipboard image"
+                AppLog.log("Clipboard", "clipboard.image.skipped reason=handled_as_image_file")
+                return fileName
             }
             MessageType.PAIRING_UNPAIR -> {
                 messageDispatcher.dispatch(message)
@@ -1227,23 +1235,81 @@ class PollService : Service() {
         AppLog.log("Clipboard", "clipboard.write_text.succeeded length=${text.length}")
     }
 
-    private fun pushImageToClipboard(data: ByteArray) {
-        // Save to cache, then set clipboard URI
-        try {
-            val file = java.io.File(cacheDir, "clipboard_received.png")
-            file.writeBytes(data)
-            val uri = androidx.core.content.FileProvider.getUriForFile(
-                this, "$packageName.fileprovider", file
-            )
-            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = ClipData.newUri(contentResolver, "Clipboard image", uri)
-            clipboard.setPrimaryClip(clip)
-            AppLog.log("Clipboard", "clipboard.write_image.succeeded size=${data.size}")
-        } catch (e: Exception) {
-            AppLog.log("Clipboard", "clipboard.write_image.failed error_kind=${e.javaClass.simpleName}", "warning")
-            // Fallback: just save the file
-            saveFile("clipboard_image.png", data)
+    private suspend fun saveClipboardImageTransfer(
+        data: ByteArray,
+        mimeType: String,
+        transferId: String,
+        prefs: AppPreferences,
+        db: AppDatabase,
+    ): String? {
+        val imageType = clipboardImageType(mimeType, data)
+        val file = saveFile("clipboard-image${imageType.first}", data) ?: return null
+        val size = file.length()
+        AppLog.log("Recv", "clipboard.image.saved bytes=$size name=${file.name}")
+        db.transferDao().insert(QueuedTransfer(
+            contentUri = Uri.fromFile(file).toString(),
+            displayName = file.name,
+            displayLabel = file.name,
+            mimeType = imageType.second,
+            sizeBytes = size,
+            recipientDeviceId = prefs.deviceId ?: "",
+            direction = TransferDirection.INCOMING,
+            status = TransferStatus.COMPLETE,
+            transferId = transferId,
+        ))
+        db.transferDao().trimHistory()
+        showTransferNotification(file.name)
+        return file.name
+    }
+
+    private fun clipboardImageType(mimeType: String, data: ByteArray): Pair<String, String> {
+        val normalized = mimeType.substringBefore(";").trim().lowercase()
+        when (normalized) {
+            "image/png" -> return ".png" to "image/png"
+            "image/jpeg", "image/jpg" -> return ".jpg" to "image/jpeg"
+            "image/gif" -> return ".gif" to "image/gif"
+            "image/webp" -> return ".webp" to "image/webp"
+            "image/bmp" -> return ".bmp" to "image/bmp"
+            "image/tiff" -> return ".tiff" to "image/tiff"
+            "image/heic" -> return ".heic" to "image/heic"
+            "image/heif" -> return ".heif" to "image/heif"
+            "image/svg+xml" -> return ".svg" to "image/svg+xml"
         }
+
+        if (hasPrefix(data, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) {
+            return ".png" to "image/png"
+        }
+        if (hasPrefix(data, 0xFF, 0xD8, 0xFF)) {
+            return ".jpg" to "image/jpeg"
+        }
+        if (hasAsciiPrefix(data, "GIF87a") || hasAsciiPrefix(data, "GIF89a")) {
+            return ".gif" to "image/gif"
+        }
+        if (data.size >= 12 && hasAsciiPrefix(data, "RIFF") && asciiAt(data, 8, "WEBP")) {
+            return ".webp" to "image/webp"
+        }
+        if (hasAsciiPrefix(data, "BM")) {
+            return ".bmp" to "image/bmp"
+        }
+        if (hasPrefix(data, 0x49, 0x49, 0x2A, 0x00) || hasPrefix(data, 0x4D, 0x4D, 0x00, 0x2A)) {
+            return ".tiff" to "image/tiff"
+        }
+
+        return ".png" to "image/png"
+    }
+
+    private fun hasPrefix(data: ByteArray, vararg prefix: Int): Boolean {
+        if (data.size < prefix.size) return false
+        return prefix.indices.all { (data[it].toInt() and 0xFF) == prefix[it] }
+    }
+
+    private fun hasAsciiPrefix(data: ByteArray, prefix: String): Boolean {
+        return asciiAt(data, 0, prefix)
+    }
+
+    private fun asciiAt(data: ByteArray, offset: Int, value: String): Boolean {
+        if (data.size < offset + value.length) return false
+        return value.indices.all { ((data[offset + it].toInt() and 0xFF).toChar()) == value[it] }
     }
 
     private fun saveFile(fileName: String, data: ByteArray): java.io.File? {
