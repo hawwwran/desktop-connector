@@ -28,7 +28,7 @@ android {
         applicationId = "com.desktopconnector"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
+        versionCode = 5
         versionName = androidVersionName
         setProperty("archivesBaseName", "Desktop-Connector-${versionName}")
     }
