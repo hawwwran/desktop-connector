@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Full history so future P.5b can resolve the tag's commit
           # timestamp for SOURCE_DATE_EPOCH without a fetch hop.
@@ -242,7 +242,7 @@ jobs:
         # or a tag-push that failed before the publish step. The
         # AppImage becomes downloadable from the run summary instead.
         if: github.event_name != 'push' || github.ref_type != 'tag'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-connector-${{ steps.artefact.outputs.version }}-x86_64
           path: |
@@ -272,7 +272,7 @@ jobs:
         # tag would also have ref_type=tag, which we explicitly do NOT
         # want to publish (manual runs are dry-runs by convention).
         if: github.event_name == 'push' && github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             artefacts/desktop-connector-*-x86_64.AppImage
