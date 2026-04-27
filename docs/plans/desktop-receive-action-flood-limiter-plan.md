@@ -27,7 +27,7 @@ Rules:
 - A batch is one pending-transfer list returned by the desktop poller.
 - The rolling minute limit catches fast repeated arrivals that do not arrive in the same poll batch.
 - If a limit is exceeded, the received item is still saved and marked complete; only the configured side effect is skipped.
-- If actions are skipped, show one concise summary notification, for example: `Received 18 files. Skipped 15 automatic opens to prevent flooding.`
+- If actions are skipped, show one concise summary notification, for example: `Received 18 items. Skipped 15 automatic actions to prevent flooding.`
 - Do not include file paths, URLs, or clipboard text in flood logs or summary text.
 - Clipboard image `.fn` transfers are compatibility transport only: desktop and Android save them as `clipboard-image.<ext>` using MIME type or image signature, then treat them as normal received image files. They must not write directly into the recipient clipboard.
 

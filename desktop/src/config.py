@@ -309,6 +309,7 @@ class Config:
 
     @property
     def receive_action_limits(self) -> dict[str, dict[str, int]]:
+        self.reload()
         return _normalize_receive_action_limits(
             self._data.get("receive_action_limits")
         )

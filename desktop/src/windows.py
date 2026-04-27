@@ -816,10 +816,13 @@ def show_settings(config_dir: Path):
                         spin.set_value(float(value))
             btn.set_label("\u2713 Reset")
             btn.set_sensitive(False)
-            GLib.timeout_add(
-                2000,
-                lambda: (btn.set_label("Reset to defaults"), btn.set_sensitive(True), False)[-1],
-            )
+
+            def restore_reset_label() -> bool:
+                btn.set_label("Reset to defaults")
+                btn.set_sensitive(True)
+                return False
+
+            GLib.timeout_add(2000, restore_reset_label)
 
         reset_btn.connect("clicked", on_reset_limits)
 

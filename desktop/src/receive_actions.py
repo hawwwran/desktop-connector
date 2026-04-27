@@ -152,9 +152,11 @@ class ReceiveActionLimiter:
 
     def allow(self, action_key: str,
               batch: ReceiveActionBatch | None = None) -> bool:
+        if action_key not in DEFAULT_RECEIVE_ACTION_LIMITS:
+            return True
         limits = self._limits_for(action_key)
         now = self._clock()
-        recent = self._recent.setdefault(action_key, deque())
+        recent = self._recent[action_key]
         self._prune_recent(recent, now)
 
         batch_limit = limits.get(RECEIVE_ACTION_LIMIT_BATCH, 0)
