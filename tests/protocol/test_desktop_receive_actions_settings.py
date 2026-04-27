@@ -27,6 +27,14 @@ class ReceiveActionsSettingsSourceTests(unittest.TestCase):
     def test_old_auto_open_links_row_is_removed(self):
         self.assertNotIn("Auto-open links", self.source)
 
+    def test_settings_window_default_size_and_resizable(self):
+        self.assertIn(
+            'title="Settings", default_width=630, default_height=624',
+            self.source,
+        )
+        self.assertIn("win.set_resizable(True)", self.source)
+        self.assertNotIn("win.set_resizable(False)", self.source)
+
     def test_receive_actions_group_and_rows_are_present(self):
         for text in (
             'Adw.PreferencesGroup(title="Receive Actions")',
@@ -42,6 +50,46 @@ class ReceiveActionsSettingsSourceTests(unittest.TestCase):
             "Open in default document viewer",
         ):
             self.assertIn(text, self.source)
+
+    def test_flood_protection_group_and_rows_are_present(self):
+        for text in (
+            'Adw.PreferencesGroup(title="Receive Action Flood Protection")',
+            'title="Flood limits"',
+            'subtitle="0 means unlimited"',
+            'Gtk.Button(label="Reset to defaults"',
+            "DEFAULT_RECEIVE_ACTION_LIMITS",
+            "RECEIVE_ACTION_LIMIT_MAX",
+            "RECEIVE_ACTION_LIMIT_BATCH",
+            "RECEIVE_ACTION_LIMIT_MINUTE",
+            "RECEIVE_ACTION_KEY_URL_OPEN",
+            "RECEIVE_ACTION_KEY_URL_COPY",
+            "RECEIVE_ACTION_KEY_TEXT_COPY",
+            "RECEIVE_ACTION_KEY_IMAGE_OPEN",
+            "RECEIVE_ACTION_KEY_VIDEO_OPEN",
+            "RECEIVE_ACTION_KEY_DOCUMENT_OPEN",
+            '"Open URL"',
+            '"Copy URL to clipboard"',
+            '"Copy text to clipboard"',
+            '"Open image"',
+            '"Open video"',
+            '"Open document"',
+            "Gtk.Grid(",
+            '"Action type"',
+            '"Max per batch"',
+            '"Max per minute"',
+            "Gtk.SpinButton(",
+            "config.set_receive_action_limit(",
+            "config.reset_receive_action_limits()",
+        ):
+            self.assertIn(text, self.source)
+
+    def test_flood_protection_is_after_receive_actions_and_before_logs(self):
+        receive_pos = self.source.index('title="Receive Actions"')
+        flood_pos = self.source.index('title="Receive Action Flood Protection"')
+        logs_pos = self.source.index('title="Logs"')
+
+        self.assertGreater(flood_pos, receive_pos)
+        self.assertLess(flood_pos, logs_pos)
 
     def test_logs_are_appended_after_connection_statistics(self):
         stats_pos = self.source.index('title="Pending outgoing"')

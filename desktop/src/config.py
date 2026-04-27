@@ -17,6 +17,17 @@ RECEIVE_ACTION_OPEN = "open"
 RECEIVE_ACTION_COPY = "copy"
 RECEIVE_ACTION_NONE = "none"
 
+RECEIVE_ACTION_KEY_URL_OPEN = "url.open"
+RECEIVE_ACTION_KEY_URL_COPY = "url.copy"
+RECEIVE_ACTION_KEY_TEXT_COPY = "text.copy"
+RECEIVE_ACTION_KEY_IMAGE_OPEN = "image.open"
+RECEIVE_ACTION_KEY_VIDEO_OPEN = "video.open"
+RECEIVE_ACTION_KEY_DOCUMENT_OPEN = "document.open"
+
+RECEIVE_ACTION_LIMIT_BATCH = "batch"
+RECEIVE_ACTION_LIMIT_MINUTE = "minute"
+RECEIVE_ACTION_LIMIT_MAX = 999
+
 RECEIVE_KIND_URL = "url"
 RECEIVE_KIND_TEXT = "text"
 RECEIVE_KIND_IMAGE = "image"
@@ -31,6 +42,33 @@ DEFAULT_RECEIVE_ACTIONS = {
     RECEIVE_KIND_DOCUMENT: RECEIVE_ACTION_NONE,
 }
 
+DEFAULT_RECEIVE_ACTION_LIMITS = {
+    RECEIVE_ACTION_KEY_URL_OPEN: {
+        RECEIVE_ACTION_LIMIT_BATCH: 1,
+        RECEIVE_ACTION_LIMIT_MINUTE: 5,
+    },
+    RECEIVE_ACTION_KEY_URL_COPY: {
+        RECEIVE_ACTION_LIMIT_BATCH: 1,
+        RECEIVE_ACTION_LIMIT_MINUTE: 10,
+    },
+    RECEIVE_ACTION_KEY_TEXT_COPY: {
+        RECEIVE_ACTION_LIMIT_BATCH: 1,
+        RECEIVE_ACTION_LIMIT_MINUTE: 10,
+    },
+    RECEIVE_ACTION_KEY_IMAGE_OPEN: {
+        RECEIVE_ACTION_LIMIT_BATCH: 1,
+        RECEIVE_ACTION_LIMIT_MINUTE: 5,
+    },
+    RECEIVE_ACTION_KEY_VIDEO_OPEN: {
+        RECEIVE_ACTION_LIMIT_BATCH: 1,
+        RECEIVE_ACTION_LIMIT_MINUTE: 2,
+    },
+    RECEIVE_ACTION_KEY_DOCUMENT_OPEN: {
+        RECEIVE_ACTION_LIMIT_BATCH: 1,
+        RECEIVE_ACTION_LIMIT_MINUTE: 5,
+    },
+}
+
 _RECEIVE_ACTIONS_BY_KIND = {
     RECEIVE_KIND_URL: {
         RECEIVE_ACTION_OPEN,
@@ -42,6 +80,13 @@ _RECEIVE_ACTIONS_BY_KIND = {
     RECEIVE_KIND_VIDEO: {RECEIVE_ACTION_OPEN, RECEIVE_ACTION_NONE},
     RECEIVE_KIND_DOCUMENT: {RECEIVE_ACTION_OPEN, RECEIVE_ACTION_NONE},
 }
+
+
+def _default_receive_action_limits() -> dict[str, dict[str, int]]:
+    return {
+        action_key: dict(limits)
+        for action_key, limits in DEFAULT_RECEIVE_ACTION_LIMITS.items()
+    }
 
 
 def allowed_receive_actions(kind: str) -> set[str]:
@@ -60,6 +105,35 @@ def _normalize_receive_actions(value: object) -> dict[str, str]:
     return actions
 
 
+def _normalize_receive_action_limit_value(value: object, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return default
+    if value < 0:
+        return default
+    return min(value, RECEIVE_ACTION_LIMIT_MAX)
+
+
+def _normalize_receive_action_limits(value: object) -> dict[str, dict[str, int]]:
+    limits = _default_receive_action_limits()
+    if not isinstance(value, dict):
+        return limits
+
+    for action_key, stored_limits in value.items():
+        if action_key not in limits or not isinstance(stored_limits, dict):
+            continue
+
+        normalized = dict(limits[action_key])
+        for limit_name in (RECEIVE_ACTION_LIMIT_BATCH, RECEIVE_ACTION_LIMIT_MINUTE):
+            if limit_name in stored_limits:
+                normalized[limit_name] = _normalize_receive_action_limit_value(
+                    stored_limits[limit_name],
+                    limits[action_key][limit_name],
+                )
+        limits[action_key] = normalized
+
+    return limits
+
+
 class Config:
     """Manages persistent configuration."""
 
@@ -69,6 +143,7 @@ class Config:
         self.config_file = self.config_dir / "config.json"
         self._data = self._load()
         self._migrate_receive_actions()
+        self._migrate_receive_action_limits()
 
     def _load(self) -> dict:
         if self.config_file.exists():
@@ -93,6 +168,13 @@ class Config:
         normalized = _normalize_receive_actions(stored)
         if stored != normalized:
             self._data["receive_actions"] = normalized
+            self.save()
+
+    def _migrate_receive_action_limits(self) -> None:
+        stored = self._data.get("receive_action_limits")
+        normalized = _normalize_receive_action_limits(stored)
+        if stored != normalized:
+            self._data["receive_action_limits"] = normalized
             self.save()
 
     @property
@@ -146,6 +228,7 @@ class Config:
         """Reload config from disk (picks up changes from subprocesses)."""
         self._data = self._load()
         self._migrate_receive_actions()
+        self._migrate_receive_action_limits()
 
     @property
     def paired_devices(self) -> dict:
@@ -223,6 +306,36 @@ class Config:
         if kind in actions and action in allowed_receive_actions(kind):
             actions[kind] = action
         self.receive_actions = actions
+
+    @property
+    def receive_action_limits(self) -> dict[str, dict[str, int]]:
+        return _normalize_receive_action_limits(
+            self._data.get("receive_action_limits")
+        )
+
+    @receive_action_limits.setter
+    def receive_action_limits(self, value: dict[str, dict[str, int]]) -> None:
+        self._data["receive_action_limits"] = _normalize_receive_action_limits(value)
+        self.save()
+
+    def get_receive_action_limits(self, action_key: str) -> dict[str, int]:
+        limits = self.receive_action_limits.get(action_key)
+        if limits is None:
+            return {RECEIVE_ACTION_LIMIT_BATCH: 0, RECEIVE_ACTION_LIMIT_MINUTE: 0}
+        return dict(limits)
+
+    def set_receive_action_limit(self, action_key: str, limit_name: str,
+                                 value: int) -> None:
+        limits = self.receive_action_limits
+        if action_key in limits and limit_name in (
+            RECEIVE_ACTION_LIMIT_BATCH,
+            RECEIVE_ACTION_LIMIT_MINUTE,
+        ):
+            limits[action_key][limit_name] = value
+        self.receive_action_limits = limits
+
+    def reset_receive_action_limits(self) -> None:
+        self.receive_action_limits = _default_receive_action_limits()
 
     @property
     def allow_logging(self) -> bool:

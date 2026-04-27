@@ -28,6 +28,9 @@ from .messaging import FnTransferAdapter, MessageDispatcher, MessageType
 from .platform import DesktopPlatform
 from .receive_actions import (
     RECEIVE_KIND_OTHER,
+    ReceiveActionBatch,
+    ReceiveActionFloodSummary,
+    ReceiveActionLimiter,
     apply_receive_action,
     apply_receive_text_actions,
     classify_received_file,
@@ -94,6 +97,7 @@ class Poller:
         self._tracker_state_lock = threading.Lock()
         self._tracker_last_progress: dict[str, tuple[int, float]] = {}  # tid -> (chunks_downloaded, monotonic_ts)
         self._tracker_gave_up: set[str] = set()
+        self._receive_action_limiter = ReceiveActionLimiter(config)
 
     def _write_poll_status(self, status: str) -> None:
         """Write long poll status: 'active', 'unavailable', 'testing', 'offline'."""
@@ -246,12 +250,45 @@ class Poller:
         log.info("transfer.pending.found count=%d", len(transfers))
         self._fast_poll_until = time.time() + FAST_POLL_DURATION
 
-        for transfer in transfers:
-            if not self._running:
-                break
-            self._download_transfer(transfer)
+        receive_action_batch = self._receive_action_limiter.start_batch(len(transfers))
+        try:
+            for transfer in transfers:
+                if not self._running:
+                    break
+                self._download_transfer(
+                    transfer,
+                    receive_action_batch=receive_action_batch,
+                )
+        finally:
+            summary = self._receive_action_limiter.finish_batch(receive_action_batch)
+            self._notify_receive_action_flood_summary(summary)
 
-    def _download_transfer(self, transfer: dict) -> None:
+    def _notify_receive_action_flood_summary(
+        self,
+        summary: ReceiveActionFloodSummary,
+    ) -> None:
+        if not summary.has_suppressed:
+            return
+
+        item_word = "item" if summary.batch_size == 1 else "items"
+        action_word = "action" if summary.total_suppressed == 1 else "actions"
+        body = (
+            f"Received {summary.batch_size} {item_word}. "
+            f"Skipped {summary.total_suppressed} automatic {action_word} "
+            "to prevent flooding."
+        )
+        log.info(
+            "receive_action.flood_limited batch_size=%d suppressed=%d",
+            summary.batch_size,
+            summary.total_suppressed,
+        )
+        try:
+            self.platform.notifications.notify("Receive actions limited", body)
+        except Exception:
+            log.exception("receive_action.flood_notification.failed")
+
+    def _download_transfer(self, transfer: dict, *,
+                           receive_action_batch: ReceiveActionBatch | None = None) -> None:
         transfer_id = transfer["transfer_id"]
         sender_id = transfer["sender_id"]
         encrypted_meta = transfer["encrypted_meta"]
@@ -285,18 +322,22 @@ class Poller:
         mode = transfer.get("mode", "classic")
         if filename.startswith(".fn."):
             self._receive_fn_transfer(
-                transfer_id, sender_id, filename, chunk_count, symmetric_key)
+                transfer_id, sender_id, filename, chunk_count, symmetric_key,
+                receive_action_batch=receive_action_batch)
         elif mode == "streaming":
             self._receive_streaming_transfer(
                 transfer_id, sender_id, filename, chunk_count,
-                base_nonce, symmetric_key)
+                base_nonce, symmetric_key,
+                receive_action_batch=receive_action_batch)
         else:
             self._receive_file_transfer(
                 transfer_id, sender_id, filename, chunk_count,
-                base_nonce, symmetric_key)
+                base_nonce, symmetric_key,
+                receive_action_batch=receive_action_batch)
 
     def _receive_fn_transfer(self, transfer_id: str, sender_id: str, filename: str,
-                             chunk_count: int, symmetric_key: bytes) -> None:
+                             chunk_count: int, symmetric_key: bytes, *,
+                             receive_action_batch: ReceiveActionBatch | None = None) -> None:
         """Handle command-style .fn.* transfers: tiny payloads, in-memory path,
         write to a tmp file under the save_dir, dispatch, ACK."""
         plaintext_parts: list[bytes] = []
@@ -332,7 +373,11 @@ class Poller:
             log.exception("Failed to write .fn payload for %s", transfer_id[:12])
             return
 
-        self._handle_fn_transfer(save_path, sender_id=sender_id)
+        self._handle_fn_transfer(
+            save_path,
+            sender_id=sender_id,
+            receive_action_batch=receive_action_batch,
+        )
 
         if self.api.ack_transfer(transfer_id):
             log.info("delivery.acked transfer_id=%s", transfer_id[:12])
@@ -342,7 +387,8 @@ class Poller:
 
     def _receive_file_transfer(self, transfer_id: str, sender_id: str,
                                filename: str, chunk_count: int,
-                               base_nonce: bytes, symmetric_key: bytes) -> None:
+                               base_nonce: bytes, symmetric_key: bytes, *,
+                               receive_action_batch: ReceiveActionBatch | None = None) -> None:
         """Stream chunks to a temp file under {save_dir}/.parts/, then
         atomic-finalize to the destination via os.link (race-free) +
         unlink. Memory bounded by CHUNK_SIZE. ACK is sent only after the
@@ -429,7 +475,10 @@ class Poller:
             chunks_downloaded=0,
             chunks_total=0,
         )
-        self._apply_receive_file_action(final_path)
+        self._apply_receive_file_action(
+            final_path,
+            receive_action_batch=receive_action_batch,
+        )
         for cb in self._on_file_received:
             try:
                 cb(final_path)
@@ -438,7 +487,8 @@ class Poller:
 
     def _receive_streaming_transfer(self, transfer_id: str, sender_id: str,
                                     filename: str, chunk_count: int,
-                                    base_nonce: bytes, symmetric_key: bytes) -> None:
+                                    base_nonce: bytes, symmetric_key: bytes, *,
+                                    receive_action_batch: ReceiveActionBatch | None = None) -> None:
         """Streaming-relay recipient: pull chunks sequentially, ACK each
         one so the server can wipe its blob immediately.
 
@@ -603,22 +653,36 @@ class Poller:
             chunks_downloaded=0,
             chunks_total=0,
         )
-        self._apply_receive_file_action(final_path)
+        self._apply_receive_file_action(
+            final_path,
+            receive_action_batch=receive_action_batch,
+        )
         for cb in self._on_file_received:
             try:
                 cb(final_path)
             except Exception:
                 log.exception("File received callback error")
 
-    def _apply_receive_file_action(self, filepath: Path) -> None:
+    def _apply_receive_file_action(
+        self,
+        filepath: Path,
+        *,
+        receive_action_batch: ReceiveActionBatch | None = None,
+    ) -> None:
         kind = classify_received_file(filepath)
         if kind == RECEIVE_KIND_OTHER:
             return
-        if not apply_receive_action(self.config, self.platform, kind, path=filepath):
+        if not apply_receive_action(
+            self.config,
+            self.platform,
+            kind,
+            path=filepath,
+            limiter=self._receive_action_limiter,
+            batch=receive_action_batch,
+        ):
             log.warning(
-                "receive_action.file.failed kind=%s path=%s",
+                "receive_action.file.failed kind=%s",
                 kind,
-                filepath,
             )
 
     def _stream_download_chunk(self, transfer_id: str, index: int,
@@ -848,13 +912,26 @@ class Poller:
         if removed:
             log.info("Cleaned up %d stale .part file(s)", removed)
 
-    def _handle_fn_transfer(self, filepath: Path, *, sender_id: str | None = None) -> None:
+    def _handle_fn_transfer(
+        self,
+        filepath: Path,
+        *,
+        sender_id: str | None = None,
+        receive_action_batch: ReceiveActionBatch | None = None,
+    ) -> None:
         """Handle special .fn. transfers through the unified message dispatcher."""
         name = filepath.name
         try:
             message = FnTransferAdapter.to_device_message(name, filepath.read_bytes(), sender_id=sender_id)
             if message is None:
                 log.warning("fasttrack.command.unknown fn=%s", name)
+                return
+
+            if message.type == MessageType.CLIPBOARD_TEXT:
+                self._handle_message_clipboard_text(
+                    message,
+                    receive_action_batch=receive_action_batch,
+                )
                 return
 
             if not self._message_dispatcher.dispatch(message):
@@ -864,7 +941,12 @@ class Poller:
         finally:
             filepath.unlink(missing_ok=True)
 
-    def _handle_message_clipboard_text(self, message) -> None:
+    def _handle_message_clipboard_text(
+        self,
+        message,
+        *,
+        receive_action_batch: ReceiveActionBatch | None = None,
+    ) -> None:
         text = str(message.payload.get("text", ""))
 
         urls = extract_received_urls(text)
@@ -872,7 +954,13 @@ class Poller:
         self.platform.notifications.notify("Clipboard received", preview[:60])
         self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.text"),
                          display_label=preview, direction="received", size=len(text))
-        if not apply_receive_text_actions(self.config, self.platform, text):
+        if not apply_receive_text_actions(
+            self.config,
+            self.platform,
+            text,
+            limiter=self._receive_action_limiter,
+            batch=receive_action_batch,
+        ):
             log.warning("receive_action.text.failed length=%d", len(text))
 
     def _handle_message_clipboard_image(self, message) -> None:

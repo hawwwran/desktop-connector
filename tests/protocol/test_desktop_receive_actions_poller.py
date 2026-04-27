@@ -16,6 +16,10 @@ sys.path.insert(0, REPO_ROOT)
 
 from desktop.src.config import (  # noqa: E402
     RECEIVE_ACTION_COPY,
+    RECEIVE_ACTION_KEY_TEXT_COPY,
+    RECEIVE_ACTION_KEY_URL_OPEN,
+    RECEIVE_ACTION_LIMIT_BATCH,
+    RECEIVE_ACTION_LIMIT_MINUTE,
     RECEIVE_ACTION_NONE,
     RECEIVE_ACTION_OPEN,
     RECEIVE_KIND_IMAGE,
@@ -29,8 +33,14 @@ from desktop.src.poller import Poller  # noqa: E402
 
 
 class _Config:
-    def __init__(self, actions: dict[str, str]):
+    def __init__(
+        self,
+        actions: dict[str, str],
+        *,
+        limits: dict[str, dict[str, int]] | None = None,
+    ):
         self.actions = actions
+        self.limits = limits or {}
         self.config_dir = Path(tempfile.mkdtemp(prefix="dc-recv-action-config-"))
         self.save_directory = self.config_dir / "save"
         self.save_directory.mkdir()
@@ -38,6 +48,14 @@ class _Config:
 
     def get_receive_action(self, kind: str) -> str:
         return self.actions.get(kind, RECEIVE_ACTION_NONE)
+
+    def get_receive_action_limits(self, action_key: str) -> dict[str, int]:
+        return dict(
+            self.limits.get(
+                action_key,
+                {RECEIVE_ACTION_LIMIT_BATCH: 0, RECEIVE_ACTION_LIMIT_MINUTE: 0},
+            )
+        )
 
 
 class _Clipboard:
@@ -86,10 +104,16 @@ class _Platform:
 
 
 class ReceiveActionsPollerTests(unittest.TestCase):
-    def _build_poller(self, actions: dict[str, str], *, platform: _Platform | None = None):
+    def _build_poller(
+        self,
+        actions: dict[str, str],
+        *,
+        platform: _Platform | None = None,
+        limits: dict[str, dict[str, int]] | None = None,
+    ):
         history = MagicMock()
         poller = Poller(
-            config=_Config(actions),
+            config=_Config(actions, limits=limits),
             connection=MagicMock(),
             api=MagicMock(),
             crypto=MagicMock(),
@@ -212,7 +236,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
         events: list[tuple[str, str]] = []
         poller.on_file_received(lambda p: events.append(("callback", p.name)))
 
-        def record_action(_config, _platform, kind, *, path):
+        def record_action(_config, _platform, kind, *, path, **_kwargs):
             events.append(("action", path.name))
             self.assertEqual(kind, RECEIVE_KIND_IMAGE)
             return True
@@ -243,7 +267,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
         events: list[tuple[str, str]] = []
         poller.on_file_received(lambda p: events.append(("callback", p.name)))
 
-        def record_action(_config, _platform, kind, *, path):
+        def record_action(_config, _platform, kind, *, path, **_kwargs):
             events.append(("action", path.name))
             self.assertEqual(kind, RECEIVE_KIND_VIDEO)
             return True
@@ -329,6 +353,67 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             )
 
         action.assert_not_called()
+
+    def test_fn_clipboard_text_uses_receive_action_batch_limits(self):
+        poller, _history = self._build_poller(
+            {RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY},
+            limits={
+                RECEIVE_ACTION_KEY_TEXT_COPY: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 0,
+                },
+            },
+        )
+        batch = poller._receive_action_limiter.start_batch(2)
+
+        first = poller.config.save_directory / ".fn.clipboard.text"
+        first.write_text("first")
+        poller._handle_fn_transfer(first, receive_action_batch=batch)
+
+        second = poller.config.save_directory / ".fn.clipboard.text"
+        second.write_text("second")
+        poller._handle_fn_transfer(second, receive_action_batch=batch)
+
+        self.assertEqual(poller.platform.clipboard.written_text, ["first"])
+        self.assertEqual(
+            poller._receive_action_limiter.finish_batch(batch).suppressed_counts,
+            {RECEIVE_ACTION_KEY_TEXT_COPY: 1},
+        )
+
+    def test_poll_once_batches_receive_action_limits_and_notifies_summary(self):
+        poller, _history = self._build_poller(
+            {},
+            limits={
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 0,
+                },
+            },
+        )
+        transfers = [{"transfer_id": "one"}, {"transfer_id": "two"}]
+        poller.api.get_pending_transfers.return_value = transfers
+        observed_batches = []
+
+        def fake_download(_transfer, *, receive_action_batch=None):
+            self.assertIsNotNone(receive_action_batch)
+            observed_batches.append(receive_action_batch)
+            poller._receive_action_limiter.allow(
+                RECEIVE_ACTION_KEY_URL_OPEN,
+                receive_action_batch,
+            )
+
+        with patch.object(poller, "_download_transfer", side_effect=fake_download):
+            poller._poll_once()
+
+        self.assertEqual(len(observed_batches), 2)
+        self.assertIs(observed_batches[0], observed_batches[1])
+        self.assertEqual(
+            poller.platform.notifications.events,
+            [(
+                "Receive actions limited",
+                "Received 2 items. Skipped 1 automatic action to prevent flooding.",
+            )],
+        )
 
 
 if __name__ == "__main__":

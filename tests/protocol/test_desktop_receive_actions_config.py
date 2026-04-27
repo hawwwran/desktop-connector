@@ -15,10 +15,20 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.config import (  # noqa: E402
+    DEFAULT_RECEIVE_ACTION_LIMITS,
     DEFAULT_RECEIVE_ACTIONS,
     RECEIVE_ACTION_COPY,
+    RECEIVE_ACTION_KEY_DOCUMENT_OPEN,
+    RECEIVE_ACTION_KEY_IMAGE_OPEN,
+    RECEIVE_ACTION_KEY_TEXT_COPY,
+    RECEIVE_ACTION_KEY_URL_COPY,
+    RECEIVE_ACTION_KEY_URL_OPEN,
+    RECEIVE_ACTION_KEY_VIDEO_OPEN,
     RECEIVE_ACTION_NONE,
     RECEIVE_ACTION_OPEN,
+    RECEIVE_ACTION_LIMIT_BATCH,
+    RECEIVE_ACTION_LIMIT_MAX,
+    RECEIVE_ACTION_LIMIT_MINUTE,
     RECEIVE_KIND_DOCUMENT,
     RECEIVE_KIND_IMAGE,
     RECEIVE_KIND_TEXT,
@@ -49,6 +59,63 @@ class ReceiveActionsConfigTests(unittest.TestCase):
         self.assertEqual(
             self._read_config()["receive_actions"],
             DEFAULT_RECEIVE_ACTIONS,
+        )
+
+    def test_new_config_gets_default_receive_action_limits(self):
+        config = Config(self.config_dir)
+
+        self.assertEqual(
+            config.receive_action_limits,
+            DEFAULT_RECEIVE_ACTION_LIMITS,
+        )
+        self.assertEqual(
+            self._read_config()["receive_action_limits"],
+            DEFAULT_RECEIVE_ACTION_LIMITS,
+        )
+
+    def test_default_receive_action_limits_match_flood_policy(self):
+        for action_key, limits in DEFAULT_RECEIVE_ACTION_LIMITS.items():
+            self.assertEqual(
+                limits[RECEIVE_ACTION_LIMIT_BATCH],
+                1,
+                action_key,
+            )
+
+        self.assertEqual(
+            DEFAULT_RECEIVE_ACTION_LIMITS[RECEIVE_ACTION_KEY_URL_OPEN][
+                RECEIVE_ACTION_LIMIT_MINUTE
+            ],
+            5,
+        )
+        self.assertEqual(
+            DEFAULT_RECEIVE_ACTION_LIMITS[RECEIVE_ACTION_KEY_URL_COPY][
+                RECEIVE_ACTION_LIMIT_MINUTE
+            ],
+            10,
+        )
+        self.assertEqual(
+            DEFAULT_RECEIVE_ACTION_LIMITS[RECEIVE_ACTION_KEY_TEXT_COPY][
+                RECEIVE_ACTION_LIMIT_MINUTE
+            ],
+            10,
+        )
+        self.assertEqual(
+            DEFAULT_RECEIVE_ACTION_LIMITS[RECEIVE_ACTION_KEY_IMAGE_OPEN][
+                RECEIVE_ACTION_LIMIT_MINUTE
+            ],
+            5,
+        )
+        self.assertEqual(
+            DEFAULT_RECEIVE_ACTION_LIMITS[RECEIVE_ACTION_KEY_VIDEO_OPEN][
+                RECEIVE_ACTION_LIMIT_MINUTE
+            ],
+            2,
+        )
+        self.assertEqual(
+            DEFAULT_RECEIVE_ACTION_LIMITS[RECEIVE_ACTION_KEY_DOCUMENT_OPEN][
+                RECEIVE_ACTION_LIMIT_MINUTE
+            ],
+            5,
         )
 
     def test_text_action_defaults_to_copy(self):
@@ -180,6 +247,168 @@ class ReceiveActionsConfigTests(unittest.TestCase):
         expected[RECEIVE_KIND_URL] = RECEIVE_ACTION_COPY
         self.assertEqual(config.receive_actions, expected)
         self.assertEqual(self._read_config()["receive_actions"], expected)
+
+    def test_partial_receive_action_limits_are_filled_with_defaults(self):
+        self._write_config({
+            "receive_action_limits": {
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 0,
+                },
+                RECEIVE_ACTION_KEY_IMAGE_OPEN: {
+                    RECEIVE_ACTION_LIMIT_MINUTE: 2,
+                },
+            },
+        })
+
+        config = Config(self.config_dir)
+
+        expected = {
+            action_key: dict(limits)
+            for action_key, limits in DEFAULT_RECEIVE_ACTION_LIMITS.items()
+        }
+        expected[RECEIVE_ACTION_KEY_URL_OPEN][RECEIVE_ACTION_LIMIT_BATCH] = 0
+        expected[RECEIVE_ACTION_KEY_IMAGE_OPEN][RECEIVE_ACTION_LIMIT_MINUTE] = 2
+        self.assertEqual(config.receive_action_limits, expected)
+        self.assertEqual(self._read_config()["receive_action_limits"], expected)
+
+    def test_invalid_receive_action_limits_are_removed_or_defaulted(self):
+        self._write_config({
+            "receive_action_limits": {
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: -1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: "many",
+                    "hour": 20,
+                },
+                RECEIVE_ACTION_KEY_TEXT_COPY: {
+                    RECEIVE_ACTION_LIMIT_BATCH: True,
+                    RECEIVE_ACTION_LIMIT_MINUTE: RECEIVE_ACTION_LIMIT_MAX + 1,
+                },
+                RECEIVE_ACTION_KEY_DOCUMENT_OPEN: "invalid",
+                "archive.open": {
+                    RECEIVE_ACTION_LIMIT_BATCH: 1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 1,
+                },
+            },
+        })
+
+        config = Config(self.config_dir)
+
+        expected = {
+            action_key: dict(limits)
+            for action_key, limits in DEFAULT_RECEIVE_ACTION_LIMITS.items()
+        }
+        expected[RECEIVE_ACTION_KEY_TEXT_COPY][
+            RECEIVE_ACTION_LIMIT_MINUTE
+        ] = RECEIVE_ACTION_LIMIT_MAX
+        self.assertEqual(config.receive_action_limits, expected)
+        self.assertEqual(self._read_config()["receive_action_limits"], expected)
+
+    def test_receive_action_limits_setter_normalizes_and_persists(self):
+        config = Config(self.config_dir)
+
+        config.receive_action_limits = {
+            RECEIVE_ACTION_KEY_URL_COPY: {
+                RECEIVE_ACTION_LIMIT_BATCH: 0,
+                RECEIVE_ACTION_LIMIT_MINUTE: 2000,
+            },
+            RECEIVE_ACTION_KEY_IMAGE_OPEN: {
+                RECEIVE_ACTION_LIMIT_BATCH: 2,
+            },
+            "unknown.copy": {
+                RECEIVE_ACTION_LIMIT_BATCH: 1,
+                RECEIVE_ACTION_LIMIT_MINUTE: 1,
+            },
+        }
+
+        expected = {
+            action_key: dict(limits)
+            for action_key, limits in DEFAULT_RECEIVE_ACTION_LIMITS.items()
+        }
+        expected[RECEIVE_ACTION_KEY_URL_COPY][RECEIVE_ACTION_LIMIT_BATCH] = 0
+        expected[RECEIVE_ACTION_KEY_URL_COPY][
+            RECEIVE_ACTION_LIMIT_MINUTE
+        ] = RECEIVE_ACTION_LIMIT_MAX
+        expected[RECEIVE_ACTION_KEY_IMAGE_OPEN][RECEIVE_ACTION_LIMIT_BATCH] = 2
+        self.assertEqual(config.receive_action_limits, expected)
+        self.assertEqual(self._read_config()["receive_action_limits"], expected)
+
+    def test_set_receive_action_limit_updates_one_limit(self):
+        config = Config(self.config_dir)
+
+        config.set_receive_action_limit(
+            RECEIVE_ACTION_KEY_URL_OPEN,
+            RECEIVE_ACTION_LIMIT_BATCH,
+            0,
+        )
+        config.set_receive_action_limit(
+            RECEIVE_ACTION_KEY_URL_OPEN,
+            "hour",
+            22,
+        )
+        config.set_receive_action_limit(
+            "unknown.open",
+            RECEIVE_ACTION_LIMIT_BATCH,
+            22,
+        )
+
+        expected = dict(DEFAULT_RECEIVE_ACTION_LIMITS[RECEIVE_ACTION_KEY_URL_OPEN])
+        expected[RECEIVE_ACTION_LIMIT_BATCH] = 0
+        self.assertEqual(
+            config.get_receive_action_limits(RECEIVE_ACTION_KEY_URL_OPEN),
+            expected,
+        )
+        self.assertEqual(
+            config.get_receive_action_limits("unknown.open"),
+            {RECEIVE_ACTION_LIMIT_BATCH: 0, RECEIVE_ACTION_LIMIT_MINUTE: 0},
+        )
+
+    def test_reset_receive_action_limits_restores_defaults(self):
+        config = Config(self.config_dir)
+        config.set_receive_action_limit(
+            RECEIVE_ACTION_KEY_URL_OPEN,
+            RECEIVE_ACTION_LIMIT_BATCH,
+            0,
+        )
+
+        config.reset_receive_action_limits()
+
+        self.assertEqual(
+            config.receive_action_limits,
+            DEFAULT_RECEIVE_ACTION_LIMITS,
+        )
+        self.assertEqual(
+            self._read_config()["receive_action_limits"],
+            DEFAULT_RECEIVE_ACTION_LIMITS,
+        )
+
+    def test_reload_normalizes_receive_action_limits_written_by_another_process(self):
+        config = Config(self.config_dir)
+        self._write_config({
+            "receive_action_limits": {
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 0,
+                    RECEIVE_ACTION_LIMIT_MINUTE: RECEIVE_ACTION_LIMIT_MAX + 1,
+                },
+                RECEIVE_ACTION_KEY_IMAGE_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: -1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 2,
+                },
+            },
+        })
+
+        config.reload()
+
+        expected = {
+            action_key: dict(limits)
+            for action_key, limits in DEFAULT_RECEIVE_ACTION_LIMITS.items()
+        }
+        expected[RECEIVE_ACTION_KEY_URL_OPEN][RECEIVE_ACTION_LIMIT_BATCH] = 0
+        expected[RECEIVE_ACTION_KEY_URL_OPEN][
+            RECEIVE_ACTION_LIMIT_MINUTE
+        ] = RECEIVE_ACTION_LIMIT_MAX
+        expected[RECEIVE_ACTION_KEY_IMAGE_OPEN][RECEIVE_ACTION_LIMIT_MINUTE] = 2
+        self.assertEqual(config.receive_action_limits, expected)
+        self.assertEqual(self._read_config()["receive_action_limits"], expected)
 
 
 if __name__ == "__main__":

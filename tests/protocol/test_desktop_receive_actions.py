@@ -14,6 +14,13 @@ ensure_desktop_on_path()
 
 from src.config import (  # noqa: E402
     RECEIVE_ACTION_COPY,
+    RECEIVE_ACTION_KEY_DOCUMENT_OPEN,
+    RECEIVE_ACTION_KEY_IMAGE_OPEN,
+    RECEIVE_ACTION_KEY_TEXT_COPY,
+    RECEIVE_ACTION_KEY_URL_COPY,
+    RECEIVE_ACTION_KEY_URL_OPEN,
+    RECEIVE_ACTION_LIMIT_BATCH,
+    RECEIVE_ACTION_LIMIT_MINUTE,
     RECEIVE_ACTION_NONE,
     RECEIVE_ACTION_OPEN,
     RECEIVE_KIND_DOCUMENT,
@@ -23,7 +30,9 @@ from src.config import (  # noqa: E402
     RECEIVE_KIND_VIDEO,
 )
 from src.receive_actions import (  # noqa: E402
+    RECEIVE_ACTION_WINDOW_S,
     RECEIVE_KIND_OTHER,
+    ReceiveActionLimiter,
     apply_receive_action,
     apply_receive_text_actions,
     classify_received_file,
@@ -33,11 +42,36 @@ from src.receive_actions import (  # noqa: E402
 
 
 class _FakeConfig:
-    def __init__(self, actions: dict[str, str]):
+    def __init__(
+        self,
+        actions: dict[str, str],
+        *,
+        limits: dict[str, dict[str, int]] | None = None,
+    ):
         self._actions = actions
+        self._limits = limits or {}
 
     def get_receive_action(self, kind: str) -> str:
         return self._actions.get(kind, RECEIVE_ACTION_NONE)
+
+    def get_receive_action_limits(self, action_key: str) -> dict[str, int]:
+        return dict(
+            self._limits.get(
+                action_key,
+                {RECEIVE_ACTION_LIMIT_BATCH: 0, RECEIVE_ACTION_LIMIT_MINUTE: 0},
+            )
+        )
+
+
+class _FakeClock:
+    def __init__(self, now: float = 1000.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 class _FakeShell:
@@ -302,6 +336,47 @@ class ApplyReceiveActionTests(unittest.TestCase):
         self.assertEqual(platform.shell.opened_paths, [])
         self.assertEqual(platform.clipboard.written_text, [])
 
+    def test_limited_url_open_is_successful_noop(self):
+        config = _FakeConfig(
+            {RECEIVE_KIND_URL: RECEIVE_ACTION_OPEN},
+            limits={
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 0,
+                },
+            },
+        )
+        platform = _FakePlatform()
+        limiter = ReceiveActionLimiter(config, clock=_FakeClock())
+        batch = limiter.start_batch(2)
+
+        self.assertTrue(
+            apply_receive_action(
+                config,
+                platform,
+                RECEIVE_KIND_URL,
+                url="https://first.example",
+                limiter=limiter,
+                batch=batch,
+            )
+        )
+        self.assertTrue(
+            apply_receive_action(
+                config,
+                platform,
+                RECEIVE_KIND_URL,
+                url="https://second.example",
+                limiter=limiter,
+                batch=batch,
+            )
+        )
+
+        self.assertEqual(platform.shell.opened_urls, ["https://first.example"])
+        self.assertEqual(
+            limiter.finish_batch(batch).suppressed_counts,
+            {RECEIVE_ACTION_KEY_URL_OPEN: 1},
+        )
+
 
 class ApplyReceiveTextActionsTests(unittest.TestCase):
     def test_exact_url_runs_only_url_action(self):
@@ -370,6 +445,176 @@ class ApplyReceiveTextActionsTests(unittest.TestCase):
             platform.clipboard.written_text,
             ["https://example.com/report.pdf"],
         )
+
+    def test_limited_text_copy_keeps_prior_staged_url_copy(self):
+        config = _FakeConfig(
+            {
+                RECEIVE_KIND_URL: RECEIVE_ACTION_COPY,
+                RECEIVE_KIND_TEXT: RECEIVE_ACTION_COPY,
+            },
+            limits={
+                RECEIVE_ACTION_KEY_URL_COPY: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 0,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 0,
+                },
+                RECEIVE_ACTION_KEY_TEXT_COPY: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 0,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 1,
+                },
+            },
+        )
+        platform = _FakePlatform()
+        limiter = ReceiveActionLimiter(config, clock=_FakeClock())
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_TEXT_COPY))
+
+        text = "See https://example.com/report.pdf when ready"
+        self.assertTrue(
+            apply_receive_text_actions(
+                config,
+                platform,
+                text,
+                limiter=limiter,
+                batch=limiter.start_batch(1),
+            )
+        )
+
+        self.assertEqual(
+            platform.clipboard.written_text,
+            ["https://example.com/report.pdf"],
+        )
+
+
+class ReceiveActionLimiterTests(unittest.TestCase):
+    def test_batch_limit_suppresses_after_threshold(self):
+        config = _FakeConfig(
+            {},
+            limits={
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 3,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 0,
+                },
+            },
+        )
+        limiter = ReceiveActionLimiter(config, clock=_FakeClock())
+        batch = limiter.start_batch(5)
+
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN, batch))
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN, batch))
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN, batch))
+        self.assertFalse(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN, batch))
+
+        summary = limiter.finish_batch(batch)
+        self.assertTrue(summary.has_suppressed)
+        self.assertEqual(summary.total_suppressed, 1)
+        self.assertEqual(
+            summary.suppressed_counts,
+            {RECEIVE_ACTION_KEY_URL_OPEN: 1},
+        )
+
+    def test_minute_limit_suppresses_until_window_expires(self):
+        clock = _FakeClock()
+        config = _FakeConfig(
+            {},
+            limits={
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 0,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 2,
+                },
+            },
+        )
+        limiter = ReceiveActionLimiter(config, clock=clock)
+
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN))
+        clock.advance(10)
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN))
+        clock.advance(10)
+        self.assertFalse(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN))
+        clock.advance(RECEIVE_ACTION_WINDOW_S - 20 + 0.01)
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN))
+
+    def test_zero_limits_are_unlimited(self):
+        config = _FakeConfig(
+            {},
+            limits={
+                RECEIVE_ACTION_KEY_TEXT_COPY: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 0,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 0,
+                },
+            },
+        )
+        limiter = ReceiveActionLimiter(config, clock=_FakeClock())
+        batch = limiter.start_batch(50)
+
+        for _i in range(50):
+            self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_TEXT_COPY, batch))
+
+        summary = limiter.finish_batch(batch)
+        self.assertFalse(summary.has_suppressed)
+        self.assertEqual(summary.suppressed_counts, {})
+
+    def test_action_keys_have_independent_counts(self):
+        config = _FakeConfig(
+            {},
+            limits={
+                RECEIVE_ACTION_KEY_URL_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 1,
+                },
+                RECEIVE_ACTION_KEY_DOCUMENT_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 1,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 1,
+                },
+            },
+        )
+        limiter = ReceiveActionLimiter(config, clock=_FakeClock())
+        batch = limiter.start_batch(4)
+
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN, batch))
+        self.assertFalse(limiter.allow(RECEIVE_ACTION_KEY_URL_OPEN, batch))
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_DOCUMENT_OPEN, batch))
+        self.assertFalse(limiter.allow(RECEIVE_ACTION_KEY_DOCUMENT_OPEN, batch))
+
+        summary = limiter.finish_batch(batch)
+        self.assertEqual(
+            summary.suppressed_counts,
+            {
+                RECEIVE_ACTION_KEY_URL_OPEN: 1,
+                RECEIVE_ACTION_KEY_DOCUMENT_OPEN: 1,
+            },
+        )
+
+    def test_minute_suppression_is_recorded_in_batch_summary(self):
+        config = _FakeConfig(
+            {},
+            limits={
+                RECEIVE_ACTION_KEY_IMAGE_OPEN: {
+                    RECEIVE_ACTION_LIMIT_BATCH: 0,
+                    RECEIVE_ACTION_LIMIT_MINUTE: 1,
+                },
+            },
+        )
+        limiter = ReceiveActionLimiter(config, clock=_FakeClock())
+        batch = limiter.start_batch(2)
+
+        self.assertTrue(limiter.allow(RECEIVE_ACTION_KEY_IMAGE_OPEN, batch))
+        self.assertFalse(limiter.allow(RECEIVE_ACTION_KEY_IMAGE_OPEN, batch))
+
+        summary = limiter.finish_batch(batch)
+        self.assertEqual(summary.batch_size, 2)
+        self.assertEqual(summary.total_suppressed, 1)
+        self.assertEqual(
+            summary.suppressed_counts,
+            {RECEIVE_ACTION_KEY_IMAGE_OPEN: 1},
+        )
+
+    def test_unknown_action_keys_are_unlimited(self):
+        limiter = ReceiveActionLimiter(_FakeConfig({}), clock=_FakeClock())
+        batch = limiter.start_batch(20)
+
+        for _i in range(20):
+            self.assertTrue(limiter.allow("unknown.open", batch))
+
+        self.assertEqual(limiter.finish_batch(batch).suppressed_counts, {})
 
 
 if __name__ == "__main__":
