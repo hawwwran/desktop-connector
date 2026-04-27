@@ -26,19 +26,29 @@ def main():
         subprocess.run(["notify-send", "-a", "Desktop Connector", "No files selected"])
         return
 
-    for path in paths:
-        if os.path.isfile(path):
-            subprocess.Popen([
-                os.path.expanduser("~/.local/bin/desktop-connector"),
-                "--headless", f"--send={path}",
-            ])
+    files = [p for p in paths if os.path.isfile(p)]
+    folders = [p for p in paths if os.path.isdir(p)]
 
-    count = len(paths)
-    subprocess.run([
-        "notify-send", "-a", "Desktop Connector",
-        "Sending to phone",
-        f"{count} file(s) queued",
-    ])
+    for path in files:
+        subprocess.Popen([
+            os.path.expanduser("~/.local/bin/desktop-connector"),
+            "--headless", f"--send={path}",
+        ])
+
+    if folders:
+        word = "folder" if len(folders) == 1 else "folders"
+        subprocess.run([
+            "notify-send", "-a", "Desktop Connector", "-i", "dialog-warning",
+            "Folder transport is not supported",
+            f"Skipped {len(folders)} {word}. Send individual files instead.",
+        ])
+
+    if files:
+        subprocess.run([
+            "notify-send", "-a", "Desktop Connector",
+            "Sending to phone",
+            f"{len(files)} file(s) queued",
+        ])
 
 if __name__ == "__main__":
     main()

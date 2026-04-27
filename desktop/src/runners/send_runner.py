@@ -28,6 +28,15 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
         log.error("File not found: %s", filepath)
         return 1
 
+    if filepath.is_dir():
+        log.error("send.rejected reason=is_directory path=%s", filepath)
+        from ..notifications import notify
+        notify(
+            "Folder transport is not supported",
+            "Send individual files instead.",
+        )
+        return 1
+
     # Get first paired device
     target_id, target_info = config.get_first_paired_device()
     symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])

@@ -31,6 +31,16 @@ from .brand import (
     apply_pointer_cursors,
     claim_gtk_identity,
 )
+from .notifications import notify
+
+
+def _notify_folders_skipped(count: int) -> None:
+    word = "folder" if count == 1 else "folders"
+    notify(
+        "Folder transport is not supported",
+        f"Skipped {count} {word}. Send individual files instead.",
+        icon="dialog-warning",
+    )
 
 
 def _make_app() -> Adw.Application:
@@ -135,10 +145,16 @@ def show_send_files(config_dir: Path):
 
         def on_drop(target, value, x, y):
             files = value.get_files()
+            skipped_folders = 0
             for f in files:
                 p = Path(f.get_path())
+                if p.is_dir():
+                    skipped_folders += 1
+                    continue
                 if p.is_file() and p not in file_list:
                     file_list.append(p)
+            if skipped_folders:
+                _notify_folders_skipped(skipped_folders)
             stack.set_visible_child_name("content")
             refresh_list()
             return True
@@ -496,9 +512,15 @@ def show_send_files(config_dir: Path):
 
         def on_browse(b):
             paths = dialogs.pick_files("Select files to send")
+            skipped_folders = 0
             for p in paths:
+                if p.is_dir():
+                    skipped_folders += 1
+                    continue
                 if p not in file_list:
                     file_list.append(p)
+            if skipped_folders:
+                _notify_folders_skipped(skipped_folders)
             refresh_list()
 
         browse_btn.connect("clicked", on_browse)
