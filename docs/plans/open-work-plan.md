@@ -21,8 +21,8 @@ because of the committed-secret issue.
 ## Track A — Android signing secrets cleanup
 
 **Why:** `android/app/build.gradle.kts` lines 41 + 43 still have
-`storePassword = "desktopconnector"` and
-`keyPassword = "desktopconnector"` in plaintext, and the file is
+`storePassword = "<retired-password>"` and
+`keyPassword = "<retired-password>"` in plaintext, and the file is
 git-tracked. The keystore itself (`android/keystore.jks`) is
 properly gitignored, so the password alone is meaningless to a
 repo-history attacker — but the project's stated goal ("repo
@@ -53,9 +53,9 @@ update. Negative test: removing the properties file causes
 
 1. Edit `android/app/build.gradle.kts` lines 36–46. Replace:
    ```kotlin
-   storePassword = "desktopconnector"
+   storePassword = "<retired-password>"
    keyAlias = "desktop-connector"
-   keyPassword = "desktopconnector"
+   keyPassword = "<retired-password>"
    ```
    with:
    ```kotlin
@@ -66,9 +66,9 @@ update. Negative test: removing the properties file causes
 2. Create `~/.gradle/gradle.properties` (outside the repo) with
    the actual values:
    ```properties
-   DC_KEYSTORE_PASSWORD=desktopconnector
+   DC_KEYSTORE_PASSWORD=<retired-password>
    DC_KEY_ALIAS=desktop-connector
-   DC_KEY_PASSWORD=desktopconnector
+   DC_KEY_PASSWORD=<retired-password>
    ```
    `chmod 600 ~/.gradle/gradle.properties`.
 3. Verify `cd android && ./gradlew assembleRelease` still produces
@@ -77,7 +77,7 @@ update. Negative test: removing the properties file causes
    succeeds (signature unchanged → updates work).
 
 **Acceptance:**
-- `git grep -n desktopconnector android/app/build.gradle.kts`
+- `git grep -n <retired-password> android/app/build.gradle.kts`
   returns nothing.
 - Release build still produces a signed APK with the same
   signature fingerprint as before.
@@ -101,7 +101,7 @@ SHA-256 unchanged (`426b…6840`). New file SHA-256 recorded in
 `docs/release/android-signing-recovery.md`. KeePassXC entry
 updated; backups deleted.
 
-The current password `"desktopconnector"` is weak and was visible
+The current password `"<retired-password>"` is weak and was visible
 in git history for years. Rotation is independent of A.1 — it can
 happen later, or never. Do it if you want a clean break.
 
@@ -211,6 +211,10 @@ Sections:
   signed APK.
 
 ### A.5 — Server Firebase service account hygiene ⏱ ~10 min docs
+
+**Status: DONE 2026-04-28.** Service-account JSON backed up to
+KeePassXC alongside the keystore + AppImage signing key, same
+shape (entry-with-attachment + project-ID note).
 
 **Why:** `server/firebase-service-account.json` is a separate
 credential giving full FCM-send authority. Already correctly

@@ -101,7 +101,7 @@ checklist; runtime ~10 minutes.
    - Verify integrity:
      ```bash
      sha256sum android/keystore.jks
-     # Must match: a49a15daeab30e50779e6951de23e334f7786286ab0ca805ba7360b2f734071e
+     # Must match the File SHA-256 in the Identity table above.
      ```
      If the hash mismatches, the attachment is wrong — stop, do
      not proceed, re-fetch.
