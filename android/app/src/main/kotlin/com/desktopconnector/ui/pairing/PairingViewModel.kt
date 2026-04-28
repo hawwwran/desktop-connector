@@ -45,6 +45,20 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
                 // Save server URL
                 prefs.serverUrl = serverUrl
 
+                // Stale-credentials guard. If we hold stored creds but have
+                // no paired device, the creds are leftover from a previous
+                // install — most often Android Auto Backup restoring
+                // `dc_prefs.xml` while `dc_secure_keys.xml` (the keypair)
+                // is correctly excluded, leaving the local identity
+                // mismatched against the server's records. Drop them so
+                // the registration block below re-registers cleanly
+                // instead of sending an authed pairing request that the
+                // server 401s.
+                if (!keyManager.hasPairedDevice() && prefs.isRegistered) {
+                    AppLog.log("Pairing", "pairing.startup.stale_creds_cleared")
+                    prefs.clearAuthCredentials()
+                }
+
                 // Register if needed
                 if (!prefs.isRegistered) {
                     val api = ApiClient(serverUrl)

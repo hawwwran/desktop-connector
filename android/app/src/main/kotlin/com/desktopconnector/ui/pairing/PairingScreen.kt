@@ -37,6 +37,7 @@ fun PairingScreen(
     onConfirmPairing: () -> Unit,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     var scannedData by remember { mutableStateOf<JSONObject?>(null) }
     var manualMode by remember { mutableStateOf(false) }
@@ -218,8 +219,8 @@ fun PairingScreen(
             }
             Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                OutlinedButton(onClick = onCancel) {
-                    Text("Cancel")
+                OutlinedButton(onClick = onOpenSettings) {
+                    Text("Settings")
                 }
                 TextButton(onClick = { manualMode = true }) {
                     Text("Enter URL manually")

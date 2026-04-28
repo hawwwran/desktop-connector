@@ -413,6 +413,7 @@ fun AppNavigation(
                     pairingViewModel.reset()
                     navController.popBackStack("home", inclusive = false)
                 },
+                onOpenSettings = { navController.navigate("settings") },
             )
         }
 
