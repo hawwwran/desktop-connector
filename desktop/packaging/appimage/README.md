@@ -21,7 +21,7 @@ deletion (see `src/bootstrap/appimage_install_hook.py`).
 | `desktop-connector.desktop` | AppImage-internal `.desktop` entry. Used by AppImageLauncher and the install hook (P.3b). |
 | `linuxdeploy.recipe.sh` | Bundling driver for native libs + GTK4. Wired up in P.2a. |
 | `build-appimage.sh` | Mechanical builder: `--source=<dir> --output=<dir>` → `desktop-connector-x86_64.AppImage`. |
-| `build.sh` | Interactive driver wrapping `build-appimage.sh`. Wired up in P.1c. |
+| `build.sh` | Interactive driver wrapping `build-appimage.sh`. Prompts for source (github/local), output dir, persists answers at `~/.config/desktop-connector-build/state.json`. `--non-interactive` re-runs the saved choice. |
 | `.tools/` | Vendored upstream AppImages (gitignored). Auto-downloaded on first run. |
 
 ## Tooling choice
@@ -48,8 +48,11 @@ them into `usr/share/icons/hicolor/<size>/apps/desktop-connector.png`.
 # Direct (mechanical, no prompts):
 ./build-appimage.sh --source=$PWD --output=/tmp/out
 
-# Interactive (P.1c, not yet wired):
+# Interactive (prompts for source + output, remembers your choices):
 ./build.sh
+
+# Re-run last successful build silently:
+./build.sh --non-interactive
 ```
 
 Both honour `--help`. The mechanical builder downloads upstream tools

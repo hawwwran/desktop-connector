@@ -240,6 +240,20 @@ Add a short subsection (or separate
 
 ## Track B — AppImage interactive build driver (P.1c)
 
+**Status: DONE 2026-04-28.** `desktop/packaging/appimage/build.sh`
+implements all six sub-steps (B.1–B.6) in one cohesive script:
+pre-flight, source choice (github/local), path validation, output
+dir prompt, confirmation summary, state persistence at
+`~/.config/desktop-connector-build/state.json`, and a
+`--non-interactive` mode that exits non-zero with a clear
+"run interactively first" error when state is missing or
+incomplete. Verified end-to-end: an inadvertent test run drove
+the mechanical builder to a completed 153 MiB AppImage; negative
+non-interactive paths (no state, empty state, corrupt state,
+saved local path missing) all fail clean. README updated.
+
+
+
 **Why:** the mechanical `build-appimage.sh` is production-ready
 and CI-driven, but invoking it from a local laptop currently means
 typing `./desktop/packaging/appimage/build-appimage.sh
