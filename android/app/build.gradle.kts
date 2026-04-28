@@ -38,9 +38,9 @@ android {
             val ks = rootProject.file("keystore.jks")
             if (ks.exists()) {
                 storeFile = ks
-                storePassword = "desktopconnector"
-                keyAlias = "desktop-connector"
-                keyPassword = "desktopconnector"
+                storePassword = (project.findProperty("DC_KEYSTORE_PASSWORD") as? String) ?: ""
+                keyAlias = (project.findProperty("DC_KEY_ALIAS") as? String) ?: "desktop-connector"
+                keyPassword = (project.findProperty("DC_KEY_PASSWORD") as? String) ?: ""
             }
         }
     }
