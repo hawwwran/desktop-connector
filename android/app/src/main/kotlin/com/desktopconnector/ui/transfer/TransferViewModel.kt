@@ -23,6 +23,7 @@ import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.ConnectionManager
 import com.desktopconnector.network.ConnectionState
 import com.desktopconnector.network.UploadWorker
+import com.desktopconnector.util.Installer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -423,45 +424,22 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                     }
                 }
             } else if (transfer.displayName.endsWith(".apk") || transfer.displayLabel.endsWith(".apk") || transfer.mimeType.contains("android.package")) {
-                // APK install — delegate to system
-                try {
-                    val fileUri = Uri.parse(transfer.contentUri)
-                    val file = java.io.File(fileUri.path!!)
-                    com.desktopconnector.data.AppLog.log("APK", "File exists: ${file.exists()}, path: ${file.absolutePath}")
-
-                    if (!file.exists()) {
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(app, "APK file no longer exists", Toast.LENGTH_SHORT).show()
-                        }
-                    } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
-                        && !app.packageManager.canRequestPackageInstalls()) {
-                        com.desktopconnector.data.AppLog.log("APK", "Unknown sources not allowed")
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(app, "Please allow installing from unknown sources", Toast.LENGTH_LONG).show()
-                            val settingsIntent = android.content.Intent(
-                                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                Uri.parse("package:${app.packageName}")
-                            ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) }
-                            app.startActivity(settingsIntent)
-                        }
-                    } else {
-                        val contentUri = androidx.core.content.FileProvider.getUriForFile(
-                            app, "${app.packageName}.fileprovider", file
-                        )
-                        com.desktopconnector.data.AppLog.log("APK", "Installing: $contentUri")
-                        withContext(Dispatchers.Main) {
-                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-                                setDataAndType(contentUri, "application/vnd.android.package-archive")
-                                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            app.startActivity(intent)
-                        }
+                withContext(Dispatchers.Main) {
+                    val outcome = try {
+                        val file = java.io.File(Uri.parse(transfer.contentUri).path!!)
+                        Installer.installApk(app, file)
+                    } catch (e: Exception) {
+                        com.desktopconnector.data.AppLog.log("APK", "Error: ${e.message}")
+                        Installer.InstallStartOutcome.ERROR
                     }
-                } catch (e: Exception) {
-                    com.desktopconnector.data.AppLog.log("APK", "Error: ${e.message}")
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(app, "Cannot open APK: ${e.message}", Toast.LENGTH_LONG).show()
+                    when (outcome) {
+                        Installer.InstallStartOutcome.FILE_GONE ->
+                            Toast.makeText(app, "APK file no longer exists", Toast.LENGTH_SHORT).show()
+                        Installer.InstallStartOutcome.MISSING_PERMISSION ->
+                            Toast.makeText(app, "Please allow installing from unknown sources", Toast.LENGTH_LONG).show()
+                        Installer.InstallStartOutcome.ERROR ->
+                            Toast.makeText(app, "Cannot open APK", Toast.LENGTH_LONG).show()
+                        Installer.InstallStartOutcome.LAUNCHED -> {}
                     }
                 }
             } else {

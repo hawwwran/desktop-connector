@@ -7,6 +7,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -33,6 +37,9 @@ import com.desktopconnector.ui.pairing.PairingScreen
 import com.desktopconnector.ui.pairing.PairingStage
 import com.desktopconnector.ui.pairing.PairingViewModel
 import com.desktopconnector.ui.transfer.TransferViewModel
+import com.desktopconnector.ui.update.UpdateBanner
+import com.desktopconnector.ui.update.UpdateModal
+import com.desktopconnector.ui.update.UpdateViewModel
 
 @Composable
 fun AppNavigation(
@@ -48,6 +55,26 @@ fun AppNavigation(
 
     val transferViewModel: TransferViewModel = viewModel()
     val pairingViewModel: PairingViewModel = viewModel()
+    val updateViewModel: UpdateViewModel = viewModel()
+    val updateState by updateViewModel.state.collectAsState()
+    val updateModalOpen by updateViewModel.modalOpen.collectAsState()
+
+    // Wire activity-lifecycle hooks to the UpdateViewModel.
+    // ON_RESUME → onAppOpen (rate-limited internally to 24 h via the cache)
+    // ON_STOP   → cancelInFlightCheck (abort auto-check on minimize; the
+    //   download is intentionally untouched — its WAKE_LOCK keeps it alive)
+    val updateLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(updateLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> updateViewModel.onAppOpen()
+                Lifecycle.Event.ON_STOP -> updateViewModel.cancelInFlightCheck()
+                else -> Unit
+            }
+        }
+        updateLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { updateLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Handle initial share intent URIs
     LaunchedEffect(initialUris) {
@@ -85,7 +112,19 @@ fun AppNavigation(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // Background paint covers the area behind the status bar too. With
+    // targetSdk=35 the window.statusBarColor is ignored (edge-to-edge is
+    // forced), so without this the activity's window background (the
+    // light-mode parent theme's white) shows through the status bar
+    // when banner-statusBarsPadding pushes Compose content below it.
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+
+    // statusBarsPadding on the wrapping Column pushes the banner into the
+    // safe area AND consumes the status-bar inset, so the screens below
+    // (whose Scaffolds default to systemBars insets) don't double-pad
+    // their TopAppBars.
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+        UpdateBanner(state = updateState, onClick = updateViewModel::openModal)
 
     NavHost(navController = navController, startDestination = startDest) {
         composable("home") {
@@ -405,9 +444,12 @@ fun AppNavigation(
                     transferViewModel.downloadLogsToPhone(text, appendBatteryStats)
                 },
                 onBack = { navController.popBackStack() },
+                updateState = updateState,
+                onCheckForUpdates = updateViewModel::onForceCheck,
             )
         }
     }
+    } // end Column (banner + NavHost)
 
     // Find my Phone overlay (shown even for silent search)
     if (findPhoneRinging.value) {
@@ -452,6 +494,15 @@ fun AppNavigation(
             }
         }
     }
+
+    UpdateModal(
+        state = updateState,
+        open = updateModalOpen,
+        onInstall = updateViewModel::onInstall,
+        onSkip = updateViewModel::onSkipVersion,
+        onDismiss = updateViewModel::onDismissModal,
+        onCancelDownload = updateViewModel::onCancelDownload,
+    )
 
     } // end Box wrapper
 }

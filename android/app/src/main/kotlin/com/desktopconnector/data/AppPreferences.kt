@@ -51,6 +51,27 @@ class AppPreferences(context: Context) {
         get() = prefs.getBoolean("battery_prompt_dismissed", false)
         set(value) = prefs.edit().putBoolean("battery_prompt_dismissed", value).apply()
 
+    var lastUpdateCheckAt: Long
+        get() = prefs.getLong("last_update_check_at", 0L)
+        set(value) = prefs.edit().putLong("last_update_check_at", value).apply()
+
+    // Defensive copy on get — SharedPreferences' getStringSet warns against
+    // mutating the returned instance.
+    var dismissedUpdateVersions: Set<String>
+        get() = prefs.getStringSet("dismissed_update_versions", null)?.toSet() ?: emptySet()
+        set(value) = prefs.edit().putStringSet("dismissed_update_versions", value).apply()
+
+    var cachedLatestVersion: String?
+        get() = prefs.getString("cached_latest_version", null)
+        set(value) = prefs.edit().putString("cached_latest_version", value).apply()
+
+    fun dismissUpdateVersion(version: String) {
+        dismissedUpdateVersions = dismissedUpdateVersions + version
+    }
+
+    fun isUpdateVersionDismissed(version: String): Boolean =
+        version in dismissedUpdateVersions
+
     var themeMode: ThemeMode
         get() = when (prefs.getString("theme_mode", "system")) {
             "light" -> ThemeMode.LIGHT

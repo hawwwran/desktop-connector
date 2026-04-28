@@ -28,7 +28,7 @@ android {
         applicationId = "com.desktopconnector"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
+        versionCode = 8
         versionName = androidVersionName
         setProperty("archivesBaseName", "Desktop-Connector-${versionName}")
     }
@@ -117,4 +117,11 @@ dependencies {
     // Unit tests (JVM, no emulator). Added for D.4a UploadStreamLoopTest.
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    // org.json on Android is part of the platform; for JVM unit tests
+    // we need the upstream library to give UpdateChecker's parser the
+    // same JSONObject/JSONArray API.
+    testImplementation("org.json:json:20240303")
+    // MockWebServer for UpdateChecker network tests. Pinned to the
+    // OkHttp version above.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

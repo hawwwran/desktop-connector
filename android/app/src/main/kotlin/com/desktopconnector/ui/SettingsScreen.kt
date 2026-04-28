@@ -24,6 +24,7 @@ import com.desktopconnector.data.ThemeMode
 import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
 import com.desktopconnector.ui.theme.DcBlue950
+import com.desktopconnector.ui.update.UpdateUiState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -42,6 +43,8 @@ fun SettingsScreen(
     onSendLogs: (String, Boolean) -> Unit,
     onDownloadLogs: (String, Boolean) -> Unit,
     onBack: () -> Unit,
+    updateState: UpdateUiState = UpdateUiState.Idle,
+    onCheckForUpdates: () -> Unit = {},
 ) {
     var serverUrl by remember { mutableStateOf(prefs.serverUrl ?: "") }
     var stats by remember { mutableStateOf<JSONObject?>(null) }
@@ -528,6 +531,26 @@ fun SettingsScreen(
                 }
             }
 
+            // Updates
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            ) {
+                Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                    Text("Updates", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        updateSubtitleFor(updateState),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    SettingsActionButton(onClick = onCheckForUpdates) {
+                        Text("Check for updates")
+                    }
+                }
+            }
+
             // Version (read at runtime from PackageInfo — Gradle populates
             // versionName from the repo-root version.json, so this matches
             // the authoritative release value).
@@ -706,4 +729,17 @@ private fun formatTimestamp(ts: Long): String {
     if (ts == 0L) return "Unknown"
     val sdf = java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault())
     return sdf.format(java.util.Date(ts * 1000))
+}
+
+private fun updateSubtitleFor(state: UpdateUiState): String = when (state) {
+    is UpdateUiState.Available ->
+        if (state.dismissed) "v${state.info.latestVersion} available (skipped)"
+        else "Update available — v${state.info.latestVersion}"
+    is UpdateUiState.NoUpdate ->
+        "You're on the latest version (v${state.currentVersion})"
+    is UpdateUiState.Checking -> updateSubtitleFor(state.previous)
+    is UpdateUiState.Downloading -> "Downloading update…"
+    is UpdateUiState.Launching -> "Opening installer…"
+    is UpdateUiState.Error -> "Couldn't reach update server — try again"
+    UpdateUiState.Idle -> "Tap to check now"
 }

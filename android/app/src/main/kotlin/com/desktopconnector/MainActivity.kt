@@ -22,6 +22,7 @@ import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.ui.AppNavigation
 import com.desktopconnector.ui.theme.DesktopConnectorTheme
+import com.desktopconnector.util.UpdateCacheCleanup
 
 class MainActivity : ComponentActivity() {
 
@@ -44,6 +45,7 @@ class MainActivity : ComponentActivity() {
 
         requestPermissions()
         clearTransferNotifications()
+        UpdateCacheCleanup.pruneOldUpdates(this)
 
         val prefs = AppPreferences(this)
         val keyManager = KeyManager(this)
