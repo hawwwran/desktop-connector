@@ -1,7 +1,7 @@
 # Protocol compatibility classification
 
 This document defines how to classify behavior changes against
-`docs/plans/protocol.md`.
+`docs/protocol/protocol.md`.
 
 ## Categories
 
@@ -41,7 +41,7 @@ Examples:
 
 ## Guardrails
 
-- `docs/plans/protocol.md` remains the source of truth.
+- `docs/protocol/protocol.md` remains the source of truth.
 - Contract tests operationalize the protocol; they do not replace it.
 - Avoid encoding accidental implementation quirks as mandatory protocol rules.
 

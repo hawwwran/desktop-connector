@@ -1,513 +1,322 @@
-# desktop-hardening-plan.md
+# Desktop hardening plan — at-rest secret storage
 
-## Purpose
+**Status: DRAFT — not started.** Implementation plan for moving
+the desktop client's at-rest secrets out of plaintext JSON into
+the OS Secret Service (libsecret on GNOME-family / GNOME Keyring,
+KWallet on KDE).
 
-This document describes a practical hardening plan for the Desktop Connector desktop client.
-
-The focus is on **local secret storage and desktop-side security posture**, not on transport encryption.
-
-The current desktop client already has a strong in-transit model, but local at-rest handling of secrets is not yet strong enough for a more professional desktop application.
-
-This plan explains:
-
-- what is currently stored,
-- what is weak about the current design,
-- what should be hardened first,
-- how to preserve a smooth migration path,
-- and how to keep compatibility during a transition period.
+This plan replaces the earlier `hardening-plan.md` draft (which
+assumed a parallel Qt client was migrating; that target was
+dropped when AppImage replaced the Qt cutover — see
+`temp/finished-plans/desktop-client-migration-plan.md`). With a
+single Python client, the migration story collapses to "rotate
+config layout in place, on the same client".
 
 ---
 
-## Current local-secret situation
+## Why
 
-Today, the desktop client stores highly sensitive material in the config directory.
+The desktop client is strong on the wire (X25519 + AES-256-GCM)
+but stores everything at rest in `~/.config/desktop-connector/`
+as plain JSON or a permissioned PEM:
 
-### Current storage locations
+| File | Contents | Sensitivity |
+|------|----------|-------------|
+| `config.json` | `device_id`, **`auth_token`**, server URL, save dir, `paired_devices[].pubkey`, **`paired_devices[].symmetric_key_b64`**, `name`, `paired_at`, UI prefs | High — auth_token + symmetric keys live here |
+| `keys/private_key.pem` | long-term X25519 device private key | High — but already chmod-protected at write time |
+| `history.json` | last 50 transfer records (filenames, timestamps; no key material) | Low |
+| `logs/*.log` (opt-in) | event vocabulary; no key material per logging policy | Low |
 
-#### Config file
-`~/.config/desktop-connector/config.json`
+A plaintext `auth_token` lets anyone with read access to the
+home directory act as the desktop device against the relay. A
+plaintext `symmetric_key_b64` per paired device lets them decrypt
+intercepted ciphertext (assuming they also recover the relay's
+encrypted blobs — but we shouldn't rely on the relay being
+unreachable as the only barrier).
 
-This currently stores:
-- `device_id`
-- `auth_token`
-- `paired_devices`
-- for each paired device:
-  - `pubkey`
-  - `symmetric_key_b64`
-  - `name`
-  - `paired_at`
+The realistic goal here is **not** "perfect secrecy against a
+fully compromised local account". It's "match normal desktop
+secret-storage expectations" — encryption-at-rest gated by the
+desktop session unlock.
 
-#### Private key
-`~/.config/desktop-connector/keys/private_key.pem`
+## Current code surface
 
-This stores the long-term device private key.
+- `desktop/src/config.py:210` — `auth_token` getter/setter on
+  the JSON dict
+- `desktop/src/config.py:239` — `add_paired_device` writes
+  `symmetric_key_b64` into the JSON dict
+- `desktop/src/config.py:263` — `clear_pairings` modes
+  (`pairing_only` / `full`); both touch the JSON dict
+- `desktop/src/api_client.py` — reads `auth_token` for every
+  authenticated request
+- `desktop/src/runners/registration.py`, `runners/pairing.py` —
+  write secrets via the config object
 
-### What is currently good
-The key directory is explicitly created with restrictive permissions and the private key file is explicitly written with restrictive permissions.
-
-### What is currently weak
-The config file currently holds:
-- the server auth token
-- pairing-derived symmetric keys
-
-and it is stored as ordinary JSON rather than in secure secret storage.
-
-That means the app is strong on the wire, but weaker than it should be for local secret storage.
-
----
-
-## Security objective
-
-The objective is not “perfect secrecy against a fully compromised local account.”
-
-The realistic objective is:
-
-- improve local secret handling significantly,
-- reduce accidental secret exposure,
-- align the app with normal desktop secret-storage expectations,
-- keep migration practical,
-- and avoid breaking development workflows unnecessarily.
+Any plan that moves secrets out of JSON has to thread through
+those callers without breaking them.
 
 ---
 
-## Main hardening direction
+## Backend choice (deferred to H.3)
 
-The long-term target should be:
+Three viable Python integrations with the Linux Secret Service:
 
-### Store secrets in the OS secret store
-On Linux, the preferred direction is to use the system secret-storage layer rather than plain JSON config files.
+| Option | Pros | Cons |
+|--------|------|------|
+| `keyring` (PyPI) | clean abstraction; widely tested | adds dep + jeepney; no native attribute lookup |
+| `secretstorage` (PyPI) | direct Secret Service API; jeepney-based | Linux-only (fine, we already are); slightly more API surface |
+| `gi.repository.Secret` | already bundled via GTK4 stack — zero new deps | most verbose API |
 
-A good Linux-oriented target is the Secret Service ecosystem, which is exposed through libsecret on GNOME-family systems. Libsecret’s simple password API is explicitly intended for storing and retrieving secrets, and its stored item attributes are *not* secure and should not contain secret values.
+Recommendation: **`keyring`** for the cleanest call sites
+(`keyring.set_password("desktop-connector-pairing-symkey", device_id, key)`),
+unless the AppImage bundle audit (H.3) shows it pulls in
+problematic transitive deps. Final pick belongs in H.3 — don't
+prescribe before validating against the bundle.
 
-If the future Qt client wants a Qt-friendly abstraction, QtKeychain is designed exactly for secure secret storage behind Qt, using Linux secret stores such as GNOME Keyring / libsecret and KWallet where available, and it explicitly states that unsupported environments do not silently fall back to plaintext unless insecure fallback is enabled.
+## Headless mode is a real constraint
 
-### Keep non-secret settings in config.json
-The JSON config file should remain for ordinary settings such as:
-- server URL
-- save directory
-- UI preferences
-- device display name
-- optional logging preference
-- non-secret metadata
+The desktop client also runs `--headless` (no GUI, just
+receiver). On a headless server there is typically no D-Bus
+session bus and no Secret Service running. The plan **must**
+handle this — silently writing plaintext when the secret store
+is unreachable is exactly the "insecure fallback" failure mode
+the original plan called out.
 
-This gives a cleaner split:
-- config file for settings
-- secret store for secrets
+Approach (formalised in H.5):
+- Probe Secret Service availability at startup.
+- If reachable → use it.
+- If not reachable AND `allow_plaintext_secrets: true` is set
+  in `config.json` (or `--allow-plaintext-secrets` CLI flag is
+  passed) → fall back to plaintext, with chmod 0600 + a logged
+  warning on every start.
+- Otherwise → exit 1 with a clear one-line error pointing at
+  the override flag and explaining the trade-off.
 
----
-
-## What should be treated as secrets
-
-The following should be treated as secrets and moved out of plain JSON:
-
-### 1. `auth_token`
-This grants authenticated access as the desktop device.
-
-### 2. pairing-derived symmetric keys
-The `symmetric_key_b64` values are the most important local secrets after the private key.
-
-### 3. long-term private key
-The long-term private key already has better filesystem protection than the JSON config, but it should still be considered part of the hardening scope.
-
-The app may choose between:
-- continuing to store it on disk with strong permissions,
-- or moving it into secret storage if the platform strategy supports that cleanly.
-
-This does not need to be the first migration step, but it should remain in scope.
+This makes the insecure path explicit, opt-in, and noisy.
 
 ---
 
-## What should not be treated as secrets
+## Phases
 
-The following should generally remain outside secret storage:
+Each phase is independently landable and ends on a single
+commit. Estimates assume the AppImage build path stays green
+and the protocol contract tests still pass.
 
-- `device_id`
-- paired device public keys
-- device names
-- `paired_at`
-- save directory
-- server URL
-- UI preferences
+### H.1 — Lock down filesystem permissions ⏱ ~30 min
 
-These may still be sensitive in a privacy sense, but they are not secret material in the same way as tokens and symmetric keys.
+Before any architecture change, do the cheapest improvement:
+make the existing files less readable.
 
-Also note that secret-store lookup attributes should never themselves contain secret material.
+**What changes:**
+1. `Config.__init__` (or wherever the config dir is created):
+   `os.makedirs(DEFAULT_CONFIG_DIR, mode=0o700, exist_ok=True)`
+   followed by `os.chmod(DEFAULT_CONFIG_DIR, 0o700)` to fix any
+   existing dirs that were created with weaker permissions.
+2. `Config.save()`: write to a tmp file, `os.chmod(tmp, 0o600)`,
+   then `os.replace(tmp, target)` (atomic + permissioned).
+3. `Config.load()`: log a warning if the existing file is
+   world-readable / group-readable, then fix on next save.
+4. Same treatment for `history.json`.
 
----
+**Acceptance:**
+- `stat -c '%a' ~/.config/desktop-connector/` returns `700`
+- `stat -c '%a' ~/.config/desktop-connector/config.json`
+  returns `600`
+- Existing installs fix their own permissions on next save
+- `test_loop.sh` still green
 
-## Recommended target storage model
+### H.2 — Secret-storage abstraction in code ⏱ ~1 h
 
-## Config file should keep:
-- `server_url`
-- `save_directory`
-- `device_name`
-- `auto_open_links`
-- `allow_logging`
-- pairing metadata without secret values
-- migration markers / storage version markers
+Refactor `config.py` so secret reads/writes go through a small
+interface. **No backend yet** — the only implementation in this
+phase is "store in config.json", byte-equivalent to today.
 
-## Secret storage should keep:
-- `auth_token`
-- per-device pairing symmetric keys
-- optionally later the long-term private key or an encrypted wrapper around it
+**What changes:**
+1. New `desktop/src/secrets.py` exposing:
+   ```python
+   class SecretStore(Protocol):
+       def get(self, key: str) -> str | None: ...
+       def set(self, key: str, value: str) -> None: ...
+       def delete(self, key: str) -> None: ...
+       def is_secure(self) -> bool: ...
+   ```
+2. `JsonFallbackStore(config_path)` — current behaviour, keeps
+   secrets inside `config.json`. `is_secure() → False`.
+3. `Config` accepts a `SecretStore` (default = JsonFallbackStore).
+   `auth_token` getter/setter and `add_paired_device` route
+   through it instead of touching `_data` directly.
+4. Define the canonical attribute scheme used by all backends:
+   - `auth_token` → key `auth_token`
+   - per-pairing symkey → key `pairing_symkey:<device_id>`
 
-A good resulting model is:
+**Acceptance:**
+- All callers of `auth_token` and `paired_devices` work unchanged
+- Protocol contract tests pass
+- A new unit test pins the abstraction (`SecretStore` get/set/delete
+  round-trip)
 
-### `config.json`
-Contains only non-secret configuration and metadata.
+### H.3 — Secret Service backend ⏱ ~2 h
 
-### Secret store entries
-Contain:
-- desktop auth token
-- pairing secret material per paired device
+Implement `SecretServiceStore` against libsecret.
 
-### Private key
-Initially may remain on disk with strict permissions, then be revisited later.
+**What changes:**
+1. Audit AppImage bundle implications: pick `keyring` vs
+   `secretstorage` vs `gi.repository.Secret` based on what the
+   AppImage already pulls in cleanly. Document the choice in
+   `secrets.py`.
+2. `SecretServiceStore` class implementing the `SecretStore`
+   protocol. Service identifier: `"desktop-connector"`. Lookup
+   attribute: `{"category": "auth_token"}` or
+   `{"category": "pairing_symkey", "device_id": "<id>"}`.
+3. Probe at process start: try opening the keyring; on
+   `SecretServiceUnavailable` / `dbus.exceptions.DBusException`,
+   surface a typed exception that callers can branch on.
+4. `is_secure() → True`.
 
----
+**Acceptance:**
+- Fresh install on a GNOME / KDE machine writes secrets to the
+  keyring; `seahorse` (or `kwalletmanager`) shows them under
+  "desktop-connector"
+- AppImage size doesn't grow by more than ~1 MiB
+- Toggling lock state of the keyring blocks reads with a
+  clear typed error (no plaintext fallback on accident)
 
-## Shared-data compatibility requirement
+### H.4 — Migration: import legacy plaintext on first run ⏱ ~1 h
 
-A very important goal for the migration should be:
+When the new code first sees an old-style `config.json` that
+still has `auth_token` / `symmetric_key_b64` inline, copy them
+into the secret store and write a migration marker.
 
-**allow the existing Python client and an alternative Qt client to coexist at the data-model level during development, as long as they are not run at the same time.**
+**What changes:**
+1. On `Config.load()`, after secret store initialisation:
+   - If `_data` contains `auth_token` and the secret store is
+     secure: copy to secret store, remove from `_data`, set
+     `_data["secrets_migrated_at"] = "<iso8601>"`, save.
+   - Same for each `paired_devices[*].symmetric_key_b64`.
+2. If the secret store is **not** secure (H.5 fallback path),
+   leave the legacy fields in place and **do not** add the
+   migration marker — the next more-secure boot will pick up
+   the migration.
+3. `Config.clear_pairings("full")` and the auth-failure recovery
+   path (`docs/diagnostics.events.md` "auth_failure_kind") must
+   delete from the secret store, not just the JSON dict.
 
-This matters because it dramatically lowers migration friction.
+**Acceptance:**
+- Existing install with plaintext secrets boots, secrets land in
+  the keyring, `cat ~/.config/desktop-connector/config.json`
+  shows no `auth_token` or `symmetric_key_b64` afterwards
+- `clear_pairings("full")` after migration leaves no orphaned
+  keyring entries (verified via `seahorse` or programmatic list)
+- Re-pairing after migration writes new entries to the keyring,
+  not to `config.json`
 
-A successful hardening plan should support:
+### H.5 — Headless / no-Secret-Service handling ⏱ ~45 min
 
-- stop Python app
-- start Qt app
-- reuse the same identity and pairing state
-- stop Qt app
-- start Python app again if needed
+Make the no-keyring case explicit.
 
-This should be treated as a first-class migration requirement.
+**What changes:**
+1. `Config.__init__` detects whether `SecretServiceStore` could
+   open. If not, check `_data.get("allow_plaintext_secrets")` or
+   the `--allow-plaintext-secrets` CLI flag (added to
+   `bootstrap/args.py`).
+2. With opt-in: instantiate `JsonFallbackStore` and log a
+   `WARNING` per logging vocabulary
+   (`config.secrets.plaintext_fallback`).
+3. Without opt-in: print a one-line error to stderr and
+   `sys.exit(1)`. The error mentions both the flag and the
+   config field.
+4. The receiver-mode default install (`install-from-source.sh` /
+   AppImage first-launch) should not enable the flag — only
+   headless deployments where the operator chose this trade-off.
 
----
+**Acceptance:**
+- Stop GNOME Keyring → Python client fails to start with the
+  one-line error mentioning the override
+- Same with `--allow-plaintext-secrets` → starts, logs the
+  warning, secrets land in `config.json` with `chmod 0600`
+- The flag's presence is logged on every start (so a long-running
+  headless instance leaves a paper trail)
 
-## Recommendation for migration compatibility
+### H.6 — Plaintext scrub command ⏱ ~30 min
 
-## Short-term compatibility model
-During the transition period, the Qt client should be able to read:
+After a stable migration, give the user a way to verify the
+config file is clean.
 
-- the current `config.json`
-- the current `keys/private_key.pem`
+**What changes:**
+1. New CLI subcommand: `python -m src.main --scrub-secrets`.
+   Loads config, verifies all known secret keys round-trip
+   through the secret store, then explicitly removes any
+   surviving legacy fields and re-saves with `chmod 0600`.
+2. Surfaces a Settings-window button "Verify secret storage"
+   that runs the same logic and shows the result.
 
-and interpret the existing pairing layout.
+**Acceptance:**
+- `--scrub-secrets` on a freshly-migrated install reports
+  "no legacy fields found"
+- `--scrub-secrets` on an install where the user hand-edited
+  `auth_token` back into JSON: removes it again
+- Settings button shows the same outcome with a brand-styled
+  status row
 
-That means the Qt client should be backward-compatible with the current on-disk format first.
+### H.7 — Revisit private_key.pem (deferred) ⏱ ~unknown
 
-### Why this is valuable
-It allows:
-- incremental migration
-- side-by-side development
-- easy rollback during testing
-- lower conversion risk
+The long-term private key already has good filesystem protection
+(written `chmod 0600` at creation by `crypto.py`). Whether to
+also move it into the secret store is a separate trade-off:
 
----
+- Pro: encryption-at-rest gated by session unlock; lifetime
+  matches the rest of the secret material.
+- Con: the secret store stores strings (base64-encode the PEM);
+  rotation gets harder; libsecret's per-secret size limits vary
+  per backend.
 
-## Medium-term compatibility model
-Once hardening begins, the new client should support a **migration-aware storage layer**:
-
-### Read order
-1. try secure secret storage
-2. if missing, fall back to legacy `config.json`
-3. if legacy values are found, optionally import them into secure storage
-4. mark migration status in config
-5. optionally scrub legacy secret fields later
-
-This gives a safe transition path.
-
----
-
-## Long-term compatibility model
-Eventually the preferred state should be:
-
-- both clients understand the new storage model,
-- legacy plaintext secret fields are no longer required,
-- and plaintext secret storage is retired.
-
-But this should happen only after the migration period is stable.
-
----
-
-## Recommended hardening phases
-
-## Phase 1 — lock down current filesystem behavior
-Before changing storage architecture, improve the current file-permission story.
-
-### Goals
-- ensure config directory is created with restrictive permissions
-- ensure `config.json` gets explicit secure permissions
-- audit any other config-side files for permissions
-- keep this change low-risk and backward-compatible
-
-### Why first
-This is a cheap improvement even before secret-store migration begins.
-
-### Deliverables
-- explicit permissions on config directory
-- explicit permissions on config file
-- permission-check/logging for insecure existing files where useful
-
----
-
-## Phase 2 — separate secret vs non-secret data model
-Refactor the config model so the app clearly distinguishes:
-
-- settings
-- metadata
-- secrets
-
-### Goals
-- stop treating one JSON blob as the storage location for everything
-- introduce a secret-storage interface
-- define exactly which values move to secret storage
-
-### Deliverables
-- secret storage abstraction
-- reduced config schema
-- migration marker/version field
-
----
-
-## Phase 3 — add secret store backend
-Implement a Linux secret-storage backend.
-
-### Preferred Linux direction
-Use a secret storage backend aligned with the Linux desktop secret ecosystem.
-
-Two viable directions are:
-
-#### Option A — libsecret-based integration
-A Linux-native route aligned with Secret Service / GNOME-style secret storage.
-
-#### Option B — QtKeychain for the Qt client
-A Qt-oriented route that uses Linux desktop secret stores and is better aligned with a Qt desktop shell. QtKeychain explicitly supports Linux secret backends and avoids insecure fallback unless explicitly enabled.
-
-### Deliverables
-- secure secret read/write
-- lookup strategy by non-secret attributes
-- no insecure fallback by default
-
----
-
-## Phase 4 — add legacy import logic
-Make the new secret layer import from legacy config if needed.
-
-### Goals
-- preserve compatibility with existing installs
-- support Python -> Qt transition
-- support staged rollout without forcing immediate conversion
-
-### Deliverables
-- legacy reader
-- import-on-first-use or explicit migration command
-- migration status marker
+Defer until H.1–H.6 are stable and there's a felt need. Until
+then the on-disk key with `chmod 0600` is acceptable.
 
 ---
 
-## Phase 5 — split pairing metadata from pairing secrets
-Refactor pairing storage so that:
+## What this plan does NOT do
 
-### In config
-Store only:
-- device ID
-- public key
-- display name
-- timestamps
-- maybe secret-store lookup key or alias if needed
+- **No re-pairing.** Existing pairings survive the migration —
+  the keyring entries are derived from the same plaintext values
+  the JSON held.
+- **No protocol changes.** Server, Android, on-the-wire format
+  unchanged. Only the desktop's at-rest layout shifts.
+- **No history-file encryption.** `history.json` is filenames +
+  timestamps + sizes; not key material. Out of scope.
+- **No per-user passphrase prompt.** The Secret Service backend
+  inherits the desktop session's unlock. Adding a separate
+  passphrase is a different threat model (offline attacker with
+  full disk access) and would need its own plan.
+- **No Windows / macOS support.** The Linux-only stance from
+  the wider project carries through. `keyring` would auto-pick
+  the right backend on those platforms if we ever cross-compile,
+  but that's not on the roadmap.
 
-### In secret storage
-Store:
-- the pairing symmetric key
+## Risks + mitigations
 
-This is the most important practical hardening step after auth token migration.
-
----
-
-## Phase 6 — harden auth token storage
-Move the server auth token into secure storage as well.
-
-### Why
-If someone can read the auth token, they may act as the desktop device against the relay.
-
-### Deliverables
-- auth token stored in secret storage
-- config only stores metadata needed to locate the token if necessary
-
----
-
-## Phase 7 — revisit long-term private key storage
-After the rest of the migration is stable, decide whether the private key should:
-
-- remain as a strictly permissioned filesystem secret
-- be stored in the secret store
-- or be encrypted locally with a key derived from secret-store-protected material
-
-This is a more delicate step and should come later.
-
-### Recommendation
-Do not make this the first migration step.  
-First remove the easy-to-expose secrets from plain JSON.
-
----
-
-## Phase 8 — optional secure cleanup of legacy plaintext
-After migration has been stable for some time, add a cleanup path that removes legacy plaintext secret fields from `config.json`.
-
-### Important note
-Do not do this too early.
-
-Keep rollback and dev compatibility simple until the new client path is stable.
-
----
-
-## Qt client compatibility answer
-
-## Can the Qt app reuse the same pairing data initially?
-**Yes — and it should, if you want the migration to stay practical.**
-
-If the Python app is closed and the Qt app is then started, the Qt app can absolutely be designed to use the same current desktop data:
-
-- same `config.json`
-- same `keys/private_key.pem`
-- same pairing metadata shape
-- same pairing symmetric key entries
-- same auth token
-
-That is the best development-time migration strategy.
-
-### Why this is a good idea
-It gives you:
-- easier iterative development
-- no repeated re-pairing
-- lower migration friction
-- easier comparison between old and new desktop clients
-- easier rollback if something breaks
-
----
-
-## Important caveat: do not run them simultaneously
-This is the critical warning.
-
-The current desktop config model does not appear to have the same cross-process locking discipline for `config.json` that the history file has for `history.json`.
-
-That means sharing the same config is reasonable for:
-- one app stopped
-- the other app started
-
-but not ideal for:
-- both running at the same time
-- both writing config state opportunistically
-
-### Recommended rule
-Treat the current shared config as:
-- **safe enough for sequential development use**
-- **not a good concurrent multi-client setup**
-
-That should be the explicit development rule.
-
----
-
-## Recommended transition policy for your dev workflow
-
-### Development stage 1
-Qt client reads the exact same current config and key material as the Python client.
-
-Policy:
-- never run both at once
-- stop one before starting the other
-
-### Development stage 2
-Qt client introduces secret-store support but still understands legacy config.
-
-Policy:
-- read secure storage first
-- fall back to legacy config
-- optionally import legacy secrets into secure storage
-
-### Development stage 3
-Both clients can support the new storage layout.
-
-Policy:
-- one shared identity
-- one shared pairing set
-- no repeated pairing required
-- old plaintext secret fields gradually phased out
-
-This is the smoothest migration path.
-
----
-
-## Recommended implementation rule
-
-The new storage layer should be built around this principle:
-
-**identity and pairing state are conceptually shared, but secret material should be abstracted behind a storage interface.**
-
-That means the Qt app should not hard-code:
-- “read `symmetric_key_b64` from JSON forever”
-
-It should instead do:
-1. ask secret storage for pairing secret
-2. if missing, check legacy JSON
-3. migrate if appropriate
-
-This makes the transition easy without freezing the old insecure model permanently.
-
----
-
-## What not to do
-
-## 1. Do not break existing installs immediately
-Forcing all users into a new storage model in one step is unnecessary risk.
-
-## 2. Do not require re-pairing just because the desktop shell changed
-If the app identity is conceptually the same device, re-pairing should be avoided where possible.
-
-## 3. Do not run both desktop clients against the same mutable config concurrently
-That is asking for subtle state corruption or divergence.
-
-## 4. Do not store secret-store lookup attributes as secrets
-Secret-store attributes are identifiers, not secret data.
-
-## 5. Do not enable insecure plaintext fallback silently
-If a secret backend is unavailable, the behavior should be explicit and intentional.
-
----
-
-## Recommended immediate actions
-
-If you want a sensible near-term hardening sequence, do this:
-
-### Immediate
-1. enforce restrictive permissions on config dir and config file
-2. define a secret-storage abstraction
-3. keep the current on-disk format readable by both clients
-4. forbid concurrent Python + Qt client usage during development
-
-### Next
-5. move `auth_token` and pairing symmetric keys into secret storage
-6. keep pairing metadata in JSON
-7. add legacy import logic
-
-### Later
-8. revisit private key storage
-9. remove legacy plaintext secret fields once migration is proven safe
+| Risk | Mitigation |
+|------|-----------|
+| User on a niche desktop (sway, hyprland) has no Secret Service running. | H.5's opt-in plaintext fallback. The error message names common installs (`gnome-keyring`, `kwalletmanager`). |
+| `keyring` / `secretstorage` adds D-Bus deps that bloat the AppImage. | H.3 audits before picking. Fall back to `gi.Secret` (already bundled) if size matters. |
+| Migration partial-fails (keyring write succeeds, JSON remove fails). | H.4 runs as `set → verify-read → remove`, all in `Config.save()`'s atomic-rename pattern. |
+| User locks the keyring mid-session. | Surface as a typed exception → auth-failure-kind banner already exists for "credentials wrong"; reuse the UX. |
+| Secret-store entry visible to other processes via D-Bus. | Acceptable. Same-user processes already have access to the JSON file. The hardening upgrade is "encryption at rest", not "process isolation". |
+| AppImage on a host without `python3-gi` for `gi.Secret`. | Bundle is self-contained; gi.Secret comes via the GTK4 plugin (already shipped for the windows). Verify in H.3 audit. |
 
 ---
 
 ## Practical definition of success
 
-This plan is successful if, after implementation:
+After H.1–H.6 land:
 
-- the desktop app no longer stores auth token and pairing symmetric keys in plain JSON
-- the Qt client can still reuse existing desktop identity/pairing data during migration
-- developers can switch between Python and Qt clients without re-pairing
-- sequential use is supported cleanly
-- concurrent use is explicitly discouraged or prevented
-- local secret handling is significantly improved without causing migration chaos
-
-That is the right goal.
+- `cat ~/.config/desktop-connector/config.json` shows no
+  `auth_token` and no `symmetric_key_b64`
+- `seahorse` (or equivalent) shows entries under
+  `desktop-connector`
+- A fresh install pairs successfully and never writes secrets
+  to JSON
+- An existing install upgrades transparently — no re-pairing
+- Headless deployments either use the keyring (if available) or
+  exit clean with an error pointing at the explicit opt-in
+- `test_loop.sh` and `tests/protocol/` stay green

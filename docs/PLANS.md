@@ -1,37 +1,31 @@
 # Plans Index
 
-Working notes under [`plans/`](./plans/) (gitignored, local only).
-Each file is a self-contained plan; some have been acted on, most
-haven't yet.
+Working notes under [`plans/`](./plans/) (tracked in git; small,
+current set). Protocol reference docs under
+[`protocol/`](./protocol/). Release runbooks under
+[`release/`](./release/).
 
 ## Status legend
-- **Done** — landed on `main`, plan file carries a completion header
-- **Draft** — plan is written and reviewed, implementation not yet started
-- **Deferred** — conditionally useful, waiting on a measurement or
-  another plan to land first
+- **Open** — implementation not started, or in progress
+- **Reference** — living spec, never "done"; updated as the
+  surface changes
 
 ---
 
-## Desktop client
+## Open plans
 
 | Plan | Intent | Status |
 |------|--------|--------|
-| [desktop-client-migration-plan.md](plans/desktop-client-migration-plan.md) | Migrate desktop off pystray + GTK-subprocess to PySide6 (pragmatic path) or Rust core + Qt shell (long term). | Draft |
-| [hardening-plan.md](plans/hardening-plan.md) | Improve at-rest secret storage on the desktop — `auth_token`, paired-device symmetric keys, private key currently sit in `~/.config/desktop-connector/`. | Draft |
-| [secrets-and-signing-plan.md](plans/secrets-and-signing-plan.md) | Move Android signing passwords out of `build.gradle.kts`; define keystore backup, machine-migration, and server Firebase service-account hygiene. | Draft |
-| [appimage-distro-support-plan.md](plans/appimage-distro-support-plan.md) | Ship the desktop client as an AppImage per architecture, define a realistic tested-distro list vs. expected-to-work vs. unsupported. | Draft |
+| [brand-rollout.md](plans/brand-rollout.md) | Apply `visual-identity-guide.md` across desktop and server. | Android **Done** (v0.2.0) · Desktop Open · Server Open |
+| [hardening-plan.md](plans/hardening-plan.md) | Improve at-rest secret storage on the desktop — `auth_token`, paired-device symmetric keys, private key currently sit in `~/.config/desktop-connector/` as plaintext. | Open |
+| [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Open |
 
-## Brand / visual identity
+## Protocol reference (living docs)
 
-| Plan | Intent | Status |
-|------|--------|--------|
-| [brand-rollout.md](plans/brand-rollout.md) | Apply `visual-identity-guide.md` across all three components. | Android **Done** (v0.2.0) · Desktop Draft · Server Draft |
+| Doc | Purpose |
+|------|--------|
+| [protocol.md](protocol/protocol.md) | Formal spec of the HTTP + encrypted-envelope protocol between desktop, phone, relay. Reverse-specified from `main`. |
+| [explain.protocol.md](protocol/explain.protocol.md) | Rationale for why `protocol.md` exists, how to extend it, how to use it during change design. |
+| [protocol.compatibility.md](protocol.compatibility.md) | Per-row classification of every protocol surface change as preserving / extending / breaking. |
+| [protocol.examples.md](protocol.examples.md) | Canonical request / response examples for each endpoint and mode. |
 
-## Protocol & docs
-
-| Plan | Intent | Status |
-|------|--------|--------|
-| [protocol.md](plans/protocol.md) | Formal spec of the HTTP + encrypted-envelope protocol between desktop, phone, relay. Reverse-specified from `main`. | Reference (living doc) |
-| [explain.protocol.md](plans/explain.protocol.md) | Rationale for why `protocol.md` exists, how to extend it, how to use it during change design. | Reference |
-| [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Draft |
-| [streaming-improvement.md](plans/streaming-improvement.md) | Replace the store-then-forward relay with a streaming pass-through: per-chunk ACK wipes blobs on the server, so peak on-disk bytes collapse to the in-flight window. Either-party abort, mode negotiation, 425/410 error envelopes. | Server **Done** (phases A+B) · Desktop Draft · Android Draft · Integration Draft |

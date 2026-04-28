@@ -6,7 +6,7 @@ These tests pin the externally observable behavior of the protocol and the deskt
 - **`test_platform_contract.py`** — pins the `DesktopPlatform` / `PlatformCapabilities` shape, confirms `compose_desktop_platform()` raises `NotImplementedError` on non-Linux hosts (no silent Linux fallback), and verifies `src.platform.contract` imports without pulling in Linux backends.
 - **`test_connection_auth_state.py`** — pins the `ConnectionManager` auth-failure state machine: trip at threshold, latch-no-refire, 2xx resets streak but not latched kind, per-kind status text, `effective_state` transitions during streaks, atomic `update_credentials`. No network — drives `_record_auth_response` directly.
 
-They complement, not replace, `docs/plans/protocol.md` and `docs/protocol.examples.md`.
+They complement, not replace, `docs/protocol/protocol.md` and `docs/protocol.examples.md`.
 
 ## Running
 
