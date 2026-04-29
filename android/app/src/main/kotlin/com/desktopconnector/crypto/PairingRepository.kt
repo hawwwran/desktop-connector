@@ -59,6 +59,22 @@ class PairingRepository private constructor(
         _selectedDeviceId.value = deviceId
     }
 
+    fun rename(deviceId: String, newName: String) {
+        keyManager.setPairedDeviceName(deviceId, newName)
+        refresh()
+    }
+
+    /** Keystore + selection only. The `.fn.unpair` send and per-peer
+     *  history wipe are orchestrated by `TransferViewModel.unpairDesktop`,
+     *  which has the API client and DB. If the removed pair was selected,
+     *  fall over to the most-recently-paired remaining entry. */
+    fun unpair(deviceId: String) {
+        val wasSelected = _selectedDeviceId.value == deviceId
+        keyManager.removePairedDevice(deviceId)
+        refresh()
+        if (wasSelected) selectPair(_pairs.value.firstOrNull()?.deviceId)
+    }
+
     private fun loadPairs(): List<PairedDeviceInfo> =
         keyManager.getAllPairedDevices().sortedByDescending { it.pairedAt }
 

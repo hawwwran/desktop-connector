@@ -502,6 +502,21 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun renamePair(deviceId: String, newName: String) {
+        pairingRepo.rename(deviceId, newName.trim())
+    }
+
+    /** User-initiated unpair (Settings list). Tells the desktop, wipes
+     *  this peer's history, then drops the keystore entry + selection. */
+    fun unpairDesktop(deviceId: String) {
+        sendUnpairNotification(deviceId)
+        viewModelScope.launch(Dispatchers.IO) {
+            db.transferDao().deleteAllForPeer(deviceId)
+            pairingRepo.unpair(deviceId)
+            refreshTransfers()
+        }
+    }
+
     fun sendLogsToDesktop(text: String, appendBatteryStats: Boolean = false) {
         val app = getApplication<Application>()
         val paired = pairingRepo.selected.value ?: return

@@ -424,25 +424,16 @@ fun AppNavigation(
         }
 
         composable("settings") {
-            val selectedPair by pairingRepo.selected.collectAsState()
+            val pairs by pairingRepo.pairs.collectAsState()
             SettingsScreen(
                 prefs = prefs,
                 deviceId = keyManager.deviceId,
-                pairedDeviceName = selectedPair?.name ?: "",
-                pairedDeviceId = selectedPair?.deviceId ?: "",
+                pairs = pairs,
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
-                onUnpair = {
-                    selectedPair?.let {
-                        // Notify desktop before removing pairing
-                        transferViewModel.sendUnpairNotification(it.deviceId)
-                        keyManager.removePairedDevice(it.deviceId)
-                        pairingRepo.refresh()
-                    }
-                    navController.navigate("pairing") {
-                        popUpTo("home") { inclusive = true }
-                    }
-                },
+                onRenamePair = { id, name -> transferViewModel.renamePair(id, name) },
+                onUnpair = { id -> transferViewModel.unpairDesktop(id) },
+                onPairAnother = { navController.navigate("pairing") },
                 onSendLogs = { text, appendBatteryStats ->
                     // Send logs as a file transfer
                     transferViewModel.sendLogsToDesktop(text, appendBatteryStats)

@@ -10,6 +10,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -18,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.desktopconnector.crypto.PairedDeviceInfo
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.data.ThemeMode
@@ -35,11 +39,12 @@ import org.json.JSONObject
 fun SettingsScreen(
     prefs: AppPreferences,
     deviceId: String,
-    pairedDeviceName: String,
-    pairedDeviceId: String,
+    pairs: List<PairedDeviceInfo>,
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
-    onUnpair: () -> Unit,
+    onRenamePair: (deviceId: String, newName: String) -> Unit,
+    onUnpair: (deviceId: String) -> Unit,
+    onPairAnother: () -> Unit,
     onSendLogs: (String, Boolean) -> Unit,
     onDownloadLogs: (String, Boolean) -> Unit,
     onBack: () -> Unit,
@@ -50,11 +55,11 @@ fun SettingsScreen(
     var stats by remember { mutableStateOf<JSONObject?>(null) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(pairs.firstOrNull()?.deviceId) {
         withContext(Dispatchers.IO) {
             if (prefs.serverUrl != null && prefs.deviceId != null && prefs.authToken != null) {
                 val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
-                stats = api.getStats(pairedWith = pairedDeviceId.ifEmpty { null })
+                stats = api.getStats(pairedWith = pairs.firstOrNull()?.deviceId)
             }
         }
     }
@@ -366,83 +371,14 @@ fun SettingsScreen(
                 }
             }
 
-            // Paired device
-            if (pairedDeviceName.isNotEmpty()) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                ) {
-                    Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
-                        Text("Paired Desktop", style = MaterialTheme.typography.titleSmall)
-                        Spacer(Modifier.height(8.dp))
-                        SettingsRow("Name", pairedDeviceName)
-                        SettingsRow("ID", "${pairedDeviceId.take(16)}...")
-
-                        // Show paired device online status from stats
-                        val pairedStats = stats?.optJSONArray("paired_devices")
-                            ?.let { arr -> (0 until arr.length()).map { arr.getJSONObject(it) } }
-                            ?.firstOrNull { it.optString("device_id").startsWith(pairedDeviceId.take(16)) }
-
-                        if (pairedStats != null) {
-                            val online = pairedStats.optBoolean("online", false)
-                            val statusStr = if (online) {
-                                "Online"
-                            } else {
-                                val lastSeen = pairedStats.optLong("last_seen", 0)
-                                if (lastSeen > 0) {
-                                    val ago = (System.currentTimeMillis() / 1000) - lastSeen
-                                    when {
-                                        ago < 60 -> "Last seen just now"
-                                        ago < 3600 -> "Last seen ${ago / 60} min ago"
-                                        ago < 86400 -> "Last seen ${ago / 3600}h ago"
-                                        else -> "Last seen ${formatTimestamp(lastSeen)}"
-                                    }
-                                } else "Offline"
-                            }
-                            SettingsRow(
-                                "Status",
-                                statusStr,
-                                if (online) MaterialTheme.colorScheme.onSurfaceVariant
-                                else MaterialTheme.colorScheme.error,
-                            )
-                        }
-
-                        Spacer(Modifier.height(12.dp))
-                        var showUnpairDialog by remember { mutableStateOf(false) }
-                        Button(
-                            onClick = { showUnpairDialog = true },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error,
-                                contentColor = DcBlue950,
-                            ),
-                        ) {
-                            Text("Unpair")
-                        }
-
-                        if (showUnpairDialog) {
-                            AlertDialog(
-                                onDismissRequest = { showUnpairDialog = false },
-                                title = { Text("Unpair device?") },
-                                text = {
-                                    Text("This will disconnect the paired desktop. You'll need to pair again to send or receive files.")
-                                },
-                                confirmButton = {
-                                    TextButton(onClick = {
-                                        showUnpairDialog = false
-                                        onUnpair()
-                                    }) {
-                                        Text("Unpair", color = MaterialTheme.colorScheme.error)
-                                    }
-                                },
-                                dismissButton = {
-                                    TextButton(onClick = { showUnpairDialog = false }) {
-                                        Text("Cancel")
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
+            // Pairings list
+            if (pairs.isNotEmpty()) {
+                PairingsCard(
+                    pairs = pairs,
+                    onRenamePair = onRenamePair,
+                    onUnpair = onUnpair,
+                    onPairAnother = onPairAnother,
+                )
             }
 
             // Connection statistics
@@ -742,4 +678,142 @@ private fun updateSubtitleFor(state: UpdateUiState): String = when (state) {
     is UpdateUiState.Launching -> "Opening installer…"
     is UpdateUiState.Error -> "Couldn't reach update server — try again"
     UpdateUiState.Idle -> "Tap to check now"
+}
+
+@Composable
+private fun PairingsCard(
+    pairs: List<PairedDeviceInfo>,
+    onRenamePair: (deviceId: String, newName: String) -> Unit,
+    onUnpair: (deviceId: String) -> Unit,
+    onPairAnother: () -> Unit,
+) {
+    var renaming: PairedDeviceInfo? by remember { mutableStateOf(null) }
+    var unpairing: PairedDeviceInfo? by remember { mutableStateOf(null) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+            Text(
+                if (pairs.size == 1) "Paired Desktop" else "Paired Desktops",
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Spacer(Modifier.height(8.dp))
+            for ((index, pair) in pairs.withIndex()) {
+                if (index > 0) HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                PairingRow(
+                    pair = pair,
+                    onRename = { renaming = pair },
+                    onUnpair = { unpairing = pair },
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onPairAnother,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Pair with another desktop")
+            }
+        }
+    }
+
+    renaming?.let { pair ->
+        RenamePairDialog(
+            current = pair,
+            onSave = { newName ->
+                onRenamePair(pair.deviceId, newName)
+                renaming = null
+            },
+            onCancel = { renaming = null },
+        )
+    }
+
+    unpairing?.let { pair ->
+        AlertDialog(
+            onDismissRequest = { unpairing = null },
+            title = { Text("Unpair ${pair.name}?") },
+            text = {
+                Text(
+                    "This disconnects ${pair.name} and removes its history from this phone. " +
+                        "You'll need to pair again to exchange files."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onUnpair(pair.deviceId)
+                    unpairing = null
+                }) {
+                    Text("Unpair", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { unpairing = null }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun PairingRow(
+    pair: PairedDeviceInfo,
+    onRename: () -> Unit,
+    onUnpair: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(pair.name, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "ID: ${pair.deviceId.take(16)}…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(onClick = onRename) {
+            Icon(Icons.Default.Edit, contentDescription = "Rename ${pair.name}")
+        }
+        IconButton(onClick = onUnpair) {
+            Icon(
+                Icons.Default.Delete,
+                contentDescription = "Unpair ${pair.name}",
+                tint = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RenamePairDialog(
+    current: PairedDeviceInfo,
+    onSave: (String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var typed by remember(current.deviceId) { mutableStateOf(current.name) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Rename desktop") },
+        text = {
+            OutlinedTextField(
+                value = typed,
+                onValueChange = { typed = it },
+                singleLine = true,
+                label = { Text("Name") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { if (typed.isNotBlank()) onSave(typed.trim()) },
+                enabled = typed.isNotBlank(),
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        },
+    )
 }
