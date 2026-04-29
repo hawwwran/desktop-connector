@@ -349,7 +349,7 @@ fun AppNavigation(
                 )
             }
 
-            val authFailureKind by transferViewModel.connectionManager.authFailureKind
+            val authFailures by transferViewModel.connectionManager.authFailureByPeer
                 .collectAsState()
             val storageFull by com.desktopconnector.network.StoragePressure.full
                 .collectAsState()
@@ -360,7 +360,7 @@ fun AppNavigation(
                 connectionState = connState,
                 transfers = transfers,
                 isRefreshing = isRefreshing,
-                authFailureKind = authFailureKind,
+                authFailures = authFailures,
                 storageFull = storageFull,
                 pairs = homePairs,
                 selectedPair = homeSelected,
@@ -378,8 +378,8 @@ fun AppNavigation(
                 onNavigateSettings = { navController.navigate("settings") },
                 onNavigateDownloads = { navController.navigate("downloads") },
                 onClearHistory = { transferViewModel.clearHistory() },
-                onRepair = {
-                    transferViewModel.repairFromAuthFailure()
+                onRepair = { peerId ->
+                    transferViewModel.repairFromAuthFailure(peerId)
                     navController.navigate("pairing") {
                         popUpTo("home") { inclusive = false }
                     }

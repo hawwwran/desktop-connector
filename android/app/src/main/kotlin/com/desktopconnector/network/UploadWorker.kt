@@ -209,11 +209,13 @@ class UploadWorker(
                 runStreamingUpload(
                     api, transferId, transferDbId, chunkCount, sourceOpener, sourceSize,
                     baseNonce, symmetricKey, keyManager, transfer.displayName, db,
+                    peerId = transfer.peerDeviceId,
                 )
             } else {
                 runClassicUpload(
                     api, transferId, transferDbId, chunkCount, sourceOpener, sourceSize,
                     baseNonce, symmetricKey, keyManager, transfer.displayName, db,
+                    peerId = transfer.peerDeviceId,
                 )
             }
         } catch (e: Exception) {
@@ -243,13 +245,14 @@ class UploadWorker(
         keyManager: KeyManager,
         displayName: String,
         db: AppDatabase,
+        peerId: String,
     ): Result {
         sourceOpener().use { input ->
             val buf = ByteArray(CryptoUtils.CHUNK_SIZE)
             for (index in 0 until chunkCount) {
                 val plaintext = readFullChunk(input, buf, sourceSize, index, chunkCount)
                 val encrypted = keyManager.encryptChunk(plaintext, baseNonce, index, symmetricKey)
-                val terminal = uploadChunkWithRetry(api, transferId, index, chunkCount, encrypted)
+                val terminal = uploadChunkWithRetry(api, transferId, index, chunkCount, encrypted, peerId)
                 if (terminal != null) {
                     AppLog.log("Upload", "transfer.upload.failed transfer_id=${transferId.take(12)} reason=$terminal")
                     db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, terminal)
@@ -301,6 +304,7 @@ class UploadWorker(
         keyManager: KeyManager,
         displayName: String,
         db: AppDatabase,
+        peerId: String,
     ): Result {
         // Wake + WiFi locks. Released deterministically in `finally`.
         val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -337,7 +341,7 @@ class UploadWorker(
                         // Per-chunk wake refresh keeps us alive across
                         // long WAITING_STREAM episodes.
                         wakeLock.acquire(2 * 60 * 1000L)
-                        api.uploadChunkTyped(transferId, index, encrypted)
+                        api.uploadChunkTyped(transferId, index, encrypted, peerId = peerId)
                     },
                     onChunkOk = { index ->
                         db.transferDao().updateProgress(transferDbId, index + 1, chunkCount)
@@ -403,7 +407,7 @@ class UploadWorker(
                             "transfer.upload.failed transfer_id=${transferId.take(12)} reason=${outcome.reason} mode=streaming")
                         // Best-effort tell server so recipient gets 410 on
                         // its next chunk GET instead of 425'ing forever.
-                        try { api.abortTransfer(transferId, "sender_failed") } catch (_: Exception) {}
+                        try { api.abortTransfer(transferId, "sender_failed", peerId = peerId) } catch (_: Exception) {}
                         db.transferDao().markFailedWithReason(transferDbId, outcome.reason)
                         Result.failure()
                     }
@@ -436,11 +440,12 @@ class UploadWorker(
         index: Int,
         chunkCount: Int,
         encrypted: ByteArray,
+        peerId: String,
     ): String? {
         var firstFailureAt: Long? = null
         while (true) {
             try {
-                val ok = api.uploadChunk(transferId, index, encrypted) != null
+                val ok = api.uploadChunk(transferId, index, encrypted, peerId = peerId) != null
                 if (ok) {
                     Log.d(TAG, "Uploaded chunk ${index + 1}/$chunkCount")
                     return null

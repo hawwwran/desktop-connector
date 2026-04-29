@@ -503,7 +503,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
 
                 val transferId = java.util.UUID.randomUUID().toString()
                 if (api.initTransfer(transferId, pairedDeviceId, encryptedMeta, 1) == ApiClient.InitOutcome.OK) {
-                    api.uploadChunk(transferId, 0, encryptedChunk)
+                    api.uploadChunk(transferId, 0, encryptedChunk, peerId = pairedDeviceId)
                 }
             } catch (e: Exception) {
                 Log.w("TransferVM", "Failed to send unpair notification: ${e.message}")
@@ -635,7 +635,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                 }
                 try {
                     ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
-                        .abortTransfer(tid, reason)
+                        .abortTransfer(tid, reason, peerId = transfer.peerDeviceId)
                 } catch (_: Exception) {
                     // best effort
                 }
@@ -689,25 +689,27 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** User tapped the "Re-pair" banner. Wipes the appropriate scope and
-     *  clears the latched auth-failure flag. Caller navigates to the
-     *  pairing screen. */
-    fun repairFromAuthFailure() {
-        val kind = connectionManager.authFailureKind.value ?: return
+    /** User tapped a "Re-pair" banner. The empty-string peerId is the
+     *  global key — wipe everything (CREDENTIALS_INVALID also resets the
+     *  keypair). A real peerId removes only that pair. Caller navigates
+     *  to the pairing screen. */
+    fun repairFromAuthFailure(peerId: String) {
+        val kind = connectionManager.authFailureByPeer.value[peerId] ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            keyManager.removeAllPairedDevices()
-            if (kind == com.desktopconnector.network.AuthFailureKind.CREDENTIALS_INVALID) {
-                prefs.clearAuthCredentials()
-                keyManager.resetKeypair()
+            if (peerId.isEmpty()) {
+                keyManager.removeAllPairedDevices()
+                if (kind == com.desktopconnector.network.AuthFailureKind.CREDENTIALS_INVALID) {
+                    prefs.clearAuthCredentials()
+                    keyManager.resetKeypair()
+                }
+                com.desktopconnector.network.FcmManager.reset(prefs)
+                pairingRepo.refresh()
+                pairingRepo.selectPair(null)
+            } else {
+                db.transferDao().deleteAllForPeer(peerId)
+                pairingRepo.unpair(peerId)
             }
-            // FCM token survives pair cycles on the device side but the
-            // server's record of it just got wiped. Reset so the next
-            // registerToken() POSTs rather than skipping on a matching
-            // cached string.
-            com.desktopconnector.network.FcmManager.reset(prefs)
-            pairingRepo.refresh()
-            pairingRepo.selectPair(null)
-            connectionManager.clearAuthFailure()
+            connectionManager.clearAuthFailure(peerId)
         }
     }
 

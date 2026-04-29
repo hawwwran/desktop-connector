@@ -1,12 +1,15 @@
 package com.desktopconnector.network
 
 import com.desktopconnector.data.AppLog
-import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -42,19 +45,32 @@ class ConnectionManager(
         .readTimeout(3, TimeUnit.SECONDS)
         .build()
 
+    // Singleton-lifetime scope for derived flows. ConnectionManager itself
+    // is owned by TransferViewModel which lives for the process; never
+    // cancelled.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
     private val _retryInfo = MutableStateFlow(RetryInfo())
     val retryInfo: StateFlow<RetryInfo> = _retryInfo.asStateFlow()
 
-    // Orthogonal to `state`: a device with bad creds can still reach
-    // optional-auth endpoints (/api/health) and flip to CONNECTED. The
-    // banner watches this flag independently and overrides other copy.
-    private val _authFailureKind = MutableStateFlow<AuthFailureKind?>(null)
-    val authFailureKind: StateFlow<AuthFailureKind?> = _authFailureKind.asStateFlow()
+    /** Latched 401/403 verdicts keyed by peer id. The `""` (empty-string)
+     *  key is reserved for global failures — every CREDENTIALS_INVALID
+     *  lands here (the phone's creds are bad regardless of who we were
+     *  calling), and 403s without a peer attribution land here too.
+     *  Per-peer keys hold one of those device ids. */
+    private val _authFailureByPeer = MutableStateFlow<Map<String, AuthFailureKind>>(emptyMap())
+    val authFailureByPeer: StateFlow<Map<String, AuthFailureKind>> = _authFailureByPeer.asStateFlow()
 
-    /** Tracks a "streak pending" flag independent of the latched kind so the
+    /** Aggregate "any failure latched" view. Kept for the connection-state
+     *  fold and any consumer that just needs a yes/no. */
+    val anyAuthFailure: StateFlow<Boolean> = _authFailureByPeer
+        .map { it.isNotEmpty() }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
+    /** Tracks a "streak pending" flag independent of the latched map so the
      *  UI can show offline as soon as the first 401/403 lands, not only
      *  after the banner trips. */
     private val _authStreaking = MutableStateFlow(false)
@@ -62,60 +78,63 @@ class ConnectionManager(
     /** State folded for UI consumption. Online = network OK AND no auth
      *  failure outstanding (neither latched nor in a pending streak). Keeps
      *  the UI from claiming "online" while a 401/403 is unresolved. */
-    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     val effectiveState: StateFlow<ConnectionState> = combine(
-        _state, _authFailureKind, _authStreaking,
-    ) { s, k, streaking ->
-        if (k != null || streaking) ConnectionState.DISCONNECTED else s
-    }.stateIn(GlobalScope, SharingStarted.Eagerly, ConnectionState.DISCONNECTED)
+        _state, anyAuthFailure, _authStreaking,
+    ) { s, anyFailure, streaking ->
+        if (anyFailure || streaking) ConnectionState.DISCONNECTED else s
+    }.stateIn(scope, SharingStarted.Eagerly, ConnectionState.DISCONNECTED)
 
-    // Streak state — guarded by `authStreakLock` so the collector
-    // thread (observeAuth) can't interleave with the UI thread
+    // Per-key streak counters. CREDENTIALS_INVALID and PAIRING_MISSING
+    // keep separate counts: a 401 then 403 to different peers must NOT
+    // collapse into a 2-streak. Guarded by `authStreakLock` so the
+    // collector thread (observeAuth) can't interleave with the UI thread
     // (clearAuthFailure) on the non-atomic counter updates.
     private val authStreakLock = Any()
-    private var authFailureStreak = 0
-    private var authFailureStreakKind: AuthFailureKind? = null
+    private val streakByKey = HashMap<Pair<String, AuthFailureKind>, Int>()
 
     /** Feed an AuthObservation emitted by ApiClient.authObservations. Safe
      *  to call from any thread. */
     fun observeAuth(observation: AuthObservation) = synchronized(authStreakLock) {
         when (observation) {
             is AuthObservation.Success -> {
-                authFailureStreak = 0
-                authFailureStreakKind = null
+                streakByKey.clear()
                 _authStreaking.value = false
-                // Do NOT clear _authFailureKind here — the flag stays latched
+                // Do NOT clear latched failures here — they stay latched
                 // until the user acknowledges via the banner (see
-                // clearAuthFailure()). Otherwise an optional-auth 200 would
-                // silently dismiss a real failure.
+                // clearAuthFailure(peerId)). Otherwise an optional-auth
+                // 200 would silently dismiss a real failure.
             }
             is AuthObservation.Failure -> {
-                // Already latched? Don't re-fire, don't advance counter.
-                if (_authFailureKind.value != null) return@synchronized
-                if (authFailureStreakKind != observation.kind) {
-                    authFailureStreakKind = observation.kind
-                    authFailureStreak = 1
-                } else {
-                    authFailureStreak++
-                }
-                // Flip effective state to DISCONNECTED on the very first
-                // failure. Banner still waits for the 3-count threshold.
+                // CREDENTIALS_INVALID is always app-global — the empty
+                // string is the canonical "global" key. PAIRING_MISSING
+                // attributes to the peer if known; falls back to global.
+                val key = if (observation.kind == AuthFailureKind.CREDENTIALS_INVALID) ""
+                          else observation.peerId ?: ""
+                val mapKey = key to observation.kind
+                // Already latched for this key? Don't re-fire, don't bump.
+                if (_authFailureByPeer.value[key] != null) return@synchronized
+                val next = (streakByKey[mapKey] ?: 0) + 1
+                streakByKey[mapKey] = next
                 _authStreaking.value = true
-                if (authFailureStreak >= AUTH_FAILURE_THRESHOLD) {
-                    _authFailureKind.value = observation.kind
+                if (next >= AUTH_FAILURE_THRESHOLD) {
+                    _authFailureByPeer.value = _authFailureByPeer.value + (key to observation.kind)
+                    streakByKey.remove(mapKey)
                     AppLog.log("Auth",
-                        "auth.failure.tripped kind=${observation.kind.name} count=$authFailureStreak",
+                        "auth.failure.tripped kind=${observation.kind.name} peer=${key.take(12)} count=$next",
                         "warning")
                 }
             }
         }
     }
 
-    fun clearAuthFailure() = synchronized(authStreakLock) {
-        authFailureStreak = 0
-        authFailureStreakKind = null
-        _authStreaking.value = false
-        _authFailureKind.value = null
+    fun clearAuthFailure(peerId: String) = synchronized(authStreakLock) {
+        _authFailureByPeer.value = _authFailureByPeer.value - peerId
+        // Drop streak counters for this key too — leaving them would let
+        // a single subsequent 401/403 immediately re-latch.
+        streakByKey.entries.removeAll { it.key.first == peerId }
+        if (_authFailureByPeer.value.isEmpty() && streakByKey.isEmpty()) {
+            _authStreaking.value = false
+        }
     }
 
     val secondsUntilRetry: Int

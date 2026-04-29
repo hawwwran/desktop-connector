@@ -636,14 +636,14 @@ class PollService : Service() {
             val displayLabel = saveClipboardImageTransfer(data, mimeType, transferId, senderId, prefs, db)
                 ?: return
             AppLog.log("Recv", "fasttrack.command.handled fn=$fileName label=$displayLabel")
-            ackHandledTransfer(api, transferId)
+            ackHandledTransfer(api, transferId, peerId = senderId)
             return
         }
 
         val displayLabel = handleFnTransfer(fileName, data, senderId = senderId)
         AppLog.log("Recv", "fasttrack.command.handled fn=$fileName label=$displayLabel")
 
-        ackHandledTransfer(api, transferId)
+        ackHandledTransfer(api, transferId, peerId = senderId)
 
         if (fileName != ".fn.unpair") {
             db.transferDao().insert(QueuedTransfer(
@@ -661,9 +661,9 @@ class PollService : Service() {
         }
     }
 
-    private fun ackHandledTransfer(api: ApiClient, transferId: String) {
+    private fun ackHandledTransfer(api: ApiClient, transferId: String, peerId: String? = null) {
         try {
-            if (api.ackTransfer(transferId))
+            if (api.ackTransfer(transferId, peerId = peerId))
                 AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)}")
             else
                 AppLog.log("Recv", "delivery.acked transfer_id=${transferId.take(12)} reason=already_executed")
@@ -741,7 +741,7 @@ class PollService : Service() {
                     if (db.transferDao().exists(dbRowId) == 0) {
                         AppLog.log("Recv", "transfer.download.cancelled transfer_id=${transferId.take(12)} chunk_index=${i + 1}/$chunkCount")
                         cancelled = true
-                        api.ackTransfer(transferId)
+                        api.ackTransfer(transferId, peerId = senderId)
                         return
                     }
                     db.transferDao().updateProgress(dbRowId, i + 1, chunkCount)
@@ -780,7 +780,7 @@ class PollService : Service() {
         // delete a fully received file just because the network hiccupped
         // before we could tell the server.
         val ackOk = try {
-            api.ackTransfer(transferId)
+            api.ackTransfer(transferId, peerId = senderId)
         } catch (e: Exception) {
             Log.w(TAG, "ACK threw after durable write of $transferId: ${e.message}")
             false
@@ -894,7 +894,7 @@ class PollService : Service() {
             outcome = java.io.BufferedOutputStream(fos).use { out ->
                 downloadStreamLoop(
                     chunkCount = chunkCount,
-                    downloadChunk = { index -> api.downloadChunkTyped(transferId, index) },
+                    downloadChunk = { index -> api.downloadChunkTyped(transferId, index, peerId = senderId) },
                     decrypt = { bytes ->
                         try {
                             CryptoUtils.decryptBlob(bytes, symmetricKey)
@@ -912,7 +912,7 @@ class PollService : Service() {
                         try { fos.fd.sync() } catch (_: Exception) {}
                     },
                     ackChunk = { index ->
-                        val acked = try { api.ackChunk(transferId, index) } catch (_: Exception) { false }
+                        val acked = try { api.ackChunk(transferId, index, peerId = senderId) } catch (_: Exception) { false }
                         if (!acked) {
                             AppLog.log("Recv",
                                 "transfer.chunk.ack_failed transfer_id=${transferId.take(12)} chunk_index=$index",
@@ -953,7 +953,7 @@ class PollService : Service() {
                 AppLog.log("Recv",
                     "transfer.download.recipient_aborted transfer_id=${transferId.take(12)} reason=${outcome.reason}",
                     "warning")
-                try { api.abortTransfer(transferId, "recipient_abort") } catch (_: Exception) {}
+                try { api.abortTransfer(transferId, "recipient_abort", peerId = senderId) } catch (_: Exception) {}
                 db.transferDao().markAborted(dbRowId, "recipient_abort")
                 if (outcome.reason != "recipient_abort") {
                     // Additionally mark FAILED with a typed failureReason

@@ -17,10 +17,14 @@ enum class AuthFailureKind { CREDENTIALS_INVALID, PAIRING_MISSING }
 
 
 /** Every authenticated HTTP call funnels a verdict through this flow so
- *  ConnectionManager can maintain the consecutive-failure counter. */
+ *  ConnectionManager can maintain the consecutive-failure counter.
+ *  `peerId` attributes 403 PAIRING_MISSING failures to a specific paired
+ *  desktop; null = global / not attributable. 401 CREDENTIALS_INVALID
+ *  failures are always global (the phone's own creds are bad regardless
+ *  of who we were calling). */
 sealed class AuthObservation {
     object Success : AuthObservation()
-    data class Failure(val kind: AuthFailureKind) : AuthObservation()
+    data class Failure(val kind: AuthFailureKind, val peerId: String? = null) : AuthObservation()
 }
 
 /**
@@ -67,11 +71,14 @@ class ApiClient(
         this.authToken = authToken
     }
 
-    private fun reportAuthStatus(code: Int) {
+    private fun reportAuthStatus(code: Int, peerId: String? = null) {
         val o = when (code) {
             in 200..299 -> AuthObservation.Success
+            // 401 is account-level (the phone's creds are bad), so peer
+            // attribution is meaningless. 403 is per-pair, so we
+            // attribute when the caller knew who they were addressing.
             401 -> AuthObservation.Failure(AuthFailureKind.CREDENTIALS_INVALID)
-            403 -> AuthObservation.Failure(AuthFailureKind.PAIRING_MISSING)
+            403 -> AuthObservation.Failure(AuthFailureKind.PAIRING_MISSING, peerId)
             else -> return  // 4xx/5xx for other reasons are not auth verdicts
         }
         emitAuth(o)
@@ -108,7 +115,7 @@ class ApiClient(
             .url("$serverUrl/api/pairing/request")
             .post(body.toString().toRequestBody(jsonType))
             .build()
-        return executeStatus(request)
+        return executeStatus(request, peerId = desktopId)
     }
 
     // --- Transfers ---
@@ -205,7 +212,7 @@ class ApiClient(
             .build()
         return try {
             client.newCall(request).execute().use { resp ->
-                reportAuthStatus(resp.code)
+                reportAuthStatus(resp.code, peerId = recipientId)
                 val bodyStr = resp.body?.string()
                 val negotiated = parseNegotiatedMode(bodyStr) ?: "classic"
                 val outcome = when (resp.code) {
@@ -248,21 +255,21 @@ class ApiClient(
      * can parse the JSON body out-of-band, but for Phase D's sender
      * state machine the bool verdict is enough.
      */
-    fun abortTransfer(transferId: String, reason: String): Boolean {
+    fun abortTransfer(transferId: String, reason: String, peerId: String? = null): Boolean {
         val body = JSONObject().apply { put("reason", reason) }
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId")
             .delete(body.toString().toRequestBody(jsonType))
             .build()
-        return executeStatus(request)
+        return executeStatus(request, peerId = peerId)
     }
 
-    fun uploadChunk(transferId: String, chunkIndex: Int, data: ByteArray): JSONObject? {
+    fun uploadChunk(transferId: String, chunkIndex: Int, data: ByteArray, peerId: String? = null): JSONObject? {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex")
             .post(data.toRequestBody(binaryType))
             .build()
-        return executeJson(request)
+        return executeJson(request, peerId = peerId)
     }
 
     /**
@@ -274,14 +281,14 @@ class ApiClient(
      * these into null; D.4a's streaming sender uses this typed path
      * instead.
      */
-    fun uploadChunkTyped(transferId: String, chunkIndex: Int, data: ByteArray): ChunkUploadResult {
+    fun uploadChunkTyped(transferId: String, chunkIndex: Int, data: ByteArray, peerId: String? = null): ChunkUploadResult {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex")
             .post(data.toRequestBody(binaryType))
             .build()
         return try {
             client.newCall(request).execute().use { resp ->
-                reportAuthStatus(resp.code)
+                reportAuthStatus(resp.code, peerId = peerId)
                 when {
                     resp.isSuccessful -> ChunkUploadResult.Ok
                     resp.code == 401 || resp.code == 403 -> ChunkUploadResult.AuthError
@@ -322,7 +329,7 @@ class ApiClient(
             .url(url)
             .get()
             .build()
-        return executeJson(request)
+        return executeJson(request, peerId = pairedWith)
     }
 
     // Active long poll call — can be cancelled externally to unblock the poll loop
@@ -370,14 +377,14 @@ class ApiClient(
         return (0 until arr.length()).map { arr.getJSONObject(it) }
     }
 
-    fun downloadChunk(transferId: String, chunkIndex: Int): ByteArray? {
+    fun downloadChunk(transferId: String, chunkIndex: Int, peerId: String? = null): ByteArray? {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex")
             .get()
             .build()
         return try {
             client.newCall(request).execute().use { resp ->
-                reportAuthStatus(resp.code)
+                reportAuthStatus(resp.code, peerId = peerId)
                 if (resp.isSuccessful) resp.body?.bytes() else null
             }
         } catch (e: Exception) {
@@ -393,14 +400,14 @@ class ApiClient(
      * collapses all of these into null; D.3's streaming recipient
      * uses this typed path instead.
      */
-    fun downloadChunkTyped(transferId: String, chunkIndex: Int): ChunkDownloadResult {
+    fun downloadChunkTyped(transferId: String, chunkIndex: Int, peerId: String? = null): ChunkDownloadResult {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex")
             .get()
             .build()
         return try {
             client.newCall(request).execute().use { resp ->
-                reportAuthStatus(resp.code)
+                reportAuthStatus(resp.code, peerId = peerId)
                 when {
                     resp.isSuccessful -> {
                         val bytes = resp.body?.bytes()
@@ -442,12 +449,12 @@ class ApiClient(
         return 1000L
     }
 
-    fun ackTransfer(transferId: String): Boolean {
+    fun ackTransfer(transferId: String, peerId: String? = null): Boolean {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId/ack")
             .post("".toRequestBody(jsonType))
             .build()
-        return executeStatus(request)
+        return executeStatus(request, peerId = peerId)
     }
 
     /**
@@ -459,12 +466,12 @@ class ApiClient(
      * send a transfer-level `ackTransfer` after per-chunk ACKing the
      * last chunk.
      */
-    fun ackChunk(transferId: String, chunkIndex: Int): Boolean {
+    fun ackChunk(transferId: String, chunkIndex: Int, peerId: String? = null): Boolean {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/$transferId/chunks/$chunkIndex/ack")
             .post("".toRequestBody(jsonType))
             .build()
-        return executeStatus(request)
+        return executeStatus(request, peerId = peerId)
     }
 
     // Short-timeout client for liveness pong — must fit inside FCM's
@@ -520,7 +527,7 @@ class ApiClient(
             .url("$serverUrl/api/fasttrack/send")
             .post(body.toString().toRequestBody(jsonType))
             .build()
-        val result = executeJson(request) ?: return null
+        val result = executeJson(request, peerId = recipientId) ?: return null
         return result.optInt("message_id", -1).takeIf { it > 0 }
     }
 
@@ -615,10 +622,10 @@ class ApiClient(
         }
     }
 
-    private fun executeJson(request: Request): JSONObject? {
+    private fun executeJson(request: Request, peerId: String? = null): JSONObject? {
         return try {
             client.newCall(request).execute().use { resp ->
-                reportAuthStatus(resp.code)
+                reportAuthStatus(resp.code, peerId)
                 val body = resp.body?.string() ?: return null
                 if (resp.isSuccessful) JSONObject(body) else null
             }
@@ -627,10 +634,10 @@ class ApiClient(
         }
     }
 
-    private fun executeStatus(request: Request): Boolean {
+    private fun executeStatus(request: Request, peerId: String? = null): Boolean {
         return try {
             client.newCall(request).execute().use {
-                reportAuthStatus(it.code)
+                reportAuthStatus(it.code, peerId)
                 it.isSuccessful
             }
         } catch (e: Exception) {

@@ -68,7 +68,7 @@ fun HomeScreen(
     connectionState: ConnectionState,
     transfers: List<QueuedTransfer>,
     isRefreshing: Boolean,
-    authFailureKind: AuthFailureKind?,
+    authFailures: Map<String, AuthFailureKind>,
     storageFull: Boolean,
     pairs: List<PairedDeviceInfo>,
     selectedPair: PairedDeviceInfo?,
@@ -86,7 +86,7 @@ fun HomeScreen(
     onNavigateSettings: () -> Unit,
     onNavigateDownloads: () -> Unit,
     onClearHistory: () -> Unit,
-    onRepair: () -> Unit,
+    onRepair: (peerId: String) -> Unit,
 ) {
     var selectorOpen by remember { mutableStateOf(false) }
     var confirmCandidate by remember { mutableStateOf<QueuedTransfer?>(null) }
@@ -227,16 +227,16 @@ fun HomeScreen(
             },
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                if (authFailureKind != null) {
+                for ((peerId, kind) in authFailures) {
+                    val name = pairs.firstOrNull { it.deviceId == peerId }?.name
                     AuthFailureBanner(
-                        kind = authFailureKind,
-                        onRepair = onRepair,
+                        kind = kind,
+                        peerName = name,
+                        isGlobal = peerId.isEmpty(),
+                        onRepair = { onRepair(peerId) },
                     )
                 }
-                // Storage-full info banner. Unlike the auth banner this
-                // one has no action button — the queue resolves on its
-                // own as the recipient drains. Yellow surface + icon.
-                if (storageFull && authFailureKind == null) {
+                if (storageFull && authFailures.isEmpty()) {
                     StorageFullBanner()
                 }
                 Row(
@@ -519,14 +519,20 @@ private fun DeviceSelectorRow(
 @Composable
 private fun AuthFailureBanner(
     kind: AuthFailureKind,
+    peerName: String?,
+    isGlobal: Boolean,
     onRepair: () -> Unit,
 ) {
     val brand = MaterialTheme.brandColors
-    val message = when (kind) {
-        AuthFailureKind.CREDENTIALS_INVALID ->
-            "Server doesn't recognise this device. Re-pair to restore the connection."
-        AuthFailureKind.PAIRING_MISSING ->
+    val message = when {
+        kind == AuthFailureKind.CREDENTIALS_INVALID ->
+            "Account credentials invalid. Re-register and re-pair all desktops."
+        isGlobal ->
             "Pairing was lost on the server. Re-pair to restore the connection."
+        peerName != null ->
+            "Pairing with $peerName lost on the server. Tap Re-pair to restore."
+        else ->
+            "Pairing with one of your desktops was lost. Tap Re-pair to restore."
     }
     androidx.compose.material3.Surface(
         color = MaterialTheme.colorScheme.errorContainer,
