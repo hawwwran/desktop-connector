@@ -13,6 +13,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.desktopconnector.crypto.CryptoUtils
 import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.crypto.PairingRepository
 import com.desktopconnector.data.AppDatabase
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.data.BatteryStatsDumper
@@ -39,6 +40,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
 
     private val prefs = AppPreferences(application)
     private val keyManager = KeyManager(application)
+    private val pairingRepo = PairingRepository.getInstance(application)
     private val db = AppDatabase.getInstance(application)
     val connectionManager = ConnectionManager(prefs.serverUrl ?: "")
 
@@ -48,9 +50,6 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val _statusText = MutableStateFlow("Disconnected")
-    val statusText: StateFlow<String> = _statusText.asStateFlow()
-
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
 
@@ -59,11 +58,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
     val linkDialog: StateFlow<Pair<String, String>?> = _linkDialog.asStateFlow()
     fun dismissLinkDialog() { _linkDialog.value = null }
 
-    val pairedDeviceName: String
-        get() = keyManager.getFirstPairedDevice()?.name ?: ""
-
-    private val _isPaired = MutableStateFlow(keyManager.hasPairedDevice())
-    val isPaired: StateFlow<Boolean> = _isPaired.asStateFlow()
+    val isPaired: StateFlow<Boolean> = pairingRepo.isPaired
 
     init {
         // Pass auth credentials to connection manager for heartbeat
@@ -104,23 +99,20 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        // UI tick — updates status text and effective connection state every
-        // second. Effective state folds auth-invalid into DISCONNECTED, so a
-        // latched 401/403 paints the status dot offline even while network
+        // UI tick — refreshes the effective connection state every second.
+        // Effective state folds auth-invalid into DISCONNECTED, so a latched
+        // 401/403 paints the status dot offline even while network
         // reachability to /api/health is fine.
         viewModelScope.launch(Dispatchers.IO) {
             while (true) {
                 _connectionState.value = connectionManager.effectiveState.value
-                _statusText.value = connectionManager.getStatusText()
                 delay(1_000)
             }
         }
 
-        // Refresh transfer list + pairing state periodically
         viewModelScope.launch {
             while (true) {
                 refreshTransfers()
-                _isPaired.value = keyManager.hasPairedDevice()
                 delay(2000)
             }
         }
@@ -200,7 +192,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
 
     fun queueFiles(uris: List<Uri>) {
         val app = getApplication<Application>()
-        val paired = keyManager.getFirstPairedDevice() ?: return
+        val paired = pairingRepo.selected.value ?: return
 
         viewModelScope.launch(Dispatchers.IO) {
             for (uri in uris) {
@@ -217,7 +209,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                     displayLabel = name,
                     mimeType = mime,
                     sizeBytes = size,
-                    recipientDeviceId = paired.deviceId,
+                    peerDeviceId = paired.deviceId,
                 )
                 val id = db.transferDao().insert(transfer)
                 UploadWorker.enqueue(app, id)
@@ -228,7 +220,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
 
     fun sendClipboard() {
         val app = getApplication<Application>()
-        val paired = keyManager.getFirstPairedDevice()
+        val paired = pairingRepo.selected.value
         if (paired == null) {
             viewModelScope.launch(Dispatchers.Main) {
                 Toast.makeText(app, "No paired device", Toast.LENGTH_SHORT).show()
@@ -281,8 +273,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun sendClipboardText(text: String) {
-        val app = getApplication<Application>()
-        val paired = keyManager.getFirstPairedDevice() ?: return
+        val paired = pairingRepo.selected.value ?: return
         viewModelScope.launch(Dispatchers.IO) {
             queueClipboardText(text, paired.deviceId)
         }
@@ -305,7 +296,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             displayLabel = preview,
             mimeType = "text/plain",
             sizeBytes = data.size.toLong(),
-            recipientDeviceId = recipientId,
+            peerDeviceId = recipientId,
         )
         val id = db.transferDao().insert(transfer)
         UploadWorker.enqueue(app, id)
@@ -322,33 +313,11 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             displayLabel = "Clipboard image",
             mimeType = mime,
             sizeBytes = size,
-            recipientDeviceId = recipientId,
+            peerDeviceId = recipientId,
         )
         val id = db.transferDao().insert(transfer)
         UploadWorker.enqueue(app, id)
         refreshTransfers()
-    }
-
-    fun resend(transfer: QueuedTransfer) {
-        val app = getApplication<Application>()
-        val paired = keyManager.getFirstPairedDevice() ?: return
-
-        viewModelScope.launch(Dispatchers.IO) {
-            val newTransfer = transfer.copy(
-                id = 0,
-                status = TransferStatus.QUEUED,
-                chunksUploaded = 0,
-                errorMessage = null,
-                createdAt = System.currentTimeMillis() / 1000,
-                recipientDeviceId = paired.deviceId,
-            )
-            val id = db.transferDao().insert(newTransfer)
-            UploadWorker.enqueue(app, id)
-            refreshTransfers()
-            withContext(Dispatchers.Main) {
-                Toast.makeText(app, "Resending...", Toast.LENGTH_SHORT).show()
-            }
-        }
     }
 
     fun openLink(url: String) {
@@ -535,7 +504,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
 
     fun sendLogsToDesktop(text: String, appendBatteryStats: Boolean = false) {
         val app = getApplication<Application>()
-        val paired = keyManager.getFirstPairedDevice() ?: return
+        val paired = pairingRepo.selected.value ?: return
 
         viewModelScope.launch(Dispatchers.IO) {
             val combined = if (appendBatteryStats) {
@@ -554,7 +523,7 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                 displayLabel = "App logs",
                 mimeType = "text/plain",
                 sizeBytes = bytes.size.toLong(),
-                recipientDeviceId = paired.deviceId,
+                peerDeviceId = paired.deviceId,
             )
             val id = db.transferDao().insert(transfer)
             UploadWorker.enqueue(app, id)
@@ -694,14 +663,6 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun tryNow() {
-        viewModelScope.launch(Dispatchers.IO) {
-            connectionManager.tryNow()
-            _connectionState.value = connectionManager.state.value
-            _statusText.value = connectionManager.getStatusText()
-        }
-    }
-
     /** User tapped the "Re-pair" banner. Wipes the appropriate scope and
      *  clears the latched auth-failure flag. Caller navigates to the
      *  pairing screen. */
@@ -718,7 +679,8 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             // registerToken() POSTs rather than skipping on a matching
             // cached string.
             com.desktopconnector.network.FcmManager.reset(prefs)
-            _isPaired.value = false
+            pairingRepo.refresh()
+            pairingRepo.selectPair(null)
             connectionManager.clearAuthFailure()
         }
     }

@@ -46,6 +46,14 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Co-sign with the release keystore when present so installDebug
+            // can upgrade a release install in place. No-op without keystore.
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile?.exists() == true) {
+                signingConfig = releaseSigning
+            }
+        }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("release")
@@ -68,6 +76,10 @@ android {
     buildFeatures {
         compose = true
     }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

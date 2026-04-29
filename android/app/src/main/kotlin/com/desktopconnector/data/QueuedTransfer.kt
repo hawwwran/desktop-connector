@@ -40,7 +40,8 @@ data class QueuedTransfer(
     val displayLabel: String = "",  // Human-readable ("Hello wor...", "Clipboard image", "photo.jpg")
     val mimeType: String,
     val sizeBytes: Long,
-    val recipientDeviceId: String,
+    // "The other party": recipient for OUTGOING, sender for INCOMING.
+    val peerDeviceId: String,
     val direction: TransferDirection = TransferDirection.OUTGOING,
     val status: TransferStatus = TransferStatus.QUEUED,
     val chunksUploaded: Int = 0,
@@ -93,6 +94,39 @@ interface TransferDao {
 
     @Query("SELECT * FROM queued_transfers ORDER BY createdAt DESC LIMIT 100")
     suspend fun getRecent(): List<QueuedTransfer>
+
+    /** Per-peer history view (A.6 consumer). Same LIMIT 100 budget as
+     *  `getRecent` but scoped — `peerDeviceId` is the OTHER party for
+     *  both directions. */
+    @Query("SELECT * FROM queued_transfers WHERE peerDeviceId = :peerId ORDER BY createdAt DESC LIMIT 100")
+    suspend fun getRecentForPeer(peerId: String): List<QueuedTransfer>
+
+    /** A.4: when a pair is removed (from settings or via `.fn.unpair`),
+     *  drop every transfer row tied to it — sent, received, in-flight.
+     *  Aggressive on purpose: an unpaired desktop will reject every
+     *  chunk-upload with 403, so any in-flight outgoing row to it is
+     *  dead on arrival. */
+    @Query("DELETE FROM queued_transfers WHERE peerDeviceId = :peerId")
+    suspend fun deleteAllForPeer(peerId: String)
+
+    /** Per-peer "Clear all". Mirrors `clearAll`'s preserve-in-flight
+     *  semantics (active streaming uploads survive) but scoped to one
+     *  peer — used by the per-peer history view's clear button (A.6). */
+    @Query("""
+        DELETE FROM queued_transfers
+        WHERE peerDeviceId = :peerId
+          AND status NOT IN (
+            'QUEUED', 'PREPARING', 'WAITING', 'UPLOADING',
+            'SENDING', 'WAITING_STREAM', 'DELIVERING'
+          )
+    """)
+    suspend fun clearAllForPeer(peerId: String)
+
+    /** A.2: backfill helper for `MultiPairMigrationRunner`. Bulk
+     *  reassigns legacy INCOMING rows whose `peerDeviceId` was the
+     *  phone's own id (the pre-rename bug) to a real peer id. */
+    @Query("UPDATE queued_transfers SET peerDeviceId = :newPeerId WHERE direction = 'INCOMING' AND peerDeviceId = :oldPeerId")
+    suspend fun reassignIncomingPeer(oldPeerId: String, newPeerId: String)
 
     // "Active" outgoing rows — includes streaming in-flight statuses
     // (SENDING, WAITING_STREAM, DELIVERING) so the re-queue path

@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.crypto.PairingRepository
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.ui.AppNavigation
 import com.desktopconnector.ui.theme.DesktopConnectorTheme
@@ -24,8 +25,9 @@ class ShareReceiverActivity : ComponentActivity() {
 
         val prefs = AppPreferences(this)
         val keyManager = KeyManager(this)
+        val pairingRepo = PairingRepository.getInstance(this)
 
-        if (!keyManager.hasPairedDevice()) {
+        if (pairingRepo.pairs.value.isEmpty()) {
             Toast.makeText(this, "Not paired with a desktop yet. Open the app first.", Toast.LENGTH_LONG).show()
             finish()
             return

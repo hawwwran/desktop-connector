@@ -201,22 +201,4 @@ class ConnectionManager(
         _retryInfo.value = RetryInfo()
         checkConnection()
     }
-
-    fun getStatusText(): String {
-        if (_authFailureKind.value != null) {
-            return "Offline — pairing lost on server"
-        }
-        // Pending streak also reads as offline so the text matches the dot.
-        if (_authStreaking.value) {
-            return "Offline — verifying credentials"
-        }
-        return when (_state.value) {
-            ConnectionState.CONNECTED -> "Connected"
-            ConnectionState.RECONNECTING -> "Connecting..."
-            ConnectionState.DISCONNECTED -> {
-                val info = _retryInfo.value
-                "Offline — retry #${info.retryCount} in ${secondsUntilRetry}s"
-            }
-        }
-    }
 }

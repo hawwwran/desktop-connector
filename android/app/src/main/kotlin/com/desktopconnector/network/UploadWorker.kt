@@ -73,8 +73,8 @@ class UploadWorker(
         val authToken = prefs.authToken ?: return Result.failure()
 
         val keyManager = KeyManager(applicationContext)
-        val paired = keyManager.getPairedDevice(transfer.recipientDeviceId) ?: run {
-            Log.e(TAG, "No paired device found: ${transfer.recipientDeviceId}")
+        val paired = keyManager.getPairedDevice(transfer.peerDeviceId) ?: run {
+            Log.e(TAG, "No paired device found: ${transfer.peerDeviceId}")
             db.transferDao().updateStatus(transferDbId, TransferStatus.FAILED, "Paired device not found")
             return Result.failure()
         }
@@ -135,7 +135,7 @@ class UploadWorker(
         }
 
         val initResult = api.initTransferTyped(
-            transferId, transfer.recipientDeviceId, encryptedMeta, chunkCount, requestedMode,
+            transferId, transfer.peerDeviceId, encryptedMeta, chunkCount, requestedMode,
         )
         val initOutcome = initResult.outcome
         val negotiatedMode = initResult.negotiatedMode
@@ -202,7 +202,7 @@ class UploadWorker(
 
         db.transferDao().updateStatus(transferDbId, TransferStatus.UPLOADING)
         db.transferDao().updateProgress(transferDbId, 0, chunkCount)
-        AppLog.log("Upload", "transfer.init.accepted transfer_id=${transferId.take(12)} recipient=${transfer.recipientDeviceId.take(12)} chunks=$chunkCount requested_mode=$requestedMode negotiated_mode=$negotiatedMode")
+        AppLog.log("Upload", "transfer.init.accepted transfer_id=${transferId.take(12)} recipient=${transfer.peerDeviceId.take(12)} chunks=$chunkCount requested_mode=$requestedMode negotiated_mode=$negotiatedMode")
 
         return try {
             if (negotiatedMode == "streaming") {

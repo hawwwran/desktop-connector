@@ -28,6 +28,20 @@ class AppPreferences(context: Context) {
         get() = prefs.getString("fcm_token", null)
         set(value) = prefs.edit().putString("fcm_token", value).apply()
 
+    /** Currently selected paired desktop. Null = use most-recently-paired
+     *  fallback (resolved by `PairingRepository.selected`). */
+    var selectedDeviceId: String?
+        get() = prefs.getString("selected_device_id", null)
+        set(value) = prefs.edit().run {
+            if (value == null) remove("selected_device_id") else putString("selected_device_id", value)
+            apply()
+        }
+
+    /** One-shot gate for `MultiPairMigrationRunner`. */
+    var multiPairMigrationDone: Boolean
+        get() = prefs.getBoolean("multi_pair_migration_done", false)
+        set(value) = prefs.edit().putBoolean("multi_pair_migration_done", value).apply()
+
     val isRegistered: Boolean
         get() = deviceId != null && authToken != null
 

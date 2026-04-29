@@ -93,10 +93,25 @@ class KeyManager(context: Context) {
             }
     }
 
+    /** Every paired device blob, in arbitrary order. Caller sorts. */
+    fun getAllPairedDevices(): List<PairedDeviceInfo> {
+        return securePrefs.all.keys
+            .filter { it.startsWith("paired_") }
+            .mapNotNull { key -> getPairedDevice(key.removePrefix("paired_")) }
+    }
+
     fun hasPairedDevice(): Boolean = getFirstPairedDevice() != null
 
     fun removePairedDevice(deviceId: String) {
         securePrefs.edit().remove("paired_$deviceId").apply()
+    }
+
+    /** Rename a pair without bumping `paired_at` (which `savePairedDevice`
+     *  would). No-op if the pair doesn't exist. */
+    fun setPairedDeviceName(deviceId: String, name: String) {
+        val existing = securePrefs.getString("paired_$deviceId", null) ?: return
+        val json = JSONObject(existing).apply { put("name", name) }
+        securePrefs.edit().putString("paired_$deviceId", json.toString()).apply()
     }
 
     /** Drop every paired_* row. Shared helper used by the .fn.unpair flow

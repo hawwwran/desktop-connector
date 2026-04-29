@@ -14,7 +14,7 @@ class Converters {
     fun toDirection(value: String): TransferDirection = TransferDirection.valueOf(value)
 }
 
-@Database(entities = [QueuedTransfer::class], version = 8, exportSchema = false)
+@Database(entities = [QueuedTransfer::class], version = 9, exportSchema = true)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun transferDao(): TransferDao
@@ -37,7 +37,7 @@ abstract class AppDatabase : RoomDatabase() {
                     // we're confident the migration chain is solid we can
                     // drop the fallback so future schema drift fails loudly
                     // instead of silently losing data.
-                    .addMigrations(MIGRATION_7_8)
+                    .addMigrations(MIGRATION_7_8, MIGRATION_8_9)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }

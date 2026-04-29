@@ -87,6 +87,8 @@ class PollService : Service() {
             val keyManager = KeyManager(this@PollService)
             keyManager.getFirstPairedDevice()?.let { paired ->
                 keyManager.removePairedDevice(paired.deviceId)
+                com.desktopconnector.crypto.PairingRepository
+                    .getInstance(this@PollService).refresh()
             }
             showTransferNotification("Desktop disconnected")
         }
@@ -596,9 +598,9 @@ class PollService : Service() {
             // from streaming, extra round-trips hurt. Plan §9 non-goal.
             receiveFnTransfer(transferId, senderId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db)
         } else if (mode == "streaming") {
-            receiveStreamingTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
+            receiveStreamingTransfer(transferId, senderId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
         } else {
-            receiveFileTransfer(transferId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
+            receiveFileTransfer(transferId, senderId, chunkCount, symmetricKey, fileName, mimeType, api, prefs, db, wakeLock)
         }
     }
 
@@ -623,7 +625,7 @@ class PollService : Service() {
         AppLog.log("Recv", "fasttrack.command.received fn=$fileName bytes=${data.size}")
 
         if (fileName.startsWith(".fn.clipboard.image")) {
-            val displayLabel = saveClipboardImageTransfer(data, mimeType, transferId, prefs, db)
+            val displayLabel = saveClipboardImageTransfer(data, mimeType, transferId, senderId, prefs, db)
                 ?: return
             AppLog.log("Recv", "fasttrack.command.handled fn=$fileName label=$displayLabel")
             ackHandledTransfer(api, transferId)
@@ -642,7 +644,7 @@ class PollService : Service() {
                 displayLabel = displayLabel,
                 mimeType = mimeType,
                 sizeBytes = data.size.toLong(),
-                recipientDeviceId = prefs.deviceId ?: "",
+                peerDeviceId = senderId,
                 direction = TransferDirection.INCOMING,
                 status = TransferStatus.COMPLETE,
             ))
@@ -669,7 +671,7 @@ class PollService : Service() {
      * final destination so the finalize-rename is atomic.
      */
     private suspend fun receiveFileTransfer(
-        transferId: String, chunkCount: Int, symmetricKey: ByteArray,
+        transferId: String, senderId: String, chunkCount: Int, symmetricKey: ByteArray,
         fileName: String, mimeType: String, api: ApiClient, prefs: AppPreferences,
         db: AppDatabase, wakeLock: PowerManager.WakeLock,
     ) {
@@ -687,7 +689,7 @@ class PollService : Service() {
                 displayLabel = fileName,
                 mimeType = mimeType,
                 sizeBytes = 0,
-                recipientDeviceId = prefs.deviceId ?: "",
+                peerDeviceId = senderId,
                 direction = TransferDirection.INCOMING,
                 status = TransferStatus.UPLOADING,
                 totalChunks = chunkCount,
@@ -821,7 +823,7 @@ class PollService : Service() {
      * matters.
      */
     private suspend fun receiveStreamingTransfer(
-        transferId: String, chunkCount: Int, symmetricKey: ByteArray,
+        transferId: String, senderId: String, chunkCount: Int, symmetricKey: ByteArray,
         fileName: String, mimeType: String, api: ApiClient, prefs: AppPreferences,
         db: AppDatabase, wakeLock: PowerManager.WakeLock,
     ) {
@@ -843,7 +845,7 @@ class PollService : Service() {
                 displayLabel = fileName,
                 mimeType = mimeType,
                 sizeBytes = 0,
-                recipientDeviceId = prefs.deviceId ?: "",
+                peerDeviceId = senderId,
                 direction = TransferDirection.INCOMING,
                 status = TransferStatus.UPLOADING,
                 totalChunks = chunkCount,
@@ -1239,6 +1241,7 @@ class PollService : Service() {
         data: ByteArray,
         mimeType: String,
         transferId: String,
+        senderId: String,
         prefs: AppPreferences,
         db: AppDatabase,
     ): String? {
@@ -1252,7 +1255,7 @@ class PollService : Service() {
             displayLabel = file.name,
             mimeType = imageType.second,
             sizeBytes = size,
-            recipientDeviceId = prefs.deviceId ?: "",
+            peerDeviceId = senderId,
             direction = TransferDirection.INCOMING,
             status = TransferStatus.COMPLETE,
             transferId = transferId,

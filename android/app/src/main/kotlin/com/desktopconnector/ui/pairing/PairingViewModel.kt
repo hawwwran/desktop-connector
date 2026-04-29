@@ -5,6 +5,7 @@ import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.crypto.PairingRepository
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.network.ApiClient
@@ -34,6 +35,7 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
 
     private val prefs = AppPreferences(application)
     private val keyManager = KeyManager(application)
+    private val pairingRepo = PairingRepository.getInstance(application)
 
     fun onQrScanned(serverUrl: String, desktopId: String, desktopPubkey: String, desktopName: String) {
         AppLog.log("Pairing", "pairing.qr.scanned desktop_id=${desktopId.take(12)}")
@@ -109,6 +111,8 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
             symmetricKeyB64 = Base64.encodeToString(sharedKey, Base64.NO_WRAP),
             name = current.desktopName,
         )
+        pairingRepo.refresh()
+        pairingRepo.selectPair(current.desktopId)
 
         _state.value = current.copy(stage = PairingStage.COMPLETE)
         AppLog.log("Pairing", "pairing.confirm.accepted peer=${current.desktopId.take(12)}")

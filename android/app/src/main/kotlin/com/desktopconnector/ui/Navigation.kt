@@ -29,6 +29,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.crypto.PairingRepository
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.data.ThemeMode
 import com.desktopconnector.network.FcmManager
@@ -51,7 +52,9 @@ fun AppNavigation(
     initialClipboardText: String? = null,
 ) {
     val navController = rememberNavController()
-    val startDest = if (keyManager.hasPairedDevice()) "home" else "pairing"
+    val appContext = LocalContext.current.applicationContext
+    val pairingRepo = remember { PairingRepository.getInstance(appContext) }
+    val startDest = if (pairingRepo.pairs.value.isNotEmpty()) "home" else "pairing"
 
     val transferViewModel: TransferViewModel = viewModel()
     val pairingViewModel: PairingViewModel = viewModel()
@@ -78,14 +81,14 @@ fun AppNavigation(
 
     // Handle initial share intent URIs
     LaunchedEffect(initialUris) {
-        if (initialUris.isNotEmpty() && keyManager.hasPairedDevice()) {
+        if (initialUris.isNotEmpty() && pairingRepo.pairs.value.isNotEmpty()) {
             transferViewModel.queueFiles(initialUris)
         }
     }
 
     // Handle shared text (URLs from Chrome, YouTube, etc.)
     LaunchedEffect(initialClipboardText) {
-        if (initialClipboardText != null && keyManager.hasPairedDevice()) {
+        if (initialClipboardText != null && pairingRepo.pairs.value.isNotEmpty()) {
             transferViewModel.sendClipboardText(initialClipboardText)
         }
     }
@@ -418,19 +421,20 @@ fun AppNavigation(
         }
 
         composable("settings") {
-            val paired = keyManager.getFirstPairedDevice()
+            val selectedPair by pairingRepo.selected.collectAsState()
             SettingsScreen(
                 prefs = prefs,
                 deviceId = keyManager.deviceId,
-                pairedDeviceName = paired?.name ?: "",
-                pairedDeviceId = paired?.deviceId ?: "",
+                pairedDeviceName = selectedPair?.name ?: "",
+                pairedDeviceId = selectedPair?.deviceId ?: "",
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
                 onUnpair = {
-                    paired?.let {
+                    selectedPair?.let {
                         // Notify desktop before removing pairing
                         transferViewModel.sendUnpairNotification(it.deviceId)
                         keyManager.removePairedDevice(it.deviceId)
+                        pairingRepo.refresh()
                     }
                     navController.navigate("pairing") {
                         popUpTo("home") { inclusive = true }

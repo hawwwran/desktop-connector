@@ -50,3 +50,81 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
         db.execSQL("ALTER TABLE queued_transfers ADD COLUMN waitingStartedAt INTEGER")
     }
 }
+
+/**
+ * v8 → v9 — rename `recipientDeviceId` → `peerDeviceId`. SQLite < 3.25
+ * lacks RENAME COLUMN, so we do the table-rebuild dance. The CREATE
+ * TABLE schema must match Room's generated v9 byte-for-byte: PRAGMA
+ * validation is strict about the `notnull` flag (explicit NOT NULL on
+ * the AUTOINCREMENT id is required) and DEFAULT clauses. Diff against
+ * `app/schemas/.../9.json` if validation rejects.
+ *
+ * Idempotent on source column: a prior failed run that left the table
+ * half-migrated (peerDeviceId present, version pragma still 8) is
+ * recoverable.
+ */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        val sourceCol = if (hasColumn(db, "queued_transfers", "peerDeviceId"))
+            "peerDeviceId" else "recipientDeviceId"
+
+        db.execSQL(
+            """
+            CREATE TABLE queued_transfers_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                contentUri TEXT NOT NULL,
+                displayName TEXT NOT NULL,
+                displayLabel TEXT NOT NULL,
+                mimeType TEXT NOT NULL,
+                sizeBytes INTEGER NOT NULL,
+                peerDeviceId TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL,
+                chunksUploaded INTEGER NOT NULL,
+                totalChunks INTEGER NOT NULL,
+                deliveryChunks INTEGER NOT NULL,
+                deliveryTotal INTEGER NOT NULL,
+                errorMessage TEXT,
+                transferId TEXT,
+                delivered INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'classic',
+                negotiatedMode TEXT,
+                abortReason TEXT,
+                failureReason TEXT,
+                waitingStartedAt INTEGER
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            INSERT INTO queued_transfers_new (
+                id, contentUri, displayName, displayLabel, mimeType, sizeBytes,
+                peerDeviceId, direction, status, chunksUploaded, totalChunks,
+                deliveryChunks, deliveryTotal, errorMessage, transferId, delivered,
+                createdAt, mode, negotiatedMode, abortReason, failureReason,
+                waitingStartedAt
+            )
+            SELECT
+                id, contentUri, displayName, displayLabel, mimeType, sizeBytes,
+                $sourceCol, direction, status, chunksUploaded, totalChunks,
+                deliveryChunks, deliveryTotal, errorMessage, transferId, delivered,
+                createdAt, mode, negotiatedMode, abortReason, failureReason,
+                waitingStartedAt
+            FROM queued_transfers
+            """.trimIndent()
+        )
+        db.execSQL("DROP TABLE queued_transfers")
+        db.execSQL("ALTER TABLE queued_transfers_new RENAME TO queued_transfers")
+    }
+
+    private fun hasColumn(db: SupportSQLiteDatabase, table: String, column: String): Boolean {
+        db.query("PRAGMA table_info(`$table`)").use { cursor ->
+            val nameIdx = cursor.getColumnIndex("name")
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIdx) == column) return true
+            }
+        }
+        return false
+    }
+}
