@@ -303,15 +303,28 @@ fun HomeScreen(
                 }
 
                 if (showClearDialog) {
+                    val peerName = selectedPair?.name
                     AlertDialog(
                         onDismissRequest = { showClearDialog = false },
-                        title = { Text("Clear history?") },
-                        text = { Text("This will remove all transfer history entries.") },
+                        title = {
+                            Text(
+                                if (peerName != null) "Clear history for $peerName?"
+                                else "Clear history?"
+                            )
+                        },
+                        text = {
+                            Text(
+                                if (peerName != null)
+                                    "Removes every transfer to or from $peerName from this phone. " +
+                                        "Other paired desktops are unaffected."
+                                else "This will remove all transfer history entries."
+                            )
+                        },
                         confirmButton = {
                             TextButton(onClick = {
                                 showClearDialog = false
                                 onClearHistory()
-                            }) { Text("Clear All", color = MaterialTheme.colorScheme.error) }
+                            }) { Text("Clear", color = MaterialTheme.colorScheme.error) }
                         },
                         dismissButton = {
                             TextButton(onClick = { showClearDialog = false }) { Text("Cancel") }

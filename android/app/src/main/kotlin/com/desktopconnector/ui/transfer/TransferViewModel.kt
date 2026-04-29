@@ -116,6 +116,13 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                 delay(2000)
             }
         }
+
+        // Selection changes (header selector / background auto-switch /
+        // unpair fallback) re-fetch the list immediately rather than
+        // waiting for the 2 s polling tick.
+        viewModelScope.launch {
+            pairingRepo.selectedDeviceId.collect { refreshTransfers() }
+        }
     }
 
     /** Fetch the recent transfer list and, in the same pass, flip any
@@ -130,7 +137,9 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             val nowMs = System.currentTimeMillis()
             val createdCutoffSec = nowMs / 1000 - 30 * 60
             val waitingStreamCutoffMs = nowMs - 30 * 60 * 1000L
-            val fetched = db.transferDao().getRecent()
+            val peerId = pairingRepo.selected.value?.deviceId
+            val fetched = if (peerId != null) db.transferDao().getRecentForPeer(peerId)
+                          else db.transferDao().getRecent()
 
             // Classic WAITING scrub (pre-streaming): row created more than
             // 30 min ago and still WAITING — no live UploadWorker. Mark
@@ -673,7 +682,9 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
 
     fun clearHistory() {
         viewModelScope.launch(Dispatchers.IO) {
-            db.transferDao().clearAll()
+            val peerId = pairingRepo.selected.value?.deviceId
+            if (peerId != null) db.transferDao().clearAllForPeer(peerId)
+            else db.transferDao().clearAll()
             refreshTransfers()
         }
     }
