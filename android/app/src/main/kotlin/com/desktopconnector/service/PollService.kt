@@ -657,7 +657,7 @@ class PollService : Service() {
                 status = TransferStatus.COMPLETE,
             ))
             db.transferDao().trimHistory()
-            showTransferNotification(displayLabel)
+            showTransferNotification(displayLabel, peerId = senderId)
         }
     }
 
@@ -797,7 +797,7 @@ class PollService : Service() {
         )
         db.transferDao().trimHistory()
         if (stillExists) {
-            showTransferNotification(fileName)
+            showTransferNotification(fileName, peerId = senderId)
         }
     }
 
@@ -995,7 +995,7 @@ class PollService : Service() {
         )
         db.transferDao().trimHistory()
         if (stillExists) {
-            showTransferNotification(fileName)
+            showTransferNotification(fileName, peerId = senderId)
         }
         terminalState = "complete"
     }
@@ -1269,7 +1269,7 @@ class PollService : Service() {
             transferId = transferId,
         ))
         db.transferDao().trimHistory()
-        showTransferNotification(file.name)
+        showTransferNotification(file.name, peerId = senderId)
         return file.name
     }
 
@@ -1350,17 +1350,25 @@ class PollService : Service() {
         }
     }
 
-    private fun showTransferNotification(label: String) {
+    private fun showTransferNotification(label: String, peerId: String? = null) {
         val mgr = getSystemService(NotificationManager::class.java)
         val intent = Intent(this, MainActivity::class.java)
         val pending = PendingIntent.getActivity(this, 0, intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
+        // Suffix the desktop name only when N > 1 — single-pair users
+        // see today's wording verbatim, no string churn.
+        val pairs = com.desktopconnector.crypto.PairingRepository.getInstance(this).pairs.value
+        val text = if (peerId != null && pairs.size > 1) {
+            val name = pairs.firstOrNull { it.deviceId == peerId }?.name
+            if (name != null) "$label from $name" else label
+        } else label
+
         val notification = Notification.Builder(this, CHANNEL_TRANSFER)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setColor(BRAND_ACCENT)
             .setContentTitle("Received")
-            .setContentText(label)
+            .setContentText(text)
             .setContentIntent(pending)
             .setAutoCancel(true)
             .build()
