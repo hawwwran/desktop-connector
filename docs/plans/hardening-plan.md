@@ -302,20 +302,83 @@ config file is clean.
 - Settings button shows the same outcome with a brand-styled
   status row
 
-### H.7 — Revisit private_key.pem (deferred) ⏱ ~unknown
+### H.7 — Move private_key.pem into the secret store ⏱ ~2 h
 
-The long-term private key already has good filesystem protection
-(written `chmod 0600` at creation by `crypto.py`). Whether to
-also move it into the secret store is a separate trade-off:
+**Status: DONE.** The long-term X25519 private key now rides on
+the same `SecretStore` backend as `auth_token` and pairing
+symkeys. PEM file remains the storage of record only when no
+secret service is reachable (headless / no-keyring deployments).
 
-- Pro: encryption-at-rest gated by session unlock; lifetime
-  matches the rest of the secret material.
-- Con: the secret store stores strings (base64-encode the PEM);
-  rotation gets harder; libsecret's per-secret size limits vary
-  per backend.
+**What landed:**
+- `crypto.KeyManager` accepts `secret_store: SecretStore | None`.
+  Production callers pass `config.secret_store` (the same store
+  Config picked via `open_default_store`); legacy callers / tests
+  that pass nothing get the pre-H.7 PEM-only behaviour
+  byte-for-byte.
+- One-shot migration on init: existing `keys/private_key.pem`
+  gets read, copied into the keyring under
+  `private_key:pem`, and the file is deleted. Idempotent
+  across re-inits (post-migration boots find the keyring
+  authoritative and short-circuit). Partial-failure-safe (if
+  `keyring.set_password` raises mid-migration, the PEM stays
+  on disk for the next boot to retry — same shape as H.4).
+- Stale-PEM cleanup: if the keyring already holds the live key
+  and a PEM file appears (typically after a backup restore),
+  the file is removed defensively so future loads can't pick
+  up two competing sources of truth.
+- Corrupt keyring entry refuses to silently regenerate — the
+  operator gets a typed exception so they can triage via
+  seahorse rather than losing the device identity to a parse
+  error.
+- `KeyManager.scrub_private_key()` covers the long-running
+  process / Settings → Verify scenario where a PEM appears
+  after init's migration check has already run. Returns True
+  iff a migration occurred.
+- `KeyManager.was_pem_migrated` flag lets `--scrub-secrets`
+  CLI and the Settings Verify button surface "device private
+  key" alongside the auth_token / symkey counts.
+- `reset_keys()` wipes from BOTH backends — without that, a
+  reset followed by a fresh-install would silently inherit
+  the old keyring entry.
+- `Config.secret_store` property exposes the active backend
+  so production callers don't reach into `Config._secret_store`.
 
-Defer until H.1–H.6 are stable and there's a felt need. Until
-then the on-disk key with `chmod 0600` is acceptable.
+**Surfaces refreshed:**
+- Settings → Security row subtitle now says "Identity, auth
+  token + pairing keys" (was just "Auth token + pairing keys").
+- The H.5 explainer window's "What's happening" section now
+  enumerates `keys/private_key.pem` alongside `config.json`.
+- The `--scrub-secrets` CLI line and Settings Verify message
+  combine config-side counts with "device private key" into a
+  single summary.
+
+**Recovery posture:** post-migration, if the keyring entry is
+lost (DB corruption, fresh OS install without restoring the
+keyring, manual deletion via seahorse), the desktop generates a
+fresh keypair on next launch — new device identity. The phone
+will then need to re-pair. Accepted trade-off given this
+project's audience (single-user sideload), and structurally
+identical to the H.4 recovery posture for `auth_token` /
+pairing symkeys: keyring loss = re-register / re-pair.
+
+The same effect can be triggered intentionally via the tray's
+"Re-pair" banner (visible during AUTH_INVALID auth-failure) or
+the `local_unpair("full")` path in poller.py — both call
+`crypto.reset_keys()`, which post-H.7 wipes both the keyring
+entry and any leftover PEM before regenerating.
+
+Routine `Settings → Unpair` and inbound `.fn.unpair` messages
+do **not** touch the private key — they only clear the
+specific pairing's symkey + metadata, preserving the device
+identity.
+
+**Tests:** 20 unit tests in
+`tests/protocol/test_desktop_keymanager.py` covering legacy
+PEM-only compatibility, secure-store fresh install, migration
+of existing PEM, idempotence across re-inits, partial-failure
+PEM retention, identity preservation across migration,
+stale-PEM cleanup, scrub variants, store-read failure
+fallback, and corrupt-keyring-entry refusal.
 
 ---
 

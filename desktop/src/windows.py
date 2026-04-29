@@ -73,7 +73,11 @@ def show_send_files(config_dir: Path):
     from .backends.linux.dialog_backend import LinuxDialogBackend
 
     config = Config(config_dir)
-    crypto = KeyManager(config_dir)
+    # H.7: pass the same store Config picked so the private key
+    # lands alongside auth_token + pairing symkeys instead of in a
+    # separate PEM file. Insecure-store / no-keyring deployments
+    # still get the legacy PEM path as fallback.
+    crypto = KeyManager(config_dir, secret_store=config.secret_store)
     history = TransferHistory(config_dir)
     dialogs = LinuxDialogBackend()
 
@@ -572,7 +576,11 @@ def show_settings(config_dir: Path):
     from .bootstrap.app_version import get_app_version
 
     config = Config(config_dir)
-    crypto = KeyManager(config_dir)
+    # H.7: pass the same store Config picked so the private key
+    # lands alongside auth_token + pairing symkeys instead of in a
+    # separate PEM file. Insecure-store / no-keyring deployments
+    # still get the legacy PEM path as fallback.
+    crypto = KeyManager(config_dir, secret_store=config.secret_store)
     conn = ConnectionManager(config.server_url, config.device_id or "", config.auth_token or "")
 
     # Fetch stats from server
@@ -1044,11 +1052,12 @@ def show_settings(config_dir: Path):
         verify_row = Adw.ActionRow(
             title="Secret storage",
             subtitle=(
-                "Auth token + pairing keys in OS keyring "
+                "Identity, auth token + pairing keys in OS keyring "
                 "(libsecret / KWallet)"
                 if _secure_now else
-                "Auth token + pairing keys in plaintext config.json "
-                "(no keyring backend reachable)"
+                "Identity, auth token + pairing keys in plaintext "
+                "~/.config/desktop-connector/ (no keyring backend "
+                "reachable)"
             ),
         )
         sec_group.add(verify_row)
@@ -1070,19 +1079,24 @@ def show_settings(config_dir: Path):
                 transient_for=win,
                 heading="About verify secret storage",
                 body=(
-                    "Verify scans config.json for plaintext fields "
-                    "(auth_token, symmetric_key_b64) and moves any it "
-                    "finds into the OS keyring.\n\n"
+                    "Verify scans for plaintext secret material and "
+                    "moves anything it finds into the OS keyring. "
+                    "Three locations are checked:\n\n"
+                    "  • config.json → auth_token field\n"
+                    "  • config.json → paired_devices[*].symmetric_key_b64\n"
+                    "  • keys/private_key.pem → long-term device "
+                    "identity key\n\n"
                     "Useful when:\n"
-                    "  • You've manually edited config.json\n"
+                    "  • You've manually edited config.json or "
+                    "restored a private_key.pem from backup\n"
                     "  • A previous launch's automatic migration "
                     "failed (e.g. the keyring was locked at startup)\n"
                     "  • You want to confirm secrets are stored "
                     "correctly\n\n"
                     "Verify does NOT change cryptographic identity, "
                     "doesn't re-pair, and doesn't rotate keys. It "
-                    "only ensures plaintext doesn't accumulate in "
-                    "config.json."
+                    "only ensures plaintext doesn't accumulate "
+                    "outside the keyring."
                 ),
             )
             dialog.add_response("close", "Close")
@@ -1097,24 +1111,40 @@ def show_settings(config_dir: Path):
 
         def _on_verify_secret_storage(_btn):
             result = config.scrub_secrets()
+            # H.7 also covers the private-key PEM. crypto already
+            # ran a migration check in __init__ (window-spawn time);
+            # re-running here picks up anything that arrived since.
+            pem_scrubbed = (
+                crypto.scrub_private_key() or crypto.was_pem_migrated
+            )
+
             if not result.secure:
                 verify_row.set_subtitle(
                     "Plaintext fallback active — no scrub possible. "
                     "Install gnome-keyring or kwallet and re-launch."
                 )
-            elif result.failed > 0:
+                return
+            if result.failed > 0:
                 verify_row.set_subtitle(
                     f"Scrubbed {result.scrubbed}, {result.failed} "
                     "field(s) remain (keyring transient — re-try)"
                 )
-            elif result.scrubbed > 0:
+                return
+
+            items: list[str] = []
+            if result.scrubbed > 0:
+                items.append(f"{result.scrubbed} field(s)")
+            if pem_scrubbed:
+                items.append("device private key")
+            if items:
                 verify_row.set_subtitle(
-                    f"\u2713 Scrubbed {result.scrubbed} plaintext "
-                    "field(s) from config.json"
+                    "\u2713 Scrubbed " + " + ".join(items) +
+                    " into the keyring"
                 )
             else:
                 verify_row.set_subtitle(
-                    "\u2713 Already clean — no plaintext in config.json"
+                    "\u2713 Already clean — identity, auth token + "
+                    "pairing keys all in keyring"
                 )
 
         verify_btn.connect("clicked", _on_verify_secret_storage)
@@ -1168,7 +1198,11 @@ def show_history(config_dir: Path):
     from .crypto import KeyManager
 
     config = Config(config_dir)
-    crypto = KeyManager(config_dir)
+    # H.7: pass the same store Config picked so the private key
+    # lands alongside auth_token + pairing symkeys instead of in a
+    # separate PEM file. Insecure-store / no-keyring deployments
+    # still get the legacy PEM path as fallback.
+    crypto = KeyManager(config_dir, secret_store=config.secret_store)
     history = TransferHistory(config_dir)
 
     from .api_client import STORAGE_FULL_MAX_WINDOW_S
@@ -2049,7 +2083,11 @@ def show_pairing(config_dir: Path):
     import io
 
     config = Config(config_dir)
-    crypto = KeyManager(config_dir)
+    # H.7: pass the same store Config picked so the private key
+    # lands alongside auth_token + pairing symkeys instead of in a
+    # separate PEM file. Insecure-store / no-keyring deployments
+    # still get the legacy PEM path as fallback.
+    crypto = KeyManager(config_dir, secret_store=config.secret_store)
     conn = ConnectionManager(config.server_url, config.device_id or "", config.auth_token or "")
     api = ApiClient(conn, crypto)
 
@@ -2185,7 +2223,11 @@ def show_find_phone(config_dir: Path):
     from .messaging import FasttrackAdapter, MessageType
 
     config = Config(config_dir)
-    crypto = KeyManager(config_dir)
+    # H.7: pass the same store Config picked so the private key
+    # lands alongside auth_token + pairing symkeys instead of in a
+    # separate PEM file. Insecure-store / no-keyring deployments
+    # still get the legacy PEM path as fallback.
+    crypto = KeyManager(config_dir, secret_store=config.secret_store)
 
     # Check WebKit availability
     has_webkit = False
@@ -2739,9 +2781,9 @@ def show_secret_storage_warning(config_dir: Path):
             label=(
                 "Desktop Connector couldn't reach a Secret Service "
                 "backend (GNOME Keyring, KWallet, etc.). It's still "
-                "working, but your authentication token and per-pairing "
-                "encryption keys are sitting in plain text in your "
-                "config file."
+                "working, but your long-term identity key, "
+                "authentication token, and per-pairing encryption keys "
+                "are sitting in plain text in your config directory."
             ),
             xalign=0, wrap=True, hexpand=True,
         )
@@ -2761,10 +2803,13 @@ def show_secret_storage_warning(config_dir: Path):
         outer.append(_section(
             "What's happening",
             f"Secrets are written to:\n  {config_dir / 'config.json'}\n"
+            f"  {config_dir / 'keys' / 'private_key.pem'}\n"
             "with restrictive permissions (0o600), but anyone who can "
             "read your home directory (other accounts on this machine, "
             "anyone with a backup of ~/.config) sees the values in "
-            "plain text.",
+            "plain text. The private key is the most sensitive of the "
+            "three — losing it leaks your long-term device identity "
+            "and every pairing's encryption key.",
         ))
 
         outer.append(_section(

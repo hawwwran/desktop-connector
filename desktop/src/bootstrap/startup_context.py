@@ -31,7 +31,9 @@ def build_startup_context(args: StartupArgs) -> StartupContext:
     if args.save_dir:
         config.save_directory = args.save_dir
 
-    crypto = KeyManager(config.config_dir)
+    # H.7: pass the same store Config picked so the private key
+    # rides on the same backend as auth_token + pairing symkeys.
+    crypto = KeyManager(config.config_dir, secret_store=config.secret_store)
     conn = ConnectionManager(
         config.server_url,
         config.device_id or "unregistered",

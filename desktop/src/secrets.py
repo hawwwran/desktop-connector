@@ -42,6 +42,13 @@ log = logging.getLogger(__name__)
 SECRET_KEY_AUTH_TOKEN = "auth_token"
 _PAIRING_SYMKEY_PREFIX = "pairing_symkey:"
 
+# H.7: long-term X25519 device private key (PEM-encoded). Lives only
+# under :class:`SecretServiceStore`; :class:`JsonFallbackStore` does not
+# accept it — when the keyring is unreachable, the PEM file at
+# ``~/.config/desktop-connector/keys/private_key.pem`` is the storage
+# of record (managed by :class:`crypto.KeyManager`, not this module).
+SECRET_KEY_PRIVATE_KEY_PEM = "private_key:pem"
+
 # Service name used as the libsecret / Secret Service collection
 # attribute. Shows up in seahorse / kwalletmanager next to each
 # entry, alongside the per-secret key (``auth_token`` /

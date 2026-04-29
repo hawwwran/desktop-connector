@@ -452,6 +452,20 @@ class Config:
                     n += 1
         return n
 
+    @property
+    def secret_store(self) -> SecretStore:
+        """Read-only access to the active secret store.
+
+        Production callers (notably :class:`crypto.KeyManager` per
+        H.7) need the same store backend Config selected so the
+        private key lands alongside auth_token + pairing symkeys.
+        Returning the underlying instance keeps the seam in one place
+        — H.4 set the policy via ``open_default_store``; H.7 reuses
+        that selection rather than independently re-probing the
+        keyring.
+        """
+        return self._secret_store
+
     def is_secret_storage_secure(self) -> bool:
         """True iff the active secret-store backend is the OS keyring
         (libsecret / KWallet via :class:`SecretServiceStore`).

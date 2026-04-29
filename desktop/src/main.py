@@ -79,12 +79,24 @@ def main() -> int:
     # log lines aren't dropped or emitted under the default logging config.
     setup_logging(args.verbose, Path(args.config_dir) if args.config_dir else None)
 
-    # H.6: --scrub-secrets short-circuits before the full startup
+    # H.6+H.7: --scrub-secrets short-circuits before the full startup
     # context (no need to register or pair just to verify storage).
+    # Covers config.json fields (auth_token, pairing symkeys) AND the
+    # legacy private_key.pem file in one pass.
     if args.scrub_secrets:
         from .config import Config
+        from .crypto import KeyManager
         cfg = Config(Path(args.config_dir) if args.config_dir else None)
         result = cfg.scrub_secrets()
+        # KeyManager.__init__ runs the PEM-migration check on every
+        # construction; .scrub_private_key() catches anything that
+        # showed up between Config init and now (e.g. a hand-restored
+        # PEM after the H.4 cycle finished). Two-step ensures we
+        # cover both code paths in a single CLI invocation.
+        crypto = KeyManager(cfg.config_dir, secret_store=cfg.secret_store)
+        pem_scrubbed_now = crypto.scrub_private_key()
+        pem_scrubbed = crypto.was_pem_migrated or pem_scrubbed_now
+
         if not result.secure:
             print(
                 "Secret storage: plaintext fallback active "
@@ -100,13 +112,24 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+
+        # Combine config-side counts with the private-key migration
+        # signal into one summary line for the operator.
+        items: list[str] = []
         if result.scrubbed > 0:
+            items.append(f"{result.scrubbed} plaintext field(s)")
+        if pem_scrubbed:
+            items.append("device private key")
+        if items:
             print(
-                f"Scrubbed {result.scrubbed} plaintext field(s) from "
-                "config.json into the keyring.",
+                "Scrubbed " + " and ".join(items) +
+                " into the keyring.",
             )
         else:
-            print("Secret storage already clean — no plaintext in config.json.")
+            print(
+                "Secret storage already clean — no plaintext in "
+                "config.json or keys/private_key.pem.",
+            )
         return 0
 
     context = build_startup_context(args)
