@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.desktopconnector.crypto.KeyManager
 import com.desktopconnector.crypto.PairingRepository
+import com.desktopconnector.crypto.nextDefaultName
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.network.ApiClient
@@ -23,10 +24,13 @@ data class PairingState(
     val desktopPubkey: String = "",
     val desktopName: String = "",
     val serverUrl: String = "",
+    /** Pre-filled value for the NAMING text field — "Desktop" or
+     *  "Desktop N" depending on what's already taken. */
+    val suggestedName: String = "",
     val error: String? = null,
 )
 
-enum class PairingStage { SCANNING, SENDING, VERIFYING, COMPLETE, ERROR }
+enum class PairingStage { SCANNING, SENDING, VERIFYING, NAMING, COMPLETE, ERROR }
 
 class PairingViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -101,15 +105,30 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** Codes-match → advance to the naming step. The actual save lands
+     *  in `commitName` so the user owns the user-visible label. The QR-
+     *  supplied `desktopName` is intentionally discarded. */
     fun confirmPairing() {
         val current = _state.value
+        val suggested = nextDefaultName(pairingRepo.pairs.value.map { it.name })
+        _state.value = current.copy(
+            stage = PairingStage.NAMING,
+            suggestedName = suggested,
+        )
+    }
+
+    /** Persist the pair under the user-chosen name and finalize. Blank
+     *  input falls back to the suggestion (no empty-name pairs). */
+    fun commitName(name: String) {
+        val current = _state.value
+        val finalName = name.trim().ifBlank { current.suggestedName }
         val sharedKey = keyManager.deriveSharedKey(current.desktopPubkey)
 
         keyManager.savePairedDevice(
             deviceId = current.desktopId,
             pubkeyB64 = current.desktopPubkey,
             symmetricKeyB64 = Base64.encodeToString(sharedKey, Base64.NO_WRAP),
-            name = current.desktopName,
+            name = finalName,
         )
         pairingRepo.refresh()
         pairingRepo.selectPair(current.desktopId)
@@ -122,6 +141,12 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         // registerToken() would skip the POST because the token string
         // is unchanged, and the new server record would never learn it.
         FcmManager.reset(prefs)
+    }
+
+    /** Back-arrow from NAMING — preserves the verification code so the
+     *  user can re-confirm without re-scanning. */
+    fun cancelNaming() {
+        _state.value = _state.value.copy(stage = PairingStage.VERIFYING)
     }
 
     fun cancel() {

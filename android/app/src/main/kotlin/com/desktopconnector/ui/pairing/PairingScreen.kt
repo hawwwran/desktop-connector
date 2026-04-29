@@ -35,6 +35,9 @@ fun PairingScreen(
     onQrScanned: (serverUrl: String, desktopId: String, desktopPubkey: String, desktopName: String) -> Unit,
     verificationCode: String?,
     onConfirmPairing: () -> Unit,
+    suggestedName: String,
+    onCommitName: (String) -> Unit,
+    onCancelNaming: () -> Unit,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -88,6 +91,36 @@ fun PairingScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 OutlinedButton(onClick = onCancel) { Text("Close") }
                 Button(onClick = onRetry) { Text("Scan again") }
+            }
+        } else if (stage == PairingStage.NAMING) {
+            // Pick a user-visible name for the new pair. Pre-filled with
+            // "Desktop" or "Desktop N"; users can override freely.
+            var typedName by remember(suggestedName) { mutableStateOf(suggestedName) }
+            Spacer(Modifier.height(24.dp))
+            Text(
+                "Name this desktop",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Shown in the device selector and history. You can rename later in Settings.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = typedName,
+                onValueChange = { typedName = it },
+                label = { Text("Name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(24.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                OutlinedButton(onClick = onCancelNaming) { Text("Back") }
+                Button(onClick = { onCommitName(typedName) }) { Text("Save") }
             }
         } else if (verificationCode != null) {
             // Verification stage

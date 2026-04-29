@@ -408,6 +408,9 @@ fun AppNavigation(
                 },
                 verificationCode = state.verificationCode,
                 onConfirmPairing = { pairingViewModel.confirmPairing() },
+                suggestedName = state.suggestedName,
+                onCommitName = { pairingViewModel.commitName(it) },
+                onCancelNaming = { pairingViewModel.cancelNaming() },
                 onRetry = { pairingViewModel.reset() },
                 // Cancel exits the pairing screen entirely — previously it
                 // reset state to SCANNING which was a no-op since the
