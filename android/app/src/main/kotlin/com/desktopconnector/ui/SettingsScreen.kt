@@ -55,11 +55,11 @@ fun SettingsScreen(
     var stats by remember { mutableStateOf<JSONObject?>(null) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(pairs.firstOrNull()?.deviceId) {
+    LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
             if (prefs.serverUrl != null && prefs.deviceId != null && prefs.authToken != null) {
                 val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
-                stats = api.getStats(pairedWith = pairs.firstOrNull()?.deviceId)
+                stats = api.getStats()
             }
         }
     }

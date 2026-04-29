@@ -447,12 +447,10 @@ private fun DeviceSelectorSheet(
                 modifier = Modifier.padding(start = 24.dp, top = 4.dp, bottom = 12.dp),
             )
             for (pair in pairs) {
-                val matchedKey = onlineByPeer.keys.firstOrNull { it.startsWith(pair.deviceId.take(16)) }
-                val online = matchedKey?.let { onlineByPeer[it] }
                 DeviceSelectorRow(
                     pair = pair,
                     selected = pair.deviceId == selectedDeviceId,
-                    online = online,
+                    online = onlineByPeer[pair.deviceId],
                     onClick = { onSelectPair(pair.deviceId) },
                 )
             }
