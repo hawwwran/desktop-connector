@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .secrets import (
@@ -22,6 +23,21 @@ from .secrets import (
 # sets this so the test runner never writes to the dev machine's
 # real keyring. Production code never sets this.
 _NO_KEYRING_ENV_VAR = "DESKTOP_CONNECTOR_NO_KEYRING"
+
+
+@dataclass(frozen=True)
+class ScrubResult:
+    """Outcome of :meth:`Config.scrub_secrets`.
+
+    ``secure`` is the active backend's status (False = JSON
+    fallback; scrub couldn't act). ``scrubbed`` is the count of
+    plaintext fields removed from ``config.json``; ``failed`` is
+    the count that couldn't be migrated (remained as plaintext
+    for the next boot to retry).
+    """
+    secure: bool
+    scrubbed: int
+    failed: int
 
 log = logging.getLogger(__name__)
 
@@ -379,6 +395,62 @@ class Config:
     def device_id(self, value: str) -> None:
         self._data["device_id"] = value
         self.save()
+
+    def scrub_secrets(self) -> "ScrubResult":
+        """Reload from disk, migrate any plaintext into the secret
+        store, return what happened.
+
+        Useful when:
+          - User manually edited ``config.json`` to add ``auth_token``
+            or ``symmetric_key_b64`` back in.
+          - A prior boot's automatic migration partial-failed (e.g.
+            keyring was locked at startup), leaving plaintext for
+            the failed key in ``config.json``.
+          - Caller just wants to confirm "no plaintext anywhere".
+
+        On an insecure store (JSON fallback active), scrub is a no-op
+        — there's no secure backend to migrate INTO. Returns
+        ``ScrubResult(secure=False, scrubbed=0, failed=0)``.
+
+        On a secure store with no plaintext to migrate, returns
+        ``ScrubResult(secure=True, scrubbed=0, failed=0)``.
+
+        On partial failure, ``failed`` is non-zero and the failed
+        plaintext stays in ``config.json`` for next boot to retry.
+        """
+        if not self._secret_store.is_secure():
+            log.info("config.secrets.scrub.skipped reason=insecure_store")
+            return ScrubResult(secure=False, scrubbed=0, failed=0)
+
+        self.reload()
+        before = self._count_plaintext_secrets()
+        self._migrate_legacy_secrets_if_needed()
+        after = self._count_plaintext_secrets()
+        scrubbed = max(before - after, 0)
+        result = ScrubResult(secure=True, scrubbed=scrubbed, failed=after)
+        log.info(
+            "config.secrets.scrub.result secure=True scrubbed=%d failed=%d",
+            result.scrubbed, result.failed,
+        )
+        return result
+
+    def _count_plaintext_secrets(self) -> int:
+        """Count of plaintext secret fields currently in self._data.
+
+        Used by :meth:`scrub_secrets` to compute before/after deltas.
+        Counts ``auth_token`` (top-level) plus each non-empty
+        ``paired_devices[*].symmetric_key_b64``.
+        """
+        n = 0
+        token = self._data.get("auth_token")
+        if isinstance(token, str) and token:
+            n += 1
+        for entry in self._data.get("paired_devices", {}).values():
+            if isinstance(entry, dict):
+                value = entry.get("symmetric_key_b64")
+                if isinstance(value, str) and value:
+                    n += 1
+        return n
 
     def is_secret_storage_secure(self) -> bool:
         """True iff the active secret-store backend is the OS keyring

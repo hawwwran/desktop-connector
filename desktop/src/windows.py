@@ -1031,6 +1031,95 @@ def show_settings(config_dir: Path):
                 subtitle=str(stats.get("pending_outgoing", 0)),
             ))
 
+        # Security: verify secret storage (H.6). Surfaces the active
+        # backend's status and gives the user a way to re-scrub
+        # plaintext after manual config.json edits or a partial-failure
+        # boot. Settings open already triggers Config init's automatic
+        # migration, so on first display the row almost always reads
+        # "Already clean".
+        sec_group = Adw.PreferencesGroup(title="Security")
+        content.append(sec_group)
+
+        _secure_now = config.is_secret_storage_secure()
+        verify_row = Adw.ActionRow(
+            title="Secret storage",
+            subtitle=(
+                "Auth token + pairing keys in OS keyring "
+                "(libsecret / KWallet)"
+                if _secure_now else
+                "Auth token + pairing keys in plaintext config.json "
+                "(no keyring backend reachable)"
+            ),
+        )
+        sec_group.add(verify_row)
+
+        # Info icon: tooltip on hover, click opens an explainer dialog.
+        info_btn = Gtk.Button(valign=Gtk.Align.CENTER)
+        info_btn.set_child(Gtk.Image.new_from_icon_name(
+            "dialog-information-symbolic",
+        ))
+        info_btn.add_css_class("flat")
+        info_btn.add_css_class("circular")
+        info_btn.set_tooltip_text(
+            "Verify scans config.json for plaintext secrets and "
+            "migrates them into the OS keyring. Click for details."
+        )
+
+        def _on_secret_info(_btn):
+            dialog = Adw.MessageDialog(
+                transient_for=win,
+                heading="About verify secret storage",
+                body=(
+                    "Verify scans config.json for plaintext fields "
+                    "(auth_token, symmetric_key_b64) and moves any it "
+                    "finds into the OS keyring.\n\n"
+                    "Useful when:\n"
+                    "  • You've manually edited config.json\n"
+                    "  • A previous launch's automatic migration "
+                    "failed (e.g. the keyring was locked at startup)\n"
+                    "  • You want to confirm secrets are stored "
+                    "correctly\n\n"
+                    "Verify does NOT change cryptographic identity, "
+                    "doesn't re-pair, and doesn't rotate keys. It "
+                    "only ensures plaintext doesn't accumulate in "
+                    "config.json."
+                ),
+            )
+            dialog.add_response("close", "Close")
+            dialog.set_default_response("close")
+            dialog.present()
+
+        info_btn.connect("clicked", _on_secret_info)
+        verify_row.add_suffix(info_btn)
+
+        verify_btn = Gtk.Button(label="Verify", valign=Gtk.Align.CENTER)
+        verify_btn.add_css_class("pill")
+
+        def _on_verify_secret_storage(_btn):
+            result = config.scrub_secrets()
+            if not result.secure:
+                verify_row.set_subtitle(
+                    "Plaintext fallback active — no scrub possible. "
+                    "Install gnome-keyring or kwallet and re-launch."
+                )
+            elif result.failed > 0:
+                verify_row.set_subtitle(
+                    f"Scrubbed {result.scrubbed}, {result.failed} "
+                    "field(s) remain (keyring transient — re-try)"
+                )
+            elif result.scrubbed > 0:
+                verify_row.set_subtitle(
+                    f"\u2713 Scrubbed {result.scrubbed} plaintext "
+                    "field(s) from config.json"
+                )
+            else:
+                verify_row.set_subtitle(
+                    "\u2713 Already clean — no plaintext in config.json"
+                )
+
+        verify_btn.connect("clicked", _on_verify_secret_storage)
+        verify_row.add_suffix(verify_btn)
+
         add_logs_group()
 
         # --- Footer: version + install shape ---------------------------------

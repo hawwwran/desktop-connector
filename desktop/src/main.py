@@ -79,6 +79,36 @@ def main() -> int:
     # log lines aren't dropped or emitted under the default logging config.
     setup_logging(args.verbose, Path(args.config_dir) if args.config_dir else None)
 
+    # H.6: --scrub-secrets short-circuits before the full startup
+    # context (no need to register or pair just to verify storage).
+    if args.scrub_secrets:
+        from .config import Config
+        cfg = Config(Path(args.config_dir) if args.config_dir else None)
+        result = cfg.scrub_secrets()
+        if not result.secure:
+            print(
+                "Secret storage: plaintext fallback active "
+                f"(no OS keyring reachable). config.json: {cfg.config_file}",
+                file=sys.stderr,
+            )
+            return 1
+        if result.failed > 0:
+            print(
+                f"Scrubbed {result.scrubbed} plaintext field(s); "
+                f"{result.failed} could not be migrated (keyring "
+                "transient). Re-run after fixing the backend.",
+                file=sys.stderr,
+            )
+            return 1
+        if result.scrubbed > 0:
+            print(
+                f"Scrubbed {result.scrubbed} plaintext field(s) from "
+                "config.json into the keyring.",
+            )
+        else:
+            print("Secret storage already clean — no plaintext in config.json.")
+        return 0
+
     context = build_startup_context(args)
 
     # H.5: surface the JSON-fallback state to the user at every

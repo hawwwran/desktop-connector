@@ -18,6 +18,7 @@ class StartupArgs:
     server_url: str | None
     save_dir: str | None
     verbose: bool
+    scrub_secrets: bool
 
 
 StartupMode = Literal["send_file", "headless_receive", "tray_receive"]
@@ -38,6 +39,13 @@ def parse_startup_args() -> StartupArgs:
     parser.add_argument("--server-url", type=str, help="Override server URL")
     parser.add_argument("--save-dir", type=str, help="Override save directory")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--scrub-secrets",
+        action="store_true",
+        help="Verify secret storage: migrate any plaintext from "
+             "config.json into the OS keyring, print result, and exit. "
+             "No-op when no keyring backend is reachable.",
+    )
     parsed = parser.parse_args()
 
     return StartupArgs(
@@ -48,6 +56,7 @@ def parse_startup_args() -> StartupArgs:
         server_url=parsed.server_url,
         save_dir=parsed.save_dir,
         verbose=parsed.verbose,
+        scrub_secrets=parsed.scrub_secrets,
     )
 
 

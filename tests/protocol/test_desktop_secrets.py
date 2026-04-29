@@ -11,6 +11,7 @@ backends (libsecret) can swap in without changing call sites.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -22,7 +23,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.config import Config  # noqa: E402
+from src.config import Config, ScrubResult  # noqa: E402
 from src.secrets import (  # noqa: E402
     SECRET_KEY_AUTH_TOKEN,
     SERVICE_NAME,
@@ -725,6 +726,156 @@ class RemovePairedDeviceTests(unittest.TestCase):
             cfg = Config(config_dir=Path(td))
             cfg.remove_paired_device("dev-never-existed")
             self.assertEqual(cfg.paired_devices, {})
+
+
+class ScrubSecretsTests(unittest.TestCase):
+    """H.6: scrub_secrets is on-demand re-migration. Used by the
+    --scrub-secrets CLI flag and the Settings 'Verify' button to
+    move plaintext that snuck back in (manual edits, partial-failure
+    boots) into the secret store."""
+
+    def test_no_op_when_already_clean(self) -> None:
+        fake = _FakeKeyring()
+        store = SecretServiceStore(keyring_module=fake)
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(config_dir=Path(td), secret_store=store)
+            cfg.auth_token = "tok-already-in-store"
+            result = cfg.scrub_secrets()
+            self.assertEqual(
+                result, ScrubResult(secure=True, scrubbed=0, failed=0),
+            )
+
+    def test_scrubs_manually_edited_plaintext_auth_token(self) -> None:
+        # Simulate the user hand-editing config.json to add an
+        # auth_token field after the original migration moved it
+        # to the keyring. Scrub must move it back out.
+        fake = _FakeKeyring()
+        store = SecretServiceStore(keyring_module=fake)
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            cfg = Config(config_dir=config_dir, secret_store=store)
+            # Bypass the public setter to land plaintext into _data
+            # the way a manual JSON edit would. Save it to disk so
+            # reload() picks it up.
+            cfg._data["auth_token"] = "manual-edit-token"
+            cfg.save()
+            result = cfg.scrub_secrets()
+            self.assertEqual(
+                result, ScrubResult(secure=True, scrubbed=1, failed=0),
+            )
+            # Plaintext gone, keyring has the value.
+            self.assertNotIn("auth_token", cfg._data)
+            self.assertEqual(
+                fake.values[(SERVICE_NAME, SECRET_KEY_AUTH_TOKEN)],
+                "manual-edit-token",
+            )
+
+    def test_scrubs_pairing_symkey_added_back_to_json(self) -> None:
+        fake = _FakeKeyring()
+        store = SecretServiceStore(keyring_module=fake)
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            cfg = Config(config_dir=config_dir, secret_store=store)
+            cfg.add_paired_device("dev-X", "pk-X", "sk-X", name="N")
+            # Manual re-edit puts plaintext back next to the metadata.
+            cfg._data["paired_devices"]["dev-X"]["symmetric_key_b64"] = "sk-edit"
+            cfg.save()
+            result = cfg.scrub_secrets()
+            self.assertEqual(
+                result, ScrubResult(secure=True, scrubbed=1, failed=0),
+            )
+            self.assertNotIn(
+                "symmetric_key_b64",
+                cfg._data["paired_devices"]["dev-X"],
+            )
+            # Keyring now holds the manually-edited value.
+            self.assertEqual(
+                fake.values[(SERVICE_NAME, pairing_symkey_key("dev-X"))],
+                "sk-edit",
+            )
+
+    def test_scrubs_multiple_fields_in_one_call(self) -> None:
+        fake = _FakeKeyring()
+        store = SecretServiceStore(keyring_module=fake)
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(config_dir=Path(td), secret_store=store)
+            cfg.add_paired_device("dev-A", "pk-A", "sk-A")
+            cfg.add_paired_device("dev-B", "pk-B", "sk-B")
+            cfg._data["auth_token"] = "tok-edit"
+            cfg._data["paired_devices"]["dev-A"]["symmetric_key_b64"] = "sk-A-edit"
+            cfg._data["paired_devices"]["dev-B"]["symmetric_key_b64"] = "sk-B-edit"
+            cfg.save()
+            result = cfg.scrub_secrets()
+            self.assertEqual(
+                result, ScrubResult(secure=True, scrubbed=3, failed=0),
+            )
+
+    def test_no_op_when_store_insecure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(config_dir=Path(td))  # JsonFallbackStore
+            # Even with plaintext present, scrub does nothing — the
+            # store is insecure, there's nowhere to migrate to.
+            cfg._data["auth_token"] = "stays-in-json"
+            cfg.save()
+            result = cfg.scrub_secrets()
+            self.assertEqual(
+                result, ScrubResult(secure=False, scrubbed=0, failed=0),
+            )
+            # Plaintext still there.
+            self.assertEqual(
+                cfg._data.get("auth_token"), "stays-in-json",
+            )
+
+    def test_partial_failure_reflected_in_result(self) -> None:
+        # Mid-scrub keyring failure: auth_token migrates, pairing
+        # symkey set raises. ScrubResult reports failed=1.
+        fake = _FakeKeyring()
+        store = SecretServiceStore(keyring_module=fake)
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(config_dir=Path(td), secret_store=store)
+            cfg.add_paired_device("dev-A", "pk-A", "sk-A")
+            cfg._data["auth_token"] = "tok-edit"
+            cfg._data["paired_devices"]["dev-A"]["symmetric_key_b64"] = "sk-edit"
+            cfg.save()
+
+            real_set = fake.set_password
+
+            def selective_set(service, username, password):
+                if username.startswith("pairing_symkey:"):
+                    raise fake.errors.KeyringError("simulated mid-scrub drop")
+                return real_set(service, username, password)
+            fake.set_password = selective_set  # type: ignore[assignment]
+
+            result = cfg.scrub_secrets()
+            self.assertEqual(
+                result, ScrubResult(secure=True, scrubbed=1, failed=1),
+            )
+            # auth_token migrated; pairing symkey plaintext stays.
+            self.assertNotIn("auth_token", cfg._data)
+            self.assertEqual(
+                cfg._data["paired_devices"]["dev-A"]["symmetric_key_b64"],
+                "sk-edit",
+            )
+
+    def test_picks_up_external_edits_via_reload(self) -> None:
+        # Scrub does an explicit reload before counting — verifies
+        # that an edit made by an external process / hand-edit
+        # while the Config object is alive gets picked up.
+        fake = _FakeKeyring()
+        store = SecretServiceStore(keyring_module=fake)
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            cfg = Config(config_dir=config_dir, secret_store=store)
+            cfg.auth_token = "in-store"
+            # External writer modifies config.json behind cfg's back.
+            disk_path = config_dir / "config.json"
+            data = json.loads(disk_path.read_text())
+            data["auth_token"] = "snuck-in-externally"
+            disk_path.write_text(json.dumps(data))
+            # Without scrub's reload, cfg._data wouldn't see this.
+            self.assertNotIn("auth_token", cfg._data)
+            result = cfg.scrub_secrets()
+            self.assertEqual(result.scrubbed, 1)
 
 
 class IsSecretStorageSecureTests(unittest.TestCase):
