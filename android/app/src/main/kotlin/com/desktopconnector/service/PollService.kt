@@ -82,15 +82,22 @@ class PollService : Service() {
             val textPayload = msg.payload["text"] as? String ?: return@register
             pushTextToClipboard(textPayload)
         }
-        register(MessageType.PAIRING_UNPAIR) {
-            AppLog.log("Pairing", "pairing.unpair.received")
-            val keyManager = KeyManager(this@PollService)
-            keyManager.getFirstPairedDevice()?.let { paired ->
-                keyManager.removePairedDevice(paired.deviceId)
-                com.desktopconnector.crypto.PairingRepository
-                    .getInstance(this@PollService).refresh()
+        register(MessageType.PAIRING_UNPAIR) { msg ->
+            val senderId = msg.senderId
+            if (senderId == null) {
+                AppLog.log("Pairing", "pairing.unpair.received error_kind=missing_sender_id")
+                return@register
             }
-            showTransferNotification("Desktop disconnected")
+            val keyManager = KeyManager(this@PollService)
+            val name = keyManager.getPairedDevice(senderId)?.name ?: "desktop"
+            AppLog.log("Pairing", "pairing.unpair.received peer=${senderId.take(12)}")
+            scope.launch {
+                AppDatabase.getInstance(this@PollService).transferDao()
+                    .deleteAllForPeer(senderId)
+                com.desktopconnector.crypto.PairingRepository
+                    .getInstance(this@PollService).unpair(senderId)
+            }
+            showTransferNotification("Disconnected from $name")
         }
     }
 
@@ -289,11 +296,12 @@ class PollService : Service() {
                 continue
             }
 
-            val keyManager = KeyManager(this)
-            if (!keyManager.hasPairedDevice()) {
+            val pairingRepo = com.desktopconnector.crypto.PairingRepository.getInstance(this)
+            if (pairingRepo.pairs.value.isEmpty()) {
                 delay(5000)
                 continue
             }
+            val keyManager = KeyManager(this)
 
             // One-time FCM initialization attempt (retried on pairing or app restart)
             if (!FcmManager.isInitialized && !FcmManager.initAttempted) {

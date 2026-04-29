@@ -60,7 +60,7 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
                 // the registration block below re-registers cleanly
                 // instead of sending an authed pairing request that the
                 // server 401s.
-                if (!keyManager.hasPairedDevice() && prefs.isRegistered) {
+                if (pairingRepo.pairs.value.isEmpty() && prefs.isRegistered) {
                     AppLog.log("Pairing", "pairing.startup.stale_creds_cleared")
                     prefs.clearAuthCredentials()
                 }

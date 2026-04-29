@@ -84,23 +84,12 @@ class KeyManager(context: Context) {
         )
     }
 
-    fun getFirstPairedDevice(): PairedDeviceInfo? {
-        return securePrefs.all.entries
-            .filter { it.key.startsWith("paired_") }
-            .firstNotNullOfOrNull { entry ->
-                val did = entry.key.removePrefix("paired_")
-                getPairedDevice(did)
-            }
-    }
-
     /** Every paired device blob, in arbitrary order. Caller sorts. */
     fun getAllPairedDevices(): List<PairedDeviceInfo> {
         return securePrefs.all.keys
             .filter { it.startsWith("paired_") }
             .mapNotNull { key -> getPairedDevice(key.removePrefix("paired_")) }
     }
-
-    fun hasPairedDevice(): Boolean = getFirstPairedDevice() != null
 
     fun removePairedDevice(deviceId: String) {
         securePrefs.edit().remove("paired_$deviceId").apply()
