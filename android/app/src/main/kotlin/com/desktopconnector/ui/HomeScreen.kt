@@ -19,8 +19,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Share
@@ -46,12 +49,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.desktopconnector.R
+import com.desktopconnector.crypto.PairedDeviceInfo
+import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.data.QueuedTransfer
 import com.desktopconnector.data.TransferDirection
 import com.desktopconnector.data.TransferStatus
+import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.AuthFailureKind
 import com.desktopconnector.network.ConnectionState
 import com.desktopconnector.ui.theme.brandColors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,6 +70,11 @@ fun HomeScreen(
     isRefreshing: Boolean,
     authFailureKind: AuthFailureKind?,
     storageFull: Boolean,
+    pairs: List<PairedDeviceInfo>,
+    selectedPair: PairedDeviceInfo?,
+    onSelectPair: (String) -> Unit,
+    onPairAnother: () -> Unit,
+    prefs: AppPreferences,
     onFilesSelected: (List<Uri>) -> Unit,
     onSendClipboard: () -> Unit,
     onSendUri: (Uri) -> Unit,
@@ -74,6 +88,7 @@ fun HomeScreen(
     onClearHistory: () -> Unit,
     onRepair: () -> Unit,
 ) {
+    var selectorOpen by remember { mutableStateOf(false) }
     var confirmCandidate by remember { mutableStateOf<QueuedTransfer?>(null) }
 
     confirmCandidate?.let { target ->
@@ -131,9 +146,12 @@ fun HomeScreen(
             }
             TopAppBar(
                 title = {
+                    val multiPair = pairs.size > 1
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { onRefresh() },
+                        modifier = Modifier.clickable {
+                            if (multiPair) selectorOpen = true else onRefresh()
+                        },
                     ) {
                         Icon(
                             painter = androidx.compose.ui.res.painterResource(statusIcon),
@@ -146,7 +164,19 @@ fun HomeScreen(
                             modifier = Modifier.size(20.dp),
                         )
                         Spacer(Modifier.width(10.dp))
-                        Text("Desktop Connector")
+                        Text(
+                            if (multiPair) selectedPair?.name ?: "Desktop Connector"
+                            else "Desktop Connector",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (multiPair) {
+                            Icon(
+                                Icons.Default.ArrowDropDown,
+                                contentDescription = "Switch desktop",
+                                modifier = Modifier.size(24.dp),
+                            )
+                        }
                     }
                 },
                 actions = {
@@ -335,6 +365,142 @@ fun HomeScreen(
                     }
                 }
             }
+        }
+    }
+
+    if (selectorOpen) {
+        DeviceSelectorSheet(
+            pairs = pairs,
+            selectedDeviceId = selectedPair?.deviceId,
+            prefs = prefs,
+            onSelectPair = {
+                onSelectPair(it)
+                selectorOpen = false
+            },
+            onPairAnother = {
+                selectorOpen = false
+                onPairAnother()
+            },
+            onDismiss = { selectorOpen = false },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DeviceSelectorSheet(
+    pairs: List<PairedDeviceInfo>,
+    selectedDeviceId: String?,
+    prefs: AppPreferences,
+    onSelectPair: (String) -> Unit,
+    onPairAnother: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // Per-peer online flags refreshed every 30 s while the sheet is open.
+    // Server returns one paired_devices array covering every pair, so this
+    // is one HTTP call per tick regardless of peer count.
+    val onlineByPeer = remember { mutableStateMapOf<String, Boolean>() }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val server = prefs.serverUrl
+            val device = prefs.deviceId
+            val token = prefs.authToken
+            if (server != null && device != null && token != null) {
+                withContext(Dispatchers.IO) {
+                    val stats = ApiClient(server, device, token).getStats()
+                    val arr = stats?.optJSONArray("paired_devices") ?: return@withContext
+                    for (i in 0 until arr.length()) {
+                        val row = arr.getJSONObject(i)
+                        val id = row.optString("device_id")
+                        if (id.isNotEmpty()) {
+                            onlineByPeer[id] = row.optBoolean("online", false)
+                        }
+                    }
+                }
+            }
+            delay(30_000)
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+    ) {
+        Column(modifier = Modifier.padding(bottom = 16.dp)) {
+            Text(
+                "Switch desktop",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(start = 24.dp, top = 4.dp, bottom = 12.dp),
+            )
+            for (pair in pairs) {
+                val matchedKey = onlineByPeer.keys.firstOrNull { it.startsWith(pair.deviceId.take(16)) }
+                val online = matchedKey?.let { onlineByPeer[it] }
+                DeviceSelectorRow(
+                    pair = pair,
+                    selected = pair.deviceId == selectedDeviceId,
+                    online = online,
+                    onClick = { onSelectPair(pair.deviceId) },
+                )
+            }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onPairAnother() }
+                    .padding(horizontal = 24.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(12.dp))
+                Text("Pair with another desktop", style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceSelectorRow(
+    pair: PairedDeviceInfo,
+    selected: Boolean,
+    online: Boolean?,
+    onClick: () -> Unit,
+) {
+    val brand = MaterialTheme.brandColors
+    val dotColor = when (online) {
+        true -> brand.connectionConnected
+        false -> brand.connectionDisconnected
+        null -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 24.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .background(dotColor),
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            pair.name,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f),
+            color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (selected) {
+            Text(
+                "Selected",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }

@@ -354,12 +354,19 @@ fun AppNavigation(
             val storageFull by com.desktopconnector.network.StoragePressure.full
                 .collectAsState()
 
+            val homePairs by pairingRepo.pairs.collectAsState()
+            val homeSelected by pairingRepo.selected.collectAsState()
             HomeScreen(
                 connectionState = connState,
                 transfers = transfers,
                 isRefreshing = isRefreshing,
                 authFailureKind = authFailureKind,
                 storageFull = storageFull,
+                pairs = homePairs,
+                selectedPair = homeSelected,
+                onSelectPair = { pairingRepo.selectPair(it) },
+                onPairAnother = { navController.navigate("pairing") },
+                prefs = prefs,
                 onFilesSelected = { uris -> transferViewModel.queueFiles(uris) },
                 onSendClipboard = { transferViewModel.sendClipboard() },
                 onSendUri = { uri -> transferViewModel.queueFiles(listOf(uri)) },
