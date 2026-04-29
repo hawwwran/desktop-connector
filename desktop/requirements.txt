@@ -4,3 +4,9 @@ requests>=2.31.0
 Pillow>=10.0.0
 pystray>=0.19.5
 qrcode>=7.4
+# H.3: at-rest secret storage backend. Pulls in jeepney as the D-Bus
+# transport for libsecret / Secret Service. Pure-Python wheels, no
+# native deps; bundles cleanly into the AppImage. Lazy-imported in
+# desktop/src/secrets.py so dev trees without it can still import
+# the module — only SecretServiceStore() construction triggers it.
+keyring>=24.0.0
