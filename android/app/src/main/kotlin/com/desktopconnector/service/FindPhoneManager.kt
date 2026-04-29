@@ -113,7 +113,16 @@ object FindPhoneManager {
         api: ApiClient,
         symmetricKey: ByteArray,
     ) {
-        // Stop any existing alarm first
+        // A.9b: first-come-first-served. If already ringing on behalf of
+        // a different desktop, drop the second start. Re-starting from
+        // the same desktop falls through to refresh the alarm parameters.
+        if (isRinging && activeDesktopId != null && activeDesktopId != desktopDeviceId) {
+            AppLog.log(
+                "FindPhone",
+                "findphone.start.dropped_concurrent active=${activeDesktopId?.take(12)} new=${desktopDeviceId.take(12)}",
+            )
+            return
+        }
         if (isRinging) {
             stopAlarmInternal(context, sendUpdate = false)
         }

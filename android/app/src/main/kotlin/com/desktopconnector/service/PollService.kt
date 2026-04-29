@@ -478,6 +478,7 @@ class PollService : Service() {
                 api.fasttrackAck(messageId)
                 continue
             }
+            maybeAutoSwitchToSender(senderId)
 
             try {
                 val symmetricKey = Base64.decode(paired.symmetricKeyB64, Base64.NO_WRAP)
@@ -549,6 +550,7 @@ class PollService : Service() {
             Log.w(TAG, "Transfer from unknown device $senderId, skipping")
             return
         }
+        maybeAutoSwitchToSender(senderId)
 
         val symmetricKey = Base64.decode(paired.symmetricKeyB64, Base64.NO_WRAP)
 
@@ -659,6 +661,15 @@ class PollService : Service() {
             db.transferDao().trimHistory()
             showTransferNotification(displayLabel, peerId = senderId)
         }
+    }
+
+    /** A.9: when an incoming transfer or fasttrack message arrives while
+     *  the app is in background, switch the selected pair to the sender so
+     *  the user lands on that pair's history when they next open the app.
+     *  Foreground arrivals never auto-switch — would yank the user mid-task. */
+    private fun maybeAutoSwitchToSender(senderId: String) {
+        if (com.desktopconnector.util.ForegroundTracker.isForeground) return
+        com.desktopconnector.crypto.PairingRepository.getInstance(this).selectPair(senderId)
     }
 
     private fun ackHandledTransfer(api: ApiClient, transferId: String, peerId: String? = null) {
