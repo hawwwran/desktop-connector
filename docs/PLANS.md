@@ -17,7 +17,6 @@ current set). Protocol reference docs under
 | Plan | Intent | Status |
 |------|--------|--------|
 | [brand-rollout.md](plans/brand-rollout.md) | Apply `visual-identity-guide.md` across desktop and server. | Android **Done** (v0.2.0) · Desktop Open · Server Open |
-| [hardening-plan.md](plans/hardening-plan.md) | Improve at-rest secret storage on the desktop — `auth_token`, paired-device symmetric keys, private key currently sit in `~/.config/desktop-connector/` as plaintext. | Open |
 | [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Open |
 
 ## Protocol reference (living docs)
