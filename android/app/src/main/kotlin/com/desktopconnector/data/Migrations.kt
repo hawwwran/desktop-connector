@@ -59,9 +59,13 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
  * the AUTOINCREMENT id is required) and DEFAULT clauses. Diff against
  * `app/schemas/.../9.json` if validation rejects.
  *
- * Idempotent on source column: a prior failed run that left the table
- * half-migrated (peerDeviceId present, version pragma still 8) is
- * recoverable.
+ * Idempotent recovery covers exactly one prior-failure shape: the post-
+ * rename state where DROP+RENAME finished but Room rejected the post-
+ * migration schema (version pragma still 8, but the live table already
+ * has `peerDeviceId`). The `hasColumn` probe spots that and selects the
+ * new column name as the source. Earlier-failure shapes are handled by
+ * Room wrapping each migration in a transaction — a failure before
+ * DROP+RENAME rolls back, leaving the original v8 table untouched.
  */
 val MIGRATION_8_9 = object : Migration(8, 9) {
     override fun migrate(db: SupportSQLiteDatabase) {

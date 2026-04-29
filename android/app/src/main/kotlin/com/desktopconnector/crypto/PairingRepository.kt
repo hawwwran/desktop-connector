@@ -14,13 +14,29 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 /**
+ * The slice of `KeyManager` that `PairingRepository` reads. Extracted as
+ * an interface so JVM unit tests can stand in a fake without needing
+ * EncryptedSharedPreferences.
+ */
+interface PairedDeviceStore {
+    fun getAllPairedDevices(): List<PairedDeviceInfo>
+    fun removePairedDevice(deviceId: String)
+    fun setPairedDeviceName(deviceId: String, name: String)
+}
+
+/** Same idea for the persisted-selection side of `AppPreferences`. */
+interface SelectedPairPref {
+    var selectedDeviceId: String?
+}
+
+/**
  * Process-singleton reactive view over `KeyManager`'s paired-desktop blobs.
  * `KeyManager` doesn't emit on save/remove, so any mutation site must call
  * `refresh()` for the flows to update.
  */
-class PairingRepository private constructor(
-    private val keyManager: KeyManager,
-    private val prefs: AppPreferences,
+class PairingRepository internal constructor(
+    private val keyManager: PairedDeviceStore,
+    private val prefs: SelectedPairPref,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 

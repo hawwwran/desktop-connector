@@ -2,12 +2,13 @@ package com.desktopconnector.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.desktopconnector.crypto.SelectedPairPref
 
 /**
  * Non-sensitive app preferences (server URL, registration state).
  * Sensitive keys are in EncryptedSharedPreferences via KeyManager.
  */
-class AppPreferences(context: Context) {
+class AppPreferences(context: Context) : SelectedPairPref {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("dc_prefs", Context.MODE_PRIVATE)
@@ -30,7 +31,7 @@ class AppPreferences(context: Context) {
 
     /** Currently selected paired desktop. Null = use most-recently-paired
      *  fallback (resolved by `PairingRepository.selected`). */
-    var selectedDeviceId: String?
+    override var selectedDeviceId: String?
         get() = prefs.getString("selected_device_id", null)
         set(value) = prefs.edit().run {
             if (value == null) remove("selected_device_id") else putString("selected_device_id", value)

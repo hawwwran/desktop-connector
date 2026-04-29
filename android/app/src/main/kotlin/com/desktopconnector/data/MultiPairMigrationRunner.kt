@@ -2,6 +2,7 @@ package com.desktopconnector.data
 
 import android.content.Context
 import com.desktopconnector.crypto.KeyManager
+import com.desktopconnector.crypto.PairingRepository
 import com.desktopconnector.crypto.nextDefaultName
 
 /**
@@ -24,6 +25,10 @@ object MultiPairMigrationRunner {
         backfillLegacyIncomingPeers(context, prefs, keyManager)
 
         prefs.multiPairMigrationDone = true
+        // Close the race with the singleton's first construction: if
+        // PairingRepository was instantiated before the rename pass ran,
+        // its cached _pairs holds pre-rename names. Force a re-read.
+        PairingRepository.getInstance(context).refresh()
         AppLog.log("App", "multipair.migration.done")
     }
 

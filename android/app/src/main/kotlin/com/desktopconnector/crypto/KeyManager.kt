@@ -10,7 +10,7 @@ import org.json.JSONObject
  * Manages device identity keys and paired device keys.
  * Private key stored in EncryptedSharedPreferences (backed by Android Keystore).
  */
-class KeyManager(context: Context) {
+class KeyManager(context: Context) : PairedDeviceStore {
 
     private val masterKey = MasterKey.Builder(context)
         .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -85,19 +85,19 @@ class KeyManager(context: Context) {
     }
 
     /** Every paired device blob, in arbitrary order. Caller sorts. */
-    fun getAllPairedDevices(): List<PairedDeviceInfo> {
+    override fun getAllPairedDevices(): List<PairedDeviceInfo> {
         return securePrefs.all.keys
             .filter { it.startsWith("paired_") }
             .mapNotNull { key -> getPairedDevice(key.removePrefix("paired_")) }
     }
 
-    fun removePairedDevice(deviceId: String) {
+    override fun removePairedDevice(deviceId: String) {
         securePrefs.edit().remove("paired_$deviceId").apply()
     }
 
     /** Rename a pair without bumping `paired_at` (which `savePairedDevice`
      *  would). No-op if the pair doesn't exist. */
-    fun setPairedDeviceName(deviceId: String, name: String) {
+    override fun setPairedDeviceName(deviceId: String, name: String) {
         val existing = securePrefs.getString("paired_$deviceId", null) ?: return
         val json = JSONObject(existing).apply { put("name", name) }
         securePrefs.edit().putString("paired_$deviceId", json.toString()).apply()
