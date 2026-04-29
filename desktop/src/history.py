@@ -5,6 +5,7 @@ Transfer history tracking and GTK4/libadwaita display.
 import fcntl
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,10 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 MAX_HISTORY = 50
+
+# H.1: history.json doesn't carry secrets but lives in the same dir
+# as config.json, so it inherits the restrictive-perms expectation.
+HISTORY_FILE_MODE = 0o600
 
 
 class TransferStatus:
@@ -62,7 +67,22 @@ class TransferHistory:
     def __init__(self, config_dir: Path):
         self.history_file = config_dir / "history.json"
         self._lock = threading.Lock()
+        self._warn_if_weak_perms()
         self._items: list[dict] = self._load()
+
+    def _warn_if_weak_perms(self) -> None:
+        if not self.history_file.exists():
+            return
+        try:
+            mode = self.history_file.stat().st_mode & 0o777
+        except OSError:
+            return
+        if mode & 0o077:
+            log.warning(
+                "history.permissions.weak path=%s mode=%o expected=%o "
+                "(fixed on next save)",
+                self.history_file, mode, HISTORY_FILE_MODE,
+            )
 
     def _load(self) -> list[dict]:
         """Read the history file under a shared flock.
@@ -117,13 +137,20 @@ class TransferHistory:
                         fd.write(json.dumps(items, indent=2))
                         fd.flush()
                         try:
-                            import os
                             os.fsync(fd.fileno())
                         except OSError:
                             # fsync unavailable on some filesystems —
                             # flush() alone still gets us into the page
                             # cache, which is enough for a same-host
                             # reader to see the data.
+                            pass
+                        # H.1: tighten perms on every write so pre-H.1
+                        # installs (and any newly-created files) land at
+                        # 0o600. fchmod-on-open-fd avoids a TOCTOU race
+                        # against another process opening the path.
+                        try:
+                            os.fchmod(fd.fileno(), HISTORY_FILE_MODE)
+                        except OSError:
                             pass
                     self._items = items
                     return changed

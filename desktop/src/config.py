@@ -3,8 +3,11 @@ Configuration management for Desktop Connector.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "desktop-connector"
 DEFAULT_SAVE_DIR = Path.home() / "Desktop-Connector"
@@ -12,6 +15,12 @@ DEFAULT_SERVER_URL = "http://localhost:4441"
 DEFAULT_POLL_INTERVAL = 30  # seconds when idle
 FAST_POLL_INTERVAL = 5      # seconds after a transfer is found
 FAST_POLL_DURATION = 120    # seconds to stay in fast-poll mode
+
+# Restrictive perms on the config directory + file: secrets like
+# auth_token and per-pairing symmetric keys live in config.json
+# until hardening H.2+ moves them to the OS secret store.
+CONFIG_DIR_MODE = 0o700
+CONFIG_FILE_MODE = 0o600
 
 RECEIVE_ACTION_OPEN = "open"
 RECEIVE_ACTION_COPY = "copy"
@@ -139,11 +148,40 @@ class Config:
 
     def __init__(self, config_dir: Path | None = None):
         self.config_dir = config_dir or DEFAULT_CONFIG_DIR
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.config_dir.mkdir(parents=True, exist_ok=True, mode=CONFIG_DIR_MODE)
+        try:
+            os.chmod(self.config_dir, CONFIG_DIR_MODE)
+        except OSError as exc:
+            log.warning(
+                "config.permissions.dir_chmod_failed dir=%s err=%s",
+                self.config_dir, exc,
+            )
         self.config_file = self.config_dir / "config.json"
+        self._warn_if_weak_perms()
         self._data = self._load()
         self._migrate_receive_actions()
         self._migrate_receive_action_limits()
+
+    def _warn_if_weak_perms(self) -> None:
+        """Log once at startup if config.json has group/world bits.
+
+        We don't chmod existing files in place — a concurrent reader
+        might be in the middle of an old open(). The next save() runs
+        through the atomic-rename path which always lands a 0o600 file,
+        so this self-heals on first write.
+        """
+        if not self.config_file.exists():
+            return
+        try:
+            mode = self.config_file.stat().st_mode & 0o777
+        except OSError:
+            return
+        if mode & 0o077:
+            log.warning(
+                "config.permissions.weak path=%s mode=%o expected=%o "
+                "(fixed on next save)",
+                self.config_file, mode, CONFIG_FILE_MODE,
+            )
 
     def _load(self) -> dict:
         if self.config_file.exists():
@@ -152,8 +190,26 @@ class Config:
         return {}
 
     def save(self) -> None:
-        with open(self.config_file, "w") as f:
-            json.dump(self._data, f, indent=2)
+        """Atomic save with restrictive permissions.
+
+        Writes to a per-PID tmp file in the same directory, sets mode
+        0o600 BEFORE rename so the visible file at the target path is
+        never world/group-readable, then atomically renames over the
+        target. Side-effect: pre-H.1 installs (with 0o644 files)
+        self-heal on their first save.
+        """
+        tmp = self.config_dir / f".config.json.{os.getpid()}.tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(self._data, f, indent=2)
+            os.chmod(tmp, CONFIG_FILE_MODE)
+            os.replace(tmp, self.config_file)
+        except Exception:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def _migrate_receive_actions(self) -> None:
         stored = self._data.get("receive_actions")

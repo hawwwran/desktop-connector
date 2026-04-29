@@ -293,6 +293,14 @@ renamed/restructured.
 | `platform.permission.granted` | android | info | `permission` | |
 | `platform.permission.denied` | android | warning | `permission` | |
 
+### config
+
+| Event | Where | Severity | Context | Notes |
+|---|---|---|---|---|
+| `config.permissions.weak` | desktop | warning | `path`, `mode`, `expected` | Existing `config.json` found with group/world bits; auto-fixed on next save. See hardening-plan H.1. |
+| `config.permissions.dir_chmod_failed` | desktop | warning | `dir`, `err` | Could not tighten the config dir to 0o700 (rare; e.g. read-only mount, ACL conflict) |
+| `history.permissions.weak` | desktop | warning | `path`, `mode`, `expected` | Existing `history.json` with group/world bits; auto-fixed on next write |
+
 ### apierror
 
 | Event | Where | Severity | Context | Notes |
