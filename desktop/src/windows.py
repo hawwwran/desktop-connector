@@ -2609,9 +2609,123 @@ def show_onboarding(config_dir: Path):
     app.run(None)
 
 
+def show_secret_storage_warning(config_dir: Path):
+    """Explainer for H.5's plaintext-fallback warning.
+
+    Opened when the user clicks the tray's "⚠ Secrets in plaintext"
+    row. Three short sections — what's happening, why, how to fix —
+    plus a Close button. No buttons that act on state; this window
+    is informational. Fixing means installing a Secret Service
+    backend (gnome-keyring on Zorin/Ubuntu/Mint, kwallet on KDE)
+    and re-launching Desktop Connector.
+    """
+    app = _make_app()
+
+    def on_activate(app):
+        apply_brand_css()
+        win = Adw.ApplicationWindow(
+            application=app,
+            title="Secret storage warning",
+            default_width=560,
+            default_height=520,
+        )
+
+        toolbar = Adw.ToolbarView()
+        win.set_content(toolbar)
+        toolbar.add_top_bar(Adw.HeaderBar())
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=18,
+            margin_top=24, margin_bottom=24,
+            margin_start=24, margin_end=24,
+        )
+        toolbar.set_content(outer)
+
+        title = Gtk.Label(label="Secrets are stored in plaintext", xalign=0)
+        title.add_css_class("title-2")
+        outer.append(title)
+
+        subtitle = Gtk.Label(
+            label=(
+                "Desktop Connector couldn't reach a Secret Service "
+                "backend (GNOME Keyring, KWallet, etc.). It's still "
+                "working, but your authentication token and per-pairing "
+                "encryption keys are sitting in plain text in your "
+                "config file."
+            ),
+            xalign=0, wrap=True, hexpand=True,
+        )
+        subtitle.add_css_class("dim-label")
+        outer.append(subtitle)
+
+        def _section(title_text: str, body_text: str) -> Gtk.Box:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            heading = Gtk.Label(label=title_text, xalign=0)
+            heading.add_css_class("heading")
+            box.append(heading)
+            body = Gtk.Label(label=body_text, xalign=0, wrap=True, hexpand=True)
+            body.set_selectable(True)
+            box.append(body)
+            return box
+
+        outer.append(_section(
+            "What's happening",
+            f"Secrets are written to:\n  {config_dir / 'config.json'}\n"
+            "with restrictive permissions (0o600), but anyone who can "
+            "read your home directory (other accounts on this machine, "
+            "anyone with a backup of ~/.config) sees the values in "
+            "plain text.",
+        ))
+
+        outer.append(_section(
+            "Why this is happening",
+            "Either no Secret Service backend is installed / running, "
+            "or it's locked and Desktop Connector couldn't unlock it. "
+            "Desktop sessions normally start gnome-keyring (or kwallet "
+            "on KDE) automatically, but headless / minimal installs "
+            "may not.",
+        ))
+
+        outer.append(_section(
+            "How to fix it",
+            "On GNOME / Zorin / Ubuntu / Mint:\n"
+            "  sudo apt install gnome-keyring libsecret-tools\n\n"
+            "On KDE Plasma:\n"
+            "  sudo apt install kwalletmanager kwallet-pam\n\n"
+            "Then log out, log back in (so the keyring daemon "
+            "registers with your session), and re-launch Desktop "
+            "Connector. The next start will migrate your secrets out "
+            "of config.json into the keyring automatically.",
+        ))
+
+        button_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+            halign=Gtk.Align.END,
+        )
+        outer.append(button_row)
+
+        close_btn = Gtk.Button(label="Close")
+        close_btn.add_css_class("pill")
+        close_btn.connect("clicked", lambda _: win.close())
+        button_row.append(close_btn)
+
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run(None)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("window", choices=["send-files", "settings", "history", "pairing", "find-phone", "onboarding"])
+    parser.add_argument(
+        "window",
+        choices=[
+            "send-files", "settings", "history", "pairing",
+            "find-phone", "onboarding", "secret-storage-warning",
+        ],
+    )
     parser.add_argument("--config-dir", required=True)
     args = parser.parse_args()
 
@@ -2630,6 +2744,8 @@ def main():
         show_find_phone(config_dir)
     elif args.window == "onboarding":
         show_onboarding(config_dir)
+    elif args.window == "secret-storage-warning":
+        show_secret_storage_warning(config_dir)
 
 
 if __name__ == "__main__":

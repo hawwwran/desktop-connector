@@ -210,32 +210,76 @@ into the secret store and write a migration marker.
 - Re-pairing after migration writes new entries to the keyring,
   not to `config.json`
 
-### H.5 — Headless / no-Secret-Service handling ⏱ ~45 min
+### H.5 — Surface the no-keyring fallback to the user ⏱ ~45 min
 
-Make the no-keyring case explicit.
+Make the JSON-fallback path **visible** rather than blocking.
+H.4 already falls back silently when the Secret Service can't be
+reached; H.5 turns that silence into two visible surfaces — a
+stderr warning for CLI runs and a clickable tray menu indicator
+for desktop-mode runs — so the user knows their secrets are
+sitting in plaintext config.json and what to do about it.
+
+**Policy shift from the prior draft:** the original H.5 was
+going to refuse to start without an explicit
+`--allow-plaintext-secrets` opt-in. That's too aggressive for
+this project's audience (single-user desktops, occasional
+headless servers); a refused-startup leaves the user with no
+clear recovery path on a phone with active pairings. The new
+posture is **warn-but-don't-block**: the desktop keeps
+working, but the warning is loud enough to be hard to ignore.
 
 **What changes:**
-1. `Config.__init__` detects whether `SecretServiceStore` could
-   open. If not, check `_data.get("allow_plaintext_secrets")` or
-   the `--allow-plaintext-secrets` CLI flag (added to
-   `bootstrap/args.py`).
-2. With opt-in: instantiate `JsonFallbackStore` and log a
-   `WARNING` per logging vocabulary
-   (`config.secrets.plaintext_fallback`).
-3. Without opt-in: print a one-line error to stderr and
-   `sys.exit(1)`. The error mentions both the flag and the
-   config field.
-4. The receiver-mode default install (`install-from-source.sh` /
-   AppImage first-launch) should not enable the flag — only
-   headless deployments where the operator chose this trade-off.
+
+1. `Config.is_secret_storage_secure()` public method (thin
+   wrapper around the existing `self._secret_store.is_secure()`)
+   — single canonical surface for the "is fallback active?" check.
+2. CLI / headless mode: at startup, if not secure, print a
+   single-line warning to stderr (e.g., "⚠ Secret Service
+   unavailable — auth_token and pairing keys stored in plaintext
+   ~/.config/desktop-connector/config.json. Install
+   gnome-keyring / kwallet to fix.") in addition to the existing
+   `config.secrets.fallback_to_json` log event. No exit, no opt-in
+   flag required. Re-emitted once per process start.
+3. Tray-mode warning row: a new `pystray.MenuItem` rendered
+   directly under the connection-status row when not secure.
+   Label format mirrors the existing warning rows ("⚠ Secrets in
+   plaintext — click for info"). Click handler spawns a new GTK4
+   subprocess window via the existing `_open_gtk4_window` /
+   `--gtk-window=` dispatch.
+4. Explainer window: new
+   `show_secret_storage_warning(config_dir)` in
+   `desktop/src/windows.py`. Adw status-page layout with three
+   sections — what's happening (plaintext storage), why (no
+   reachable Secret Service backend), how to fix (typical
+   commands per desktop / how to install gnome-keyring on
+   Zorin/Ubuntu, KWallet on KDE, etc.). Single "Close" button.
+   Registered in the windows.py `--gtk-window=` choices list.
+5. Diagnostic event: `config.secrets.user_warned` emitted on
+   each surface (one per CLI start, one per tray-menu open
+   while in fallback mode) so logs show how many times the user
+   has been told.
+
+**What does NOT change:**
+- No CLI flag, no config field. The fallback is always
+  permitted; we just make it noisy.
+- No startup blocking. Even fully headless deployments without
+  a Secret Service keep working — just with the warning logged
+  every boot.
+- Migration semantics from H.4 unchanged. If keyring becomes
+  available on a later boot, H.4's migration runs then.
 
 **Acceptance:**
-- Stop GNOME Keyring → Python client fails to start with the
-  one-line error mentioning the override
-- Same with `--allow-plaintext-secrets` → starts, logs the
-  warning, secrets land in `config.json` with `chmod 0600`
-- The flag's presence is logged on every start (so a long-running
-  headless instance leaves a paper trail)
+- Stop GNOME Keyring → next desktop launch starts cleanly,
+  emits `config.secrets.fallback_to_json` and
+  `config.secrets.user_warned` to log + stderr, tray menu shows
+  a warning row directly under the connection status.
+- Click the tray warning row → explainer window opens with
+  what/why/how-to-fix sections.
+- `--headless --send=…` mode → stderr warning prints once
+  before the send proceeds; transfer still completes.
+- Restart GNOME Keyring + restart desktop → warning row
+  disappears, secrets get migrated by H.4 on this boot, log
+  emits `config.secrets.using_keyring` instead.
 
 ### H.6 — Plaintext scrub command ⏱ ~30 min
 

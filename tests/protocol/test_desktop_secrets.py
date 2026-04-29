@@ -727,6 +727,33 @@ class RemovePairedDeviceTests(unittest.TestCase):
             self.assertEqual(cfg.paired_devices, {})
 
 
+class IsSecretStorageSecureTests(unittest.TestCase):
+    """H.5: Config exposes the active backend's security via a
+    public method so the CLI / tray surfaces have a single check."""
+
+    def test_false_when_using_json_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(config_dir=Path(td))  # JsonFallbackStore via env-var
+            self.assertFalse(cfg.is_secret_storage_secure())
+
+    def test_true_when_using_secret_service_store(self) -> None:
+        fake = _FakeKeyring()
+        store = SecretServiceStore(keyring_module=fake)
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(config_dir=Path(td), secret_store=store)
+            self.assertTrue(cfg.is_secret_storage_secure())
+
+    def test_matches_underlying_store_is_secure(self) -> None:
+        # Public method is just a thin wrapper — pin that contract so
+        # callers can rely on it not diverging.
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(config_dir=Path(td))
+            self.assertEqual(
+                cfg.is_secret_storage_secure(),
+                cfg._secret_store.is_secure(),
+            )
+
+
 class OpenDefaultStoreTests(unittest.TestCase):
     def test_returns_secret_service_store_when_keyring_works(self) -> None:
         # Pass a fake keyring module via SecretServiceStore directly —

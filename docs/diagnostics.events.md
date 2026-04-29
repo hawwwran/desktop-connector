@@ -301,7 +301,8 @@ renamed/restructured.
 | `config.permissions.dir_chmod_failed` | desktop | warning | `dir`, `err` | Could not tighten the config dir to 0o700 (rare; e.g. read-only mount, ACL conflict) |
 | `history.permissions.weak` | desktop | warning | `path`, `mode`, `expected` | Existing `history.json` with group/world bits; auto-fixed on next write |
 | `config.secrets.using_keyring` | desktop | info | `service` | Secret Service backend (libsecret / KWallet) reachable; auth_token + pairing symkeys live there. H.3+. |
-| `config.secrets.fallback_to_json` | desktop | warning | `reason` | Secret Service unreachable (no D-Bus session, no daemon, package missing); secrets stay in plaintext `config.json`. H.5 will require explicit opt-in for this path. |
+| `config.secrets.fallback_to_json` | desktop | warning | `reason` | Secret Service unreachable (no D-Bus session, no daemon, package missing); secrets stay in plaintext `config.json`. The desktop keeps running — H.5 surfaces the state via stderr (CLI) and a clickable tray menu row. |
+| `config.secrets.user_warned` | desktop | warning | `surface` | User-facing surface emitted the H.5 warning. `surface` ∈ {`cli`, `tray`} — `cli` once per process start when fallback is active; `tray` each time the user clicks the warning row in the menu. |
 | `config.secrets.migrated` | desktop | info | `count`, `keys` | Migrated N plaintext secrets out of config.json into the keyring. `keys` is a comma-separated list of canonical key names (`auth_token`, `pairing_symkey:<id12>`); never the secret values. H.4. |
 | `config.secrets.migration_failed` | desktop | warning | `key`, `reason` | A single migration step failed (e.g. keyring went down mid-migration). Plaintext left in place; retried on next boot. |
 | `config.secrets.delete_failed` | desktop | warning | `key`, `reason` | Could not delete a keyring entry during `remove_paired_device` / `wipe_credentials`. Orphan left behind; harmless until next wipe. |

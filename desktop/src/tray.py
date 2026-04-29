@@ -235,6 +235,14 @@ class TrayApp:
                     visible=lambda _: (self.conn.storage_full
                                       and self.conn.auth_failure_kind is None),
                 ),
+                # H.5: rendered when the OS keyring isn't reachable and
+                # secrets are sitting in plaintext config.json. Click
+                # opens an explainer window with what / why / how-to-fix.
+                pystray.MenuItem(
+                    lambda _: "⚠ Secrets in plaintext — click for info",
+                    self._show_secret_storage_warning,
+                    visible=lambda _: not self.config.is_secret_storage_secure(),
+                ),
                 pystray.MenuItem(
                     "Force Reconnect",
                     self._try_now,
@@ -615,6 +623,12 @@ class TrayApp:
 
     def _find_phone(self, *_) -> None:
         self._open_gtk4_window("find-phone")
+
+    def _show_secret_storage_warning(self, *_) -> None:
+        # H.5: log an event each time the user clicks the warning so
+        # the diagnostic trail records "user was warned visually".
+        log.warning("config.secrets.user_warned surface=tray")
+        self._open_gtk4_window("secret-storage-warning")
 
     # --- Pairing ---
 

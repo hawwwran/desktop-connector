@@ -380,6 +380,17 @@ class Config:
         self._data["device_id"] = value
         self.save()
 
+    def is_secret_storage_secure(self) -> bool:
+        """True iff the active secret-store backend is the OS keyring
+        (libsecret / KWallet via :class:`SecretServiceStore`).
+
+        False means JSON fallback is in effect — secrets sit in
+        plaintext ``config.json`` (with H.1's ``chmod 0600``). H.5
+        surfaces this state via a CLI warning at startup and a
+        clickable tray menu indicator.
+        """
+        return self._secret_store.is_secure()
+
     def reload(self) -> None:
         """Reload config from disk (picks up changes from subprocesses).
 

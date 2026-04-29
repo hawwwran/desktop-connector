@@ -81,6 +81,20 @@ def main() -> int:
 
     context = build_startup_context(args)
 
+    # H.5: surface the JSON-fallback state to the user at every
+    # startup. Tray-mode users also see a clickable menu warning row
+    # (tray.py); this stderr line is the CLI / --headless surface.
+    if not context.config.is_secret_storage_secure():
+        warning = (
+            "⚠ Secret Service unavailable — auth_token and pairing keys "
+            "stored in plaintext "
+            f"{context.config.config_file}. Install gnome-keyring "
+            "(GNOME / Zorin / Ubuntu) or kwallet (KDE) and re-launch to "
+            "fix. See docs/plans/hardening-plan.md H.5."
+        )
+        print(warning, file=sys.stderr)
+        log.warning("config.secrets.user_warned surface=cli")
+
     # First-launch GTK4 onboarding (AppImage only, no-op otherwise).
     # Runs before the install hook so an "autostart off" choice can
     # drop a .no-autostart marker the install hook will honour.
