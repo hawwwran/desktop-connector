@@ -237,3 +237,31 @@ class SecretServiceStore:
             raise SecretServiceUnavailable(
                 f"keyring delete failed for {key!r}: {exc}"
             ) from exc
+
+
+def open_default_store(
+    fallback_data: dict,
+    fallback_save_fn: Callable[[], None],
+) -> SecretStore:
+    """Return :class:`SecretServiceStore` if reachable, else
+    :class:`JsonFallbackStore`.
+
+    H.4 wires this into ``Config.__init__``'s default. The fallback
+    is silent here; H.5 adds the explicit headless opt-in (refuse
+    to use the JSON path unless the operator confirms).
+
+    The ``fallback_data`` / ``fallback_save_fn`` parameters are only
+    used if the secure backend is unreachable — they bind the
+    fallback store to the caller's existing JSON dict + save path.
+    """
+    try:
+        store = SecretServiceStore()
+        log.info("config.secrets.using_keyring service=%s", SERVICE_NAME)
+        return store
+    except SecretServiceUnavailable as exc:
+        log.warning(
+            "config.secrets.fallback_to_json reason=%s "
+            "(secrets stay in plaintext config.json — see hardening-plan H.5)",
+            exc,
+        )
+        return JsonFallbackStore(fallback_data, fallback_save_fn)

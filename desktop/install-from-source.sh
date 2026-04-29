@@ -151,7 +151,7 @@ fi
 
 # --- Python packages ---
 
-PY_PKGS="pystray qrcode PyNaCl cryptography requests Pillow"
+PY_PKGS="pystray qrcode PyNaCl cryptography requests Pillow keyring"
 MISSING_PY=""
 
 for pkg in $PY_PKGS; do

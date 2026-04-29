@@ -960,12 +960,13 @@ def show_settings(config_dir: Path):
                             tmp.unlink(missing_ok=True)
                         except Exception:
                             pass
-                        # Remove local pairing
-                        devices = config.paired_devices
-                        if device_id in devices:
-                            del devices[device_id]
-                            config._data["paired_devices"] = devices
-                            config.save()
+                        # Remove local pairing — go through the Config
+                        # method so the secret store entry (libsecret
+                        # keyring or JSON fallback field) is cleaned up
+                        # alongside the JSON metadata. Direct dict
+                        # manipulation here would either leak keyring
+                        # entries or re-introduce hydrated plaintext.
+                        config.remove_paired_device(device_id)
                         win.close()
 
                 dialog.connect("response", on_response)

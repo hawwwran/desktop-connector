@@ -30,7 +30,7 @@ For commands too small for the full transfer pipeline. `fasttrack_messages` tabl
 # Server
 php -S 0.0.0.0:4441 -t server/public/
 
-# Desktop dev tree (deps: python3-tk, pystray, qrcode, PyNaCl, cryptography, requests)
+# Desktop dev tree (deps: python3-tk, pystray, qrcode, PyNaCl, cryptography, requests, keyring)
 cd desktop && python3 -m src.main              # tray
 cd desktop && python3 -m src.main --headless   # headless receiver
 cd desktop && python3 -m src.main --send=PATH  # one-shot send

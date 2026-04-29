@@ -11,9 +11,17 @@ from pathlib import Path
 from .secrets import (
     SECRET_KEY_AUTH_TOKEN,
     JsonFallbackStore,
+    SecretServiceUnavailable,
     SecretStore,
+    open_default_store,
     pairing_symkey_key,
 )
+
+# Test-only escape hatch: when set, Config defaults to the JSON
+# fallback store instead of trying the OS keyring. tests/protocol/
+# sets this so the test runner never writes to the dev machine's
+# real keyring. Production code never sets this.
+_NO_KEYRING_ENV_VAR = "DESKTOP_CONNECTOR_NO_KEYRING"
 
 log = logging.getLogger(__name__)
 
@@ -171,13 +179,19 @@ class Config:
         self.config_file = self.config_dir / "config.json"
         self._warn_if_weak_perms()
         self._data = self._load()
-        # H.2: secret reads/writes go through this store. Default is the
-        # JSON-backed fallback (byte-equivalent to pre-H.2). H.3 will
-        # add SecretServiceStore (libsecret) and the call sites here
-        # won't change.
-        self._secret_store: SecretStore = secret_store or JsonFallbackStore(
-            self._data, self.save,
-        )
+        # H.4: select the secret-store backend. Production tries the
+        # OS Secret Service (libsecret/KWallet) and falls back to the
+        # JSON fallback if unreachable; tests set
+        # DESKTOP_CONNECTOR_NO_KEYRING=1 to keep their writes off the
+        # dev machine's real keyring. Callers can override entirely
+        # by passing secret_store=.
+        if secret_store is not None:
+            self._secret_store: SecretStore = secret_store
+        elif os.environ.get(_NO_KEYRING_ENV_VAR):
+            self._secret_store = JsonFallbackStore(self._data, self.save)
+        else:
+            self._secret_store = open_default_store(self._data, self.save)
+        self._migrate_legacy_secrets_if_needed()
         self._migrate_receive_actions()
         self._migrate_receive_action_limits()
 
@@ -229,6 +243,71 @@ class Config:
             except OSError:
                 pass
             raise
+
+    def _migrate_legacy_secrets_if_needed(self) -> None:
+        """Move plaintext secrets from config.json into the secret store.
+
+        Triggered once on every startup. No-op when the active store
+        is the JSON fallback (insecure backend can't help) or when
+        the JSON has no plaintext secrets to migrate. On partial
+        failure (a single ``store.set`` raises), leaves remaining
+        plaintext in place — the next boot retries.
+
+        Per H.4 acceptance: a ``cat config.json`` after a successful
+        migration shows neither ``auth_token`` nor any pairing
+        ``symmetric_key_b64``. A ``secrets_migrated_at`` ISO-8601
+        marker records when the move happened.
+        """
+        if not self._secret_store.is_secure():
+            return
+
+        migrated_keys: list[str] = []
+
+        legacy_token = self._data.get("auth_token")
+        if isinstance(legacy_token, str) and legacy_token:
+            try:
+                self._secret_store.set(SECRET_KEY_AUTH_TOKEN, legacy_token)
+                del self._data["auth_token"]
+                migrated_keys.append("auth_token")
+            except SecretServiceUnavailable as exc:
+                log.warning(
+                    "config.secrets.migration_failed key=auth_token reason=%s "
+                    "(plaintext left in place; retrying next boot)",
+                    exc,
+                )
+
+        for device_id, entry in list(self._data.get("paired_devices", {}).items()):
+            if not isinstance(entry, dict):
+                continue
+            legacy_skey = entry.get("symmetric_key_b64")
+            if not isinstance(legacy_skey, str) or not legacy_skey:
+                continue
+            try:
+                self._secret_store.set(
+                    pairing_symkey_key(device_id), legacy_skey,
+                )
+                del entry["symmetric_key_b64"]
+                migrated_keys.append(f"pairing_symkey:{device_id[:12]}")
+            except SecretServiceUnavailable as exc:
+                log.warning(
+                    "config.secrets.migration_failed "
+                    "key=pairing_symkey:%s reason=%s "
+                    "(plaintext left in place; retrying next boot)",
+                    device_id[:12], exc,
+                )
+
+        if migrated_keys:
+            # ISO-8601 UTC marker; useful for debugging "did this
+            # install ever migrate?" without touching the keyring.
+            from datetime import datetime, timezone
+            self._data["secrets_migrated_at"] = (
+                datetime.now(timezone.utc).isoformat(timespec="seconds")
+            )
+            self.save()
+            log.info(
+                "config.secrets.migrated count=%d keys=%s",
+                len(migrated_keys), ",".join(migrated_keys),
+            )
 
     def _migrate_receive_actions(self) -> None:
         stored = self._data.get("receive_actions")
@@ -317,9 +396,36 @@ class Config:
 
     @property
     def paired_devices(self) -> dict:
-        """Returns dict of {device_id: {pubkey, symmetric_key_b64, name, paired_at}}."""
+        """Returns dict of {device_id: {pubkey, symmetric_key_b64, name, paired_at}}.
+
+        Hydrates ``symmetric_key_b64`` from the secret store on each
+        access so callers see the same dict shape regardless of which
+        backend is active. Post-H.4 the JSON dict no longer carries
+        the symkey when SecretServiceStore is in use; this getter
+        merges it back from the keyring.
+
+        The returned dict is freshly constructed — mutations don't
+        persist. Use :meth:`add_paired_device` / :meth:`remove_paired_device`
+        for changes; the legacy direct-dict-mutation pattern (e.g.
+        ``del cfg._data["paired_devices"][id]; cfg.save()``) would
+        leak keyring entries and is no longer safe.
+        """
         self.reload()
-        return self._data.get("paired_devices", {})
+        raw = self._data.get("paired_devices", {})
+        result: dict = {}
+        for device_id, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            merged = dict(entry)
+            if "symmetric_key_b64" not in merged:
+                try:
+                    symkey = self._secret_store.get(pairing_symkey_key(device_id))
+                except SecretServiceUnavailable:
+                    symkey = None
+                if symkey is not None:
+                    merged["symmetric_key_b64"] = symkey
+            result[device_id] = merged
+        return result
 
     def add_paired_device(self, device_id: str, pubkey: str, symmetric_key_b64: str, name: str = "") -> None:
         # Non-secret pairing metadata stays in _data. The symmetric
@@ -340,6 +446,34 @@ class Config:
         # which now also carries the metadata above. Single durable
         # commit captures both.
         self._secret_store.set(pairing_symkey_key(device_id), symmetric_key_b64)
+
+    def remove_paired_device(self, device_id: str) -> None:
+        """Remove a single paired device, including its keyring entry.
+
+        Use this instead of mutating ``cfg._data["paired_devices"]``
+        directly — without going through the secret store, removing
+        an entry from the JSON dict would leak its libsecret /
+        keyring entry. Also: the :attr:`paired_devices` getter now
+        hydrates symkeys from the store, so re-assigning a hydrated
+        dict back to ``_data`` would re-introduce plaintext into
+        ``config.json``. ``remove_paired_device`` avoids both
+        traps.
+        """
+        try:
+            self._secret_store.delete(pairing_symkey_key(device_id))
+        except SecretServiceUnavailable as exc:
+            # Keyring transient failure: leave the entry hanging
+            # rather than corrupting state mid-removal. Caller can
+            # retry; orphans are harmless until next wipe_credentials.
+            log.warning(
+                "config.secrets.delete_failed key=pairing_symkey:%s reason=%s",
+                device_id[:12], exc,
+            )
+            return
+        paired = self._data.get("paired_devices", {})
+        if device_id in paired:
+            del paired[device_id]
+            self.save()
 
     def get_first_paired_device(self) -> tuple[str, dict] | None:
         """Returns (device_id, info) of the first paired device, or None."""
