@@ -5,7 +5,15 @@ Configuration management for Desktop Connector.
 import json
 import logging
 import os
+import time
 from pathlib import Path
+
+from .secrets import (
+    SECRET_KEY_AUTH_TOKEN,
+    JsonFallbackStore,
+    SecretStore,
+    pairing_symkey_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +154,11 @@ def _normalize_receive_action_limits(value: object) -> dict[str, dict[str, int]]
 class Config:
     """Manages persistent configuration."""
 
-    def __init__(self, config_dir: Path | None = None):
+    def __init__(
+        self,
+        config_dir: Path | None = None,
+        secret_store: SecretStore | None = None,
+    ):
         self.config_dir = config_dir or DEFAULT_CONFIG_DIR
         self.config_dir.mkdir(parents=True, exist_ok=True, mode=CONFIG_DIR_MODE)
         try:
@@ -159,6 +171,13 @@ class Config:
         self.config_file = self.config_dir / "config.json"
         self._warn_if_weak_perms()
         self._data = self._load()
+        # H.2: secret reads/writes go through this store. Default is the
+        # JSON-backed fallback (byte-equivalent to pre-H.2). H.3 will
+        # add SecretServiceStore (libsecret) and the call sites here
+        # won't change.
+        self._secret_store: SecretStore = secret_store or JsonFallbackStore(
+            self._data, self.save,
+        )
         self._migrate_receive_actions()
         self._migrate_receive_action_limits()
 
@@ -264,12 +283,14 @@ class Config:
 
     @property
     def auth_token(self) -> str | None:
-        return self._data.get("auth_token")
+        return self._secret_store.get(SECRET_KEY_AUTH_TOKEN)
 
     @auth_token.setter
     def auth_token(self, value: str) -> None:
-        self._data["auth_token"] = value
-        self.save()
+        # store.set commits durably (saves the JSON dict for the
+        # JsonFallbackStore; writes to libsecret for SecretServiceStore).
+        # Callers don't need a separate self.save().
+        self._secret_store.set(SECRET_KEY_AUTH_TOKEN, value)
 
     @property
     def device_id(self) -> str | None:
@@ -281,8 +302,16 @@ class Config:
         self.save()
 
     def reload(self) -> None:
-        """Reload config from disk (picks up changes from subprocesses)."""
-        self._data = self._load()
+        """Reload config from disk (picks up changes from subprocesses).
+
+        Mutates ``self._data`` in place rather than reassigning the
+        attribute — the secret store holds a reference to this dict
+        (H.2's JsonFallbackStore), so reassignment would silently
+        leave the store pointing at the old snapshot.
+        """
+        new_data = self._load()
+        self._data.clear()
+        self._data.update(new_data)
         self._migrate_receive_actions()
         self._migrate_receive_action_limits()
 
@@ -293,15 +322,24 @@ class Config:
         return self._data.get("paired_devices", {})
 
     def add_paired_device(self, device_id: str, pubkey: str, symmetric_key_b64: str, name: str = "") -> None:
+        # Non-secret pairing metadata stays in _data. The symmetric
+        # key — the only secret — goes through the secret store.
+        # JsonFallbackStore writes it back into the same paired_devices
+        # entry so the on-disk shape is byte-equivalent to pre-H.2.
+        # H.3+'s SecretServiceStore will land it in libsecret instead;
+        # callers of this method don't need to know which one is in
+        # use.
         if "paired_devices" not in self._data:
             self._data["paired_devices"] = {}
         self._data["paired_devices"][device_id] = {
             "pubkey": pubkey,
-            "symmetric_key_b64": symmetric_key_b64,
             "name": name,
-            "paired_at": int(__import__("time").time()),
+            "paired_at": int(time.time()),
         }
-        self.save()
+        # store.set commits the JSON (or libsecret) and saves _data,
+        # which now also carries the metadata above. Single durable
+        # commit captures both.
+        self._secret_store.set(pairing_symkey_key(device_id), symmetric_key_b64)
 
     def get_first_paired_device(self) -> tuple[str, dict] | None:
         """Returns (device_id, info) of the first paired device, or None."""
@@ -327,9 +365,16 @@ class Config:
         """
         if scope not in ("pairing_only", "full"):
             raise ValueError(f"unknown wipe scope: {scope}")
+        # Walk paired_devices first and ask the store to delete each
+        # symkey — H.3+'s libsecret backend uses this to clear orphan
+        # keyring entries that a bare _data.pop() would leave behind.
+        # JsonFallbackStore is happy to delete fields it'll then drop
+        # via the pop below.
+        for device_id in list(self._data.get("paired_devices", {}).keys()):
+            self._secret_store.delete(pairing_symkey_key(device_id))
         self._data.pop("paired_devices", None)
         if scope == "full":
-            self._data.pop("auth_token", None)
+            self._secret_store.delete(SECRET_KEY_AUTH_TOKEN)
             self._data.pop("device_id", None)
         self.save()
 
