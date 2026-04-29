@@ -151,19 +151,17 @@ name immediately. We add an extra stage **after** the user accepts the
 verification code:
 
 - New `PairingStage.NAMING` between `CONFIRMING` and `COMPLETE`.
-- UI: a single `OutlinedTextField` prefilled with `nextDefaultName(existingNames)`,
+- UI: a single `OutlinedTextField` prefilled with the suggested name
   plus "Save" / "Cancel" buttons.
-- `nextDefaultName` rule: start at "Desktop"; if it collides with any
-  existing pair name (case-insensitive), try "Desktop 2", "Desktop 3", …
-  until free. Implemented in pure Kotlin, unit-testable.
-- The QR-supplied desktop name is **discarded** in favour of the user's
-  choice. (Justification: the user's mental model is "I'm naming this
-  desktop on my phone" — letting the desktop dictate the name on the
-  phone is confusing for multi-machine setups.)
-- Allow duplicates **after** the auto-suggestion if the user explicitly
-  types one (we don't enforce uniqueness on save — only the suggestion
-  iterates). This keeps the validation path simple and avoids a "name in
-  use" footgun.
+- **Suggestion is the QR-supplied desktop name** (i.e. the desktop's
+  hostname). If the QR didn't carry one, fall back to
+  `nextDefaultName(existingNames)` — start at "Desktop"; if taken
+  (case-insensitive), try "Desktop 2", "Desktop 3", … until free.
+  `nextDefaultName` is pure Kotlin, unit-tested.
+- The user can edit the suggestion freely before saving. Allow
+  duplicates if the user explicitly types one — we don't enforce
+  uniqueness on save, only the fallback iterates. Keeps the validation
+  path simple and avoids a "name in use" footgun.
 
 ### D4. Foreground / background detection — `ForegroundTracker`
 
@@ -574,8 +572,9 @@ the search normally. No crashes, no orphaned alarm.
   today's wording (no name suffix). N = 0 is unreachable here (nothing to
   receive).
 - **Q2 — Re-pair after auth failure**: pairing flow treats it as a
-  brand-new pair (fresh `paired_at`, name re-suggested via
-  `nextDefaultName`). Simpler implementation, acceptable UX.
+  brand-new pair (fresh `paired_at`, name re-suggested via the QR-
+  supplied hostname, falling back to `nextDefaultName` if absent).
+  Simpler implementation, acceptable UX.
 - **Q3 — ShareReceiverActivity**: silent send to selected pair. No chooser.
 - **Q4 — Storage layout**: flat `DesktopConnector/`, collision suffix as
   today.

@@ -106,11 +106,15 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** Codes-match → advance to the naming step. The actual save lands
-     *  in `commitName` so the user owns the user-visible label. The QR-
-     *  supplied `desktopName` is intentionally discarded. */
+     *  in `commitName` so the user owns the user-visible label.
+     *  Suggestion: the QR-supplied `desktopName` (the desktop's hostname),
+     *  falling back to "Desktop"/"Desktop N" only when the QR didn't
+     *  carry one. */
     fun confirmPairing() {
         val current = _state.value
-        val suggested = nextDefaultName(pairingRepo.pairs.value.map { it.name })
+        val suggested = current.desktopName.trim().ifBlank {
+            nextDefaultName(pairingRepo.pairs.value.map { it.name })
+        }
         _state.value = current.copy(
             stage = PairingStage.NAMING,
             suggestedName = suggested,
