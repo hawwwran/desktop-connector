@@ -98,6 +98,17 @@ class PairingWindowSourceTests(unittest.TestCase):
         ):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")
 
+    def test_poll_ignores_requests_from_already_paired_devices(self):
+        # Stale unclaimed relay rows should not resurrect the previous
+        # verification code when the pairing window is opened again.
+        for text in (
+            "paired_ids = set(config.paired_devices.keys())",
+            'if req["phone_id"] in paired_ids:',
+            "pairing.request.ignored_already_paired",
+            "continue",
+        ):
+            self.assertIn(text, self.source, msg=f"missing: {text!r}")
+
     def test_joiner_page_uses_pairing_key_helpers(self):
         for text in (
             'stack.add_named(join_box, "join")',

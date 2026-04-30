@@ -216,6 +216,19 @@ class ServerProtocolContractTests(unittest.TestCase):
         self.assertEqual(req["phone_id"], phone_id)
         self.assertIn("phone_pubkey", req)
 
+        # A retry can race in after the first request was claimed by poll.
+        # Confirming the pair must clean it up so reopening pairing does not
+        # show the old verification code again.
+        status, _headers, body = self.h.request(
+            "POST",
+            "/api/pairing/request",
+            token=phone_token,
+            device_id=phone_id,
+            json_body={"desktop_id": desktop_id, "phone_pubkey": phone_pub},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["status"], "ok")
+
         status, _headers, body = self.h.request(
             "POST",
             "/api/pairing/confirm",
@@ -225,6 +238,37 @@ class ServerProtocolContractTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
+
+        status, _headers, body = self.h.request(
+            "GET",
+            "/api/pairing/poll",
+            token=desktop_token,
+            device_id=desktop_id,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["requests"], [])
+
+        # Once the server already has this pair, stale clients may still retry
+        # the request. Treat that as idempotent cleanup, not as a new pending
+        # verification prompt.
+        status, _headers, body = self.h.request(
+            "POST",
+            "/api/pairing/request",
+            token=phone_token,
+            device_id=phone_id,
+            json_body={"desktop_id": desktop_id, "phone_pubkey": phone_pub},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ok")
+
+        status, _headers, body = self.h.request(
+            "GET",
+            "/api/pairing/poll",
+            token=desktop_token,
+            device_id=desktop_id,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["requests"], [])
 
     def test_transfer_sent_status_notify_and_fasttrack_contracts(self):
         desktop_id, desktop_token, _ = self._register_device("desktop")

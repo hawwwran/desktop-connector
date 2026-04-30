@@ -85,6 +85,16 @@ class PairingRepository
         );
     }
 
+    public function deleteRequestsBetweenDevices(string $a, string $b): void
+    {
+        $this->db->execute(
+            'DELETE FROM pairing_requests
+             WHERE (desktop_id = :a AND phone_id = :b)
+                OR (desktop_id = :b2 AND phone_id = :a2)',
+            [':a' => $a, ':b' => $b, ':a2' => $a, ':b2' => $b]
+        );
+    }
+
     public function listUnclaimedRequestsForDesktop(string $desktopId): array
     {
         return $this->db->queryAll(

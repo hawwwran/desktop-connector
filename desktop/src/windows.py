@@ -2818,8 +2818,14 @@ def show_pairing(config_dir: Path):
             if not win.is_visible():
                 return False
             requests_list = api.poll_pairing()
-            if requests_list:
-                req = requests_list[0]
+            paired_ids = set(config.paired_devices.keys()) if requests_list else set()
+            for req in requests_list:
+                if req["phone_id"] in paired_ids:
+                    log.info(
+                        "pairing.request.ignored_already_paired peer=%s",
+                        req["phone_id"][:12],
+                    )
+                    continue
                 device_info[0] = req
                 sym_key = crypto.derive_shared_key(req["phone_pubkey"])
                 derived_key[0] = sym_key

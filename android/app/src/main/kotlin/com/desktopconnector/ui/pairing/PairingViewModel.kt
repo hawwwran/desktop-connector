@@ -137,7 +137,7 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
         pairingRepo.refresh()
         pairingRepo.selectPair(current.desktopId)
 
-        _state.value = current.copy(stage = PairingStage.COMPLETE)
+        _state.value = PairingState(stage = PairingStage.COMPLETE)
         AppLog.log("Pairing", "pairing.confirm.accepted peer=${current.desktopId.take(12)}")
 
         // Trigger FCM init now that we have a paired device. Pass prefs so

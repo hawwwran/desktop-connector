@@ -14,6 +14,12 @@ class PairingController
         }
 
         $pairings = new PairingRepository($db);
+        if ($pairings->findPairing($desktopId, $ctx->deviceId)) {
+            $pairings->deleteRequestsBetweenDevices($desktopId, $ctx->deviceId);
+            Router::json(['status' => 'ok']);
+            return;
+        }
+
         // Remove any existing unclaimed requests from this phone to this desktop
         $pairings->deleteUnclaimedRequests($ctx->deviceId, $desktopId);
         $pairings->insertPairingRequest($desktopId, $ctx->deviceId, $phonePubkey, time());
@@ -60,6 +66,7 @@ class PairingController
                 AppLog::shortId($ids[0]), AppLog::shortId($ids[1])
             ));
         }
+        $pairings->deleteRequestsBetweenDevices($ctx->deviceId, $phoneId);
 
         Router::json(['status' => 'ok']);
     }
