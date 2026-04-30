@@ -148,7 +148,7 @@ renamed/restructured.
 | `auth.missing` | server | warning | `uri` | No X-Device-ID / Bearer headers |
 | `auth.invalid` | server | warning | `device_id`, `uri` | Credentials didn't match |
 | `auth.failure.tripped` | android | warning | `kind`, `peer`, `count` | 3-in-a-row auth-failure streak latched. `peer` is the truncated device id when 403 PAIRING_MISSING was attributable, empty for global (CREDENTIALS_INVALID always lands here, plus unattributed 403s) |
-| `register.conflict` | server | info | `device_id`, `reason=already_registered` | `/api/devices/register` was called with a `public_key` whose `device_id` already exists. Server refuses with 409 instead of returning the existing `auth_token` (closes the credential-leak vector — public keys are not secret material, so anyone holding a QR / `.dcpair` could otherwise harvest tokens). Legitimate clients short-circuit registration after the first success and never trip this. |
+| `register.conflict` | server | info | `device_id`, `reason=already_registered` | `/api/devices/register` was called with a `public_key` whose `device_id` already exists. Server refuses with 409 instead of returning the existing `auth_token` (closes the credential-leak vector — public keys are not secret material, so anyone holding a QR / `.dcpair` could otherwise harvest tokens). Legitimate clients normally short-circuit registration after the first success; recovery clients with no local pairs must rotate their keypair and retry registration with a fresh public key. |
 
 ### pairing
 
@@ -157,6 +157,7 @@ renamed/restructured.
 | `pairing.qr.generated` | desktop | info | `device_id` | QR material never logged |
 | `pairing.qr.scanned` | android | info | — | User scanned QR; no identifiers yet |
 | `pairing.request.sent` | android (new) | info | `desktop_id` | Pairing request posted |
+| `pairing.register.conflict_keypair_rotated` | android | info | — | Android hit server-side 409 registration conflict while it had no local pairs, rotated its local keypair, and retried registration with a fresh public key. |
 | `pairing.request.received` | server (new) | info | `desktop_id`, `phone_id` | Row inserted in `pairing_requests` |
 | `pairing.request.claimed` | server (new) | info | `desktop_id`, `count` | Desktop polled and claimed N requests |
 | `pairing.confirm.accepted` | server (new), desktop, android (new) | info | `device_a`, `device_b` | Pairing row created |

@@ -51,25 +51,20 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
                 // Save server URL
                 prefs.serverUrl = serverUrl
 
-                // Stale-credentials guard. If we hold stored creds but have
-                // no paired device, the creds are leftover from a previous
-                // install — most often Android Auto Backup restoring
-                // `dc_prefs.xml` while `dc_secure_keys.xml` (the keypair)
-                // is correctly excluded, leaving the local identity
-                // mismatched against the server's records. Drop them so
-                // the registration block below re-registers cleanly
-                // instead of sending an authed pairing request that the
-                // server 401s.
+                // Stale-identity guard. If we hold stored creds but have no
+                // paired device, the local identity is no longer useful for
+                // pairing recovery. Rotate it before registering so the
+                // server-side existing-public-key conflict remains a security
+                // boundary instead of blocking legitimate re-pair.
                 if (pairingRepo.pairs.value.isEmpty() && prefs.isRegistered) {
                     AppLog.log("Pairing", "pairing.startup.stale_creds_cleared")
                     prefs.clearAuthCredentials()
+                    keyManager.resetKeypair()
                 }
 
                 // Register if needed
                 if (!prefs.isRegistered) {
-                    val api = ApiClient(serverUrl)
-                    val result = api.register(keyManager.publicKeyB64, "phone")
-                        ?: throw Exception("Registration failed")
+                    val result = registerForPairing(serverUrl)
                     prefs.deviceId = result.getString("device_id")
                     prefs.authToken = result.getString("auth_token")
                     AppLog.log("Pairing", "startup.device.registered device_id=${prefs.deviceId?.take(12)}")
@@ -103,6 +98,19 @@ class PairingViewModel(application: Application) : AndroidViewModel(application)
                 )
             }
         }
+    }
+
+    private fun registerForPairing(serverUrl: String): org.json.JSONObject {
+        val api = ApiClient(serverUrl)
+        var registration = api.registerWithStatus(keyManager.publicKeyB64, "phone")
+        if (registration?.statusCode == 409 && pairingRepo.pairs.value.isEmpty()) {
+            AppLog.log("Pairing", "pairing.register.conflict_keypair_rotated")
+            prefs.clearAuthCredentials()
+            keyManager.resetKeypair()
+            registration = api.registerWithStatus(keyManager.publicKeyB64, "phone")
+        }
+        return registration?.takeIf { it.isSuccessful }?.body
+            ?: throw Exception("Registration failed")
     }
 
     /** Codes-match → advance to the naming step. The actual save lands
