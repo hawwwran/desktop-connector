@@ -54,6 +54,12 @@ FAST_POLL_DURATION = 120    # seconds to stay in fast-poll mode
 CONFIG_DIR_MODE = 0o700
 CONFIG_FILE_MODE = 0o600
 
+THEME_MODE_SYSTEM = "system"
+THEME_MODE_LIGHT = "light"
+THEME_MODE_DARK = "dark"
+DEFAULT_THEME_MODE = THEME_MODE_SYSTEM
+_ALLOWED_THEME_MODES = {THEME_MODE_SYSTEM, THEME_MODE_LIGHT, THEME_MODE_DARK}
+
 RECEIVE_ACTION_OPEN = "open"
 RECEIVE_ACTION_COPY = "copy"
 RECEIVE_ACTION_NONE = "none"
@@ -739,6 +745,20 @@ class Config:
     @allow_logging.setter
     def allow_logging(self, value: bool) -> None:
         self._data["allow_logging"] = value
+        self.save()
+
+    @property
+    def theme_mode(self) -> str:
+        value = self._data.get("theme_mode", DEFAULT_THEME_MODE)
+        if value not in _ALLOWED_THEME_MODES:
+            return DEFAULT_THEME_MODE
+        return value
+
+    @theme_mode.setter
+    def theme_mode(self, value: str) -> None:
+        if value not in _ALLOWED_THEME_MODES:
+            value = DEFAULT_THEME_MODE
+        self._data["theme_mode"] = value
         self.save()
 
     @property
