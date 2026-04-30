@@ -1666,8 +1666,15 @@ def show_history(config_dir: Path):
             inner_list.set_selection_mode(Gtk.SelectionMode.NONE)
             card.append(inner_list)
 
+            # The label is user-controlled (filename / clipboard URL) and
+            # set_use_markup is enabled below for the subtitle's coloured
+            # status span. Pango parses `&` as an entity start, so URLs
+            # like `?v=...&is=...` trip an entity parse error and render
+            # an empty title. Escape before interpolation. The direction
+            # prefix is a fixed arrow glyph, safe as-is.
+            escaped_label = GLib.markup_escape_text(label) if label else ""
             row = Adw.ActionRow(
-                title=f"{direction_prefix}  {label}",
+                title=f"{direction_prefix}  {escaped_label}",
                 subtitle=f"{size}  \u00b7  {ts}  \u00b7  {status_text}",
             )
             row.set_title_lines(1)
@@ -1759,8 +1766,7 @@ def show_history(config_dir: Path):
                 """The shared shrink+fade + history.remove path. Does NOT
                 call the server; callers decide whether to cancel first."""
                 history.remove(it)
-                tid_key = it.get("transfer_id", id(it))
-                row_widgets.pop(tid_key, None)
+                row_widgets.pop(_row_key(it), None)
                 if c in all_widgets:
                     all_widgets.remove(c)
                 structural_sig[0] = None
@@ -1931,19 +1937,34 @@ def show_history(config_dir: Path):
                     parent_box.remove_css_class("has-progress")
                 return None
 
+        def _row_key(item):
+            """Unique row identity for history-window diffing.
+            Transfer-pipeline items have a real `transfer_id`; fn-payload
+            items (clipboard text/image, .fn.unpair) go through fasttrack
+            and persist with an EMPTY-STRING transfer_id, which collides on
+            `dict.get(...)` lookups (empty-string is a present value, not
+            a default-trigger). Fall back to a (timestamp, filename, label
+            prefix) composite that's unique-enough across realistic clipboard
+            cadences."""
+            tid = item.get("transfer_id")
+            if tid:
+                return tid
+            return (
+                item.get("timestamp", 0),
+                item.get("filename", ""),
+                (item.get("display_label", "") or "")[:40],
+            )
+
         def build_list():
             _scrub_zombie_waiting()
             history._items = history._load()
             items = history.items
 
             # Structural sig: item identity and base state
-            s_sig = tuple(
-                (i.get("transfer_id", i.get("timestamp")), i.get("direction"))
-                for i in items
-            )
+            s_sig = tuple((_row_key(i), i.get("direction")) for i in items)
             # Progress sig: all mutable fields
             p_sig = tuple(
-                (i.get("transfer_id"), i.get("status"), i.get("delivered"),
+                (_row_key(i), i.get("status"), i.get("delivered"),
                  i.get("chunks_downloaded", 0), i.get("recipient_chunks_downloaded", 0))
                 for i in items
             )
@@ -1974,9 +1995,7 @@ def show_history(config_dir: Path):
                 # .removing transition window must not be ripped out of
                 # the tree by an interleaving refresh — the 300 ms
                 # GLib.timeout_add in on_delete handles final removal.
-                new_tids_ordered = [
-                    i.get("transfer_id", i.get("timestamp")) for i in items
-                ]
+                new_tids_ordered = [_row_key(i) for i in items]
                 by_tid_item = dict(zip(new_tids_ordered, items))
 
                 current_tids = list(row_widgets.keys())
@@ -2045,7 +2064,7 @@ def show_history(config_dir: Path):
             # progress bars for rows that existed before AND for rows we
             # just added (cheap, idempotent, makes the code branch-free).
             for item in items:
-                tid = item.get("transfer_id", item.get("timestamp"))
+                tid = _row_key(item)
                 entry = row_widgets.get(tid)
                 if entry:
                     box, row, old_pbar = entry
