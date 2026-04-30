@@ -266,7 +266,7 @@ Verification:
 
 ### M.3 - Send files window
 
-Status: pending
+Status: completed 2026-04-30
 
 Goal: rename the GTK send modal and add a target picker.
 
@@ -283,9 +283,14 @@ Work:
 
 Verification:
 
-- Source/unit tests for target selection and label changes where practical.
-- Manual GTK smoke after implementation, because the sandbox has historically
-  been unreliable for full GTK window tests.
+- `python3 -m unittest tests.protocol.test_desktop_send_files_multi_device_source`
+  passed 2026-04-30.
+- `python3 -m unittest tests.protocol.test_desktop_send_folder_rejection`
+  passed 2026-04-30.
+- `python3 -m py_compile desktop/src/windows.py` passed 2026-04-30.
+- `git diff --check` passed 2026-04-30.
+- Manual GTK smoke not run in this sandbox; prior GTK smoke checks in this
+  repo have been environment-gated/unreliable here.
 
 ### M.4 - History window device picker and filtering
 

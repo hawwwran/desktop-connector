@@ -60,6 +60,51 @@ def format_size(b):
     return f"{b / (1024 * 1024):.1f} MB"
 
 
+def _connected_device_label(device) -> str:
+    name = (device.name or "").strip()
+    return name if name else f"Device {device.short_id}"
+
+
+def _create_device_picker(config, *, title: str, subtitle: str = ""):
+    from .devices import ConnectedDeviceRegistry
+
+    registry = ConnectedDeviceRegistry(config)
+    devices = registry.list_devices()
+    active_device = registry.get_active_device()
+    device_labels = [_connected_device_label(device) for device in devices]
+    selected_device = [None]
+
+    if active_device is not None:
+        active_id = active_device.device_id
+        for index, device in enumerate(devices):
+            if device.device_id == active_id:
+                selected_device[0] = device
+                selected_index = index
+                break
+        else:
+            selected_index = 0
+    else:
+        selected_index = 0
+
+    row = Adw.ComboRow(
+        title=title,
+        subtitle=subtitle,
+        model=Gtk.StringList.new(device_labels or ["No paired devices"]),
+    )
+    row.set_sensitive(bool(devices))
+    row.set_selected(selected_index)
+
+    def on_device_changed(combo, _pspec):
+        selected = combo.get_selected()
+        if 0 <= selected < len(devices):
+            selected_device[0] = devices[selected]
+        else:
+            selected_device[0] = None
+
+    row.connect("notify::selected", on_device_changed)
+    return row, selected_device, devices
+
+
 # ─── Send Files Window ───────────────────────────────────────────────
 
 def show_send_files(config_dir: Path):
@@ -87,7 +132,7 @@ def show_send_files(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
-        win = Adw.ApplicationWindow(application=app, title="Send to Phone",
+        win = Adw.ApplicationWindow(application=app, title="Send files to",
                                      default_width=480, default_height=520)
 
         toolbar_view = Adw.ToolbarView()
@@ -105,6 +150,19 @@ def show_send_files(config_dir: Path):
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         stack.add_named(main_box, "content")
 
+        device_picker, selected_device, paired_devices = _create_device_picker(
+            config,
+            title="Send files to",
+            subtitle="Connected device",
+        )
+        device_group = Adw.PreferencesGroup(
+            margin_start=16,
+            margin_end=16,
+            margin_top=16,
+        )
+        device_group.add(device_picker)
+        main_box.append(device_group)
+
         # --- Drop overlay page (shown during drag) ---
         drop_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                                halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
@@ -121,7 +179,7 @@ def show_send_files(config_dir: Path):
         stack.set_visible_child_name("content")
 
         # --- Drop zone (in normal content) ---
-        drop_frame = Gtk.Frame(margin_start=16, margin_end=16, margin_top=16)
+        drop_frame = Gtk.Frame(margin_start=16, margin_end=16, margin_top=12)
         drop_frame.add_css_class("view")
         main_box.append(drop_frame)
 
@@ -209,7 +267,7 @@ def show_send_files(config_dir: Path):
                 er.add_css_class("dim-label")
                 listbox.append(er)
                 send_btn.set_sensitive(False)
-                send_btn.set_label("Send to Phone")
+                send_btn.set_label("Send files")
             else:
                 total = sum(f.stat().st_size for f in file_list)
                 for f in file_list:
@@ -231,7 +289,7 @@ def show_send_files(config_dir: Path):
                     file_rows[f] = row
                     listbox.append(row)
 
-                send_btn.set_sensitive(True)
+                send_btn.set_sensitive(selected_device[0] is not None)
                 send_btn.set_label(f"Send {len(file_list)} file(s) ({format_size(total)})")
 
         # --- Bottom bar ---
@@ -247,9 +305,10 @@ def show_send_files(config_dir: Path):
         cancel_btn.set_visible(False)
         action_bar.pack_start(cancel_btn)
 
-        send_btn = Gtk.Button(label="Send to Phone")
+        send_btn = Gtk.Button(label="Send files")
         send_btn.add_css_class("suggested-action")
         send_btn.set_sensitive(False)
+        device_picker.connect("notify::selected", lambda *_: refresh_list())
 
         refresh_list()
 
@@ -288,6 +347,17 @@ def show_send_files(config_dir: Path):
         def on_send(b):
             if not file_list:
                 return
+            target = selected_device[0]
+            if target is None:
+                notify("No connected device", "Pair a device before sending files.")
+                return
+            if not target.symmetric_key_b64:
+                notify(
+                    "Send failed",
+                    "Missing pairing key for the selected device.",
+                    icon="dialog-warning",
+                )
+                return
             paths = list(file_list)
             sending[0] = True
             cancel_requested[0] = False
@@ -298,6 +368,7 @@ def show_send_files(config_dir: Path):
             cancel_btn.set_sensitive(True)
             cancel_btn.set_label("Cancel")
             browse_btn.set_sensitive(False)
+            device_picker.set_sensitive(False)
             list_label.set_text("Sending...")
 
             # Disable remove buttons
@@ -307,13 +378,9 @@ def show_send_files(config_dir: Path):
             def do_send():
                 conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
                 api = ApiClient(conn, crypto)
-                paired = config.get_first_paired_device()
-                if not paired:
-                    GLib.idle_add(finish_sending, 0, len(paths))
-                    return
 
-                target_id, target_info = paired
-                symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+                target_id = target.device_id
+                symmetric_key = base64.b64decode(target.symmetric_key_b64)
                 try:
                     config.active_device_id = target_id
                 except Exception:
@@ -499,6 +566,7 @@ def show_send_files(config_dir: Path):
             send_btn.set_visible(True)
             clear_btn.set_visible(True)
             browse_btn.set_sensitive(True)
+            device_picker.set_sensitive(bool(paired_devices))
 
             if file_list:
                 # Some files remain (cancelled or failed)
@@ -508,7 +576,7 @@ def show_send_files(config_dir: Path):
             else:
                 list_label.set_text(f"Done — {sent}/{total} sent")
                 send_btn.set_sensitive(False)
-                send_btn.set_label("Send to Phone")
+                send_btn.set_label("Send files")
                 refresh_list()
 
         def on_cancel(b):
