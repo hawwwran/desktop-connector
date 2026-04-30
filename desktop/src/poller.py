@@ -350,6 +350,7 @@ class Poller:
 
         log.info("transfer.download.started transfer_id=%s sender=%s chunks=%d name=%s",
                  transfer_id[:12], sender_id[:12], chunk_count, filename)
+        self._mark_active_device(sender_id, reason="incoming")
 
         # Streaming is negotiated at init on the sender side; the
         # recipient sees the decision here via the `mode` field on the
@@ -447,6 +448,7 @@ class Poller:
             status="downloading",
             chunks_downloaded=0,
             chunks_total=chunk_count,
+            peer_device_id=sender_id,
         )
 
         try:
@@ -563,6 +565,7 @@ class Poller:
             chunks_downloaded=0,
             chunks_total=chunk_count,
             mode="streaming",
+            peer_device_id=sender_id,
         )
 
         try:
@@ -970,6 +973,8 @@ class Poller:
             if message is None:
                 log.warning("fasttrack.command.unknown fn=%s", name)
                 return
+            if sender_id:
+                self._mark_active_device(sender_id, reason="incoming")
 
             if message.type == MessageType.CLIPBOARD_TEXT:
                 self._handle_message_clipboard_text(
@@ -1008,7 +1013,9 @@ class Poller:
         preview = text if len(urls) == 1 else (text[:60] + "..." if len(text) > 60 else text)
         self.platform.notifications.notify("Clipboard received", preview[:60])
         self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.text"),
-                         display_label=preview, direction="received", size=len(text))
+                         display_label=preview, direction="received", size=len(text),
+                         sender_id=message.sender_id or "",
+                         peer_device_id=message.sender_id or "")
         if not apply_receive_text_actions(
             self.config,
             self.platform,
@@ -1067,6 +1074,7 @@ class Poller:
             size=final_size,
             content_path=str(final_path),
             sender_id=sender_id or "",
+            peer_device_id=sender_id or message.sender_id or "",
             transfer_id=transfer_id,
         )
         self._apply_receive_file_action(
@@ -1086,6 +1094,22 @@ class Poller:
             notify_title="Unpaired",
             notify_body="Paired device disconnected",
         )
+
+    def _mark_active_device(self, device_id: str, *, reason: str) -> None:
+        try:
+            self.config.active_device_id = device_id
+            log.info(
+                "device.active.changed peer=%s reason=%s",
+                device_id[:8],
+                reason,
+            )
+        except Exception:
+            log.debug(
+                "device.active.update_failed peer=%s reason=%s",
+                device_id[:8],
+                reason,
+                exc_info=True,
+            )
 
     def local_unpair(self, scope: str, *, notify_title: str | None = None,
                      notify_body: str | None = None) -> None:

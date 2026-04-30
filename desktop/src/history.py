@@ -171,6 +171,7 @@ class TransferHistory:
             transfer_id: str = "", status: str = "complete",
             chunks_downloaded: int = 0, chunks_total: int = 0,
             *,
+            peer_device_id: str = "",
             mode: str = "classic",
             chunks_uploaded: int = 0,
             abort_reason: str | None = None) -> None:
@@ -195,6 +196,7 @@ class TransferHistory:
             "size": size,
             "content_path": content_path,
             "sender_id": sender_id,
+            "peer_device_id": peer_device_id,
             "transfer_id": transfer_id,
             "status": status,
             "chunks_downloaded": chunks_downloaded,
@@ -219,6 +221,26 @@ class TransferHistory:
             del items[MAX_HISTORY:]
             return True
         self._locked_read_modify_write(do_add)
+
+    def get_peer_device_id(self, item: dict, *,
+                           fallback_device_id: str = "") -> str:
+        """Return the other device for a history row.
+
+        New rows carry ``peer_device_id`` explicitly. Legacy received
+        rows pre-M.1 only carried ``sender_id``, so keep that as a
+        read-side fallback. Legacy sent rows did not persist a target;
+        callers that need to bucket them can provide a best-effort
+        fallback such as the active or first paired device.
+        """
+        peer_device_id = item.get("peer_device_id")
+        if isinstance(peer_device_id, str) and peer_device_id:
+            return peer_device_id
+
+        sender_id = item.get("sender_id")
+        if item.get("direction") == "received" and isinstance(sender_id, str) and sender_id:
+            return sender_id
+
+        return fallback_device_id
 
     def update(self, transfer_id: str, **fields) -> bool:
         """Update an existing history entry by transfer_id. Returns True if found."""

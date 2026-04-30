@@ -314,6 +314,10 @@ def show_send_files(config_dir: Path):
 
                 target_id, target_info = paired
                 symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+                try:
+                    config.active_device_id = target_id
+                except Exception:
+                    pass
                 sent = 0
                 total = len(paths)
 
@@ -357,6 +361,7 @@ def show_send_files(config_dir: Path):
                                             content_path=str(fp), transfer_id=transfer_id,
                                             status=TransferStatus.FAILED,
                                             chunks_downloaded=0, chunks_total=total_chunks,
+                                            peer_device_id=target_id,
                                             failure_reason="too_large")
                             else:
                                 history.update(transfer_id,
@@ -372,7 +377,8 @@ def show_send_files(config_dir: Path):
                                             status=(TransferStatus.WAITING
                                                     if uploaded == -1
                                                     else TransferStatus.UPLOADING),
-                                            chunks_downloaded=0, chunks_total=total_chunks)
+                                            chunks_downloaded=0, chunks_total=total_chunks,
+                                            peer_device_id=target_id)
                             elif uploaded == -1:
                                 history.update(transfer_id,
                                                status=TransferStatus.WAITING)

@@ -396,6 +396,19 @@ class Config:
         self._data["device_id"] = value
         self.save()
 
+    @property
+    def active_device_id(self) -> str | None:
+        value = self._data.get("active_device_id")
+        return value if isinstance(value, str) and value else None
+
+    @active_device_id.setter
+    def active_device_id(self, value: str | None) -> None:
+        if value:
+            self._data["active_device_id"] = value
+        else:
+            self._data.pop("active_device_id", None)
+        self.save()
+
     def scrub_secrets(self) -> "ScrubResult":
         """Reload from disk, migrate any plaintext into the secret
         store, return what happened.
@@ -540,9 +553,29 @@ class Config:
             "paired_at": int(time.time()),
         }
         # store.set commits the JSON (or libsecret) and saves _data,
-        # which now also carries the metadata above. Single durable
-        # commit captures both.
+        # which now also carries the metadata above. SecretServiceStore
+        # writes only the secret, so save metadata explicitly in that
+        # secure-store path.
         self._secret_store.set(pairing_symkey_key(device_id), symmetric_key_b64)
+        if self._secret_store.is_secure():
+            self.save()
+
+    def rename_paired_device(self, device_id: str, name: str) -> bool:
+        """Update only non-secret pairing metadata.
+
+        Returns False when the pairing no longer exists. This method
+        intentionally edits ``_data`` directly instead of assigning a
+        hydrated ``paired_devices`` snapshot back into config, which
+        would reintroduce secure-store symmetric keys into config.json.
+        """
+        self.reload()
+        paired = self._data.get("paired_devices", {})
+        entry = paired.get(device_id)
+        if not isinstance(entry, dict):
+            return False
+        entry["name"] = name
+        self.save()
+        return True
 
     def remove_paired_device(self, device_id: str) -> None:
         """Remove a single paired device, including its keyring entry.
@@ -570,6 +603,8 @@ class Config:
         paired = self._data.get("paired_devices", {})
         if device_id in paired:
             del paired[device_id]
+            if self._data.get("active_device_id") == device_id:
+                self._data.pop("active_device_id", None)
             self.save()
 
     def get_first_paired_device(self) -> tuple[str, dict] | None:
@@ -604,6 +639,7 @@ class Config:
         for device_id in list(self._data.get("paired_devices", {}).keys()):
             self._secret_store.delete(pairing_symkey_key(device_id))
         self._data.pop("paired_devices", None)
+        self._data.pop("active_device_id", None)
         if scope == "full":
             self._secret_store.delete(SECRET_KEY_AUTH_TOKEN)
             self._data.pop("device_id", None)

@@ -410,6 +410,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             size=13,
             content_path=str(final_path),
             sender_id="sender-1",
+            peer_device_id="sender-1",
             transfer_id="tid-image",
         )
 

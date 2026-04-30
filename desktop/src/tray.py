@@ -653,6 +653,15 @@ class TrayApp:
 
         target_id, target_info = paired
         symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+        try:
+            self.config.active_device_id = target_id
+            log.info("device.active.changed peer=%s reason=outgoing", target_id[:8])
+        except Exception:
+            log.debug(
+                "device.active.update_failed peer=%s reason=outgoing",
+                target_id[:8],
+                exc_info=True,
+            )
 
         import tempfile
         tmp = Path(tempfile.mktemp(suffix="_" + filename))
@@ -679,7 +688,8 @@ class TrayApp:
                 self.history.add(filename=filename, display_label=preview,
                                  direction="sent", size=len(data), content_path=str(tmp),
                                  transfer_id=transfer_id, status="uploading",
-                                 chunks_downloaded=0, chunks_total=total_chunks)
+                                 chunks_downloaded=0, chunks_total=total_chunks,
+                                 peer_device_id=target_id)
             else:
                 self.history.update(transfer_id,
                                     chunks_downloaded=uploaded, chunks_total=total_chunks)

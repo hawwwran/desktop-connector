@@ -49,6 +49,16 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
         log.error("Cannot reach server at %s", config.server_url)
         return 1
 
+    try:
+        config.active_device_id = target_id
+        log.info("device.active.changed peer=%s reason=outgoing", target_id[:8])
+    except Exception:
+        log.debug(
+            "device.active.update_failed peer=%s reason=outgoing",
+            target_id[:8],
+            exc_info=True,
+        )
+
     from ..history import TransferHistory, TransferStatus
 
     history = TransferHistory(config.config_dir)
@@ -76,6 +86,7 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
                     content_path=str(filepath), transfer_id=transfer_id,
                     status=TransferStatus.FAILED,
                     chunks_downloaded=0, chunks_total=total_chunks,
+                    peer_device_id=target_id,
                     failure_reason="too_large",
                 )
             else:
@@ -93,6 +104,7 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
                     status=(TransferStatus.WAITING if uploaded == -1
                             else TransferStatus.UPLOADING),
                     chunks_downloaded=0, chunks_total=total_chunks,
+                    peer_device_id=target_id,
                 )
             elif uploaded == -1:
                 history.update(transfer_id, status=TransferStatus.WAITING)
