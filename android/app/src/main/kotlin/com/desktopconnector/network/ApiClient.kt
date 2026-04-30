@@ -27,6 +27,14 @@ sealed class AuthObservation {
     data class Failure(val kind: AuthFailureKind, val peerId: String? = null) : AuthObservation()
 }
 
+data class DeviceRegistrationResult(
+    val statusCode: Int,
+    val body: JSONObject?,
+) {
+    val isSuccessful: Boolean
+        get() = statusCode in 200..299 && body != null
+}
+
 /**
  * HTTP client for all server API endpoints.
  * Mirrors the Python desktop/src/api_client.py implementation.
@@ -93,6 +101,11 @@ class ApiClient(
     // --- Device Registration ---
 
     fun register(publicKeyB64: String, deviceType: String = "phone"): JSONObject? {
+        val result = registerWithStatus(publicKeyB64, deviceType)
+        return if (result?.isSuccessful == true) result.body else null
+    }
+
+    fun registerWithStatus(publicKeyB64: String, deviceType: String = "phone"): DeviceRegistrationResult? {
         val body = JSONObject().apply {
             put("public_key", publicKeyB64)
             put("device_type", deviceType)
@@ -101,7 +114,7 @@ class ApiClient(
             .url("$serverUrl/api/devices/register")
             .post(body.toString().toRequestBody(jsonType))
             .build()
-        return executeJson(request)
+        return executeRegistration(request)
     }
 
     // --- Pairing ---
@@ -628,6 +641,26 @@ class ApiClient(
                 reportAuthStatus(resp.code, peerId)
                 val body = resp.body?.string() ?: return null
                 if (resp.isSuccessful) JSONObject(body) else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun executeRegistration(request: Request): DeviceRegistrationResult? {
+        return try {
+            client.newCall(request).execute().use { resp ->
+                reportAuthStatus(resp.code)
+                val rawBody = resp.body?.string().orEmpty()
+                val jsonBody = try {
+                    if (rawBody.isBlank()) null else JSONObject(rawBody)
+                } catch (_: Exception) {
+                    null
+                }
+                DeviceRegistrationResult(
+                    statusCode = resp.code,
+                    body = jsonBody,
+                )
             }
         } catch (e: Exception) {
             null

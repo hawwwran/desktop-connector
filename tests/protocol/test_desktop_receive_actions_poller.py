@@ -99,9 +99,15 @@ class _Platform:
         clipboard: _Clipboard | None = None,
         shell: _Shell | None = None,
     ):
+        from desktop.src.interfaces.location import NullLocationProvider
+
         self.clipboard = clipboard or _Clipboard()
         self.shell = shell or _Shell()
         self.notifications = _Notifications()
+        # Production wiring relies on the typed `location` field on
+        # DesktopPlatform; mirror it here so the responder can read
+        # NullLocationProvider().get_current_fix without exploding.
+        self.location = NullLocationProvider()
 
 
 class ReceiveActionsPollerTests(unittest.TestCase):
@@ -410,6 +416,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             size=13,
             content_path=str(final_path),
             sender_id="sender-1",
+            peer_device_id="sender-1",
             transfer_id="tid-image",
         )
 

@@ -23,6 +23,7 @@ from .brand import (
 from .config import Config
 from .connection import AuthFailureKind, ConnectionManager, ConnectionState
 from .crypto import KeyManager
+from .devices import ConnectedDeviceRegistry, short_device_id
 from .history import TransferHistory
 from .platform import DesktopPlatform
 from .poller import Poller
@@ -257,7 +258,7 @@ class TrayApp:
                     self._send_clipboard,
                     visible=lambda _: self.config.is_paired and self.platform.capabilities.clipboard_text,
                 ),
-                pystray.MenuItem("Find my Phone", self._find_phone,
+                pystray.MenuItem("Find my Device", self._find_phone,
                                  visible=lambda _: self.config.is_paired and self._fcm_available),
                 pystray.MenuItem("Show History", self._show_history),
                 pystray.MenuItem(
@@ -266,7 +267,15 @@ class TrayApp:
                     visible=lambda _: self.platform.capabilities.open_folder,
                 ),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Pair...", self._pair, visible=lambda _: not self.config.is_paired),
+                # Always available — multi-device support means the user can
+                # add another pairing on top of an existing one. The pairing
+                # window's naming step handles uniqueness against the
+                # current pair list.
+                pystray.MenuItem(
+                    lambda _: ("Pair..." if not self.config.is_paired
+                               else "Pair another device..."),
+                    self._pair,
+                ),
                 pystray.MenuItem("Settings...", self._show_settings),
                 # Update items appear only inside an AppImage — apt-pip and
                 # dev-tree installs can't act on an in-app update anyway.
@@ -545,10 +554,10 @@ class TrayApp:
         import time
         if not self.config.is_paired:
             return
-        paired = self.config.get_first_paired_device()
-        if not paired:
+        target = ConnectedDeviceRegistry(self.config).get_active_device()
+        if target is None:
             return
-        target_id, _ = paired
+        target_id = target.device_id
         with self._ping_lock:
             if self._ping_in_flight:
                 return
@@ -647,12 +656,31 @@ class TrayApp:
             return
 
         filename, data, mime_type = result
-        paired = self.config.get_first_paired_device()
-        if not paired:
+        registry = ConnectedDeviceRegistry(self.config)
+        target = registry.get_active_device()
+        if target is None:
+            return
+        if not target.symmetric_key_b64:
+            log.error(
+                "clipboard.send.failed reason=missing_pairing_key peer=%s",
+                target.short_id,
+            )
+            self.platform.notifications.notify(
+                "Send failed",
+                "Missing pairing key for the selected device",
+            )
             return
 
-        target_id, target_info = paired
-        symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+        target_id = target.device_id
+        symmetric_key = base64.b64decode(target.symmetric_key_b64)
+        try:
+            registry.mark_active(target_id, reason="outgoing")
+        except Exception:
+            log.debug(
+                "device.active.update_failed peer=%s reason=outgoing",
+                short_device_id(target_id),
+                exc_info=True,
+            )
 
         import tempfile
         tmp = Path(tempfile.mktemp(suffix="_" + filename))
@@ -679,7 +707,8 @@ class TrayApp:
                 self.history.add(filename=filename, display_label=preview,
                                  direction="sent", size=len(data), content_path=str(tmp),
                                  transfer_id=transfer_id, status="uploading",
-                                 chunks_downloaded=0, chunks_total=total_chunks)
+                                 chunks_downloaded=0, chunks_total=total_chunks,
+                                 peer_device_id=target_id)
             else:
                 self.history.update(transfer_id,
                                     chunks_downloaded=uploaded, chunks_total=total_chunks)

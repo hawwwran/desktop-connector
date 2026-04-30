@@ -60,6 +60,51 @@ def format_size(b):
     return f"{b / (1024 * 1024):.1f} MB"
 
 
+def _connected_device_label(device) -> str:
+    name = (device.name or "").strip()
+    return name if name else f"Device {device.short_id}"
+
+
+def _create_device_picker(config, *, title: str, subtitle: str = ""):
+    from .devices import ConnectedDeviceRegistry
+
+    registry = ConnectedDeviceRegistry(config)
+    devices = registry.list_devices()
+    active_device = registry.get_active_device()
+    device_labels = [_connected_device_label(device) for device in devices]
+    selected_device = [None]
+
+    if active_device is not None:
+        active_id = active_device.device_id
+        for index, device in enumerate(devices):
+            if device.device_id == active_id:
+                selected_device[0] = device
+                selected_index = index
+                break
+        else:
+            selected_index = 0
+    else:
+        selected_index = 0
+
+    row = Adw.ComboRow(
+        title=title,
+        subtitle=subtitle,
+        model=Gtk.StringList.new(device_labels or ["No paired devices"]),
+    )
+    row.set_sensitive(bool(devices))
+    row.set_selected(selected_index)
+
+    def on_device_changed(combo, _pspec):
+        selected = combo.get_selected()
+        if 0 <= selected < len(devices):
+            selected_device[0] = devices[selected]
+        else:
+            selected_device[0] = None
+
+    row.connect("notify::selected", on_device_changed)
+    return row, selected_device, devices
+
+
 # ─── Send Files Window ───────────────────────────────────────────────
 
 def show_send_files(config_dir: Path):
@@ -87,7 +132,7 @@ def show_send_files(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
-        win = Adw.ApplicationWindow(application=app, title="Send to Phone",
+        win = Adw.ApplicationWindow(application=app, title="Send files to",
                                      default_width=480, default_height=520)
 
         toolbar_view = Adw.ToolbarView()
@@ -105,6 +150,19 @@ def show_send_files(config_dir: Path):
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         stack.add_named(main_box, "content")
 
+        device_picker, selected_device, paired_devices = _create_device_picker(
+            config,
+            title="Send files to",
+            subtitle="Connected device",
+        )
+        device_group = Adw.PreferencesGroup(
+            margin_start=16,
+            margin_end=16,
+            margin_top=16,
+        )
+        device_group.add(device_picker)
+        main_box.append(device_group)
+
         # --- Drop overlay page (shown during drag) ---
         drop_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
                                halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER,
@@ -121,7 +179,7 @@ def show_send_files(config_dir: Path):
         stack.set_visible_child_name("content")
 
         # --- Drop zone (in normal content) ---
-        drop_frame = Gtk.Frame(margin_start=16, margin_end=16, margin_top=16)
+        drop_frame = Gtk.Frame(margin_start=16, margin_end=16, margin_top=12)
         drop_frame.add_css_class("view")
         main_box.append(drop_frame)
 
@@ -209,7 +267,7 @@ def show_send_files(config_dir: Path):
                 er.add_css_class("dim-label")
                 listbox.append(er)
                 send_btn.set_sensitive(False)
-                send_btn.set_label("Send to Phone")
+                send_btn.set_label("Send files")
             else:
                 total = sum(f.stat().st_size for f in file_list)
                 for f in file_list:
@@ -231,7 +289,7 @@ def show_send_files(config_dir: Path):
                     file_rows[f] = row
                     listbox.append(row)
 
-                send_btn.set_sensitive(True)
+                send_btn.set_sensitive(selected_device[0] is not None)
                 send_btn.set_label(f"Send {len(file_list)} file(s) ({format_size(total)})")
 
         # --- Bottom bar ---
@@ -247,9 +305,10 @@ def show_send_files(config_dir: Path):
         cancel_btn.set_visible(False)
         action_bar.pack_start(cancel_btn)
 
-        send_btn = Gtk.Button(label="Send to Phone")
+        send_btn = Gtk.Button(label="Send files")
         send_btn.add_css_class("suggested-action")
         send_btn.set_sensitive(False)
+        device_picker.connect("notify::selected", lambda *_: refresh_list())
 
         refresh_list()
 
@@ -288,6 +347,17 @@ def show_send_files(config_dir: Path):
         def on_send(b):
             if not file_list:
                 return
+            target = selected_device[0]
+            if target is None:
+                notify("No connected device", "Pair a device before sending files.")
+                return
+            if not target.symmetric_key_b64:
+                notify(
+                    "Send failed",
+                    "Missing pairing key for the selected device.",
+                    icon="dialog-warning",
+                )
+                return
             paths = list(file_list)
             sending[0] = True
             cancel_requested[0] = False
@@ -298,6 +368,7 @@ def show_send_files(config_dir: Path):
             cancel_btn.set_sensitive(True)
             cancel_btn.set_label("Cancel")
             browse_btn.set_sensitive(False)
+            device_picker.set_sensitive(False)
             list_label.set_text("Sending...")
 
             # Disable remove buttons
@@ -307,13 +378,13 @@ def show_send_files(config_dir: Path):
             def do_send():
                 conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
                 api = ApiClient(conn, crypto)
-                paired = config.get_first_paired_device()
-                if not paired:
-                    GLib.idle_add(finish_sending, 0, len(paths))
-                    return
 
-                target_id, target_info = paired
-                symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+                target_id = target.device_id
+                symmetric_key = base64.b64decode(target.symmetric_key_b64)
+                try:
+                    config.active_device_id = target_id
+                except Exception:
+                    pass
                 sent = 0
                 total = len(paths)
 
@@ -357,6 +428,7 @@ def show_send_files(config_dir: Path):
                                             content_path=str(fp), transfer_id=transfer_id,
                                             status=TransferStatus.FAILED,
                                             chunks_downloaded=0, chunks_total=total_chunks,
+                                            peer_device_id=target_id,
                                             failure_reason="too_large")
                             else:
                                 history.update(transfer_id,
@@ -372,7 +444,8 @@ def show_send_files(config_dir: Path):
                                             status=(TransferStatus.WAITING
                                                     if uploaded == -1
                                                     else TransferStatus.UPLOADING),
-                                            chunks_downloaded=0, chunks_total=total_chunks)
+                                            chunks_downloaded=0, chunks_total=total_chunks,
+                                            peer_device_id=target_id)
                             elif uploaded == -1:
                                 history.update(transfer_id,
                                                status=TransferStatus.WAITING)
@@ -493,6 +566,7 @@ def show_send_files(config_dir: Path):
             send_btn.set_visible(True)
             clear_btn.set_visible(True)
             browse_btn.set_sensitive(True)
+            device_picker.set_sensitive(bool(paired_devices))
 
             if file_list:
                 # Some files remain (cancelled or failed)
@@ -502,7 +576,7 @@ def show_send_files(config_dir: Path):
             else:
                 list_label.set_text(f"Done — {sent}/{total} sent")
                 send_btn.set_sensitive(False)
-                send_btn.set_label("Send to Phone")
+                send_btn.set_label("Send files")
                 refresh_list()
 
         def on_cancel(b):
@@ -584,11 +658,22 @@ def show_settings(config_dir: Path):
     conn = ConnectionManager(config.server_url, config.device_id or "", config.auth_token or "")
 
     # Fetch stats from server
+    from .devices import (
+        ConnectedDeviceRegistry,
+        DeviceRegistryError,
+        DuplicateDeviceNameError,
+    )
+    from .file_manager_integration import sync_file_manager_targets
+
     stats = None
+    settings_registry = ConnectedDeviceRegistry(config)
+    settings_active_device = settings_registry.get_active_device()
     try:
         api = ApiClient(conn, crypto)
-        paired_dev = config.get_first_paired_device()
-        stats = api.get_stats(paired_with=paired_dev[0] if paired_dev else None)
+        stats = api.get_stats(
+            paired_with=settings_active_device.device_id
+            if settings_active_device else None,
+        )
     except Exception:
         pass
 
@@ -928,73 +1013,226 @@ def show_settings(config_dir: Path):
         device_group.add(Adw.ActionRow(title="Name", subtitle=config.device_name))
         device_group.add(Adw.ActionRow(title="Device ID", subtitle=crypto.get_device_id()[:24] + "..."))
 
-        # Paired device
-        pair_group = Adw.PreferencesGroup(title="Paired Device")
+        # Connected devices list
+        pair_group = Adw.PreferencesGroup(title="Connected Devices")
         content.append(pair_group)
 
-        paired = config.get_first_paired_device()
-        if paired:
-            device_id, info = paired
-            name = info.get("name", "Unknown")
+        paired_devices = settings_registry.list_devices()
+        active_device_id = (
+            settings_active_device.device_id if settings_active_device else None
+        )
 
-            pair_group.add(Adw.ActionRow(title="Name", subtitle=name))
-            pair_group.add(Adw.ActionRow(title="Device ID", subtitle=device_id[:24] + "..."))
+        def open_rename_dialog(target_id: str, current_name: str):
+            dialog = Adw.MessageDialog(
+                transient_for=win,
+                heading="Rename connected device",
+                body="Choose a unique name for this connected device.",
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("save", "Save")
+            dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
 
-            unpair_btn = Gtk.Button(label="Unpair", valign=Gtk.Align.CENTER,
-                                    margin_top=8, halign=Gtk.Align.START)
-            unpair_btn.add_css_class("destructive-action")
+            entry_group = Adw.PreferencesGroup()
+            name_entry = Adw.EntryRow(title="Name")
+            name_entry.set_text(current_name)
+            entry_group.add(name_entry)
 
-            def on_unpair(btn):
-                dialog = Adw.MessageDialog(
-                    transient_for=win,
-                    heading="Unpair?",
-                    body=f"Disconnect from \"{name}\"?\nYou will need to pair again.",
-                )
-                dialog.add_response("cancel", "Cancel")
-                dialog.add_response("unpair", "Unpair")
-                dialog.set_response_appearance("unpair", Adw.ResponseAppearance.DESTRUCTIVE)
+            error_label = Gtk.Label(label="")
+            error_label.add_css_class("error")
+            error_label.set_wrap(True)
+            error_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            error_label.set_xalign(0)
+            error_label.set_visible(False)
+            error_label.set_margin_top(8)
 
-                def on_response(dlg, response):
-                    if response == "unpair":
-                        # Notify the other side
+            extra = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            extra.append(entry_group)
+            extra.append(error_label)
+            dialog.set_extra_child(extra)
+
+            def on_response(dlg, response):
+                if response != "save":
+                    dlg.close()
+                    return
+                try:
+                    settings_registry.rename(target_id, name_entry.get_text())
+                except DuplicateDeviceNameError:
+                    error_label.set_label(
+                        "This name is already used by another device."
+                    )
+                    error_label.set_visible(True)
+                    return
+                except DeviceRegistryError:
+                    error_label.set_label("Name cannot be empty.")
+                    error_label.set_visible(True)
+                    return
+                try:
+                    sync_file_manager_targets(config)
+                except Exception:
+                    pass
+                dlg.close()
+                win.close()
+
+            dialog.connect("response", on_response)
+            # Block default close-on-response so validation can keep the
+            # dialog open when the user enters a duplicate or empty name.
+            dialog.set_close_response("cancel")
+            dialog.present()
+
+        def open_unpair_dialog(target_id: str, target_name: str, target_info: dict):
+            dialog = Adw.MessageDialog(
+                transient_for=win,
+                heading="Unpair?",
+                body=f"Disconnect from \"{target_name}\"?\nYou will need to pair again.",
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("unpair", "Unpair")
+            dialog.set_response_appearance("unpair", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def on_response(dlg, response):
+                if response != "unpair":
+                    return
+                # Notify only this specific device. The remote side
+                # mirrors the unpair via .fn.unpair so both sides stay
+                # in sync; if the notify hops fail (offline, auth lost,
+                # quota), log loudly — the local pairing is still
+                # removed below, leaving the remote believing it's
+                # paired until they hit a 403 of their own.
+                import logging
+                import os as _os
+                import tempfile
+                log = logging.getLogger("desktop-connector.settings")
+                tmp_path: Path | None = None
+                try:
+                    sym_key = base64.b64decode(target_info["symmetric_key_b64"])
+                    fd, tmp_name = tempfile.mkstemp(suffix="_.fn.unpair")
+                    tmp_path = Path(tmp_name)
+                    with _os.fdopen(fd, "wb") as fh:
+                        fh.write(b"unpair")
+                    conn_tmp = ConnectionManager(
+                        config.server_url,
+                        config.device_id or "",
+                        config.auth_token or "",
+                    )
+                    api_tmp = ApiClient(conn_tmp, crypto)
+                    api_tmp.send_file(
+                        tmp_path, target_id, sym_key, filename_override=".fn.unpair"
+                    )
+                except Exception:
+                    log.warning(
+                        "pairing.unpair.notify_failed peer=%s",
+                        target_id[:12],
+                        exc_info=True,
+                    )
+                finally:
+                    if tmp_path is not None:
                         try:
-                            import tempfile
-                            sym_key = base64.b64decode(info["symmetric_key_b64"])
-                            tmp = Path(tempfile.mktemp(suffix="_.fn.unpair"))
-                            tmp.write_bytes(b"unpair")
-                            conn_tmp = ConnectionManager(config.server_url, config.device_id or "", config.auth_token or "")
-                            api_tmp = ApiClient(conn_tmp, crypto)
-                            api_tmp.send_file(tmp, device_id, sym_key, filename_override=".fn.unpair")
-                            tmp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        # Remove local pairing — go through the Config
-                        # method so the secret store entry (libsecret
-                        # keyring or JSON fallback field) is cleaned up
-                        # alongside the JSON metadata. Direct dict
-                        # manipulation here would either leak keyring
-                        # entries or re-introduce hydrated plaintext.
-                        config.remove_paired_device(device_id)
-                        win.close()
+                            tmp_path.unlink(missing_ok=True)
+                        except OSError:
+                            log.debug(
+                                "pairing.unpair.tmp_cleanup_failed",
+                                exc_info=True,
+                            )
+                # Remove only this pairing through Config so the keyring
+                # entry is cleaned up alongside JSON metadata. The
+                # registry helper also clears active_device_id when it
+                # was pointing at the unpaired device.
+                settings_registry.unpair(target_id)
+                try:
+                    sync_file_manager_targets(config)
+                except Exception:
+                    pass
+                win.close()
 
-                dialog.connect("response", on_response)
-                dialog.present()
+            dialog.connect("response", on_response)
+            dialog.present()
 
-            unpair_btn.connect("clicked", on_unpair)
-            pair_group.add(unpair_btn)
+        if paired_devices:
+            for device in paired_devices:
+                target_id = device.device_id
+                target_name = device.name or "Unknown"
+                if target_id == active_device_id:
+                    subtitle = f"{target_id[:24]}…  ·  Active"
+                else:
+                    subtitle = f"{target_id[:24]}…"
+                row = Adw.ActionRow(title=target_name, subtitle=subtitle)
+
+                rename_btn = Gtk.Button(
+                    label="Rename", valign=Gtk.Align.CENTER,
+                )
+                rename_btn.add_css_class("flat")
+                rename_btn.connect(
+                    "clicked",
+                    lambda _b, tid=target_id, nm=target_name: open_rename_dialog(tid, nm),
+                )
+                row.add_suffix(rename_btn)
+
+                target_info = config.paired_devices.get(target_id, {})
+                unpair_btn = Gtk.Button(
+                    label="Unpair", valign=Gtk.Align.CENTER,
+                )
+                unpair_btn.add_css_class("destructive-action")
+                unpair_btn.connect(
+                    "clicked",
+                    lambda _b, tid=target_id, nm=target_name, info=target_info:
+                        open_unpair_dialog(tid, nm, info),
+                )
+                row.add_suffix(unpair_btn)
+
+                pair_group.add(row)
         else:
-            pair_group.add(Adw.ActionRow(title="Not paired", subtitle="Use Pair... from the tray menu"))
+            pair_group.add(Adw.ActionRow(
+                title="No connected devices",
+                subtitle="Use Pair… from the tray menu",
+            ))
 
-        # Connection statistics (only when paired)
-        if stats and paired:
+        # Add-pairing entry-point. Mirrors Android's "Pair with another
+        # desktop" row in PairingsCard. Spawning the pairing window
+        # from here works whether or not the user already has a pair.
+        add_pair_row = Adw.ActionRow(
+            title="Pair another device",
+            subtitle="Open the QR code window to add a new connected device",
+            activatable=True,
+        )
+        add_pair_icon = Gtk.Image.new_from_icon_name("list-add-symbolic")
+        add_pair_row.add_prefix(add_pair_icon)
+        add_pair_row.add_suffix(
+            Gtk.Image.new_from_icon_name("go-next-symbolic"),
+        )
+
+        def on_add_pair(_row):
+            import os as _os
+            import subprocess as _subprocess
+            import sys as _sys
+            appimage = _os.environ.get("APPIMAGE")
+            cmd = (
+                [appimage, "--gtk-window=pairing",
+                 f"--config-dir={config.config_dir}"]
+                if appimage else
+                [_sys.executable, "-m", "src.windows", "pairing",
+                 f"--config-dir={config.config_dir}"]
+            )
+            cwd = (None if appimage
+                   else str(Path(__file__).resolve().parent.parent))
+            _subprocess.Popen(cmd, cwd=cwd)
+            win.close()
+
+        add_pair_row.connect("activated", on_add_pair)
+        pair_group.add(add_pair_row)
+
+        # Connection statistics (only when at least one pair + stats fetched)
+        if stats and paired_devices:
             stats_group = Adw.PreferencesGroup(title="Connection Statistics")
             content.append(stats_group)
 
-            paired_devs = stats.get("paired_devices", [])
-            # Match by device ID (may have multiple pairings)
-            target_id = paired[0]
-            pd = next((d for d in paired_devs if d.get("device_id") == target_id), paired_devs[0] if paired_devs else None)
-            if pd:
+            paired_devs_stats = stats.get("paired_devices", [])
+            stats_by_id = {
+                d.get("device_id"): d for d in paired_devs_stats if d.get("device_id")
+            }
+            for device in paired_devices:
+                pd = stats_by_id.get(device.device_id)
+                if not pd:
+                    continue
                 online = pd.get("online", False)
                 last_seen = pd.get("last_seen", 0)
                 if online:
@@ -1011,22 +1249,23 @@ def show_settings(config_dir: Path):
                         status_str = f"Last seen {time.strftime('%b %d, %H:%M', time.localtime(last_seen))}"
                 else:
                     status_str = "Offline"
+                pair_label = device.name or device.device_id[:12]
                 stats_group.add(Adw.ActionRow(
-                    title="Paired device status",
+                    title=f"{pair_label} — status",
                     subtitle=status_str,
                 ))
                 stats_group.add(Adw.ActionRow(
-                    title="Total transfers",
+                    title=f"{pair_label} — transfers",
                     subtitle=str(pd.get("transfers", 0)),
                 ))
                 stats_group.add(Adw.ActionRow(
-                    title="Data transferred",
+                    title=f"{pair_label} — data",
                     subtitle=_format_bytes(pd.get("bytes_transferred", 0)),
                 ))
                 paired_since = pd.get("paired_since", 0)
                 if paired_since:
                     stats_group.add(Adw.ActionRow(
-                        title="Paired since",
+                        title=f"{pair_label} — paired since",
                         subtitle=time.strftime("%b %d, %Y", time.localtime(paired_since)),
                     ))
 
@@ -1445,20 +1684,33 @@ def show_history(config_dir: Path):
         header.pack_start(folder_btn)
 
         clear_all_btn = Gtk.Button.new_from_icon_name("edit-clear-all-symbolic")
-        clear_all_btn.set_tooltip_text("Clear all history")
+        clear_all_btn.set_tooltip_text("Clear visible history")
         clear_all_btn.add_css_class("brand-action-destructive")
         def on_clear_all(b):
+            device = selected_device[0]
+            if device is None:
+                show_toast(win, "No connected device selected")
+                return
+            device_name = _connected_device_label(device)
             dialog = Adw.MessageDialog(
                 transient_for=win,
-                heading="Clear history?",
-                body="This will remove all transfer history entries.",
+                heading=f"Clear history for {device_name}?",
+                body=(
+                    f"This will remove visible transfer history entries "
+                    f"for {device_name}."
+                ),
             )
             dialog.add_response("cancel", "Cancel")
-            dialog.add_response("clear", "Clear All")
+            dialog.add_response("clear", "Clear")
             dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
             def on_response(dlg, response):
                 if response == "clear":
-                    history.clear()
+                    history.clear_for_peer(
+                        device.device_id,
+                        fallback_device_id=device.device_id,
+                    )
+                    _reset_history_view()
+                    build_list()
             dialog.connect("response", on_response)
             dialog.present()
         clear_all_btn.connect("clicked", on_clear_all)
@@ -1473,8 +1725,21 @@ def show_history(config_dir: Path):
         clamp = Adw.Clamp(maximum_size=9999, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         scroll.set_child(clamp)
 
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        clamp.set_child(content_box)
+
+        device_picker, selected_device, paired_devices = _create_device_picker(
+            config,
+            title="History for",
+            subtitle="Connected device",
+        )
+        device_group = Adw.PreferencesGroup()
+        device_group.add(device_picker)
+        content_box.append(device_group)
+        clear_all_btn.set_sensitive(selected_device[0] is not None)
+
         list_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        clamp.set_child(list_container)
+        content_box.append(list_container)
 
         has_active = [False]
         # row_widgets[transfer_id] = (box_widget, row, progress_bar_or_None)
@@ -1483,6 +1748,25 @@ def show_history(config_dir: Path):
         structural_sig = [None]  # (transfer_id, ...) — triggers structural diff
         empty_label = [None]  # holds the "No transfers yet" label when shown
         progress_sig = [None]    # mutable fields — triggers in-place update
+
+        def _selected_device_id() -> str:
+            device = selected_device[0]
+            return device.device_id if device is not None else ""
+
+        def _selected_device_name() -> str:
+            device = selected_device[0]
+            if device is None:
+                return "connected devices"
+            return _connected_device_label(device)
+
+        def _empty_history_text() -> str:
+            if selected_device[0] is None:
+                return "No connected devices"
+            return f"No transfers with {_selected_device_name()}"
+
+        def _reset_history_view() -> None:
+            structural_sig[0] = None
+            progress_sig[0] = None
 
         def _compute_status(item):
             item_status = item.get("status", "complete")
@@ -1958,15 +2242,29 @@ def show_history(config_dir: Path):
         def build_list():
             _scrub_zombie_waiting()
             history._items = history._load()
-            items = history.items
+            selected_id = _selected_device_id()
+            items = (
+                history.items_for_peer(
+                    selected_id,
+                    fallback_device_id=selected_id,
+                )
+                if selected_id else []
+            )
 
             # Structural sig: item identity and base state
-            s_sig = tuple((_row_key(i), i.get("direction")) for i in items)
+            s_sig = (
+                selected_id,
+                tuple((_row_key(i), i.get("direction")) for i in items),
+            )
             # Progress sig: all mutable fields
-            p_sig = tuple(
-                (_row_key(i), i.get("status"), i.get("delivered"),
-                 i.get("chunks_downloaded", 0), i.get("recipient_chunks_downloaded", 0))
-                for i in items
+            p_sig = (
+                selected_id,
+                tuple(
+                    (_row_key(i), i.get("status"), i.get("delivered"),
+                     i.get("chunks_downloaded", 0),
+                     i.get("recipient_chunks_downloaded", 0))
+                    for i in items
+                ),
             )
 
             if p_sig == progress_sig[0]:
@@ -2051,14 +2349,17 @@ def show_history(config_dir: Path):
                     all_widgets.insert(min(idx, len(all_widgets)), card)
 
                 # Empty-state label if nothing remains.
-                if not items and empty_label[0] is None:
-                    empty = Gtk.Label(label="No transfers yet")
-                    empty.add_css_class("dim-label")
-                    empty.set_margin_top(48)
-                    empty.set_margin_bottom(48)
-                    list_container.append(empty)
-                    all_widgets.append(empty)
-                    empty_label[0] = empty
+                if not items:
+                    if empty_label[0] is None:
+                        empty = Gtk.Label(label=_empty_history_text())
+                        empty.add_css_class("dim-label")
+                        empty.set_margin_top(48)
+                        empty.set_margin_bottom(48)
+                        list_container.append(empty)
+                        all_widgets.append(empty)
+                        empty_label[0] = empty
+                    else:
+                        empty_label[0].set_text(_empty_history_text())
 
             # In-place update on every tick — refresh subtitles and
             # progress bars for rows that existed before AND for rows we
@@ -2072,6 +2373,13 @@ def show_history(config_dir: Path):
                     row_widgets[tid] = (box, row, new_pbar)
 
             return True
+
+        def on_history_device_changed(combo, _pspec):
+            clear_all_btn.set_sensitive(selected_device[0] is not None)
+            _reset_history_view()
+            build_list()
+
+        device_picker.connect("notify::selected", on_history_device_changed)
 
         build_list()
 
@@ -2097,9 +2405,39 @@ def show_pairing(config_dir: Path):
     from .crypto import KeyManager
     from .connection import ConnectionManager
     from .api_client import ApiClient
+    from .devices import (
+        ConnectedDeviceRegistry,
+        DeviceRegistryError,
+        DuplicateDeviceNameError,
+    )
+    from .file_manager_integration import sync_file_manager_targets
     from .pairing import generate_qr_data, generate_qr_image
+    from .pairing_key import (
+        AlreadyPairedError,
+        JoinRequestError,
+        PairingHandshake,
+        PairingKeyError,
+        PairingKeyParseError,
+        PairingKeySchemaError,
+        RelayMismatchError,
+        SelfPairError,
+        begin_join,
+        build_local_key,
+        complete_join,
+        decode as decode_pairing_key,
+        default_filename,
+        encode as encode_pairing_key,
+        validate_for_join,
+    )
+    # windows.py runs as a GTK4 subprocess — Linux-scoped by construction,
+    # so instantiate the Linux backend directly.
+    from .backends.linux.dialog_backend import LinuxDialogBackend
 
     import io
+    import logging
+    import os as _os
+
+    log = logging.getLogger("desktop-connector.pairing-key")
 
     config = Config(config_dir)
     # H.7: pass the same store Config picked so the private key
@@ -2109,6 +2447,7 @@ def show_pairing(config_dir: Path):
     crypto = KeyManager(config_dir, secret_store=config.secret_store)
     conn = ConnectionManager(config.server_url, config.device_id or "", config.auth_token or "")
     api = ApiClient(conn, crypto)
+    dialogs = LinuxDialogBackend()
 
     qr_data = generate_qr_data(config, crypto)
     qr_pil = generate_qr_image(qr_data)
@@ -2119,34 +2458,51 @@ def show_pairing(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
-        win = Adw.ApplicationWindow(application=app, title="Pair with Phone",
-                                     default_width=400, default_height=560)
+        win = Adw.ApplicationWindow(application=app, title="Pair with Device",
+                                     default_width=460, default_height=640)
 
         toolbar_view = Adw.ToolbarView()
-        win.set_content(toolbar_view)
+        toast_overlay = Adw.ToastOverlay()
+        toast_overlay.set_child(toolbar_view)
+        win.set_content(toast_overlay)
+
         header = Adw.HeaderBar()
         toolbar_view.add_top_bar(header)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
-                      margin_top=16, margin_bottom=24, margin_start=24, margin_end=24,
-                      halign=Gtk.Align.CENTER)
-        toolbar_view.set_content(box)
+        stack = Gtk.Stack()
+        stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        stack.set_transition_duration(200)
+        toolbar_view.set_content(stack)
 
-        # Title
-        title = Gtk.Label(label="Scan this QR code with your phone")
+        # ── Shared state across pages ───────────────────────────
+        # role tracks which side of the pair we're on at the
+        # naming step. "inviter" means a phone scanned our QR (or a
+        # joiner sent us their pairing key); "joiner" means we
+        # entered/imported someone else's pairing key.
+        role = ["inviter"]
+        device_info = [None]      # inviter side: dict from poll_pairing
+        derived_key = [None]      # inviter side: bytes
+        joiner_handshake: list = [None]  # joiner side: PairingHandshake
+
+        # ── QR + verification page (phone pairing, default) ─────
+        qr_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                         margin_top=16, margin_bottom=24, margin_start=24, margin_end=24,
+                         halign=Gtk.Align.CENTER)
+        stack.add_named(qr_box, "qr")
+
+        title = Gtk.Label(label="Scan this QR code with your device")
         title.add_css_class("title-3")
-        box.append(title)
+        qr_box.append(title)
 
-        # Server info
         server_label = Gtk.Label(label=server_url)
         server_label.add_css_class("dim-label")
         server_label.add_css_class("caption")
-        box.append(server_label)
+        qr_box.append(server_label)
 
         id_label = Gtk.Label(label=f"Device ID: {device_id[:16]}...")
         id_label.add_css_class("dim-label")
         id_label.add_css_class("caption")
-        box.append(id_label)
+        qr_box.append(id_label)
 
         # QR code image
         buf = io.BytesIO()
@@ -2158,69 +2514,606 @@ def show_pairing(config_dir: Path):
         pixbuf = loader.get_pixbuf()
         texture = Gdk.Texture.new_for_pixbuf(pixbuf)
         qr_image = Gtk.Picture.new_for_paintable(texture)
-        qr_image.set_size_request(280, 280)
+        qr_image.set_size_request(260, 260)
         qr_image.set_content_fit(Gtk.ContentFit.CONTAIN)
-        box.append(qr_image)
+        qr_box.append(qr_image)
 
-        # Status
-        status_label = Gtk.Label(label="Waiting for phone to scan...")
+        status_label = Gtk.Label(label="Waiting for device to scan...")
         status_label.add_css_class("body")
-        box.append(status_label)
+        qr_box.append(status_label)
 
-        # Verification code
         code_label = Gtk.Label(label="")
         code_label.add_css_class("title-1")
-        box.append(code_label)
+        qr_box.append(code_label)
 
-        # Buttons
-        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
-                          halign=Gtk.Align.CENTER)
-        box.append(btn_box)
+        qr_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                             halign=Gtk.Align.CENTER)
+        qr_box.append(qr_btn_box)
 
-        cancel_btn = Gtk.Button(label="Cancel")
-        cancel_btn.connect("clicked", lambda b: win.close())
-        btn_box.append(cancel_btn)
+        qr_cancel_btn = Gtk.Button(label="Cancel")
+        qr_cancel_btn.connect("clicked", lambda b: win.close())
+        qr_btn_box.append(qr_cancel_btn)
 
         confirm_btn = Gtk.Button(label="Confirm Pairing")
         confirm_btn.add_css_class("suggested-action")
         confirm_btn.set_sensitive(False)
-        btn_box.append(confirm_btn)
+        qr_btn_box.append(confirm_btn)
 
-        phone_info = [None]
+        # Mode-switch link — opens the desktop-mode page.
+        pair_desktop_btn = Gtk.Button(label="Pair desktop instead")
+        pair_desktop_btn.add_css_class("flat")
+        pair_desktop_btn.set_halign(Gtk.Align.CENTER)
+        pair_desktop_btn.connect(
+            "clicked", lambda _b: stack.set_visible_child_name("desktop"),
+        )
+        qr_box.append(pair_desktop_btn)
 
-        def on_confirm(b):
-            info = phone_info[0]
-            if info:
-                import base64
-                sym_key = crypto.derive_shared_key(info["phone_pubkey"])
+        # ── Desktop-mode hub ───────────────────────────────────
+        desktop_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
+                              margin_top=16, margin_bottom=16, margin_start=24, margin_end=24)
+        stack.add_named(desktop_box, "desktop")
+
+        desktop_top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                  spacing=8, halign=Gtk.Align.START)
+        desktop_box.append(desktop_top_row)
+
+        pair_phone_btn = Gtk.Button(label="Pair phone instead")
+        pair_phone_btn.add_css_class("flat")
+        pair_phone_btn.connect(
+            "clicked", lambda _b: stack.set_visible_child_name("qr"),
+        )
+        desktop_top_row.append(pair_phone_btn)
+
+        desktop_title = Gtk.Label(label="Pair with another desktop", xalign=0)
+        desktop_title.add_css_class("title-3")
+        desktop_box.append(desktop_title)
+
+        desktop_subtitle = Gtk.Label(
+            label=(
+                "Exchange a pairing key with the other desktop through any "
+                "channel you trust — copy/paste through chat, or save to a "
+                "file and transfer it. The verification code on both screens "
+                "must match before either side confirms."
+            ),
+            xalign=0, wrap=True,
+        )
+        desktop_subtitle.add_css_class("dim-label")
+        desktop_subtitle.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        desktop_box.append(desktop_subtitle)
+
+        # Group 1 — Share your pairing key (inviter side)
+        share_group = Adw.PreferencesGroup(title="Share your pairing key")
+        desktop_box.append(share_group)
+
+        show_key_row = Adw.ActionRow(
+            title="Show pairing key",
+            subtitle="Display the key as text to copy and send",
+            activatable=True,
+        )
+        show_key_row.add_suffix(
+            Gtk.Image.new_from_icon_name("go-next-symbolic"),
+        )
+        share_group.add(show_key_row)
+
+        export_key_row = Adw.ActionRow(
+            title="Export pairing key",
+            subtitle=f"Save as a {default_filename(build_local_key(config, crypto))[-7:]} file",
+            activatable=True,
+        )
+        export_key_row.add_suffix(
+            Gtk.Image.new_from_icon_name("go-next-symbolic"),
+        )
+        share_group.add(export_key_row)
+
+        # Group 2 — Use someone else's pairing key (joiner side)
+        join_group = Adw.PreferencesGroup(
+            title="Use someone else's pairing key",
+        )
+        desktop_box.append(join_group)
+
+        enter_key_row = Adw.ActionRow(
+            title="Enter pairing key",
+            subtitle="Paste the key text from the other desktop",
+            activatable=True,
+        )
+        enter_key_row.add_suffix(
+            Gtk.Image.new_from_icon_name("go-next-symbolic"),
+        )
+        join_group.add(enter_key_row)
+
+        import_key_row = Adw.ActionRow(
+            title="Import pairing key",
+            subtitle="Open a .dcpair file from the other desktop",
+            activatable=True,
+        )
+        import_key_row.add_suffix(
+            Gtk.Image.new_from_icon_name("go-next-symbolic"),
+        )
+        join_group.add(import_key_row)
+
+        # Live status row at the bottom of the desktop hub. Updated
+        # by the same poll loop that drives the QR page.
+        desktop_status = Gtk.Label(
+            label="Waiting for an incoming pair request…",
+            xalign=0,
+        )
+        desktop_status.add_css_class("dim-label")
+        desktop_box.append(desktop_status)
+
+        # ── Joiner verification page ───────────────────────────
+        join_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
+                           margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+                           halign=Gtk.Align.CENTER)
+        stack.add_named(join_box, "join")
+
+        join_title = Gtk.Label(label="Verify pairing")
+        join_title.add_css_class("title-3")
+        join_box.append(join_title)
+
+        join_subtitle = Gtk.Label(
+            label=(
+                "Confirm this code matches the verification code shown on "
+                "the other desktop's pairing window before clicking Confirm."
+            ),
+            xalign=0, wrap=True,
+        )
+        join_subtitle.add_css_class("dim-label")
+        join_subtitle.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        join_box.append(join_subtitle)
+
+        join_status = Gtk.Label(label="", xalign=0)
+        join_status.add_css_class("body")
+        join_box.append(join_status)
+
+        join_code = Gtk.Label(label="")
+        join_code.add_css_class("title-1")
+        join_box.append(join_code)
+
+        join_help = Gtk.Label(
+            label=(
+                "If the other desktop never confirms, the pair won't take "
+                "effect — try opening its pairing window and trying again."
+            ),
+            xalign=0, wrap=True,
+        )
+        join_help.add_css_class("dim-label")
+        join_help.add_css_class("caption")
+        join_help.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        join_box.append(join_help)
+
+        join_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                               halign=Gtk.Align.CENTER, margin_top=8)
+        join_box.append(join_btn_box)
+
+        join_cancel_btn = Gtk.Button(label="Cancel")
+        join_cancel_btn.connect(
+            "clicked",
+            lambda _b: stack.set_visible_child_name("desktop"),
+        )
+        join_btn_box.append(join_cancel_btn)
+
+        join_confirm_btn = Gtk.Button(label="Confirm Pairing")
+        join_confirm_btn.add_css_class("suggested-action")
+        join_btn_box.append(join_confirm_btn)
+
+        # ── Naming page (shared) ────────────────────────────────
+        naming_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12,
+                             margin_top=24, margin_bottom=24, margin_start=24, margin_end=24)
+        stack.add_named(naming_box, "naming")
+
+        naming_title = Gtk.Label(label="Name this device")
+        naming_title.add_css_class("title-3")
+        naming_title.set_xalign(0)
+        naming_box.append(naming_title)
+
+        naming_subtitle = Gtk.Label(
+            label="Choose how this connected device appears in lists, history, and file-manager send targets."
+        )
+        naming_subtitle.add_css_class("dim-label")
+        naming_subtitle.add_css_class("body")
+        naming_subtitle.set_wrap(True)
+        naming_subtitle.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        naming_subtitle.set_xalign(0)
+        naming_box.append(naming_subtitle)
+
+        name_group = Adw.PreferencesGroup()
+        naming_box.append(name_group)
+
+        name_row = Adw.EntryRow(title="Name")
+        name_group.add(name_row)
+
+        naming_error = Gtk.Label(label="")
+        naming_error.add_css_class("error")
+        naming_error.set_wrap(True)
+        naming_error.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        naming_error.set_xalign(0)
+        naming_error.set_visible(False)
+        naming_box.append(naming_error)
+
+        naming_btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                                 halign=Gtk.Align.END, margin_top=8)
+        naming_box.append(naming_btn_box)
+
+        naming_cancel_btn = Gtk.Button(label="Cancel")
+        naming_cancel_btn.connect("clicked", lambda b: win.close())
+        naming_btn_box.append(naming_cancel_btn)
+
+        save_btn = Gtk.Button(label="Save")
+        save_btn.add_css_class("suggested-action")
+        naming_btn_box.append(save_btn)
+
+        stack.set_visible_child_name("qr")
+
+        # ── Inviter side: Confirm Pairing on the QR page ───────
+        def on_confirm_inviter(_b):
+            if not device_info[0]:
+                return
+            role[0] = "inviter"
+            registry = ConnectedDeviceRegistry(config)
+            name_row.set_text(registry.next_default_name())
+            naming_error.set_visible(False)
+            stack.set_visible_child_name("naming")
+            name_row.grab_focus()
+
+        confirm_btn.connect("clicked", on_confirm_inviter)
+
+        # ── Joiner side: Confirm Pairing on the join page ──────
+        def on_confirm_joiner(_b):
+            if not joiner_handshake[0]:
+                return
+            role[0] = "joiner"
+            registry = ConnectedDeviceRegistry(config)
+            name_row.set_text(
+                joiner_handshake[0].key.name
+                or registry.next_default_name(),
+            )
+            naming_error.set_visible(False)
+            stack.set_visible_child_name("naming")
+            name_row.grab_focus()
+
+        join_confirm_btn.connect("clicked", on_confirm_joiner)
+
+        # ── Naming page save handler (branches on role) ─────────
+        def show_naming_error(message: str):
+            naming_error.set_label(message)
+            naming_error.set_visible(True)
+
+        def on_save(_b):
+            registry = ConnectedDeviceRegistry(config)
+            try:
+                normalized = registry.validate_unique_name(name_row.get_text())
+            except DuplicateDeviceNameError:
+                show_naming_error("This name is already used by another device.")
+                return
+            except DeviceRegistryError:
+                show_naming_error("Name cannot be empty.")
+                return
+
+            if role[0] == "joiner":
+                handshake = joiner_handshake[0]
+                if handshake is None:
+                    show_naming_error("Pairing handshake is not ready.")
+                    return
+                try:
+                    complete_join(
+                        handshake,
+                        config=config,
+                        name=normalized,
+                        on_synced=lambda: sync_file_manager_targets(config),
+                    )
+                except Exception as exc:
+                    log.exception("pairing.key.complete_join_failed")
+                    show_naming_error(f"Could not save pairing: {exc}")
+                    return
+            else:
+                info = device_info[0]
+                if info is None:
+                    show_naming_error("Pairing request is no longer valid.")
+                    return
+                sym_key = derived_key[0]
+                if sym_key is None:
+                    sym_key = crypto.derive_shared_key(info["phone_pubkey"])
                 config.add_paired_device(
                     device_id=info["phone_id"],
                     pubkey=info["phone_pubkey"],
                     symmetric_key_b64=base64.b64encode(sym_key).decode(),
-                    name=f"Phone-{info['phone_id'][:8]}",
+                    name=normalized,
                 )
                 api.confirm_pairing(info["phone_id"])
-                status_label.set_text("Paired!")
-                GLib.timeout_add(1000, win.close)
+                try:
+                    registry.mark_active(info["phone_id"], reason="paired")
+                except DeviceRegistryError:
+                    pass
+                try:
+                    sync_file_manager_targets(config)
+                except Exception:
+                    pass
 
-        confirm_btn.connect("clicked", on_confirm)
+            naming_title.set_label("Paired!")
+            save_btn.set_sensitive(False)
+            naming_cancel_btn.set_sensitive(False)
+            GLib.timeout_add(800, win.close)
 
+        save_btn.connect("clicked", on_save)
+
+        # ── Inviter poll loop (also serves desktop hub) ─────────
         def poll_pairing():
             if not win.is_visible():
                 return False
             requests_list = api.poll_pairing()
-            if requests_list:
-                req = requests_list[0]
-                phone_info[0] = req
+            paired_ids = set(config.paired_devices.keys()) if requests_list else set()
+            for req in requests_list:
+                if req["phone_id"] in paired_ids:
+                    log.info(
+                        "pairing.request.ignored_already_paired peer=%s",
+                        req["phone_id"][:12],
+                    )
+                    continue
+                device_info[0] = req
                 sym_key = crypto.derive_shared_key(req["phone_pubkey"])
+                derived_key[0] = sym_key
                 code = KeyManager.get_verification_code(sym_key)
-                status_label.set_text(f"Phone connected: {req['phone_id'][:12]}...  Verify code:")
+                msg = f"Device connected: {req['phone_id'][:12]}...  Verify code:"
+                status_label.set_text(msg)
                 code_label.set_text(code)
                 confirm_btn.set_sensitive(True)
-                return False  # Stop polling
-            return True  # Keep polling
+                desktop_status.set_text(
+                    "Incoming pair request — review the verification code on the QR tab."
+                )
+                # Auto-switch to QR page so the user sees the verification.
+                if stack.get_visible_child_name() == "desktop":
+                    stack.set_visible_child_name("qr")
+                return False
+            return True
 
         GLib.timeout_add(2000, poll_pairing)
+
+        # ── Show pairing key dialog (string surface) ───────────
+        def on_show_pairing_key(_row):
+            key = build_local_key(config, crypto)
+            text = encode_pairing_key(key)
+            dialog = Adw.MessageDialog(
+                transient_for=win,
+                heading="Your pairing key",
+                body=(
+                    "Send this key to the other desktop through a channel "
+                    "you trust. Anyone with the key can request to pair "
+                    "with this desktop while this window is open. The "
+                    "verification code on both screens must match before "
+                    "either side confirms."
+                ),
+            )
+            extra = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            text_view = Gtk.TextView()
+            text_view.set_editable(False)
+            text_view.set_monospace(True)
+            text_view.set_wrap_mode(Gtk.WrapMode.CHAR)
+            text_view.get_buffer().set_text(text)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_min_content_height(120)
+            scroller.set_hexpand(True)
+            scroller.set_child(text_view)
+            extra.append(scroller)
+            dialog.set_extra_child(extra)
+            dialog.add_response("close", "Done")
+            dialog.add_response("copy", "Copy")
+            dialog.set_response_appearance(
+                "copy", Adw.ResponseAppearance.SUGGESTED,
+            )
+            dialog.set_default_response("copy")
+
+            def on_response(dlg, response):
+                if response == "copy":
+                    clipboard = win.get_clipboard()
+                    clipboard.set(text)
+                    toast_overlay.add_toast(
+                        Adw.Toast(title="Pairing key copied", timeout=2),
+                    )
+                dlg.close()
+
+            dialog.connect("response", on_response)
+            log.info("pairing.key.shown")
+            dialog.present()
+
+        show_key_row.connect("activated", on_show_pairing_key)
+
+        # ── Export pairing key dialog (file surface) ───────────
+        def on_export_pairing_key(_row):
+            key = build_local_key(config, crypto)
+            text = encode_pairing_key(key)
+            chosen = dialogs.save_file(
+                "Export pairing key",
+                default_filename=default_filename(key),
+                file_types=(("Pairing key", "*.dcpair"),),
+            )
+            if chosen is None:
+                return
+            try:
+                # Write atomically with restrictive perms — same bucket
+                # as identity material.
+                tmp = chosen.with_suffix(chosen.suffix + ".tmp")
+                tmp.write_text(text)
+                try:
+                    _os.chmod(tmp, 0o600)
+                except OSError:
+                    pass
+                tmp.replace(chosen)
+            except OSError as exc:
+                toast_overlay.add_toast(
+                    Adw.Toast(
+                        title=f"Could not write file: {exc}", timeout=4,
+                    ),
+                )
+                log.warning(
+                    "pairing.key.export_failed err=%s",
+                    type(exc).__name__,
+                )
+                return
+            log.info("pairing.key.exported path=%s", chosen)
+            toast_overlay.add_toast(
+                Adw.Toast(
+                    title=f"Pairing key exported to {chosen.name}", timeout=3,
+                ),
+            )
+
+        export_key_row.connect("activated", on_export_pairing_key)
+
+        # ── Joiner: present the verification page after parse+validate ──
+        def begin_joiner_session(text: str, *, surface: str) -> None:
+            try:
+                key = decode_pairing_key(text)
+            except (PairingKeyParseError, PairingKeySchemaError) as exc:
+                log.warning(
+                    "pairing.key.import_parse_failed surface=%s err=%s",
+                    surface, type(exc).__name__,
+                )
+                toast_overlay.add_toast(
+                    Adw.Toast(
+                        title=f"Pairing key is malformed: {exc}", timeout=4,
+                    ),
+                )
+                return
+            try:
+                validate_for_join(key, config=config, crypto=crypto)
+            except SelfPairError:
+                log.warning("pairing.key.import_self_pair_refused")
+                toast_overlay.add_toast(
+                    Adw.Toast(
+                        title="This pairing key is from this same desktop.",
+                        timeout=4,
+                    ),
+                )
+                return
+            except RelayMismatchError as exc:
+                # Hostnames only — full URL may carry tokens we don't
+                # want in logs.
+                from urllib.parse import urlsplit
+                local_host = urlsplit(exc.local).netloc
+                remote_host = urlsplit(exc.remote).netloc
+                log.warning(
+                    "pairing.key.import_relay_mismatched local=%s remote=%s",
+                    local_host, remote_host,
+                )
+                toast_overlay.add_toast(
+                    Adw.Toast(
+                        title=(
+                            f"Different relay servers ({remote_host}). Both "
+                            f"desktops must be configured for the same relay."
+                        ),
+                        timeout=6,
+                    ),
+                )
+                return
+            except AlreadyPairedError as exc:
+                log.warning(
+                    "pairing.key.import_already_paired_refused peer=%s",
+                    exc.device_id[:12],
+                )
+                toast_overlay.add_toast(
+                    Adw.Toast(
+                        title=(
+                            f"Already paired with \"{exc.name}\". Unpair "
+                            f"first if you want to re-pair."
+                        ),
+                        timeout=6,
+                    ),
+                )
+                return
+            except PairingKeyError as exc:
+                toast_overlay.add_toast(
+                    Adw.Toast(title=str(exc), timeout=4),
+                )
+                return
+
+            try:
+                handshake = begin_join(
+                    key, crypto=crypto,
+                    send_pairing_request=api.send_pairing_request,
+                )
+            except JoinRequestError as exc:
+                log.warning(
+                    "pairing.key.import_request_failed peer=%s",
+                    key.device_id[:12],
+                )
+                toast_overlay.add_toast(
+                    Adw.Toast(title=str(exc), timeout=6),
+                )
+                return
+
+            joiner_handshake[0] = handshake
+            log.info(
+                "pairing.request.sent_as_joiner target=%s",
+                key.device_id[:12],
+            )
+            join_status.set_text(
+                f"Pairing with {handshake.key.name} ({handshake.key.device_id[:12]}…)",
+            )
+            join_code.set_text(handshake.verification_code)
+            stack.set_visible_child_name("join")
+
+        # ── Enter pairing key dialog (string surface) ──────────
+        def on_enter_pairing_key(_row):
+            dialog = Adw.MessageDialog(
+                transient_for=win,
+                heading="Enter pairing key",
+                body=(
+                    "Paste the pairing key text the other desktop shared. "
+                    "It typically starts with `dc-pair:`."
+                ),
+            )
+            extra = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            text_view = Gtk.TextView()
+            text_view.set_monospace(True)
+            text_view.set_wrap_mode(Gtk.WrapMode.CHAR)
+            text_view.set_accepts_tab(False)
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_min_content_height(120)
+            scroller.set_hexpand(True)
+            scroller.set_child(text_view)
+            extra.append(scroller)
+            dialog.set_extra_child(extra)
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("continue", "Continue")
+            dialog.set_response_appearance(
+                "continue", Adw.ResponseAppearance.SUGGESTED,
+            )
+            dialog.set_default_response("continue")
+
+            def on_response(dlg, response):
+                if response == "continue":
+                    buf_obj = text_view.get_buffer()
+                    start = buf_obj.get_start_iter()
+                    end = buf_obj.get_end_iter()
+                    text = buf_obj.get_text(start, end, False)
+                    dlg.close()
+                    begin_joiner_session(text, surface="text")
+                else:
+                    dlg.close()
+
+            dialog.connect("response", on_response)
+            dialog.present()
+            text_view.grab_focus()
+
+        enter_key_row.connect("activated", on_enter_pairing_key)
+
+        # ── Import pairing key dialog (file surface) ───────────
+        def on_import_pairing_key(_row):
+            paths = dialogs.pick_files("Import pairing key")
+            if not paths:
+                return
+            path = paths[0]
+            try:
+                text = path.read_text()
+            except OSError as exc:
+                toast_overlay.add_toast(
+                    Adw.Toast(
+                        title=f"Could not read file: {exc}", timeout=4,
+                    ),
+                )
+                return
+            begin_joiner_session(text, surface="file")
+
+        import_key_row.connect("activated", on_import_pairing_key)
 
         apply_pointer_cursors(win)
         win.present()
@@ -2229,7 +3122,7 @@ def show_pairing(config_dir: Path):
     app.run(None)
 
 
-# ─── Find My Phone Window ───────────────────────────────────────────
+# ─── Find My Device Window ──────────────────────────────────────────
 
 def show_find_phone(config_dir: Path):
     import logging
@@ -2239,6 +3132,7 @@ def show_find_phone(config_dir: Path):
     from .crypto import KeyManager
     from .connection import ConnectionManager
     from .api_client import ApiClient
+    from .devices import ConnectedDeviceRegistry, DeviceRegistryError
     from .messaging import FasttrackAdapter, MessageType
 
     config = Config(config_dir)
@@ -2247,6 +3141,25 @@ def show_find_phone(config_dir: Path):
     # separate PEM file. Insecure-store / no-keyring deployments
     # still get the legacy PEM path as fallback.
     crypto = KeyManager(config_dir, secret_store=config.secret_store)
+
+    def decode_target_find_device_update(raw: dict, target_id: str, symmetric_key: bytes):
+        if (raw.get("sender_id") or "") != target_id:
+            return None
+        mid = raw.get("id")
+        enc_data = raw.get("encrypted_data", "")
+        try:
+            enc_bytes = base64.b64decode(enc_data)
+            plain = crypto.decrypt_blob(enc_bytes, symmetric_key)
+            resp = json.loads(plain)
+        except Exception as exc:
+            log.error("Decrypt failed: %s", exc)
+            return None
+        if not isinstance(resp, dict):
+            return None
+        msg = FasttrackAdapter.to_device_message(resp)
+        if not msg or msg.type != MessageType.FIND_PHONE_LOCATION_UPDATE:
+            return None
+        return mid, resp
 
     # Check WebKit availability
     has_webkit = False
@@ -2293,7 +3206,7 @@ function updatePos(lat,lng,acc) {
 
     def on_activate(app):
         apply_brand_css()
-        win = Adw.ApplicationWindow(application=app, title="Find my Phone",
+        win = Adw.ApplicationWindow(application=app, title="Find my Device",
                                      default_width=480, default_height=640)
 
         toolbar_view = Adw.ToolbarView()
@@ -2313,6 +3226,16 @@ function updatePos(lat,lng,acc) {
         status_label.add_css_class("title-3")
         content.append(status_label)
 
+        # Connected-device picker
+        device_picker, selected_device, paired_devices = _create_device_picker(
+            config,
+            title="Find my Device",
+            subtitle="Connected device",
+        )
+        device_group = Adw.PreferencesGroup()
+        device_group.add(device_picker)
+        content.append(device_group)
+
         # Settings group
         settings_group = Adw.PreferencesGroup(title="Settings")
         content.append(settings_group)
@@ -2320,7 +3243,7 @@ function updatePos(lat,lng,acc) {
         # Silent search toggle
         silent_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
         silent_switch.set_active(False)
-        silent_row = Adw.ActionRow(title="Silent search", subtitle="Track location without alarm (stolen phone)")
+        silent_row = Adw.ActionRow(title="Silent search", subtitle="Track location without alarm (stolen device)")
         silent_row.add_suffix(silent_switch)
         silent_row.set_activatable_widget(silent_switch)
         settings_group.add(silent_row)
@@ -2348,6 +3271,7 @@ function updatePos(lat,lng,acc) {
         start_btn = Gtk.Button(label="Start")
         start_btn.add_css_class("suggested-action")
         start_btn.add_css_class("pill")
+        start_btn.set_sensitive(selected_device[0] is not None)
         btn_box.append(start_btn)
 
         stop_btn = Gtk.Button(label="Stop")
@@ -2355,6 +3279,12 @@ function updatePos(lat,lng,acc) {
         stop_btn.add_css_class("pill")
         stop_btn.set_visible(False)
         btn_box.append(stop_btn)
+
+        def on_picker_changed(_combo, _pspec):
+            # Idle states gate Start on a selection; while locating, the
+            # picker is locked anyway so this stays a no-op.
+            start_btn.set_sensitive(selected_device[0] is not None)
+        device_picker.connect("notify::selected", on_picker_changed)
 
         # Map or fallback
         webview = [None]
@@ -2408,7 +3338,15 @@ function updatePos(lat,lng,acc) {
             status_label.set_text(status_text)
             volume_scale.set_sensitive(sliders_enabled and not silent_switch.get_active())
             silent_row.set_sensitive(sliders_enabled)
+            # Picker locks while a session is in progress so the user
+            # can't switch targets mid-locate. Re-enabling needs paired
+            # devices to exist; otherwise the empty-list picker stays
+            # insensitive.
+            device_picker.set_sensitive(sliders_enabled and bool(paired_devices))
             start_btn.set_visible(show_start)
+            start_btn.set_sensitive(
+                show_start and not show_stop and selected_device[0] is not None
+            )
             stop_btn.set_visible(show_stop)
 
         def update_location(lat, lng, accuracy):
@@ -2438,13 +3376,19 @@ function updatePos(lat,lng,acc) {
             api.fasttrack_send(target_id, encrypted_b64)
 
         def on_start(btn):
-            paired = config.get_first_paired_device()
-            if not paired:
-                toast_overlay.add_toast(Adw.Toast(title="Not paired with any device", timeout=3))
+            target = selected_device[0]
+            if target is None:
+                toast_overlay.add_toast(Adw.Toast(title="No connected device selected", timeout=3))
+                return
+            if not target.symmetric_key_b64:
+                toast_overlay.add_toast(Adw.Toast(
+                    title="Cannot locate — pairing key missing for this device",
+                    timeout=3,
+                ))
                 return
 
-            target_id, target_info = paired
-            symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+            target_id = target.device_id
+            symmetric_key = base64.b64decode(target.symmetric_key_b64)
             volume = 0 if silent_switch.get_active() else int(volume_scale.get_value())
             is_silent[0] = silent_switch.get_active()
 
@@ -2470,22 +3414,37 @@ function updatePos(lat,lng,acc) {
                 shared_target[0] = target_id
                 shared_key[0] = symmetric_key
 
-                # Flush stale messages from previous sessions
+                # Flush only stale sender-side updates from this target.
+                # Other pending fasttrack messages belong to the tray receiver.
                 stale = api.fasttrack_pending()
+                flushed_count = 0
                 for m in stale:
-                    mid = m.get("id")
+                    decoded = decode_target_find_device_update(m, target_id, symmetric_key)
+                    if decoded is None:
+                        continue
+                    mid, _resp = decoded
                     if mid:
                         api.fasttrack_ack(mid)
-                if stale:
-                    log.info("fasttrack.message.flushed_stale count=%d", len(stale))
+                        flushed_count += 1
+                if flushed_count:
+                    log.info("fasttrack.message.flushed_stale count=%d", flushed_count)
 
                 log.info("fasttrack.command.sent fn=find-phone action=start volume=%d silent=%s recipient=%s",
                          volume, is_silent[0], target_id[:12])
                 msg_id = api.fasttrack_send(target_id, encrypted_b64)
                 if msg_id is None:
                     log.error("fasttrack.command.send_failed fn=find-phone")
-                    GLib.idle_add(set_ui, "Failed to reach phone", True, True, False)
+                    GLib.idle_add(set_ui, "Failed to reach device", True, True, False)
                     return
+
+                # D2: marking active happens only after a directed
+                # device action is successfully queued.
+                try:
+                    ConnectedDeviceRegistry(config).mark_active(
+                        target_id, reason="find_device_start",
+                    )
+                except DeviceRegistryError:
+                    pass
 
                 log.debug("fasttrack.command.polling message_id=%s", msg_id)
                 last_heartbeat = time.time()
@@ -2506,39 +3465,33 @@ function updatePos(lat,lng,acc) {
                     try:
                         messages = api.fasttrack_pending()
                         for m in messages:
-                            mid = m.get("id")
-                            enc_data = m.get("encrypted_data", "")
-                            try:
-                                enc_bytes = base64.b64decode(enc_data)
-                                plain = crypto.decrypt_blob(enc_bytes, symmetric_key)
-                                resp = json.loads(plain)
-                                # Never log resp directly — it contains GPS coordinates for find-phone.
-                                log.info("Response: fn=%s state=%s", resp.get("fn"), resp.get("state"))
+                            decoded = decode_target_find_device_update(m, target_id, symmetric_key)
+                            if decoded is None:
+                                continue
+                            mid, resp = decoded
+                            # Never log resp directly — it contains GPS coordinates for find-phone.
+                            log.info("Response: fn=%s state=%s", resp.get("fn"), resp.get("state"))
 
-                                msg = FasttrackAdapter.to_device_message(resp)
-                                if msg and msg.type == MessageType.FIND_PHONE_LOCATION_UPDATE:
-                                    resp_state = resp.get("state", "")
-                                    lat = resp.get("lat")
-                                    lng = resp.get("lng")
-                                    accuracy = resp.get("accuracy")
+                            resp_state = resp.get("state", "")
+                            lat = resp.get("lat")
+                            lng = resp.get("lng")
+                            accuracy = resp.get("accuracy")
 
-                                    if resp_state == "ringing":
-                                        last_heartbeat = time.time()
-                                        comms_lost_shown = False
-                                        label = "Search in progress" if is_silent[0] else "Phone is ringing!"
-                                        GLib.idle_add(set_ui, label, False, False, True)
-                                        if lat is not None:
-                                            # Never log raw lat/lng — accuracy only.
-                                            log.info("GPS fix received acc=%.1f", accuracy or 0)
-                                            GLib.idle_add(update_location, lat, lng, accuracy)
-                                    elif resp_state == "stopped":
-                                        log.info("Phone confirmed stopped")
-                                        GLib.idle_add(set_ui, "Alarm stopped", True, True, False)
-                                        if mid:
-                                            api.fasttrack_ack(mid)
-                                        return  # clean exit
-                            except Exception as e:
-                                log.error("Decrypt failed: %s", e)
+                            if resp_state == "ringing":
+                                last_heartbeat = time.time()
+                                comms_lost_shown = False
+                                label = "Search in progress" if is_silent[0] else "Device is ringing!"
+                                GLib.idle_add(set_ui, label, False, False, True)
+                                if lat is not None:
+                                    # Never log raw lat/lng — accuracy only.
+                                    log.info("GPS fix received acc=%.1f", accuracy or 0)
+                                    GLib.idle_add(update_location, lat, lng, accuracy)
+                            elif resp_state == "stopped":
+                                log.info("Device confirmed stopped")
+                                GLib.idle_add(set_ui, "Alarm stopped", True, True, False)
+                                if mid:
+                                    api.fasttrack_ack(mid)
+                                return  # clean exit
                             if mid:
                                 api.fasttrack_ack(mid)
                     except Exception as e:
@@ -2645,7 +3598,7 @@ def show_onboarding(config_dir: Path):
         outer.append(title)
 
         subtitle = Gtk.Label(
-            label="Connect to your relay server to pair with your phone.",
+            label="Connect to your relay server to pair with your devices.",
             xalign=0, wrap=True,
         )
         subtitle.add_css_class("dim-label")
@@ -2870,16 +3823,92 @@ def show_secret_storage_warning(config_dir: Path):
     app.run(None)
 
 
+def show_locate_alert(config_dir: Path, *, sender_name: str):
+    """Always-on-top modal shown when this desktop is being located (M.8).
+
+    Spawned as a subprocess by ``GtkSubprocessAlert`` in the parent
+    Poller process. The window has one job: display sender info + a
+    Stop button. Clicking Stop (or closing the window) exits the
+    process; the parent's watcher thread sees the exit and tears the
+    rest of the locate session down.
+    """
+    app = _make_app()
+
+    def on_activate(app):
+        apply_brand_css()
+        win = Adw.ApplicationWindow(
+            application=app,
+            title="Being located",
+            default_width=400,
+            default_height=220,
+        )
+        win.set_modal(True)
+        try:
+            win.set_keep_above(True)
+        except Exception:
+            pass
+
+        toolbar = Adw.ToolbarView()
+        win.set_content(toolbar)
+        toolbar.add_top_bar(Adw.HeaderBar())
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=16,
+            margin_top=24, margin_bottom=24,
+            margin_start=24, margin_end=24,
+        )
+        toolbar.set_content(outer)
+
+        title = Gtk.Label(
+            label="This device is being located",
+            xalign=0,
+        )
+        title.add_css_class("title-2")
+        outer.append(title)
+
+        body = Gtk.Label(
+            label=f"Locate request from {sender_name}.\n"
+                  "Click Stop to silence this device.",
+            xalign=0,
+            wrap=True,
+        )
+        body.add_css_class("body")
+        body.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        outer.append(body)
+
+        outer.append(Gtk.Box(vexpand=True))
+
+        button_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            halign=Gtk.Align.END,
+        )
+        outer.append(button_row)
+
+        stop_btn = Gtk.Button(label="Stop")
+        stop_btn.add_css_class("destructive-action")
+        stop_btn.add_css_class("pill")
+        stop_btn.connect("clicked", lambda _b: win.close())
+        button_row.append(stop_btn)
+
+        apply_pointer_cursors(win)
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run(None)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "window",
         choices=[
             "send-files", "settings", "history", "pairing",
-            "find-phone", "onboarding", "secret-storage-warning",
+            "find-phone", "locate-alert", "onboarding",
+            "secret-storage-warning",
         ],
     )
     parser.add_argument("--config-dir", required=True)
+    parser.add_argument("--sender-name", default="")
     args = parser.parse_args()
 
     config_dir = Path(args.config_dir)
@@ -2895,6 +3924,8 @@ def main():
         show_pairing(config_dir)
     elif args.window == "find-phone":
         show_find_phone(config_dir)
+    elif args.window == "locate-alert":
+        show_locate_alert(config_dir, sender_name=args.sender_name or "another device")
     elif args.window == "onboarding":
         show_onboarding(config_dir)
     elif args.window == "secret-storage-warning":

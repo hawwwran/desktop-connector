@@ -15,21 +15,22 @@ The relay server never sees your data — all content is encrypted on-device bef
   <b>Desktop</b><br/>
   <img src="images/desktop-app-menu.png" alt="Tray Menu" width="160"/>
   &nbsp;&nbsp;
-  <img src="images/desktop-app-send-to-phone.png" alt="Send to Phone" width="280"/>
+  <img src="images/desktop-app-send-to-phone.png" alt="Send files to" width="280"/>
   &nbsp;&nbsp;
   <img src="images/desktop-app-history.png" alt="Transfer History" width="280"/>
   &nbsp;&nbsp;
-  <img src="images/find-my-phone.png" alt="Find my phone" width="280"/>
+  <img src="images/find-my-phone.png" alt="Find my device" width="280"/>
 </p>
 
 ## Features
 
-- **Send files** both ways (phone to PC and PC to phone)
+- **Send files** both ways (between any pair of paired devices)
+- **Multi-device** — pair as many phones / tablets / desktops as you want; pickers select the target device per send / per history view / per locate session
 - **Clipboard sharing** — send text or images between devices, pushed directly to system clipboard
 - **Share intent** — share any file from any Android app to your desktop
 - **Recent files** strip on Android for quick sending
 - **Drag and drop** on desktop to send files
-- **Right-click "Send to Phone"** — file manager integration (Nautilus, Nemo, Dolphin)
+- **Right-click "Send to <device>"** — file manager integration (Nautilus, Nemo, Dolphin), one entry per paired device
 - **Smart link detection** — shared URLs show a link icon, tap to open or copy
 - **Transfer history** with delivery status (Sent / Delivered / Received), swipe to delete
 - **Near-instant delivery** — long polling with ~1s latency, graceful fallback to regular polling

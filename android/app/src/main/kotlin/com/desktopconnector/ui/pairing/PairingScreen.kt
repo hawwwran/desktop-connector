@@ -122,7 +122,7 @@ fun PairingScreen(
                 OutlinedButton(onClick = onCancelNaming) { Text("Back") }
                 Button(onClick = { onCommitName(typedName) }) { Text("Save") }
             }
-        } else if (verificationCode != null) {
+        } else if (stage == PairingStage.VERIFYING && verificationCode != null) {
             // Verification stage
             Text(
                 "Verify this code matches your desktop:",

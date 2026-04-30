@@ -269,51 +269,20 @@ EOF
 
 info "App menu entry installed"
 
-# --- File manager "Send to Phone" integration ---
+# --- File manager "Send to <device>" integration ---
+#
+# File-manager send targets are now per-paired-device and managed by
+# desktop/src/file_manager_integration.py. The sync runs at app
+# startup, after pairing, after rename, and after unpair, so this
+# script no longer drops a generic "Send to Phone" entry — the next
+# launch will detect the file managers and write the right per-device
+# scripts itself.
 
-FM_INSTALLED=false
-
-# Nautilus (GNOME, Ubuntu, Zorin)
-if command -v nautilus >/dev/null 2>&1; then
-    NAUTILUS_SCRIPTS="$HOME/.local/share/nautilus/scripts"
-    mkdir -p "$NAUTILUS_SCRIPTS"
-    cp "$INSTALL_DIR/nautilus-send-to-phone.py" "$NAUTILUS_SCRIPTS/Send to Phone"
-    chmod +x "$NAUTILUS_SCRIPTS/Send to Phone"
-    info "Nautilus: Scripts → 'Send to Phone' installed"
-    FM_INSTALLED=true
-fi
-
-# Nemo (Cinnamon, Mint)
-if command -v nemo >/dev/null 2>&1; then
-    NEMO_SCRIPTS="$HOME/.local/share/nemo/scripts"
-    mkdir -p "$NEMO_SCRIPTS"
-    cp "$INSTALL_DIR/nautilus-send-to-phone.py" "$NEMO_SCRIPTS/Send to Phone"
-    chmod +x "$NEMO_SCRIPTS/Send to Phone"
-    info "Nemo: Scripts → 'Send to Phone' installed"
-    FM_INSTALLED=true
-fi
-
-# Dolphin (KDE)
-if command -v dolphin >/dev/null 2>&1; then
-    DOLPHIN_SERVICES="$HOME/.local/share/kservices5/ServiceMenus"
-    mkdir -p "$DOLPHIN_SERVICES"
-    cat > "$DOLPHIN_SERVICES/desktop-connector-send.desktop" << DOLPHIN_EOF
-[Desktop Entry]
-Type=Service
-ServiceTypes=KonqPopupMenu/Plugin
-MimeType=application/octet-stream;
-Actions=sendToPhone
-
-[Desktop Action sendToPhone]
-Name=Send to Phone
-Icon=$APP_NAME
-Exec=$BIN_DIR/$APP_NAME --headless --send=%f
-DOLPHIN_EOF
-    info "Dolphin: 'Send to Phone' service menu installed"
-    FM_INSTALLED=true
-fi
-
-if [ "$FM_INSTALLED" = false ]; then
+if command -v nautilus >/dev/null 2>&1 \
+   || command -v nemo >/dev/null 2>&1 \
+   || command -v dolphin >/dev/null 2>&1; then
+    info "File-manager send targets will appear after pairing (Right-click → Scripts)"
+else
     warn "No supported file manager found (Nautilus, Nemo, Dolphin). Right-click integration skipped."
 fi
 

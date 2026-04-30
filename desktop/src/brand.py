@@ -224,7 +224,7 @@ def apply_brand_css() -> None:
         background-color: {DC_BLUE_400};
     }}
 
-    /* Sliders / scales (find-my-phone volume): filled part of the
+    /* Sliders / scales (find-my-device volume): filled part of the
        trough paints sky blue. `highlight` is the filled sub-element
        on GtkScale in GTK4. */
     scale > trough > highlight {{

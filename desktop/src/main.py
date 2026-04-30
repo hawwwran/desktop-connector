@@ -10,11 +10,12 @@ Usage:
 
     # Headless send a file:
     python -m src.main --headless --send="/path/to/file"
+    python -m src.main --headless --send="/path/to/file" --target-device-id="<id>"
 
     # Custom config directory:
     python -m src.main --config-dir=/path/to/config
 
-    # Pair with a phone (GUI):
+    # Pair with a connected device (GUI):
     python -m src.main --pair
 
     # Pair headless (for testing):
@@ -27,6 +28,7 @@ from pathlib import Path
 
 from .bootstrap.app_version import get_app_version
 from .bootstrap.appimage_install_hook import ensure_appimage_integration
+from .file_manager_integration import sync_file_manager_targets
 from .bootstrap.appimage_migration import migrate_from_apt_pip_if_needed
 from .bootstrap.appimage_onboarding import OnboardingResult, run_onboarding_if_needed
 from .bootstrap.appimage_relocate import (
@@ -167,6 +169,15 @@ def main() -> int:
     # even if the relay is unreachable on first launch.
     ensure_appimage_integration(context.config)
 
+    # Re-sync per-paired-device file-manager send targets. Picks up
+    # pairings/renames/unpairs that landed while the app wasn't
+    # running, plus any pre-multi-device "Send to Phone" leftovers.
+    # No-op when no launcher (dev tree) is detected.
+    try:
+        sync_file_manager_targets(context.config)
+    except Exception as exc:
+        log.warning("file_manager.sync.failed_at_startup: %s", exc)
+
     unconfigured = False
     if not register_device(context.config, context.api):
         # Soft-fail iff the user just cancelled onboarding from interactive
@@ -201,7 +212,12 @@ def main() -> int:
 
     mode = resolve_startup_mode(args)
     if mode == "send_file":
-        return run_send_file(context.config, context.crypto, Path(args.send))
+        return run_send_file(
+            context.config,
+            context.crypto,
+            Path(args.send),
+            target_device_id=args.target_device_id,
+        )
 
     run_receiver(
         context.config,

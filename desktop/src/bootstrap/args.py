@@ -19,6 +19,7 @@ class StartupArgs:
     save_dir: str | None
     verbose: bool
     scrub_secrets: bool
+    target_device_id: str | None = None
 
 
 StartupMode = Literal["send_file", "headless_receive", "tray_receive"]
@@ -34,6 +35,11 @@ def parse_startup_args() -> StartupArgs:
     )
     parser.add_argument("--headless", action="store_true", help="Run without GUI")
     parser.add_argument("--send", type=str, help="Send a file and exit")
+    parser.add_argument(
+        "--target-device-id",
+        type=str,
+        help="Paired device id to use with --send",
+    )
     parser.add_argument("--pair", action="store_true", help="Start pairing flow")
     parser.add_argument("--config-dir", type=str, help="Config directory path")
     parser.add_argument("--server-url", type=str, help="Override server URL")
@@ -51,6 +57,7 @@ def parse_startup_args() -> StartupArgs:
     return StartupArgs(
         headless=parsed.headless,
         send=parsed.send,
+        target_device_id=parsed.target_device_id,
         pair=parsed.pair,
         config_dir=parsed.config_dir,
         server_url=parsed.server_url,

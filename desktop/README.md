@@ -1,6 +1,6 @@
 # Desktop Connector — Desktop
 
-Linux desktop client for [Desktop Connector](../README.md). System tray app with GTK4/libadwaita windows for sending files, viewing history, pairing, and finding your phone.
+Linux desktop client for [Desktop Connector](../README.md). System tray app with GTK4/libadwaita windows for sending files, viewing history, pairing one or more connected devices, and finding any of them.
 
 ## Install
 
@@ -10,7 +10,7 @@ The released form is a signed AppImage — single self-contained file, no apt or
 curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
 ```
 
-Or download the AppImage manually from [Releases](../../releases), `chmod +x`, run it. The first-launch onboarding dialog asks for your relay URL; after that the app drops a `.desktop` menu entry, autostart entry, and Nautilus/Nemo/Dolphin "Send to Phone" scripts on your behalf.
+Or download the AppImage manually from [Releases](../../releases), `chmod +x`, run it. The first-launch onboarding dialog asks for your relay URL; after that the app drops a `.desktop` menu entry plus an autostart entry. Per-device "Send to <device>" scripts (Nautilus, Nemo, Dolphin) appear once you pair at least one device — one entry per pairing.
 
 In-app updates land via the tray's "Check for updates" item or automatically once a day in the background — both pull only the binary delta (~few hundred KB), not the whole AppImage.
 
@@ -75,9 +75,11 @@ $APPIMAGE --gtk-window={send-files|settings|history|pairing|find-phone} \
 
 ## Features
 
-- System tray icon with status indicator (sparkle star: filled blue = both online, sky-blue = phone offline, yellow = reconnecting/uploading, orange = disconnected)
+- System tray icon with status indicator (sparkle star: filled blue = both online, sky-blue = paired device offline, yellow = reconnecting/uploading, orange = disconnected)
 - Drag-and-drop files onto the Send Files window
-- Right-click "Send to Phone" in file managers (Nautilus, Nemo, Dolphin)
+- Right-click "Send to <device>" in file managers (Nautilus, Nemo, Dolphin) — one entry per paired device
+- Multi-device support: pair as many phones / tablets / desktops as you like; pickers in Send / History / Find appear once a second device is paired
+- "Find my Device" — locate a paired device (alarm + GPS map) or be located by another paired desktop
 - Clipboard sharing (text and images)
 - Configurable receive actions for URLs, text, images, videos, and documents
 - Transfer history with delivery state (Sent / Delivered / Received), swipe-to-delete

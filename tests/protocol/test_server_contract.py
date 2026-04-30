@@ -145,14 +145,48 @@ class ServerProtocolContractTests(unittest.TestCase):
         self.assertEqual(len(device_id), 32)
         self.assertEqual(len(auth_token), 64)
 
+        # Re-register with the same pubkey now returns 409 — closing the
+        # auth-token-leak vector documented in the M.11 plan. The server
+        # must NOT echo any auth_token in the body, otherwise anyone
+        # holding the public key (which travels through QR codes /
+        # .dcpair files) could harvest the credential.
         status, _headers, body = self.h.request(
             "POST",
             "/api/devices/register",
             json_body={"public_key": public_key, "device_type": "desktop"},
         )
+        self.assertEqual(status, 409)
+        self.assertNotIn("auth_token", body)
+
+    def test_register_does_not_leak_auth_token_to_pubkey_holder(self):
+        # Regression for the auth-token-leak vector: the public key is
+        # not secret material. An attacker who photographs a QR code,
+        # captures a .dcpair file, or sniffs a pairing handshake holds
+        # the same data this test supplies. The endpoint must refuse
+        # to return the existing auth_token in any of those cases.
+        device_id, auth_token, public_key = self._register_device("desktop")
+
+        attacker_status, _h, attacker_body = self.h.request(
+            "POST",
+            "/api/devices/register",
+            json_body={"public_key": public_key, "device_type": "desktop"},
+        )
+
+        self.assertEqual(attacker_status, 409)
+        # No `auth_token` field at all — not even an empty / null one.
+        self.assertNotIn("auth_token", attacker_body)
+        # And of course not the actual token by accident either.
+        self.assertNotIn(auth_token, json.dumps(attacker_body))
+
+        # The legitimate device still authenticates with its
+        # originally-issued token. The 409 must not have rotated it.
+        status, _h, _b = self.h.request(
+            "GET",
+            "/api/devices/stats",
+            token=auth_token,
+            device_id=device_id,
+        )
         self.assertEqual(status, 200)
-        self.assertEqual(body["device_id"], device_id)
-        self.assertEqual(body["auth_token"], auth_token)
 
     def test_pairing_contract(self):
         desktop_id, desktop_token, _ = self._register_device("desktop")
@@ -182,6 +216,19 @@ class ServerProtocolContractTests(unittest.TestCase):
         self.assertEqual(req["phone_id"], phone_id)
         self.assertIn("phone_pubkey", req)
 
+        # A retry can race in after the first request was claimed by poll.
+        # Confirming the pair must clean it up so reopening pairing does not
+        # show the old verification code again.
+        status, _headers, body = self.h.request(
+            "POST",
+            "/api/pairing/request",
+            token=phone_token,
+            device_id=phone_id,
+            json_body={"desktop_id": desktop_id, "phone_pubkey": phone_pub},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["status"], "ok")
+
         status, _headers, body = self.h.request(
             "POST",
             "/api/pairing/confirm",
@@ -191,6 +238,37 @@ class ServerProtocolContractTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["status"], "ok")
+
+        status, _headers, body = self.h.request(
+            "GET",
+            "/api/pairing/poll",
+            token=desktop_token,
+            device_id=desktop_id,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["requests"], [])
+
+        # Once the server already has this pair, stale clients may still retry
+        # the request. Treat that as idempotent cleanup, not as a new pending
+        # verification prompt.
+        status, _headers, body = self.h.request(
+            "POST",
+            "/api/pairing/request",
+            token=phone_token,
+            device_id=phone_id,
+            json_body={"desktop_id": desktop_id, "phone_pubkey": phone_pub},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["status"], "ok")
+
+        status, _headers, body = self.h.request(
+            "GET",
+            "/api/pairing/poll",
+            token=desktop_token,
+            device_id=desktop_id,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["requests"], [])
 
     def test_transfer_sent_status_notify_and_fasttrack_contracts(self):
         desktop_id, desktop_token, _ = self._register_device("desktop")

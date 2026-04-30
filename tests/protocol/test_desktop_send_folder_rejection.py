@@ -49,12 +49,21 @@ class NautilusScriptSourceTests(unittest.TestCase):
         self.assertNotIn("count = len(paths)", self.source)
 
 
-class AppImageInstallHookTemplateTests(unittest.TestCase):
+class FileManagerScriptTemplateTests(unittest.TestCase):
+    """Per-device file-manager scripts (M.6) keep the same folder-warning
+    contract the legacy AppImage hook script had."""
+
     def setUp(self):
-        from desktop.src.bootstrap.appimage_install_hook import (
-            _nautilus_nemo_script_text,
+        from desktop.src.devices import ConnectedDevice
+        from desktop.src.file_manager_integration import _script_text
+
+        device = ConnectedDevice(
+            device_id="peer-test",
+            pubkey="pk",
+            name="Alpha",
+            paired_at=0,
         )
-        self.rendered = _nautilus_nemo_script_text(Path("/x.AppImage"))
+        self.rendered = _script_text(device, "/x.AppImage")
 
     def test_rendered_script_parses_as_python(self):
         import ast
@@ -75,6 +84,13 @@ class AppImageInstallHookTemplateTests(unittest.TestCase):
     def test_rendered_script_queued_count_uses_files_only(self):
         self.assertIn('f"{len(files)} file(s) queued"', self.rendered)
         self.assertNotIn("count = len(paths)", self.rendered)
+
+    def test_rendered_script_targets_explicit_device(self):
+        for text in (
+            'TARGET_DEVICE_ID = "peer-test"',
+            '"--target-device-id=" + TARGET_DEVICE_ID',
+        ):
+            self.assertIn(text, self.rendered)
 
 
 class SendFilesWindowSourceTests(unittest.TestCase):

@@ -253,8 +253,9 @@ info "Running in background. Look for the tray icon in your panel."
 echo
 echo -e "${BOLD}First launch?${NC}"
 echo "  - A welcome dialog will ask for your relay server URL."
-echo "  - The AppImage drops its menu entry, autostart, and file-manager"
-echo "    'Send to Phone' scripts on first run automatically."
+echo "  - The AppImage drops its menu entry + autostart on first run."
+echo "  - File-manager 'Send to <device>' scripts appear after pairing"
+echo "    (one per paired device, in Nautilus / Nemo / Dolphin)."
 echo "  - Future updates land via the in-app updater (tray menu →"
 echo "    'Check for updates'); no need to re-run this installer."
 echo

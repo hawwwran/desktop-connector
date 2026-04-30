@@ -302,18 +302,36 @@ After ack the server deletes chunk files and flips `downloaded=1`, `chunks_downl
 - `.fn.clipboard.image` payload bytes remain binary image bytes.
 - `.fn.unpair` carries no payload fields.
 
-### Fasttrack find-phone examples
+### Fasttrack find-phone / find-device examples
+
+The wire keeps `fn=find-phone` as the canonical name. Receivers also
+accept the alias `fn=find-device` (desktop M.8+); senders stay on the
+legacy name until both platforms migrate. See D5 in
+`docs/plans/desktop-multi-device-support.md`.
+
+Sender → receiver:
 
 ```json
-{"fn": "find-phone", "action": "start"}
+{"fn": "find-phone", "action": "start", "volume": 80, "timeout": 300}
 {"fn": "find-phone", "action": "stop"}
-{"fn": "find-phone", "state": "ringing"}
 ```
 
-These map to unified message types:
-- `FIND_PHONE_START`
-- `FIND_PHONE_STOP`
-- `FIND_PHONE_LOCATION_UPDATE`
+Receiver → sender (heartbeats, encrypted with the same pair symkey):
+
+```json
+{"fn": "find-phone", "state": "ringing"}
+{"fn": "find-phone", "state": "ringing", "lat": 50.1, "lng": 14.4, "accuracy": 12.5}
+{"fn": "find-phone", "state": "stopped"}
+```
+
+`lat`/`lng`/`accuracy` are optional. Absence means "received, no GPS
+fix yet" — the sender renders it as a heartbeat without coordinates.
+Coordinates never appear in any log.
+
+These map to unified message types in adapters:
+- `FIND_PHONE_START` — sender's `action=start`
+- `FIND_PHONE_STOP` — sender's `action=stop`
+- `FIND_PHONE_LOCATION_UPDATE` — receiver's `state=ringing|stopped` (with or without coords)
 
 ## 6) Liveness probe (ping/pong)
 

@@ -10,6 +10,7 @@ from ..api_client import ApiClient
 from ..config import Config
 from ..connection import ConnectionManager, ConnectionState
 from ..crypto import KeyManager
+from ..find_device_alert import GtkSubprocessAlert
 from ..platform import DesktopPlatform
 from ..poller import Poller
 
@@ -28,7 +29,22 @@ def run_receiver(
     conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
     api = ApiClient(conn, crypto)
     history = TransferHistory(config.config_dir)
-    poller = Poller(config, conn, api, crypto, history, platform)
+
+    # M.8: GTK4 subprocess alert for incoming locate requests. Headless
+    # runs skip the modal entirely (no GTK session) but still get the
+    # responder's heartbeat updates. The on_user_stop callback closes
+    # over the about-to-be-created responder via a forward indirection.
+    alert: GtkSubprocessAlert | None = None
+    if not headless:
+        alert = GtkSubprocessAlert(
+            config_dir=config.config_dir,
+            on_user_stop=lambda: poller._find_device_responder.stop(),
+        )
+
+    poller = Poller(
+        config, conn, api, crypto, history, platform,
+        find_device_alert=alert,
+    )
 
     # Wire up notifications
     poller.on_file_received(platform.notifications.notify_file_received)

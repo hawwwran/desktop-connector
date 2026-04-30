@@ -35,6 +35,14 @@ def _build_config(tmp: Path) -> MagicMock:
     config.device_id = "dev-sender"
     config.auth_token = "tok"
     config.config_dir = tmp
+    config.active_device_id = None
+    config.paired_devices = {
+        "peer-id": {
+            "symmetric_key_b64": base64.b64encode(b"k" * 32).decode(),
+            "name": "Peer",
+            "paired_at": 1,
+        },
+    }
     config.get_first_paired_device.return_value = (
         "peer-id",
         {"symmetric_key_b64": base64.b64encode(b"k" * 32).decode()},
