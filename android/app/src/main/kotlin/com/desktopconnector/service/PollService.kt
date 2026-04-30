@@ -67,10 +67,17 @@ class PollService : Service() {
 
         fun start(context: Context) {
             val intent = Intent(context, PollService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                // Bg-restricted start, FGS time-budget exhausted, or any
+                // other system refusal — don't propagate, the next user
+                // foreground touch will get another attempt.
+                AppLog.log("Poll", "fgs.bind.denied reason=${e.javaClass.simpleName}:${e.message}", "error")
             }
         }
     }
@@ -107,17 +114,31 @@ class PollService : Service() {
         super.onCreate()
         activeService = this
         createNotificationChannels()
-        // API 29+: assert only DATA_SYNC at startup. LOCATION is declared in the manifest
-        // and upgraded into at find-phone start (see setForegroundType); asserting it here
-        // would crash on any fresh install that has not yet granted location permission.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                buildIdleNotification(false),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, buildIdleNotification(false))
+        // API 29+: assert only CONNECTED_DEVICE at startup. LOCATION is declared in the
+        // manifest and upgraded in at find-phone start (see setForegroundType); asserting
+        // it here would crash on any fresh install that has not yet granted location
+        // permission.
+        //
+        // CONNECTED_DEVICE has no per-24h time budget. Using DATA_SYNC here on Android 15+
+        // burned through its 6-hour cap and the OS started throwing
+        // ForegroundServiceStartNotAllowedException on every restart, killing the process.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    buildIdleNotification(false),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, buildIdleNotification(false))
+            }
+        } catch (e: Exception) {
+            // Don't let an FGS-start failure escalate to JavaCrash → process kill →
+            // crashed_too_much, which was the pre-fix failure mode. Log and bail; the
+            // activity-foreground path will retry on the next app open.
+            AppLog.log("Poll", "fgs.start.denied reason=${e.javaClass.simpleName}:${e.message}", "error")
+            stopSelf()
+            return
         }
         scope.launch { pollLoop() }
         scope.launch { deliveryTrackerLoop() }
@@ -194,16 +215,16 @@ class PollService : Service() {
     fun setForegroundType(includeLocation: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         val type = if (includeLocation) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         } else {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
         }
         try {
             startForeground(NOTIFICATION_ID, buildIdleNotification(isConnected), type)
             AppLog.log("Poll", "fgs.type.changed location=$includeLocation")
-        } catch (e: SecurityException) {
-            AppLog.log("Poll", "fgs.type.denied reason=${e.message}", "warning")
+        } catch (e: Exception) {
+            AppLog.log("Poll", "fgs.type.denied reason=${e.javaClass.simpleName}:${e.message}", "warning")
         }
     }
 
