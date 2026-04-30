@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/banner.png" alt="Desktop Connector" width="600"/>
+</p>
+
 # Desktop Connector
 
 End-to-end encrypted file and clipboard sharing between your Android phone and Linux desktop.
