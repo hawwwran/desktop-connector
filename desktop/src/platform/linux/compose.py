@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ...backends.linux.clipboard_backend import LinuxClipboardBackend
 from ...backends.linux.dialog_backend import LinuxDialogBackend
+from ...backends.linux.location_backend import GeoClueLocationProvider
 from ...backends.linux.notification_backend import LinuxNotificationBackend
 from ...backends.linux.shell_backend import LinuxShellBackend
 from ..contract import DesktopPlatform, PlatformCapabilities
@@ -25,4 +26,5 @@ def compose_linux_platform() -> DesktopPlatform:
             open_folder=True,
             installer_terminal=True,
         ),
+        location=GeoClueLocationProvider(),
     )

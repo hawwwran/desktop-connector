@@ -14,7 +14,7 @@ from _paths import REPO_ROOT  # noqa: E402
 def _history_window_source() -> str:
     source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
     start = source.index("def show_history(")
-    end = source.index("# \u2500\u2500\u2500 Find My Phone Window", start)
+    end = source.index("# \u2500\u2500\u2500 Find My Device Window", start)
     return source[start:end]
 
 

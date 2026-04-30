@@ -2,8 +2,9 @@
 # Desktop Connector — uninstaller.
 #
 # Removes the AppImage at the canonical location, the .desktop entry,
-# the autostart entry, the file-manager "Send to Phone" scripts, and
-# any leftover bits from a prior install-from-source run
+# the autostart entry, the per-device file-manager "Send to <device>"
+# scripts (M.6: each managed file carries a sentinel comment), and any
+# leftover bits from a prior install-from-source run
 # (~/.local/bin/desktop-connector wrapper, ~/.local/share/desktop-connector/src/).
 # Optionally removes ~/.config/desktop-connector/ (your pairings, keys,
 # and history) — prompts before doing so.
@@ -23,9 +24,15 @@ LEGACY_BIN="$HOME/.local/bin/$APP_NAME"
 CONFIG_DIR="$HOME/.config/$APP_NAME"
 DESKTOP_FILE="$HOME/.local/share/applications/$APP_NAME.desktop"
 AUTOSTART_FILE="$HOME/.config/autostart/$APP_NAME.desktop"
-NAUTILUS_SCRIPT="$HOME/.local/share/nautilus/scripts/Send to Phone"
-NEMO_SCRIPT="$HOME/.local/share/nemo/scripts/Send to Phone"
+NAUTILUS_SCRIPTS_DIR="$HOME/.local/share/nautilus/scripts"
+NEMO_SCRIPTS_DIR="$HOME/.local/share/nemo/scripts"
+LEGACY_NAUTILUS_SCRIPT="$NAUTILUS_SCRIPTS_DIR/Send to Phone"
+LEGACY_NEMO_SCRIPT="$NEMO_SCRIPTS_DIR/Send to Phone"
 DOLPHIN_SERVICE="$HOME/.local/share/kservices5/ServiceMenus/$APP_NAME-send.desktop"
+# Sentinel embedded by file_manager_integration.py in every managed
+# Nautilus/Nemo script + Dolphin action file. Anything carrying this
+# string is ours; foreign user scripts are skipped.
+MANAGED_SENTINEL="desktop-connector:managed-fm-target"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BOLD='\033[1m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[✓]${NC} $1"; }
@@ -107,12 +114,27 @@ fi
 [ -f "$DESKTOP_FILE" ]   && rm -f "$DESKTOP_FILE"   && info "Removed app menu entry"
 [ -f "$AUTOSTART_FILE" ] && rm -f "$AUTOSTART_FILE" && info "Removed autostart entry"
 
-# File-manager scripts.
+# File-manager scripts. Per-device managed scripts carry the sentinel
+# comment; legacy single-pair "Send to Phone" scripts are removed
+# unconditionally for back-compat with pre-M.6 installs.
 fm_removed=0
-[ -e "$NAUTILUS_SCRIPT" ]  && rm -f "$NAUTILUS_SCRIPT"  && fm_removed=1
-[ -e "$NEMO_SCRIPT" ]      && rm -f "$NEMO_SCRIPT"      && fm_removed=1
-[ -e "$DOLPHIN_SERVICE" ]  && rm -f "$DOLPHIN_SERVICE"  && fm_removed=1
-[ "$fm_removed" -eq 1 ] && info "Removed file-manager 'Send to Phone' scripts"
+remove_managed_scripts() {
+    local dir="$1"
+    [ -d "$dir" ] || return 0
+    local entry
+    for entry in "$dir"/*; do
+        [ -f "$entry" ] || continue
+        if grep -q -F "$MANAGED_SENTINEL" "$entry" 2>/dev/null; then
+            rm -f "$entry" && fm_removed=1
+        fi
+    done
+}
+remove_managed_scripts "$NAUTILUS_SCRIPTS_DIR"
+remove_managed_scripts "$NEMO_SCRIPTS_DIR"
+[ -e "$LEGACY_NAUTILUS_SCRIPT" ] && rm -f "$LEGACY_NAUTILUS_SCRIPT" && fm_removed=1
+[ -e "$LEGACY_NEMO_SCRIPT" ]     && rm -f "$LEGACY_NEMO_SCRIPT"     && fm_removed=1
+[ -e "$DOLPHIN_SERVICE" ]        && rm -f "$DOLPHIN_SERVICE"        && fm_removed=1
+[ "$fm_removed" -eq 1 ] && info "Removed file-manager 'Send to <device>' scripts"
 
 # Hicolor brand icons (legacy install-from-source path drops them here).
 icon_removed=0

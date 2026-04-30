@@ -6,12 +6,15 @@ Linux AppImage packaging for the desktop client. See
 **Status:** P.3 complete. `build-appimage.sh` produces a runnable
 ~111 MB AppImage with bundled Python + pure-Python deps + GTK4 +
 libadwaita + WebKitGTK 6.0 + GTK3 + libayatana-appindicator3 (for
-pystray's tray backend). All four GTK4 subprocess windows (send-files,
-settings, history, find-phone) render with bundled libs and re-enter
-the AppImage via `$APPIMAGE`. First launch drops a `.desktop` menu
-entry, autostart entry, and Nautilus / Nemo / Dolphin "Send to Phone"
-scripts pointing at `$APPIMAGE`; all rewrite-on-move and respect user
-deletion (see `src/bootstrap/appimage_install_hook.py`).
+pystray's tray backend). All GTK4 subprocess windows (send-files,
+settings, history, pairing, find-phone, locate-alert) render with
+bundled libs and re-enter the AppImage via `$APPIMAGE`. First launch
+drops a `.desktop` menu entry + autostart entry pointing at
+`$APPIMAGE`; both rewrite-on-move and respect user deletion (see
+`src/bootstrap/appimage_install_hook.py`). Per-paired-device
+"Send to <device>" scripts (Nautilus / Nemo / Dolphin) are owned by
+`src/file_manager_integration.py` and re-sync after every pairing
+save / rename / unpair.
 
 ## Layout
 
@@ -70,7 +73,10 @@ re-runs.
 
 `--gtk-window=<NAME>` is an AppRun-internal dispatch that runs
 `python -m src.windows <NAME>` against the bundled GTK4. NAME is one of
-`send-files`, `settings`, `history`, `pairing`, `find-phone`.
+`send-files`, `settings`, `history`, `pairing`, `find-phone`,
+`locate-alert`. The `find-phone` and `locate-alert` names retain the
+legacy `phone` token for IPC stability — user-facing labels say
+"Find my Device" / "Being located".
 
 ## Not here
 

@@ -66,8 +66,13 @@ def generate_qr_image(data: str) -> Image.Image:
 
 def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
     """
-    Show QR code in a tkinter window and wait for phone to pair.
+    Show QR code in a tkinter window and wait for a connected device to pair.
     Returns True if pairing completed, False if cancelled.
+
+    Dead code as of M.5 — the GTK4 ``show_pairing`` window is the only
+    pairing UI invoked from the runners. Kept here for legacy headless
+    fallback callers; user-facing strings are updated in case it ever
+    gets resurrected.
     """
     import tkinter as tk
     from PIL import ImageTk
@@ -76,7 +81,7 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
     qr_image = generate_qr_image(qr_data)
     # Never log qr_data itself — it contains the device's public key (E2E material).
     log.info("QR generated for device_id=%s", crypto.get_device_id()[:12])
-    log.info("Server URL for phone: %s", json.loads(qr_data)["server"])
+    log.info("Server URL for peer: %s", json.loads(qr_data)["server"])
 
     paired = [False]
     verification_code = [None]
@@ -92,7 +97,7 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
     frame = tk.Frame(root, bg=bg, padx=24, pady=24)
     frame.pack()
 
-    tk.Label(frame, text="Scan this QR code with your phone", font=("sans-serif", 14, "bold"),
+    tk.Label(frame, text="Scan this QR code with your device", font=("sans-serif", 14, "bold"),
              fg=DC_WHITE_SOFT, bg=bg).pack(pady=(0, 4))
     server_url = json.loads(qr_data)["server"]
     tk.Label(frame, text=f"Server: {server_url}",
@@ -104,7 +109,7 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
     qr_label = tk.Label(frame, image=qr_photo, bg=bg)
     qr_label.pack(pady=(0, 16))
 
-    status_label = tk.Label(frame, text="Waiting for phone to scan...",
+    status_label = tk.Label(frame, text="Waiting for device to scan...",
                             font=("sans-serif", 11), fg=DC_YELLOW_600, bg=bg)
     status_label.pack(pady=(0, 8))
 
@@ -123,7 +128,7 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
                 device_id=info["phone_id"],
                 pubkey=info["phone_pubkey"],
                 symmetric_key_b64=base64.b64encode(sym_key).decode(),
-                name=f"Phone-{info['phone_id'][:8]}",
+                name=f"Device-{info['phone_id'][:8]}",
             )
             api.confirm_pairing(info["phone_id"])
             log.info("pairing.confirm.accepted peer=%s", info["phone_id"][:12])
@@ -157,7 +162,7 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
             sym_key = crypto.derive_shared_key(req["phone_pubkey"])
             code = KeyManager.get_verification_code(sym_key)
             verification_code[0] = code
-            status_label.config(text=f"Phone connected: {req['phone_id'][:12]}... Verify code:", fg=DC_BLUE_500)
+            status_label.config(text=f"Device connected: {req['phone_id'][:12]}... Verify code:", fg=DC_BLUE_500)
             code_label.config(text=code)
             confirm_btn.config(state=tk.NORMAL)
         else:
@@ -172,13 +177,16 @@ def run_pairing_gui(config: Config, crypto: KeyManager, api: ApiClient) -> bool:
 def run_pairing_headless(config: Config, crypto: KeyManager, api: ApiClient,
                           timeout: int = 120) -> bool:
     """
-    Headless pairing: print QR data to terminal, poll for phone, auto-confirm.
+    Headless pairing: print QR data to terminal, poll for device, auto-confirm.
     For testing / scripted use.
     """
+    from .devices import ConnectedDeviceRegistry, DeviceRegistryError
+    from .file_manager_integration import sync_file_manager_targets
+
     qr_data = generate_qr_data(config, crypto)
     # Never log qr_data itself — it contains the device's public key (E2E material).
     log.info("Pairing QR generated for device_id=%s", crypto.get_device_id()[:12])
-    log.info("Waiting for phone to pair (timeout: %ds)...", timeout)
+    log.info("Waiting for device to pair (timeout: %ds)...", timeout)
 
     start = time.time()
     while time.time() - start < timeout:
@@ -190,13 +198,23 @@ def run_pairing_headless(config: Config, crypto: KeyManager, api: ApiClient,
             # Verification code is shown to user; never logged (it's a secret).
             log.info("pairing.request.received phone_id=%s", req["phone_id"][:12])
 
+            registry = ConnectedDeviceRegistry(config)
+            chosen_name = registry.next_default_name()
             config.add_paired_device(
                 device_id=req["phone_id"],
                 pubkey=req["phone_pubkey"],
                 symmetric_key_b64=base64.b64encode(sym_key).decode(),
-                name=f"Phone-{req['phone_id'][:8]}",
+                name=chosen_name,
             )
             api.confirm_pairing(req["phone_id"])
+            try:
+                registry.mark_active(req["phone_id"], reason="paired")
+            except DeviceRegistryError:
+                pass
+            try:
+                sync_file_manager_targets(config)
+            except Exception as exc:
+                log.warning("file_manager.sync.failed_after_pairing: %s", exc)
             log.info("pairing.confirm.accepted peer=%s", req["phone_id"][:12])
             return True
         time.sleep(2)

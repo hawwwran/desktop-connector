@@ -48,9 +48,10 @@ class _ClientBoundServer:
 
     def register(self, device_type: str) -> tuple[str, str, str]:
         # Fresh random pubkey per call so the server assigns a distinct
-        # device_id — register is idempotent by public_key, so reusing
-        # the same bytes would silently collapse sender and recipient
-        # into one device.
+        # device_id. The register endpoint refuses re-registration with
+        # an already-known pubkey (the auth-token-leak fix); reusing the
+        # same bytes would now 409 instead of silently collapsing
+        # devices.
         public_key = base64.b64encode(os.urandom(32)).decode("ascii")
         status, _headers, body = self.h.request(
             "POST", "/api/devices/register",
@@ -59,7 +60,7 @@ class _ClientBoundServer:
                 "device_type": device_type,
             },
         )
-        assert status in (200, 201), (status, body)
+        assert status == 201, (status, body)
         return body["device_id"], body["auth_token"], public_key
 
     def pair(self, sender_id: str, sender_token: str,

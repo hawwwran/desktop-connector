@@ -19,14 +19,36 @@ class DeviceController
         $deviceId = substr(hash('sha256', $rawKey), 0, 32);
         $devices = new DeviceRepository($db);
 
-        // Check if already registered — return existing credentials
+        // SECURITY (auth-token leak fix, 2026-04-30):
+        //
+        // Public keys are not secret material. They travel through QR
+        // codes (pairing GUI), `.dcpair` pairing-key files (M.11), and
+        // on-the-wire pairing handshakes. The previous code path here
+        // returned the existing auth_token to *any* unauthenticated
+        // caller who supplied a known public key, which effectively
+        // turned every photographed QR or shared `.dcpair` file into a
+        // server-side credential leak.
+        //
+        // Legitimate clients persist their auth_token after the first
+        // successful registration and never re-call `/api/devices/register`
+        // for a device id they already own (see `register_device` in
+        // `desktop/src/runners/registration_runner.py` and the Android
+        // `PairingViewModel` register call — both are pairing-time-only).
+        // Clients that lose their auth_token recover by rotating the
+        // keypair, which produces a new device_id and lands a fresh
+        // row. So returning a 409 on existing-pubkey collisions is
+        // strictly correct for legitimate flows AND closes the leak.
         $existing = $devices->findById($deviceId);
         if ($existing) {
-            Router::json([
-                'device_id' => $existing['device_id'],
-                'auth_token' => $existing['auth_token'],
-            ]);
-            return;
+            AppLog::log('Auth', sprintf(
+                'register.conflict device_id=%s reason=already_registered',
+                AppLog::shortId($deviceId)
+            ));
+            throw new ConflictError(
+                'Device already registered. If you lost your auth token, '
+                . 'rotate the keypair locally — registration with a fresh '
+                . 'public key creates a new device row.'
+            );
         }
 
         $authToken = bin2hex(random_bytes(32));

@@ -23,8 +23,14 @@ from .api_client import (
 from .config import Config, FAST_POLL_INTERVAL, DEFAULT_POLL_INTERVAL, FAST_POLL_DURATION
 from .connection import ConnectionManager, ConnectionState
 from .crypto import KeyManager
+from .find_device_responder import (
+    FindDeviceAlert,
+    FindDeviceResponder,
+    NoopAlert,
+    encode_state_payload,
+)
 from .history import TransferHistory, TransferStatus
-from .messaging import FnTransferAdapter, MessageDispatcher, MessageType
+from .messaging import FasttrackAdapter, FnTransferAdapter, MessageDispatcher, MessageType
 from .platform import DesktopPlatform
 from .receive_actions import (
     RECEIVE_KIND_OTHER,
@@ -50,6 +56,12 @@ STALE_PART_TTL_S = 24 * 60 * 60
 
 # Per-chunk download retry policy (kept simple and local; mirrors current behavior).
 CHUNK_DOWNLOAD_ATTEMPTS = 3
+
+# Fasttrack receiver loop cadence. Slower than the sender-side GTK
+# find-device window's 3 s tick so the GTK window usually wins races
+# during an active sender session; after the user closes the window,
+# this drains the pending queue within FASTTRACK_POLL_INTERVAL.
+FASTTRACK_POLL_INTERVAL_S = 8.0
 
 # Streaming recipient retry policy — see
 # docs/plans/desktop-streaming-relay-plan.md §C.3 and
@@ -112,7 +124,9 @@ class Poller:
 
     def __init__(self, config: Config, connection: ConnectionManager,
                  api: ApiClient, crypto: KeyManager, history: TransferHistory,
-                 platform: DesktopPlatform):
+                 platform: DesktopPlatform,
+                 *,
+                 find_device_alert: FindDeviceAlert | None = None):
         self.config = config
         self.conn = connection
         self.api = api
@@ -123,6 +137,23 @@ class Poller:
         self._message_dispatcher.register(MessageType.CLIPBOARD_TEXT, self._handle_message_clipboard_text)
         self._message_dispatcher.register(MessageType.CLIPBOARD_IMAGE, self._handle_message_clipboard_image)
         self._message_dispatcher.register(MessageType.PAIRING_UNPAIR, self._handle_message_unpair)
+        self._find_device_responder = FindDeviceResponder(
+            alert=find_device_alert or NoopAlert(),
+            send_update=self._send_find_device_update,
+            device_name_lookup=self._lookup_device_name,
+            location_provider=getattr(
+                platform, "location",
+                None,
+            ).get_current_fix if getattr(platform, "location", None) else None,
+        )
+        self._message_dispatcher.register(
+            MessageType.FIND_PHONE_START,
+            self._find_device_responder.handle_message,
+        )
+        self._message_dispatcher.register(
+            MessageType.FIND_PHONE_STOP,
+            self._find_device_responder.handle_message,
+        )
         self._running = True
         self._wake_event = threading.Event()
         self._poll_interval = DEFAULT_POLL_INTERVAL
@@ -192,6 +223,7 @@ class Poller:
         except OSError:
             log.warning("Could not sweep stale parts on startup", exc_info=True)
         threading.Thread(target=self._delivery_tracker_loop, daemon=True).start()
+        threading.Thread(target=self._fasttrack_consumer_loop, daemon=True).start()
         last_check_time = 0
         long_poll_available = None  # None = untested, True/False = tested
         self._write_poll_status("offline")
@@ -1110,6 +1142,190 @@ class Poller:
                 reason,
                 exc_info=True,
             )
+
+    # --- find-device receiver wiring (M.8) ---------------------------
+
+    def _lookup_device_name(self, device_id: str) -> str | None:
+        try:
+            entry = self.config.paired_devices.get(device_id)
+        except Exception:
+            return None
+        if not isinstance(entry, dict):
+            return None
+        name = entry.get("name", "")
+        return name if isinstance(name, str) and name.strip() else None
+
+    def _resolve_symmetric_key(self, device_id: str) -> bytes | None:
+        try:
+            entry = self.config.paired_devices.get(device_id)
+        except Exception:
+            return None
+        if not isinstance(entry, dict):
+            return None
+        b64 = entry.get("symmetric_key_b64")
+        if not isinstance(b64, str) or not b64:
+            return None
+        try:
+            return base64.b64decode(b64)
+        except Exception:
+            return None
+
+    def _send_find_device_update(
+        self,
+        recipient_id: str,
+        state: str,
+        *,
+        lat: float | None = None,
+        lng: float | None = None,
+        accuracy: float | None = None,
+    ) -> bool:
+        symmetric_key = self._resolve_symmetric_key(recipient_id)
+        if symmetric_key is None:
+            log.warning(
+                "findphone.update.skipped reason=no_symkey peer=%s",
+                recipient_id[:12],
+            )
+            return False
+        plaintext = encode_state_payload(
+            state, lat=lat, lng=lng, accuracy=accuracy,
+        )
+        try:
+            encrypted = self.crypto.encrypt_blob(plaintext, symmetric_key)
+        except Exception:
+            log.exception(
+                "findphone.update.encrypt_failed peer=%s",
+                recipient_id[:12],
+            )
+            return False
+        encrypted_b64 = base64.b64encode(encrypted).decode()
+        try:
+            msg_id = self.api.fasttrack_send(recipient_id, encrypted_b64)
+        except Exception:
+            log.exception(
+                "findphone.update.fasttrack_send_failed peer=%s",
+                recipient_id[:12],
+            )
+            return False
+        return msg_id is not None
+
+    def _fasttrack_consumer_loop(self) -> None:
+        """Drain the fasttrack pending queue, decrypt, and dispatch.
+
+        Cadence: ``FASTTRACK_POLL_INTERVAL_S`` while connected, paused
+        while disconnected. Per-message work runs in this loop's
+        thread; handlers must not block on UI. Each message is ACK'd
+        regardless of dispatch outcome — leaving an undispatched
+        message in the queue would cause it to expire (10 min) and
+        flood logs every poll.
+
+        Coexists with the GTK find-device sender window's own polling
+        loop — they race for messages, but FIND_PHONE_LOCATION_UPDATE
+        responses are only meaningful inside that sender session, and
+        the sender's loop polls faster (3 s) so it usually wins. After
+        the sender window closes, this loop drains whatever is left
+        plus all incoming locate requests.
+        """
+        log.info("findphone.consumer.started")
+        while self._running:
+            if self.conn.state != ConnectionState.CONNECTED:
+                # Sleep on the wake event so stop() is responsive.
+                self._wake_event.wait(timeout=FASTTRACK_POLL_INTERVAL_S)
+                self._wake_event.clear()
+                continue
+            try:
+                self._process_fasttrack_pending()
+            except Exception:
+                log.exception("findphone.consumer.tick_failed")
+            self._wake_event.wait(timeout=FASTTRACK_POLL_INTERVAL_S)
+            self._wake_event.clear()
+        log.info("findphone.consumer.stopped")
+
+    def _process_fasttrack_pending(self) -> None:
+        try:
+            messages = self.api.fasttrack_pending()
+        except Exception:
+            log.debug("findphone.consumer.poll_failed", exc_info=True)
+            return
+        if not messages:
+            return
+        for raw in messages:
+            self._dispatch_fasttrack_message(raw)
+
+    def _dispatch_fasttrack_message(self, raw: dict) -> None:
+        msg_id = raw.get("id")
+        sender_id = raw.get("sender_id") or ""
+        encrypted_b64 = raw.get("encrypted_data") or ""
+
+        # Always ACK on the way out so a malformed/unauthorized msg
+        # doesn't sit in the queue.
+        try:
+            if not sender_id:
+                log.warning("findphone.consumer.dropped reason=no_sender_id")
+                return
+            symmetric_key = self._resolve_symmetric_key(sender_id)
+            if symmetric_key is None:
+                log.warning(
+                    "findphone.consumer.dropped reason=unknown_sender peer=%s",
+                    sender_id[:12],
+                )
+                return
+            try:
+                ciphertext = base64.b64decode(encrypted_b64)
+            except Exception:
+                log.warning(
+                    "findphone.consumer.dropped reason=base64_decode peer=%s",
+                    sender_id[:12],
+                )
+                return
+            try:
+                plaintext = self.crypto.decrypt_blob(ciphertext, symmetric_key)
+            except (InvalidTag, Exception) as exc:
+                log.warning(
+                    "findphone.consumer.dropped reason=decrypt_failed peer=%s kind=%s",
+                    sender_id[:12],
+                    type(exc).__name__,
+                )
+                return
+            try:
+                import json as _json
+                payload = _json.loads(plaintext)
+            except Exception:
+                log.warning(
+                    "findphone.consumer.dropped reason=json_parse peer=%s",
+                    sender_id[:12],
+                )
+                return
+            if not isinstance(payload, dict):
+                log.warning(
+                    "findphone.consumer.dropped reason=non_dict_payload peer=%s",
+                    sender_id[:12],
+                )
+                return
+
+            message = FasttrackAdapter.to_device_message(
+                payload, sender_id=sender_id,
+            )
+            if message is None:
+                log.debug(
+                    "findphone.consumer.unhandled fn=%s peer=%s",
+                    payload.get("fn"),
+                    sender_id[:12],
+                )
+                return
+            # Mark active only on inbound start/stop from a paired
+            # sender (D2: directed device action).
+            if message.type in (
+                MessageType.FIND_PHONE_START,
+                MessageType.FIND_PHONE_STOP,
+            ):
+                self._mark_active_device(sender_id, reason="find_device_incoming")
+            self._message_dispatcher.dispatch(message)
+        finally:
+            if msg_id is not None:
+                try:
+                    self.api.fasttrack_ack(int(msg_id))
+                except Exception:
+                    log.debug("findphone.consumer.ack_failed", exc_info=True)
 
     def local_unpair(self, scope: str, *, notify_title: str | None = None,
                      notify_body: str | None = None) -> None:

@@ -148,6 +148,7 @@ renamed/restructured.
 | `auth.missing` | server | warning | `uri` | No X-Device-ID / Bearer headers |
 | `auth.invalid` | server | warning | `device_id`, `uri` | Credentials didn't match |
 | `auth.failure.tripped` | android | warning | `kind`, `peer`, `count` | 3-in-a-row auth-failure streak latched. `peer` is the truncated device id when 403 PAIRING_MISSING was attributable, empty for global (CREDENTIALS_INVALID always lands here, plus unattributed 403s) |
+| `register.conflict` | server | info | `device_id`, `reason=already_registered` | `/api/devices/register` was called with a `public_key` whose `device_id` already exists. Server refuses with 409 instead of returning the existing `auth_token` (closes the credential-leak vector — public keys are not secret material, so anyone holding a QR / `.dcpair` could otherwise harvest tokens). Legitimate clients short-circuit registration after the first success and never trip this. |
 
 ### pairing
 
@@ -161,6 +162,15 @@ renamed/restructured.
 | `pairing.confirm.accepted` | server (new), desktop, android (new) | info | `device_a`, `device_b` | Pairing row created |
 | `pairing.unpair.received` | desktop, android | info | `peer_id` | `.fn.unpair` consumed |
 | `pairing.unpair.sent` | desktop, android | info | `peer_id` | Local user unpaired, notifying peer |
+| `pairing.key.shown` | desktop (M.11) | info | — | User opened the "Show pairing key" dialog. Key contents never logged. |
+| `pairing.key.exported` | desktop (M.11) | info | `path` | User saved the pairing key to a `.dcpair` file. The user-chosen path is logged; key contents are not. |
+| `pairing.key.export_failed` | desktop (M.11) | warning | `err` | OS error writing the export file (read-only mount, permissions). |
+| `pairing.key.import_parse_failed` | desktop (M.11) | warning | `surface`, `err` | D9 parser rejected. `surface ∈ {text, file}`. No payload contents in the log. |
+| `pairing.key.import_self_pair_refused` | desktop (M.11) | warning | — | D8/D10 self-pair refusal (device id matched the local one). |
+| `pairing.key.import_relay_mismatched` | desktop (M.11) | warning | `local`, `remote` | D8 relay mismatch. **Hostnames only** — full URLs are not logged because they may carry subdirectory tokens or query material. |
+| `pairing.key.import_already_paired_refused` | desktop (M.11) | warning | `peer` | The pairing key targets a device id that is already in `paired_devices`. |
+| `pairing.key.import_request_failed` | desktop (M.11) | warning | `peer` | Relay refused the pairing request (inviter window closed, transient network failure). |
+| `pairing.request.sent_as_joiner` | desktop (M.11) | info | `target` | Joiner-side counterpart of `pairing.request.sent`. Short-id of the inviter we sent a request to. |
 
 ### transfer
 
@@ -217,7 +227,28 @@ renamed/restructured.
 | `fasttrack.command.sent` | desktop, android | info | `fn`, `recipient` | e.g. `fn=find-phone action=start` |
 | `fasttrack.command.received` | desktop, android | info | `fn`, `sender` | On `.fn.*` dispatch |
 | `fasttrack.command.unknown` | desktop, android | warning | `fn` | |
-| `findphone.start.dropped_concurrent` | android | info | `active`, `new` | Second find-phone start arrived while already ringing for a different desktop; FCFS, second start ignored |
+| `findphone.start.accepted` | desktop (M.8) | info | `peer`, `silent` | Receiver accepted a locate request; alert + heartbeats begin |
+| `findphone.start.dropped_concurrent` | desktop (M.8), android | info | `active`, `new` | Second find-phone start arrived while already ringing for a different sender; FCFS, second start ignored |
+| `findphone.stop.accepted` | desktop (M.8) | info | `peer` | Active sender's stop accepted; heartbeat + alert torn down |
+| `findphone.stop.ignored` | desktop (M.8) | info | `reason`, `active`, `saw` | Stop arrived from a non-active sender (e.g. `wrong_sender`) |
+| `findphone.timeout` | desktop (M.8) | info | — | 5 min hard cap fired; treated as a local stop |
+| `findphone.command.dropped` | desktop (M.8) | warning | `reason` | Inbound message lacked sender id; pre-dispatch drop |
+| `findphone.alert.start_failed` / `findphone.alert.stop_failed` | desktop (M.8) | error | `peer` | GTK4 modal subprocess or sound thread failed; responder still sends heartbeats |
+| `findphone.alert.subprocess_failed` | desktop (M.8) | error | `sender` | `Popen` for the locate-alert window failed (no DISPLAY, missing GTK, etc.) |
+| `findphone.alert.sound_skipped` | desktop (M.8) | info | `reason` | `no_sound_file` or `no_player` — alert is visual only this session |
+| `findphone.alert.sound_started` / `findphone.alert.sound_stopped` | desktop (M.8) | info | `player` | Player binary used (`paplay`, `aplay`, `play`, `mpv`) |
+| `findphone.consumer.started` / `findphone.consumer.stopped` | desktop (M.8) | info | — | Background fasttrack consumer loop lifecycle |
+| `findphone.consumer.dropped` | desktop (M.8) | warning | `reason`, `peer`?, `kind`? | Inbound message dropped — `no_sender_id`, `unknown_sender`, `base64_decode`, `decrypt_failed`, `json_parse`, `non_dict_payload` |
+| `findphone.consumer.unhandled` | desktop (M.8) | debug | `fn`, `peer` | Sender-side response (e.g. `fn=find-phone state=ringing`) seen by the receiver-side consumer; ignored, ACKed |
+| `findphone.consumer.ack_failed` | desktop (M.8) | debug | — | Best-effort ACK failed (transient network); message will expire server-side |
+| `findphone.update.skipped` | desktop (M.8) | warning | `reason`, `peer` | Outbound state update skipped (`no_symkey` for an unpaired recipient) |
+| `findphone.update.encrypt_failed` / `findphone.update.fasttrack_send_failed` | desktop (M.8) | error | `peer` | Encrypt or transport leg of an outbound state update failed |
+| `findphone.update.send_failed` / `findphone.update.send_rejected` | desktop (M.8) | error/warning | `peer`, `state` | Responder couldn't queue an update; heartbeat thread retries on next tick |
+| `findphone.heartbeat.loop_failed` / `findphone.heartbeat.cancel_failed` | desktop (M.8) | exception/debug | — | Heartbeat thread book-keeping failures; session continues |
+| `findphone.location.unavailable` | desktop (M.9) | info | `reason`, `err`? | GeoClue connect failed (`gi_import_failed`, `geoclue_unreachable`, `geoclue_start_failed`); receiver falls back to state-only heartbeats |
+| `findphone.location.connected` | desktop (M.9) | info | `backend` | `backend=geoclue` — D-Bus client started; future fixes flow through `LocationUpdated` signals |
+| `findphone.location.fix_updated` | desktop (M.9) | info | `accuracy` | Accuracy radius (meters) only; raw lat/lng never logged |
+| `findphone.location.provider_failed` | desktop (M.9) | exception | — | LocationProvider raised; this tick falls back to state-only |
 
 ### ping
 
@@ -301,6 +332,23 @@ renamed/restructured.
 | `platform.permission.requested` | android | info | `permission` | |
 | `platform.permission.granted` | android | info | `permission` | |
 | `platform.permission.denied` | android | warning | `permission` | |
+
+### device (multi-device support)
+
+Desktop multi-device events introduced by the
+`docs/plans/desktop-multi-device-support.md` rollout (M.0–M.10). All
+fields are short id (12 chars max) so the same correlation rule
+applies as elsewhere.
+
+| Event | Where | Severity | Context | Notes |
+|---|---|---|---|---|
+| `device.active.changed` | desktop (M.0+) | info | `peer`, `reason` | Active connected device changed. `reason ∈ {test, paired, incoming, outgoing, find_device_start, find_device_incoming, ...}` per D2 of the plan |
+| `device.name.normalized` | desktop (M.0) | info | `peer` | Duplicate display name found at startup; the later duplicate was renamed to `<name> <short_id>` and persisted. Should only fire once after a legacy / hand-edited `config.json` is opened |
+| `file_manager.<kind>.write` | desktop (M.6) | info | `peer`, `name` | Per-pairing Nautilus / Nemo script created or refreshed. `<kind> ∈ {nautilus, nemo}` |
+| `file_manager.<kind>.cleaned` | desktop (M.6) | info | `name`, `peer` | Stale managed script removed because the pairing was unpaired, renamed, or the file's pairing id no longer matches |
+| `file_manager.<kind>.legacy_removed` | desktop (M.6) | info | `name` | Pre-multi-device "Send to Phone" script adopted via fingerprint and removed; per-device replacements come from the same sync pass |
+| `file_manager.dolphin.written` | desktop (M.6) | info | `peers` | Dolphin service-menu file rewritten with N actions, one per paired device |
+| `file_manager.dolphin.removed` | desktop (M.6) | info | `reason=no_pairs` | Dolphin file removed when the last pairing was deleted |
 
 ### config
 

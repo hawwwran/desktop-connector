@@ -145,14 +145,48 @@ class ServerProtocolContractTests(unittest.TestCase):
         self.assertEqual(len(device_id), 32)
         self.assertEqual(len(auth_token), 64)
 
+        # Re-register with the same pubkey now returns 409 — closing the
+        # auth-token-leak vector documented in the M.11 plan. The server
+        # must NOT echo any auth_token in the body, otherwise anyone
+        # holding the public key (which travels through QR codes /
+        # .dcpair files) could harvest the credential.
         status, _headers, body = self.h.request(
             "POST",
             "/api/devices/register",
             json_body={"public_key": public_key, "device_type": "desktop"},
         )
+        self.assertEqual(status, 409)
+        self.assertNotIn("auth_token", body)
+
+    def test_register_does_not_leak_auth_token_to_pubkey_holder(self):
+        # Regression for the auth-token-leak vector: the public key is
+        # not secret material. An attacker who photographs a QR code,
+        # captures a .dcpair file, or sniffs a pairing handshake holds
+        # the same data this test supplies. The endpoint must refuse
+        # to return the existing auth_token in any of those cases.
+        device_id, auth_token, public_key = self._register_device("desktop")
+
+        attacker_status, _h, attacker_body = self.h.request(
+            "POST",
+            "/api/devices/register",
+            json_body={"public_key": public_key, "device_type": "desktop"},
+        )
+
+        self.assertEqual(attacker_status, 409)
+        # No `auth_token` field at all — not even an empty / null one.
+        self.assertNotIn("auth_token", attacker_body)
+        # And of course not the actual token by accident either.
+        self.assertNotIn(auth_token, json.dumps(attacker_body))
+
+        # The legitimate device still authenticates with its
+        # originally-issued token. The 409 must not have rotated it.
+        status, _h, _b = self.h.request(
+            "GET",
+            "/api/devices/stats",
+            token=auth_token,
+            device_id=device_id,
+        )
         self.assertEqual(status, 200)
-        self.assertEqual(body["device_id"], device_id)
-        self.assertEqual(body["auth_token"], auth_token)
 
     def test_pairing_contract(self):
         desktop_id, desktop_token, _ = self._register_device("desktop")

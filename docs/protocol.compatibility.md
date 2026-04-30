@@ -70,12 +70,15 @@ release build of the desktop or Android client could start misbehaving.
 | `/api/fasttrack/send` | Raise ceiling above 128 KB | extending |
 | Auth: accept additional header name (e.g. `X-Auth-Token`) | Add as alternative | extending |
 | Auth: require a new header on an existing endpoint | Add requirement | breaking |
+| `/api/devices/register` with already-known `public_key` | Was 200 + existing `auth_token`; now **409 Conflict** with no `auth_token` field | technically breaking, but fixed clients short-circuit on persisted creds and never hit this path. Closes the credential-leak vector documented in `docs/plans/desktop-multi-device-support.md` D9 (M.11). Loss of the local auth_token now requires keypair rotation, which produces a fresh device_id and a fresh row. |
 | Error envelope | Change the top-level key from `"error"` to `"message"` | breaking |
 | Error envelope | Add extra context fields (e.g. `"retry_after"`) | extending |
 | `.fn.*` naming convention | Remove support for `.fn.unpair` / `.fn.clipboard.*` | breaking |
 | `.fn.*` naming convention | Add `.fn.newthing.*` | extending |
 | Fasttrack payload `{fn, action}` shape | Reuse existing `fn` with new semantics | breaking |
 | Fasttrack payload `{fn, action}` shape | Add a new `fn` value | extending |
+| Fasttrack `fn=find-phone` | Receivers (desktop M.8+) also accept `fn=find-device` as an alias | extending — senders stay on `find-phone` until both platforms migrate per D5 of `docs/plans/desktop-multi-device-support.md` |
+| Fasttrack `fn=find-phone` state update | New optional `lat`/`lng`/`accuracy` from desktop receiver (M.9) | extending — already optional on Android; absence means no fix yet |
 | `DeviceMessage.payload` shape for existing `MessageType` | Change the key set or types | breaking |
 | `DeviceMessage.payload` shape for existing `MessageType` | Add a new optional key | extending |
 | New `MessageType` enum value | Add on both Android + desktop + adapters | extending |

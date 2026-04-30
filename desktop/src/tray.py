@@ -258,7 +258,7 @@ class TrayApp:
                     self._send_clipboard,
                     visible=lambda _: self.config.is_paired and self.platform.capabilities.clipboard_text,
                 ),
-                pystray.MenuItem("Find my Phone", self._find_phone,
+                pystray.MenuItem("Find my Device", self._find_phone,
                                  visible=lambda _: self.config.is_paired and self._fcm_available),
                 pystray.MenuItem("Show History", self._show_history),
                 pystray.MenuItem(
@@ -267,7 +267,15 @@ class TrayApp:
                     visible=lambda _: self.platform.capabilities.open_folder,
                 ),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Pair...", self._pair, visible=lambda _: not self.config.is_paired),
+                # Always available — multi-device support means the user can
+                # add another pairing on top of an existing one. The pairing
+                # window's naming step handles uniqueness against the
+                # current pair list.
+                pystray.MenuItem(
+                    lambda _: ("Pair..." if not self.config.is_paired
+                               else "Pair another device..."),
+                    self._pair,
+                ),
                 pystray.MenuItem("Settings...", self._show_settings),
                 # Update items appear only inside an AppImage — apt-pip and
                 # dev-tree installs can't act on an in-app update anyway.
