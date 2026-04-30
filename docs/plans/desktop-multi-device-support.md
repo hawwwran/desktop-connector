@@ -233,7 +233,7 @@ Verification:
 
 ### M.2 - Target resolution and CLI plumbing
 
-Status: pending
+Status: completed 2026-04-30
 
 Goal: let non-GTK entry points send to a specific connected device.
 
@@ -250,9 +250,19 @@ Work:
 
 Verification:
 
-- Unit tests for `--send --target-device-id`.
-- Existing folder-rejection tests still prove directory sends fail before any
-  target resolution or server call.
+- `python3 -m unittest tests.protocol.test_desktop_target_resolution` passed
+  2026-04-30.
+- `python3 -m unittest tests.protocol.test_desktop_send_runner_streaming`
+  passed 2026-04-30.
+- `python3 -m unittest tests.protocol.test_desktop_send_folder_rejection`
+  passed 2026-04-30.
+- `python3 -m unittest tests.protocol.test_desktop_history_multi_device`
+  passed 2026-04-30.
+- `python3 -m unittest tests.protocol.test_desktop_multi_device_config`
+  passed 2026-04-30.
+- `python3 -m unittest tests.protocol.test_desktop_config_permissions` passed
+  2026-04-30.
+- `git diff --check` passed 2026-04-30.
 
 ### M.3 - Send files window
 

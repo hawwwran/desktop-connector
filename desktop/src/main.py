@@ -10,6 +10,7 @@ Usage:
 
     # Headless send a file:
     python -m src.main --headless --send="/path/to/file"
+    python -m src.main --headless --send="/path/to/file" --target-device-id="<id>"
 
     # Custom config directory:
     python -m src.main --config-dir=/path/to/config
@@ -201,7 +202,12 @@ def main() -> int:
 
     mode = resolve_startup_mode(args)
     if mode == "send_file":
-        return run_send_file(context.config, context.crypto, Path(args.send))
+        return run_send_file(
+            context.config,
+            context.crypto,
+            Path(args.send),
+            target_device_id=args.target_device_id,
+        )
 
     run_receiver(
         context.config,

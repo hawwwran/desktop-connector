@@ -245,6 +245,33 @@ class ConnectedDeviceRegistry:
         )
 
 
+def resolve_target_device(
+    config: Config,
+    *,
+    target_device_id: str | None = None,
+) -> ConnectedDevice:
+    """Resolve the paired device a non-GTK send should target.
+
+    Explicit CLI ids win. Without an explicit id, fall back to the
+    active device, then the registry default device when no active
+    device is set yet.
+    """
+    registry = ConnectedDeviceRegistry(config)
+    requested_id = (target_device_id or "").strip()
+    if requested_id:
+        device = registry.get(requested_id)
+        if device is None:
+            raise DeviceNotFoundError(
+                f"target device is not paired: {requested_id}"
+            )
+        return device
+
+    device = registry.get_active_device()
+    if device is None:
+        raise DeviceNotFoundError("no paired device")
+    return device
+
+
 def _coerce_int(value: object) -> int:
     if isinstance(value, bool):
         return 0

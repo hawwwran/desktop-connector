@@ -11,11 +11,23 @@ from ..api_client import ApiClient
 from ..config import Config
 from ..connection import ConnectionManager
 from ..crypto import KeyManager
+from ..devices import (
+    ConnectedDeviceRegistry,
+    DeviceNotFoundError,
+    resolve_target_device,
+    short_device_id,
+)
 
 log = logging.getLogger("desktop-connector")
 
 
-def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
+def run_send_file(
+    config: Config,
+    crypto: KeyManager,
+    filepath: Path,
+    *,
+    target_device_id: str | None = None,
+) -> int:
     """Send a single file and exit. Returns 0 on success, 1 on failure."""
     if not config.is_registered:
         log.error("Not registered. Run without --send first to register and pair.")
@@ -37,9 +49,24 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
         )
         return 1
 
-    # Get first paired device
-    target_id, target_info = config.get_first_paired_device()
-    symmetric_key = base64.b64decode(target_info["symmetric_key_b64"])
+    try:
+        target = resolve_target_device(
+            config,
+            target_device_id=target_device_id,
+        )
+    except DeviceNotFoundError as exc:
+        log.error(str(exc))
+        return 1
+
+    if not target.symmetric_key_b64:
+        log.error(
+            "Missing pairing key for target device: %s",
+            short_device_id(target.device_id),
+        )
+        return 1
+
+    target_id = target.device_id
+    symmetric_key = base64.b64decode(target.symmetric_key_b64)
 
     conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
     api = ApiClient(conn, crypto)
@@ -50,12 +77,11 @@ def run_send_file(config: Config, crypto: KeyManager, filepath: Path) -> int:
         return 1
 
     try:
-        config.active_device_id = target_id
-        log.info("device.active.changed peer=%s reason=outgoing", target_id[:8])
+        ConnectedDeviceRegistry(config).mark_active(target_id, reason="outgoing")
     except Exception:
         log.debug(
             "device.active.update_failed peer=%s reason=outgoing",
-            target_id[:8],
+            short_device_id(target_id),
             exc_info=True,
         )
 
