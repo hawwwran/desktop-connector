@@ -182,26 +182,7 @@ class DashboardController
     <meta http-equiv="refresh" content="5">
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
     <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-               background: #000733; color: #E8EEFD; padding: 24px; }
-        h1 { color: #ffffff; margin-bottom: 8px; font-size: 1.5rem;
-             display: flex; align-items: center; gap: 10px; }
-        h1 .spark { width: 22px; height: 22px; flex: none; }
-        .subtitle { color: #A4D0FB; margin-bottom: 24px; font-size: 0.875rem; }
-        .stats { display: flex; gap: 16px; margin-bottom: 32px; flex-wrap: wrap; }
-        .stat { background: #00146C; border-radius: 8px; padding: 16px 24px; min-width: 140px; }
-        .stat-value { font-size: 1.5rem; font-weight: 700; color: #ffffff; }
-        .stat-label { font-size: 0.75rem; color: #A4D0FB; text-transform: uppercase; letter-spacing: 0.05em; }
-        h2 { color: #ffffff; margin: 24px 0 12px; font-size: 1.1rem; }
-        table { width: 100%; border-collapse: collapse; background: #00146C; border-radius: 8px; overflow: hidden; margin-bottom: 24px; }
-        th { background: #0A1C7A; color: #A4D0FB; font-size: 0.75rem; text-transform: uppercase;
-             letter-spacing: 0.05em; padding: 10px 14px; text-align: left; }
-        td { padding: 10px 14px; border-top: 1px solid #0A1C7A; font-size: 0.875rem; font-family: 'SF Mono', monospace; }
-        tr:hover td { background: #0920AC; }
-        .empty { color: #5898FB; padding: 24px; text-align: center; }
-    </style>
+    <link rel="stylesheet" href="css/brand.css">
 </head>
 <body>
     <h1>

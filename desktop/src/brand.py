@@ -248,6 +248,57 @@ def apply_brand_css() -> None:
     )
 
 
+def apply_theme_mode_from_config_dir(config_dir) -> None:
+    """
+    Convenience for `windows.py`: each GTK4 subprocess takes a
+    `config_dir: Path`, but Config construction is heavy and not
+    every window needs it. Read `theme_mode` directly from
+    `config.json` (it's non-secret, not in the keyring) and apply.
+
+    Falls back to "system" on any error — missing file (fresh
+    install), malformed JSON, or absent key are all benign.
+    """
+    import json
+    from pathlib import Path
+    mode = "system"
+    try:
+        cfg_file = Path(config_dir) / "config.json"
+        if cfg_file.exists():
+            data = json.loads(cfg_file.read_text())
+            value = data.get("theme_mode")
+            if value in ("system", "light", "dark"):
+                mode = value
+    except Exception as e:
+        log.debug("theme_mode read failed: %s", e)
+    apply_theme_mode(mode)
+
+
+def apply_theme_mode(mode: str) -> None:
+    """
+    Route the user's `theme_mode` config pref through libadwaita's
+    Adw.StyleManager so each GTK4 subprocess honours light / dark /
+    system. Mirrors the Android `ThemeMode` pref semantics:
+
+      * "system" → Adw.ColorScheme.DEFAULT (follow desktop env)
+      * "light"  → Adw.ColorScheme.FORCE_LIGHT
+      * "dark"   → Adw.ColorScheme.FORCE_DARK
+
+    Unknown values fall through to DEFAULT. Safe to call before any
+    window is created — StyleManager is a process-wide singleton.
+    """
+    try:
+        from gi.repository import Adw
+    except Exception:
+        return
+    sm = Adw.StyleManager.get_default()
+    if mode == "light":
+        sm.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+    elif mode == "dark":
+        sm.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+    else:
+        sm.set_color_scheme(Adw.ColorScheme.DEFAULT)
+
+
 def brand_gtk_window() -> None:
     """Convenience: call once per GTK4 subprocess entry before on_activate."""
     claim_gtk_identity()

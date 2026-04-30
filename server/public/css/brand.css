@@ -1,0 +1,139 @@
+/*
+ * Desktop Connector — server brand stylesheet
+ *
+ * Palette + shared layout for any HTML the relay serves (currently
+ * the dashboard; future pairing landing pages can extend the same
+ * tokens). Mirrors the desktop and Android brand rollouts — see
+ * docs/visual-identity-guide.md.
+ */
+
+:root {
+    /* Core blues */
+    --dc-blue-970: #000733;
+    --dc-blue-950: #00146C;
+    --dc-blue-900: #0920AC;
+    --dc-blue-800: #1032D0;
+    --dc-blue-700: #2058F0;
+    --dc-blue-500: #3986FC;
+    --dc-blue-400: #5898FB;
+    --dc-blue-200: #A4D0FB;
+
+    /* Surfaces — between 950 and 900, used for table headers / hover */
+    --dc-blue-table-head: #0A1C7A;
+
+    /* Accents */
+    --dc-yellow-500: #FDD00C;
+    --dc-orange-700: #EA7601;
+    --dc-white-soft: #E8EEFD;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--dc-blue-970);
+    color: var(--dc-white-soft);
+    padding: 24px;
+}
+
+h1 {
+    color: #ffffff;
+    margin-bottom: 8px;
+    font-size: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+h1 .spark {
+    width: 22px;
+    height: 22px;
+    flex: none;
+}
+
+h2 {
+    color: #ffffff;
+    margin: 24px 0 12px;
+    font-size: 1.1rem;
+}
+
+.subtitle {
+    color: var(--dc-blue-200);
+    margin-bottom: 24px;
+    font-size: 0.875rem;
+}
+
+.stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+}
+
+.stat {
+    background: var(--dc-blue-950);
+    border-radius: 8px;
+    padding: 16px 24px;
+    min-width: 140px;
+}
+
+.stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.stat-label {
+    font-size: 0.75rem;
+    color: var(--dc-blue-200);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--dc-blue-950);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 24px;
+}
+
+th {
+    background: var(--dc-blue-table-head);
+    color: var(--dc-blue-200);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 10px 14px;
+    text-align: left;
+}
+
+td {
+    padding: 10px 14px;
+    border-top: 1px solid var(--dc-blue-table-head);
+    font-size: 0.875rem;
+    font-family: 'SF Mono', monospace;
+}
+
+tr:hover td {
+    background: var(--dc-blue-900);
+}
+
+.empty {
+    color: var(--dc-blue-400);
+    padding: 24px;
+    text-align: center;
+}
+
+/* Status colour utilities — used by dashboard rows for the dot
+ * + label pattern (online / offline, ready / uploading / aborted,
+ * FCM ready / no token). Inline `style="color:..."` was the
+ * pre-stylesheet shape and still works; classes keep new HTML
+ * surfaces consistent.
+ */
+.dc-status-ok      { color: var(--dc-blue-500); }
+.dc-status-warn    { color: var(--dc-yellow-500); }
+.dc-status-error   { color: var(--dc-orange-700); }
+.dc-status-muted   { color: var(--dc-blue-200); }
+.dc-status-dim     { color: var(--dc-blue-400); }

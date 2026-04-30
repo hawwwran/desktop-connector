@@ -29,6 +29,7 @@ from .brand import (
     DC_YELLOW_500,
     apply_brand_css,
     apply_pointer_cursors,
+    apply_theme_mode_from_config_dir,
     claim_gtk_identity,
 )
 from .notifications import notify
@@ -132,6 +133,7 @@ def show_send_files(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(application=app, title="Send files to",
                                      default_width=480, default_height=520)
 
@@ -681,6 +683,7 @@ def show_settings(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(application=app, title="Settings", default_width=630, default_height=624)
         win.set_resizable(True)
 
@@ -754,6 +757,43 @@ def show_settings(config_dir: Path):
                 GLib.timeout_add(2000, lambda: (btn.set_label("Save"), btn.set_sensitive(True), False)[-1])
 
         save_btn.connect("clicked", on_save)
+
+        # Appearance
+        appearance_group = Adw.PreferencesGroup(title="Appearance")
+        content.append(appearance_group)
+
+        theme_modes = (
+            ("System", "system"),
+            ("Light", "light"),
+            ("Dark", "dark"),
+        )
+        theme_model = Gtk.StringList.new([label for label, _ in theme_modes])
+        theme_row = Adw.ComboRow(
+            title="Theme",
+            subtitle="Match desktop, or force light / dark mode.",
+            model=theme_model,
+        )
+        current_mode = config.theme_mode
+        for idx, (_, value) in enumerate(theme_modes):
+            if value == current_mode:
+                theme_row.set_selected(idx)
+                break
+
+        def on_theme_changed(combo, _pspec, modes=theme_modes):
+            i = combo.get_selected()
+            if 0 <= i < len(modes):
+                new_mode = modes[i][1]
+                if new_mode != config.theme_mode:
+                    config.theme_mode = new_mode
+                    # Live-apply to this window so the change is visible
+                    # without a restart. Other open subprocesses pick it
+                    # up on their next reload (config.json is the source
+                    # of truth).
+                    from .brand import apply_theme_mode
+                    apply_theme_mode(new_mode)
+
+        theme_row.connect("notify::selected", on_theme_changed)
+        appearance_group.add(theme_row)
 
         # Receive actions
         receive_group = Adw.PreferencesGroup(title="Receive Actions")
@@ -1577,6 +1617,7 @@ def show_history(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(application=app, title="Transfer History",
                                      default_width=500, default_height=480)
         win.set_size_request(400, 300)
@@ -2458,6 +2499,7 @@ def show_pairing(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(application=app, title="Pair with Device",
                                      default_width=460, default_height=640)
 
@@ -3206,6 +3248,7 @@ function updatePos(lat,lng,acc) {
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(application=app, title="Find my Device",
                                      default_width=480, default_height=640)
 
@@ -3574,6 +3617,7 @@ def show_onboarding(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(
             application=app,
             title="Welcome to Desktop Connector",
@@ -3726,6 +3770,7 @@ def show_secret_storage_warning(config_dir: Path):
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(
             application=app,
             title="Secret storage warning",
@@ -3836,6 +3881,7 @@ def show_locate_alert(config_dir: Path, *, sender_name: str):
 
     def on_activate(app):
         apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(
             application=app,
             title="Being located",
