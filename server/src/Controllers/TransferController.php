@@ -57,8 +57,15 @@ class TransferController
     {
         // 1-in-20 sampling of cleanup attached to an HTTP request path; policy
         // stays here so the cleanup service itself is deterministic/reusable.
+        // Wrapped: opportunistic cleanup must never poison the response —
+        // /pending is on the desktop's connection-state hot path, so a 500
+        // here flips the UI to disconnected on every sampling hit.
         if (random_int(1, 20) === 1) {
-            TransferCleanupService::run($db);
+            try {
+                TransferCleanupService::run($db);
+            } catch (\Throwable $e) {
+                AppLog::log('Transfer', 'transfer.cleanup.failed reason=' . $e->getMessage(), 'warning');
+            }
         }
         Router::json(['transfers' => TransferService::listPending($db, $ctx->deviceId)]);
     }

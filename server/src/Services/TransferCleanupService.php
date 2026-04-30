@@ -61,7 +61,21 @@ class TransferCleanupService
         $transfers = new TransferRepository($db);
         $row = $transfers->findById($transferId);
         if ($row !== null) {
-            TransferLifecycle::onTransferExpired($row);
+            // Invariant violations on the row are logged and otherwise ignored —
+            // cleanup is the recovery path; refusing to delete a corrupt row was
+            // a footgun (such a row would re-trip the assertion on every pass
+            // and surface as HTTP 500 from /pending, since the controller samples
+            // cleanup 1-in-20). Now the row is deleted and the
+            // transfer.cleanup.invariant_violation event is the audit trail.
+            try {
+                TransferLifecycle::onTransferExpired($row);
+            } catch (\Throwable $e) {
+                AppLog::log('Transfer', sprintf(
+                    'transfer.cleanup.invariant_violation id=%s reason=%s',
+                    $transferId,
+                    $e->getMessage()
+                ), 'warning');
+            }
         }
         self::deleteChunkFilesAndRows($db, $transferId);
         $transfers->delete($transferId);
