@@ -537,6 +537,29 @@ class Config:
             result[device_id] = merged
         return result
 
+    def get_pairing_symkey(self, device_id: str) -> str | None:
+        """Fast lookup of a single pairing's symmetric key.
+
+        Skips the full ``paired_devices`` reload+rebuild that happens
+        on every property access. Hot loops (find-device heartbeat
+        every 5 s, fasttrack consumer every 8 s) call this once per
+        message instead of dragging the whole config off disk. Reads
+        in-memory ``_data`` for membership and either the hydrated
+        symkey (JsonFallbackStore) or the secret store directly
+        (SecretServiceStore). Returns ``None`` for unknown devices or
+        when the secret store is unreachable.
+        """
+        entry = self._data.get("paired_devices", {}).get(device_id)
+        if not isinstance(entry, dict):
+            return None
+        symkey = entry.get("symmetric_key_b64")
+        if isinstance(symkey, str) and symkey:
+            return symkey
+        try:
+            return self._secret_store.get(pairing_symkey_key(device_id))
+        except SecretServiceUnavailable:
+            return None
+
     def add_paired_device(self, device_id: str, pubkey: str, symmetric_key_b64: str, name: str = "") -> None:
         # Non-secret pairing metadata stays in _data. The symmetric
         # key — the only secret — goes through the secret store.

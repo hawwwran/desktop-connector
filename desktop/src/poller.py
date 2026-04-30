@@ -26,8 +26,10 @@ from .crypto import KeyManager
 from .find_device_responder import (
     FindDeviceAlert,
     FindDeviceResponder,
+    InitialTickRunner,
     NoopAlert,
     encode_state_payload,
+    threaded_initial_tick_runner,
 )
 from .history import TransferHistory, TransferStatus
 from .messaging import FasttrackAdapter, FnTransferAdapter, MessageDispatcher, MessageType
@@ -126,7 +128,8 @@ class Poller:
                  api: ApiClient, crypto: KeyManager, history: TransferHistory,
                  platform: DesktopPlatform,
                  *,
-                 find_device_alert: FindDeviceAlert | None = None):
+                 find_device_alert: FindDeviceAlert | None = None,
+                 initial_tick_runner: InitialTickRunner = threaded_initial_tick_runner):
         self.config = config
         self.conn = connection
         self.api = api
@@ -141,10 +144,8 @@ class Poller:
             alert=find_device_alert or NoopAlert(),
             send_update=self._send_find_device_update,
             device_name_lookup=self._lookup_device_name,
-            location_provider=getattr(
-                platform, "location",
-                None,
-            ).get_current_fix if getattr(platform, "location", None) else None,
+            location_provider=platform.location.get_current_fix,
+            initial_tick_runner=initial_tick_runner,
         )
         self._message_dispatcher.register(
             MessageType.FIND_PHONE_START,
@@ -156,6 +157,7 @@ class Poller:
         )
         self._running = True
         self._wake_event = threading.Event()
+        self._fasttrack_wake_event = threading.Event()
         self._poll_interval = DEFAULT_POLL_INTERVAL
         self._fast_poll_until = 0.0
         self._on_file_received: list = []
@@ -197,10 +199,12 @@ class Poller:
     def stop(self) -> None:
         self._running = False
         self._wake_event.set()
+        self._fasttrack_wake_event.set()
 
     def wake(self) -> None:
-        """Wake the poller to check immediately."""
+        """Wake both the main poll loop and the fasttrack consumer."""
         self._wake_event.set()
+        self._fasttrack_wake_event.set()
 
     def has_live_outgoing(self) -> bool:
         """True iff any sent transfer is still flowing — not yet delivered and
@@ -1157,13 +1161,10 @@ class Poller:
 
     def _resolve_symmetric_key(self, device_id: str) -> bytes | None:
         try:
-            entry = self.config.paired_devices.get(device_id)
+            b64 = self.config.get_pairing_symkey(device_id)
         except Exception:
             return None
-        if not isinstance(entry, dict):
-            return None
-        b64 = entry.get("symmetric_key_b64")
-        if not isinstance(b64, str) or not b64:
+        if not b64:
             return None
         try:
             return base64.b64decode(b64)
@@ -1226,16 +1227,18 @@ class Poller:
         log.info("findphone.consumer.started")
         while self._running:
             if self.conn.state != ConnectionState.CONNECTED:
-                # Sleep on the wake event so stop() is responsive.
-                self._wake_event.wait(timeout=FASTTRACK_POLL_INTERVAL_S)
-                self._wake_event.clear()
+                # Sleep on the dedicated fasttrack event so stop() is
+                # responsive without racing the main poll loop's
+                # _wake_event clear/set cycle.
+                self._fasttrack_wake_event.wait(timeout=FASTTRACK_POLL_INTERVAL_S)
+                self._fasttrack_wake_event.clear()
                 continue
             try:
                 self._process_fasttrack_pending()
             except Exception:
                 log.exception("findphone.consumer.tick_failed")
-            self._wake_event.wait(timeout=FASTTRACK_POLL_INTERVAL_S)
-            self._wake_event.clear()
+            self._fasttrack_wake_event.wait(timeout=FASTTRACK_POLL_INTERVAL_S)
+            self._fasttrack_wake_event.clear()
         log.info("findphone.consumer.stopped")
 
     def _process_fasttrack_pending(self) -> None:

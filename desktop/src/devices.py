@@ -202,9 +202,15 @@ class ConnectedDeviceRegistry:
         if _name_key(candidate) not in taken:
             return candidate
 
+        # Fall back to space-int suffixes (e.g. "<base> <short> 2") to
+        # match the increment style of `next_default_device_name`. We
+        # only ever reach this branch when both the base name and the
+        # short-id-disambiguated form are taken — vanishingly rare in
+        # practice, but consistency keeps the persisted-name shape
+        # uniform across both code paths.
         index = 2
         while True:
-            numbered = f"{candidate}-{index}"
+            numbered = f"{candidate} {index}"
             if _name_key(numbered) not in taken:
                 return numbered
             index += 1

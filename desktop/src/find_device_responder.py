@@ -68,6 +68,12 @@ TimerStarter = Callable[[float, Callable[[], None]], Callable[[], None]]
 # given callback; returns a cancel callable. Tests pass a fake that
 # captures the callback for manual firing.
 HeartbeatStarter = Callable[[Callable[[], None]], Callable[[], None]]
+# Runner for the initial heartbeat fired immediately on `start()`.
+# Tests run it synchronously (so assertions can read the captured
+# `send_update` call right away); production runs it on a worker
+# thread so a slow encrypted-fasttrack POST doesn't block the
+# MessageDispatcher thread that delivered the start command.
+InitialTickRunner = Callable[[Callable[[], None]], None]
 
 
 def _real_timer_starter(seconds: float, callback: Callable[[], None]) -> Callable[[], None]:
@@ -75,6 +81,22 @@ def _real_timer_starter(seconds: float, callback: Callable[[], None]) -> Callabl
     timer.daemon = True
     timer.start()
     return timer.cancel
+
+
+def _sync_initial_tick_runner(fn: Callable[[], None]) -> None:
+    fn()
+
+
+def threaded_initial_tick_runner(fn: Callable[[], None]) -> None:
+    """Production initial-tick runner: hand the tick to a daemon thread
+    so the calling thread (typically the MessageDispatcher delivering a
+    `find-phone start`) returns immediately and stays available for
+    the next inbound command."""
+    threading.Thread(
+        target=fn,
+        daemon=True,
+        name="find-device-initial-tick",
+    ).start()
 
 
 def _real_heartbeat_starter(callback: Callable[[], None]) -> Callable[[], None]:
@@ -123,6 +145,7 @@ class FindDeviceResponder:
         location_provider: Callable[[], LocationFix | None] | None = None,
         start_timer: TimerStarter = _real_timer_starter,
         start_heartbeat: HeartbeatStarter = _real_heartbeat_starter,
+        initial_tick_runner: InitialTickRunner = _sync_initial_tick_runner,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._alert = alert or NoopAlert()
@@ -131,6 +154,7 @@ class FindDeviceResponder:
         self._location_provider = location_provider or (lambda: None)
         self._start_timer = start_timer
         self._start_heartbeat = start_heartbeat
+        self._initial_tick_runner = initial_tick_runner
         self._clock = clock
         self._lock = threading.RLock()
         self._session: _Session | None = None
@@ -214,9 +238,12 @@ class FindDeviceResponder:
                                   sender_id[:12])
 
         # Send the initial heartbeat outside the lock so a slow API
-        # call doesn't block subsequent stop() commands. M.9: include
-        # current location fix when one is available.
-        self._heartbeat_tick(sender_id)
+        # call doesn't block subsequent stop() commands. Production
+        # also runs it off the calling thread (MessageDispatcher) so
+        # a slow encrypted-fasttrack POST can't stall the next inbound
+        # command. M.9: include the current location fix when one is
+        # available.
+        self._initial_tick_runner(lambda sid=sender_id: self._heartbeat_tick(sid))
 
     def stop(self, *, send_stopped_update: bool = True) -> None:
         """Locally-initiated stop (user clicked "Stop", or timeout)."""

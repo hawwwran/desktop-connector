@@ -18,7 +18,10 @@ ensure_desktop_on_path()
 
 from src.config import Config  # noqa: E402
 from src.crypto import KeyManager  # noqa: E402
-from src.find_device_responder import NoopAlert  # noqa: E402
+from src.find_device_responder import (  # noqa: E402
+    NoopAlert,
+    _sync_initial_tick_runner,
+)
 from src.history import TransferHistory  # noqa: E402
 from src.interfaces.location import NullLocationProvider  # noqa: E402
 from src.messaging import MessageType  # noqa: E402
@@ -61,7 +64,13 @@ def _make_poller(tmp: Path, *, paired: dict[str, dict] | None = None) -> tuple[P
     platform.location = NullLocationProvider()
     conn = MagicMock()
 
-    poller = Poller(config, conn, api, crypto, history, platform)
+    # Synchronous initial-tick runner so the responder's first
+    # heartbeat is observable on the calling thread (production wires
+    # a daemon thread to keep the MessageDispatcher non-blocking).
+    poller = Poller(
+        config, conn, api, crypto, history, platform,
+        initial_tick_runner=_sync_initial_tick_runner,
+    )
     return poller, api, crypto
 
 

@@ -1092,12 +1092,23 @@ def show_settings(config_dir: Path):
             def on_response(dlg, response):
                 if response != "unpair":
                     return
-                # Notify only this specific device
+                # Notify only this specific device. The remote side
+                # mirrors the unpair via .fn.unpair so both sides stay
+                # in sync; if the notify hops fail (offline, auth lost,
+                # quota), log loudly — the local pairing is still
+                # removed below, leaving the remote believing it's
+                # paired until they hit a 403 of their own.
+                import logging
+                import os as _os
+                import tempfile
+                log = logging.getLogger("desktop-connector.settings")
+                tmp_path: Path | None = None
                 try:
-                    import tempfile
                     sym_key = base64.b64decode(target_info["symmetric_key_b64"])
-                    tmp = Path(tempfile.mktemp(suffix="_.fn.unpair"))
-                    tmp.write_bytes(b"unpair")
+                    fd, tmp_name = tempfile.mkstemp(suffix="_.fn.unpair")
+                    tmp_path = Path(tmp_name)
+                    with _os.fdopen(fd, "wb") as fh:
+                        fh.write(b"unpair")
                     conn_tmp = ConnectionManager(
                         config.server_url,
                         config.device_id or "",
@@ -1105,11 +1116,23 @@ def show_settings(config_dir: Path):
                     )
                     api_tmp = ApiClient(conn_tmp, crypto)
                     api_tmp.send_file(
-                        tmp, target_id, sym_key, filename_override=".fn.unpair"
+                        tmp_path, target_id, sym_key, filename_override=".fn.unpair"
                     )
-                    tmp.unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    log.warning(
+                        "pairing.unpair.notify_failed peer=%s",
+                        target_id[:12],
+                        exc_info=True,
+                    )
+                finally:
+                    if tmp_path is not None:
+                        try:
+                            tmp_path.unlink(missing_ok=True)
+                        except OSError:
+                            log.debug(
+                                "pairing.unpair.tmp_cleanup_failed",
+                                exc_info=True,
+                            )
                 # Remove only this pairing through Config so the keyring
                 # entry is cleaned up alongside JSON metadata. The
                 # registry helper also clears active_device_id when it

@@ -71,6 +71,7 @@ release build of the desktop or Android client could start misbehaving.
 | Auth: accept additional header name (e.g. `X-Auth-Token`) | Add as alternative | extending |
 | Auth: require a new header on an existing endpoint | Add requirement | breaking |
 | `/api/devices/register` with already-known `public_key` | Was 200 + existing `auth_token`; now **409 Conflict** with no `auth_token` field | technically breaking, but fixed clients short-circuit on persisted creds and never hit this path. Closes the credential-leak vector documented in `docs/plans/desktop-multi-device-support.md` D9 (M.11). Loss of the local auth_token now requires keypair rotation, which produces a fresh device_id and a fresh row. |
+| `/api/pairing/request` when caller is already paired with `desktop_id` | Was 201 (always queues a new request row); now **200 OK with `{status: "ok"}`** and idempotently clears any stale request rows | extending — old senders ignored the response shape; new senders rely on the server tolerating re-pair attempts so a stuck verification screen can recover by retrying. Also lets the desktop polling end skip already-paired entries without server-side leftovers. |
 | Error envelope | Change the top-level key from `"error"` to `"message"` | breaking |
 | Error envelope | Add extra context fields (e.g. `"retry_after"`) | extending |
 | `.fn.*` naming convention | Remove support for `.fn.unpair` / `.fn.clipboard.*` | breaking |

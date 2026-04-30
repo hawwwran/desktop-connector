@@ -106,7 +106,25 @@ class GtkSubprocessAlert:
             try:
                 proc.terminate()
             except Exception:
-                pass
+                log.debug("findphone.alert.terminate_failed", exc_info=True)
+            # SIGTERM may be ignored by a wedged GTK4 modal (init hang,
+            # missing display). Bound the wait so a stuck subprocess
+            # can't strand a future re-arm; SIGKILL anything that
+            # didn't honour terminate.
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                log.warning("findphone.alert.terminate_timeout pid=%s", proc.pid)
+                try:
+                    proc.kill()
+                except Exception:
+                    log.debug("findphone.alert.kill_failed", exc_info=True)
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    log.debug("findphone.alert.kill_wait_failed", exc_info=True)
+            except Exception:
+                log.debug("findphone.alert.wait_failed", exc_info=True)
         # Don't join the sound thread under lock — the loop's spawn
         # may briefly block, and stop() is sometimes called from the
         # GTK main thread where blocking would hang the UI.

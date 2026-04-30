@@ -124,7 +124,14 @@ def _invocation_command(
     return None
 
 
-_FILENAME_BLOCKED = re.compile(r"[/\\\x00]+")
+# Strips control chars, path separators, and FS-hostile punctuation
+# while preserving Unicode letters/digits — paired-device names can be
+# Czech / German / Japanese / etc. and we want the script filename to
+# reflect that. `pairing_key.default_filename` uses an ASCII-only
+# allowlist for its `.dcpair` export dialog where ASCII is the norm;
+# this site is per-pair file-manager integration where Unicode names
+# need to survive.
+_FILENAME_BLOCKED = re.compile(r"[\x00-\x1f/\\:*?\"<>|]+")
 
 
 def _safe_filename_component(name: str) -> str:
