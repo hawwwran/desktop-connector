@@ -403,6 +403,7 @@ class Config:
 
     @active_device_id.setter
     def active_device_id(self, value: str | None) -> None:
+        self.reload()
         if value:
             self._data["active_device_id"] = value
         else:
@@ -540,15 +541,15 @@ class Config:
     def get_pairing_symkey(self, device_id: str) -> str | None:
         """Fast lookup of a single pairing's symmetric key.
 
-        Skips the full ``paired_devices`` reload+rebuild that happens
-        on every property access. Hot loops (find-device heartbeat
-        every 5 s, fasttrack consumer every 8 s) call this once per
-        message instead of dragging the whole config off disk. Reads
-        in-memory ``_data`` for membership and either the hydrated
-        symkey (JsonFallbackStore) or the secret store directly
-        (SecretServiceStore). Returns ``None`` for unknown devices or
-        when the secret store is unreachable.
+        Reloads before checking membership so long-running tray/find
+        processes see pairings added by a pairing subprocess before
+        deciding whether an inbound fasttrack sender is unknown.
+        Avoids the full ``paired_devices`` rebuild and reads either
+        the hydrated symkey (JsonFallbackStore) or the secret store
+        directly (SecretServiceStore). Returns ``None`` for unknown
+        devices or when the secret store is unreachable.
         """
+        self.reload()
         entry = self._data.get("paired_devices", {}).get(device_id)
         if not isinstance(entry, dict):
             return None
@@ -612,6 +613,7 @@ class Config:
         ``config.json``. ``remove_paired_device`` avoids both
         traps.
         """
+        self.reload()
         try:
             self._secret_store.delete(pairing_symkey_key(device_id))
         except SecretServiceUnavailable as exc:
@@ -654,6 +656,7 @@ class Config:
         """
         if scope not in ("pairing_only", "full"):
             raise ValueError(f"unknown wipe scope: {scope}")
+        self.reload()
         # Walk paired_devices first and ask the store to delete each
         # symkey — H.3+'s libsecret backend uses this to clear orphan
         # keyring entries that a bare _data.pop() would leave behind.

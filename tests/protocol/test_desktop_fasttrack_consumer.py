@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _paths import ensure_desktop_on_path  # noqa: E402
@@ -24,7 +24,7 @@ from src.find_device_responder import (  # noqa: E402
 )
 from src.history import TransferHistory  # noqa: E402
 from src.interfaces.location import NullLocationProvider  # noqa: E402
-from src.messaging import MessageType  # noqa: E402
+from src.messaging import DeviceMessage, MessageTransport, MessageType  # noqa: E402
 from src.poller import Poller  # noqa: E402
 
 
@@ -228,6 +228,32 @@ class FasttrackConsumerTests(unittest.TestCase):
 
         api.fasttrack_ack.assert_not_called()
         api.fasttrack_send.assert_not_called()
+
+    def test_unpair_message_removes_only_sender_pairing(self) -> None:
+        poller, _api, _crypto = _make_poller(
+            self.tmp,
+            paired={
+                "peer-A": {"name": "Peer A"},
+                "peer-B": {"name": "Peer B"},
+            },
+        )
+        message = DeviceMessage(
+            type=MessageType.PAIRING_UNPAIR,
+            transport=MessageTransport.TRANSFER_FILE,
+            sender_id="peer-A",
+        )
+
+        with patch("src.poller.sync_file_manager_targets") as sync_targets:
+            poller._handle_message_unpair(message)
+
+        devices = poller.config.paired_devices
+        self.assertNotIn("peer-A", devices)
+        self.assertIn("peer-B", devices)
+        sync_targets.assert_called_once_with(poller.config)
+        poller.platform.notifications.notify.assert_called_once_with(
+            "Unpaired",
+            "Paired device disconnected",
+        )
 
 
 if __name__ == "__main__":

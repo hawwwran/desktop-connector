@@ -17,12 +17,23 @@ def register_device(config: Config, api: ApiClient) -> bool:
         return True
 
     log.info("Registering device with server at %s...", config.server_url)
-    result = api.register(config.server_url)
-    if result:
-        config.device_id = result["device_id"]
-        config.auth_token = result["auth_token"]
+    result = api.register_with_status(config.server_url)
+    if result is not None and result.is_successful and result.body:
+        config.device_id = result.body["device_id"]
+        config.auth_token = result.body["auth_token"]
         log.info("Registered as %s", config.device_id)
         return True
+
+    if result is not None and result.status_code == 409:
+        log.warning("Registration conflict; rotating desktop identity and retrying")
+        config.wipe_credentials("full")
+        api.crypto.reset_keys()
+        result = api.register_with_status(config.server_url)
+        if result is not None and result.is_successful and result.body:
+            config.device_id = result.body["device_id"]
+            config.auth_token = result.body["auth_token"]
+            log.info("Registered as %s after identity rotation", config.device_id)
+            return True
 
     log.error("Failed to register with server")
     return False

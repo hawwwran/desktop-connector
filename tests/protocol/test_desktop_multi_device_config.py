@@ -104,6 +104,37 @@ class ConnectedDeviceRegistryTests(unittest.TestCase):
         self.assertEqual(self.config.active_device_id, "dev-A")
         self.assertEqual(self._read_config()["active_device_id"], "dev-A")
 
+    def test_active_device_update_preserves_pairings_added_by_other_process(self) -> None:
+        self._add_device("dev-A", name="A", paired_at=10)
+        stale = Config(self.config_dir)
+        other_process = Config(self.config_dir)
+        other_process.add_paired_device("dev-B", "pk-dev-B", "sk-dev-B", name="B")
+
+        stale.active_device_id = "dev-A"
+
+        data = self._read_config()
+        self.assertEqual(set(data["paired_devices"]), {"dev-A", "dev-B"})
+        self.assertEqual(data["active_device_id"], "dev-A")
+
+    def test_get_pairing_symkey_reloads_pairings_added_by_other_process(self) -> None:
+        stale = Config(self.config_dir)
+        other_process = Config(self.config_dir)
+        other_process.add_paired_device("dev-B", "pk-dev-B", "sk-dev-B", name="B")
+
+        self.assertEqual(stale.get_pairing_symkey("dev-B"), "sk-dev-B")
+
+    def test_remove_paired_device_preserves_pairings_added_by_other_process(self) -> None:
+        self._add_device("dev-A", name="A", paired_at=10)
+        stale = Config(self.config_dir)
+        other_process = Config(self.config_dir)
+        other_process.add_paired_device("dev-B", "pk-dev-B", "sk-dev-B", name="B")
+
+        stale.remove_paired_device("dev-A")
+
+        data = self._read_config()
+        self.assertNotIn("dev-A", data["paired_devices"])
+        self.assertIn("dev-B", data["paired_devices"])
+
     def test_next_default_name_starts_at_pair_count_plus_one(self) -> None:
         self.assertEqual(
             next_default_device_name(["Device 1", "Other"]),

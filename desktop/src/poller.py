@@ -31,6 +31,7 @@ from .find_device_responder import (
     encode_state_payload,
     threaded_initial_tick_runner,
 )
+from .file_manager_integration import sync_file_manager_targets
 from .history import TransferHistory, TransferStatus
 from .messaging import FasttrackAdapter, FnTransferAdapter, MessageDispatcher, MessageType
 from .platform import DesktopPlatform
@@ -1123,13 +1124,24 @@ class Poller:
             except Exception:
                 log.exception("File received callback error")
 
-    def _handle_message_unpair(self, _message) -> None:
-        log.info("pairing.unpair.received")
-        self.local_unpair(
-            scope="pairing_only",
-            notify_title="Unpaired",
-            notify_body="Paired device disconnected",
-        )
+    def _handle_message_unpair(self, message) -> None:
+        peer_id = message.sender_id
+        if not peer_id:
+            log.warning("pairing.unpair.ignored reason=missing_sender")
+            return
+        log.info("pairing.unpair.received peer=%s", peer_id[:12])
+        self.config.remove_paired_device(peer_id)
+        try:
+            sync_file_manager_targets(self.config)
+        except Exception:
+            log.debug("pairing.unpair.file_manager_sync_failed", exc_info=True)
+        try:
+            self.platform.notifications.notify(
+                "Unpaired",
+                "Paired device disconnected",
+            )
+        except Exception:
+            log.exception("notification during sender-scoped unpair failed")
 
     def _mark_active_device(self, device_id: str, *, reason: str) -> None:
         try:
@@ -1341,8 +1353,8 @@ class Poller:
                      notify_body: str | None = None) -> None:
         """
         Wipe local pairing (and optionally device credentials) and surface a
-        notification. Shared by the .fn.unpair message handler and the
-        AUTH_INVALID re-pair flow triggered from the tray.
+        notification. Used by the AUTH_INVALID re-pair flow triggered from
+        the tray; sender-scoped .fn.unpair messages remove only that peer.
 
         See Config.wipe_credentials() for scope semantics.
         """
