@@ -169,6 +169,11 @@ fun HomeScreen(
                             else "Desktop Connector",
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            // weight(fill=false) — ellipsize within the leftover
+                            // space after the chevron, instead of pushing it off
+                            // the right edge of the title slot.
+                            modifier = if (multiPair) Modifier.weight(1f, fill = false)
+                                       else Modifier,
                         )
                         if (multiPair) {
                             Icon(
