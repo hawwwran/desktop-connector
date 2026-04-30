@@ -126,7 +126,10 @@ Shared dot-notation event vocabulary (`transfer.init.accepted`, `ping.request.ra
 Optional. Server reads `firebase-service-account.json` + `google-services.json` at root. Data-only FCM with HIGH priority on transfer complete (bypasses Doze). Android initializes Firebase dynamically from `GET /api/fcm/config` — no baked-in `google-services.json`, so each server deployment can use its own Firebase project. Falls back to long-polling if unavailable.
 
 ### Auth recovery
-Both clients treat 401/403 as **terminal pairing failure**, not transient. 3-in-a-row latching streak (`authFailureStreak`) flips a persistent `auth_failure_kind` flag and surfaces a home-screen banner ("Pairing lost — re-pair to continue"). Desktop: `on_auth_failure` callbacks. Android: `AuthObservation` `SharedFlow` on `ApiClient`'s companion object. Tapping "Re-pair" wipes keys + paired devices (`KeyManager.resetKeypair` + `removeAllPairedDevices`), re-registers, navigates to pairing. Prevents the "says online but silently broken" mode after a server wipe.
+Both clients treat 401/403 as **terminal pairing failure**, not transient. 3-in-a-row latching streak surfaces a home-screen banner ("Pairing lost — re-pair to continue"). Desktop: `on_auth_failure` callbacks (single-pair scope). Android: `AuthObservation` `SharedFlow` on `ApiClient`'s companion object, per-peer attribution under `ConnectionManager._authFailureByPeer: Map<peerId, AuthFailureKind>`. Empty-string key = global (every CREDENTIALS_INVALID, plus 403s without peer attribution); a real device id = scoped to that pair only. Per-key 3-in-a-row latch so 401-then-403-to-different-peers doesn't collapse. Tapping "Re-pair X" on a per-peer banner removes only that pair (`deleteAllForPeer` + `pairingRepo.unpair`); global key wipes all paired devices and resets the keypair on CREDENTIALS_INVALID.
+
+### Android multi-pair
+Phone supports N paired desktops simultaneously. `PairingRepository` (process-singleton) is the source of truth — wraps `KeyManager`'s per-peer `paired_<deviceId>` blobs with reactive `pairs` / `selectedDeviceId` / derived `selected` `StateFlow`s. Mutation paths (pairing-confirm, settings rename / unpair, `.fn.unpair` handler) call `refresh()`; no polling backstop. Selection persists in `AppPreferences.selectedDeviceId`; falls back to most-recently-paired when null. **Every transfer row is keyed by `peerDeviceId`** ("the other party": recipient for OUTGOING, sender for INCOMING — Room v8→v9 migration `MIGRATION_8_9` renames the legacy `recipientDeviceId`). History list filters per-peer via `getRecentForPeer(peerId)`. ApiClient endpoints that target a peer thread `peerId` to `reportAuthStatus` so 403 attribution is per-pair. **UI**: when N>1, the `HomeScreen` title swaps to `<selected-name> ▾` opening a `ModalBottomSheet` of pairs with online dots; Settings has a `PairingsCard` with rename + trash per row plus "Pair with another desktop"; incoming notifications append " from `<name>`"; a backgrounded phone (driven by `ProcessLifecycleOwner` via `ForegroundTracker`) auto-switches the selected pair to whoever just sent a transfer or fasttrack message — foreground arrivals never auto-switch. Find-my-phone is FCFS: a second desktop's start while ringing for another is dropped (`findphone.start.dropped_concurrent`).
 
 ### Find my phone
 Desktop sends encrypted start/stop via fasttrack. Phone: alarm (STREAM_ALARM, bypasses silent), vibrates, reports encrypted GPS every 5 s. Desktop: location on Leaflet/OSM map (WebKitWebView, text fallback). Requires FCM — menu hidden without it. Configurable volume, hardcoded 5-min phone-side timeout. Silent search mode (GPS only, no alarm/vibration/notification, for stolen phone); Android "Allow silent search" toggle (default on). Desktop heartbeat-based status with "Lost communication" detection. Generation-counter thread safety for poll loop.
@@ -136,6 +139,7 @@ Desktop sends encrypted start/stop via fasttrack. Phone: alarm (STREAM_ALARM, by
 ### Download reliability & UX
 - Incoming transfers appear in history immediately with chunk progress. Android reuses `UPLOADING` + `chunksUploaded`/`totalChunks` for incoming (differentiated by `direction`; bar green vs orange). Desktop shows "Downloading X/Y" with `Gtk.ProgressBar`. On completion the download logic clears its own fields — transitions to `COMPLETE` with no stale counters.
 - Wake lock (`PARTIAL_WAKE_LOCK`, 2-min refresh per chunk) + WiFi lock prevent Doze throttling. Per-chunk retry (3 attempts, backoff). Retry reuses the DB row (no duplicate history). Cancel by deleting the downloading item — current chunk finishes, transfer ACKed, no more fetched.
+- **PollService FGS type is `connectedDevice`**, not `dataSync`. Android 15+ caps `dataSync` foreground services at 6 cumulative hours per 24-hour window; once exhausted, every restart throws `ForegroundServiceStartNotAllowedException`. `connectedDevice` has no time budget and is the right semantic match for our persistent paired-desktop connection. Manifest declares `FOREGROUND_SERVICE_CONNECTED_DEVICE` plus `CHANGE_NETWORK_STATE` (the minimum capability the FGS-type binding requires; normal-tier, auto-granted). Every `startForeground` / `startForegroundService` / `setForegroundType` site is wrapped in try/catch; failures log `fgs.{start,bind,type}.denied` and let the activity-foreground path retry on next app open.
 
 ### Android UX bits
 - **Notification icons monochrome** — shapes encode state (filled sparkle = connected, outline = disconnected). No intermediate "connecting" state.
@@ -224,12 +228,13 @@ desktop/
 
 android/app/src/main/kotlin/com/desktopconnector/
   DesktopConnectorApp.kt  MainActivity.kt  ShareReceiverActivity.kt
-  crypto/                  # CryptoUtils, KeyManager
+  crypto/                  # CryptoUtils, KeyManager, PairingRepository (multi-pair source of truth)
   network/                 # ApiClient (OkHttp), ConnectionManager, FcmManager, UploadWorker
   messaging/               # DeviceMessage, MessageAdapters, MessageDispatcher
   service/                 # PollService, FcmService, FindPhoneManager
-  data/                    # AppDatabase (Room), QueuedTransfer, AppPreferences, AppLog
-  ui/                      # HomeScreen, FolderScreen, SettingsScreen, Navigation, theme/
+  data/                    # AppDatabase (Room v9), QueuedTransfer, AppPreferences, Migrations, MultiPairMigrationRunner, AppLog
+  util/                    # ForegroundTracker (ProcessLifecycleOwner-driven foreground flag for A.9 auto-switch)
+  ui/                      # HomeScreen (incl. DeviceSelectorSheet), FolderScreen, SettingsScreen (incl. PairingsCard), Navigation, theme/
   ui/pairing/              # PairingScreen, PairingViewModel
   ui/transfer/             # TransferViewModel
 

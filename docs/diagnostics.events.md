@@ -139,6 +139,7 @@ renamed/restructured.
 | `startup.device.registered` | desktop, android | info | `device_id` | First-time registration with the server |
 | `startup.fcm.initialized` | android | info | `project_id` | Firebase dynamic init; project_id is non-secret |
 | `startup.fcm.init_failed` | android | warning | `error_kind` | Falls back to long-poll |
+| `multipair.migration.done` | android | info | — | One-shot post-Room migration — renamed legacy unnamed pairs and backfilled INCOMING `peerDeviceId`. Gated by `AppPreferences.multiPairMigrationDone`, fires once per install |
 
 ### auth
 
@@ -146,6 +147,7 @@ renamed/restructured.
 |---|---|---|---|---|
 | `auth.missing` | server | warning | `uri` | No X-Device-ID / Bearer headers |
 | `auth.invalid` | server | warning | `device_id`, `uri` | Credentials didn't match |
+| `auth.failure.tripped` | android | warning | `kind`, `peer`, `count` | 3-in-a-row auth-failure streak latched. `peer` is the truncated device id when 403 PAIRING_MISSING was attributable, empty for global (CREDENTIALS_INVALID always lands here, plus unattributed 403s) |
 
 ### pairing
 
@@ -188,6 +190,8 @@ renamed/restructured.
 | `transfer.abort.recipient` | server | info | `transfer_id`, `sender`, `recipient`, `reason` | `DELETE` by recipient, reason=recipient_abort |
 | `transfer.abort.wake.sent` | server | info | `transfer_id`, `target`, `fcm_result`, `fcm_type` | Abort FCM wake to the opposite party |
 | `transfer.cleanup.expired` | server (new) | info | `count` | Sweep deleted expired rows |
+| `transfer.cleanup.invariant_violation` | server | warning | `id`, `reason` | Invariant assertion threw on a corrupt row inside `deleteTransferFiles` — cleanup proceeded with the delete anyway. Recovery path; absence of this event after a corrupt-row symptom means the cleanup never ran |
+| `transfer.cleanup.failed` | server | warning | `reason` | Opportunistic cleanup raised in `/api/transfers/pending`'s 1-in-20 sampling. Caught at the controller so the response stays 200; the actual reason names which step inside the cleanup misbehaved |
 
 ### delivery
 
@@ -213,6 +217,7 @@ renamed/restructured.
 | `fasttrack.command.sent` | desktop, android | info | `fn`, `recipient` | e.g. `fn=find-phone action=start` |
 | `fasttrack.command.received` | desktop, android | info | `fn`, `sender` | On `.fn.*` dispatch |
 | `fasttrack.command.unknown` | desktop, android | warning | `fn` | |
+| `findphone.start.dropped_concurrent` | android | info | `active`, `new` | Second find-phone start arrived while already ringing for a different desktop; FCFS, second start ignored |
 
 ### ping
 
@@ -240,6 +245,10 @@ renamed/restructured.
 | `poll.loop.screen_off` | android | info | — | Phone paused polling |
 | `poll.loop.screen_on` | android | info | — | Phone resumed polling |
 | `poll.loop.fcm_wake` | android | info | `type` | FCM woke the poll loop |
+| `fgs.start.denied` | android | error | `reason` | `startForeground` rejected (e.g. `dataSync` budget exhausted on Android 15+, or background-restricted). PollService stops itself; activity-foreground retry will re-attempt on next app open |
+| `fgs.bind.denied` | android | error | `reason` | `startForegroundService` from `PollService.start(context)` rejected by the system; service never bound |
+| `fgs.type.changed` | android | info | `location` | Boolean `location` indicates whether LOCATION was added to the FGS type for find-phone GPS |
+| `fgs.type.denied` | android | warning | `reason` | `setForegroundType` upgrade refused (e.g. missing location permission) |
 
 ### fcm
 

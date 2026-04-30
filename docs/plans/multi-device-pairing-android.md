@@ -1,5 +1,16 @@
 # Multi-device pairing — Android (phase A)
 
+> **Status: shipped 2026-04-30.** All phases A.1 → A.9b plus the post-review
+> follow-ups (race fixes, unit tests, chevron positioning, QR-name default)
+> are on `origin/main` and validated end-to-end on hardware. The single-pair
+> path was verified throughout implementation; the N>1 surfaces (selector
+> sheet, history filter swap, rename / unpair dialogs, notification
+> name suffix, background auto-switch) were validated together in a final
+> pass with two real desktops paired. Architectural details now live in
+> `CLAUDE.md` (Android multi-pair section + Auth recovery), event vocabulary
+> in `docs/diagnostics.events.md`. The remaining sections of this doc are
+> kept verbatim as the design record.
+
 Phone-side support for being paired with **N desktops simultaneously**. Today
 the phone keeps an N-capable storage layout but every send/receive site
 funnels through `getFirstPairedDevice()`. This plan replaces the singleton
