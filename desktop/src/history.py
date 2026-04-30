@@ -242,6 +242,17 @@ class TransferHistory:
 
         return fallback_device_id
 
+    def items_for_peer(self, peer_device_id: str, *,
+                       fallback_device_id: str = "") -> list[dict]:
+        """Return rows attributed to one connected device."""
+        return [
+            item for item in self.items
+            if self.get_peer_device_id(
+                item,
+                fallback_device_id=fallback_device_id,
+            ) == peer_device_id
+        ]
+
     def update(self, transfer_id: str, **fields) -> bool:
         """Update an existing history entry by transfer_id. Returns True if found."""
         def do_update(items):
@@ -303,6 +314,26 @@ class TransferHistory:
             items.clear()
             return True
         self._locked_read_modify_write(do_clear)
+
+    def clear_for_peer(self, peer_device_id: str, *,
+                       fallback_device_id: str = "") -> bool:
+        """Remove history entries attributed to one connected device.
+
+        ``fallback_device_id`` keeps legacy sent rows, which did not
+        persist a peer id, scoped to the currently selected device in
+        filtered history views.
+        """
+        def do_clear(items):
+            before = len(items)
+            items[:] = [
+                item for item in items
+                if self.get_peer_device_id(
+                    item,
+                    fallback_device_id=fallback_device_id,
+                ) != peer_device_id
+            ]
+            return len(items) != before
+        return self._locked_read_modify_write(do_clear)
 
     def get_label(self, item: dict) -> str:
         return item.get("display_label") or item.get("filename", "Unknown")

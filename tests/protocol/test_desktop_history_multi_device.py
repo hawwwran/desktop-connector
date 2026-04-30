@@ -69,6 +69,80 @@ class HistoryPeerAttributionTests(unittest.TestCase):
             "active-peer",
         )
 
+    def test_items_for_peer_filters_with_legacy_fallback(self) -> None:
+        self.history.add(
+            filename="legacy.txt",
+            display_label="legacy.txt",
+            direction="sent",
+            size=1,
+            transfer_id="tid-legacy",
+        )
+        self.history.add(
+            filename="other.txt",
+            display_label="other.txt",
+            direction="sent",
+            size=1,
+            transfer_id="tid-other",
+            peer_device_id="peer-other",
+        )
+
+        rows = self.history.items_for_peer(
+            "peer-active",
+            fallback_device_id="peer-active",
+        )
+
+        self.assertEqual([row["transfer_id"] for row in rows], ["tid-legacy"])
+
+    def test_clear_for_peer_removes_only_selected_device_rows(self) -> None:
+        self.history.add(
+            filename="a.txt",
+            display_label="a.txt",
+            direction="sent",
+            size=1,
+            transfer_id="tid-a",
+            peer_device_id="peer-a",
+        )
+        self.history.add(
+            filename="b.txt",
+            display_label="b.txt",
+            direction="sent",
+            size=1,
+            transfer_id="tid-b",
+            peer_device_id="peer-b",
+        )
+
+        changed = self.history.clear_for_peer("peer-a")
+
+        self.assertTrue(changed)
+        remaining = self.history.items
+        self.assertEqual([row["transfer_id"] for row in remaining], ["tid-b"])
+
+    def test_clear_for_peer_uses_legacy_sent_fallback(self) -> None:
+        self.history.add(
+            filename="legacy.txt",
+            display_label="legacy.txt",
+            direction="sent",
+            size=1,
+            transfer_id="tid-legacy",
+        )
+        self.history.add(
+            filename="other.txt",
+            display_label="other.txt",
+            direction="sent",
+            size=1,
+            transfer_id="tid-other",
+            peer_device_id="peer-other",
+        )
+
+        changed = self.history.clear_for_peer(
+            "peer-active",
+            fallback_device_id="peer-active",
+        )
+
+        self.assertTrue(changed)
+        remaining = self.history.items
+        self.assertEqual([row["transfer_id"] for row in remaining], ["tid-other"])
+
 
 class SendRunnerPeerAttributionTests(unittest.TestCase):
     def setUp(self) -> None:

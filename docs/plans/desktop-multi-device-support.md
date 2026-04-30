@@ -294,7 +294,7 @@ Verification:
 
 ### M.4 - History window device picker and filtering
 
-Status: pending
+Status: completed 2026-04-30
 
 Goal: make transfer history device-scoped by default.
 
@@ -310,8 +310,15 @@ Work:
 
 Verification:
 
-- Unit/source tests for filtering and legacy row fallback.
-- Manual smoke with two paired devices and mixed sent/received rows.
+- `python3 -m unittest tests.protocol.test_desktop_history_multi_device`
+  passed 2026-04-30.
+- `python3 -m unittest tests.protocol.test_desktop_history_multi_device_source`
+  passed 2026-04-30.
+- `python3 -m py_compile desktop/src/windows.py desktop/src/history.py` passed
+  2026-04-30.
+- `git diff --check` passed 2026-04-30.
+- Manual GTK smoke not run in this sandbox; prior GTK smoke checks in this
+  repo have been environment-gated/unreliable here.
 
 ### M.5 - Pairing naming and settings pair list
 

@@ -1519,20 +1519,33 @@ def show_history(config_dir: Path):
         header.pack_start(folder_btn)
 
         clear_all_btn = Gtk.Button.new_from_icon_name("edit-clear-all-symbolic")
-        clear_all_btn.set_tooltip_text("Clear all history")
+        clear_all_btn.set_tooltip_text("Clear visible history")
         clear_all_btn.add_css_class("brand-action-destructive")
         def on_clear_all(b):
+            device = selected_device[0]
+            if device is None:
+                show_toast(win, "No connected device selected")
+                return
+            device_name = _connected_device_label(device)
             dialog = Adw.MessageDialog(
                 transient_for=win,
-                heading="Clear history?",
-                body="This will remove all transfer history entries.",
+                heading=f"Clear history for {device_name}?",
+                body=(
+                    f"This will remove visible transfer history entries "
+                    f"for {device_name}."
+                ),
             )
             dialog.add_response("cancel", "Cancel")
-            dialog.add_response("clear", "Clear All")
+            dialog.add_response("clear", "Clear")
             dialog.set_response_appearance("clear", Adw.ResponseAppearance.DESTRUCTIVE)
             def on_response(dlg, response):
                 if response == "clear":
-                    history.clear()
+                    history.clear_for_peer(
+                        device.device_id,
+                        fallback_device_id=device.device_id,
+                    )
+                    _reset_history_view()
+                    build_list()
             dialog.connect("response", on_response)
             dialog.present()
         clear_all_btn.connect("clicked", on_clear_all)
@@ -1547,8 +1560,21 @@ def show_history(config_dir: Path):
         clamp = Adw.Clamp(maximum_size=9999, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         scroll.set_child(clamp)
 
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        clamp.set_child(content_box)
+
+        device_picker, selected_device, paired_devices = _create_device_picker(
+            config,
+            title="History for",
+            subtitle="Connected device",
+        )
+        device_group = Adw.PreferencesGroup()
+        device_group.add(device_picker)
+        content_box.append(device_group)
+        clear_all_btn.set_sensitive(selected_device[0] is not None)
+
         list_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        clamp.set_child(list_container)
+        content_box.append(list_container)
 
         has_active = [False]
         # row_widgets[transfer_id] = (box_widget, row, progress_bar_or_None)
@@ -1557,6 +1583,25 @@ def show_history(config_dir: Path):
         structural_sig = [None]  # (transfer_id, ...) — triggers structural diff
         empty_label = [None]  # holds the "No transfers yet" label when shown
         progress_sig = [None]    # mutable fields — triggers in-place update
+
+        def _selected_device_id() -> str:
+            device = selected_device[0]
+            return device.device_id if device is not None else ""
+
+        def _selected_device_name() -> str:
+            device = selected_device[0]
+            if device is None:
+                return "connected devices"
+            return _connected_device_label(device)
+
+        def _empty_history_text() -> str:
+            if selected_device[0] is None:
+                return "No connected devices"
+            return f"No transfers with {_selected_device_name()}"
+
+        def _reset_history_view() -> None:
+            structural_sig[0] = None
+            progress_sig[0] = None
 
         def _compute_status(item):
             item_status = item.get("status", "complete")
@@ -2032,15 +2077,29 @@ def show_history(config_dir: Path):
         def build_list():
             _scrub_zombie_waiting()
             history._items = history._load()
-            items = history.items
+            selected_id = _selected_device_id()
+            items = (
+                history.items_for_peer(
+                    selected_id,
+                    fallback_device_id=selected_id,
+                )
+                if selected_id else []
+            )
 
             # Structural sig: item identity and base state
-            s_sig = tuple((_row_key(i), i.get("direction")) for i in items)
+            s_sig = (
+                selected_id,
+                tuple((_row_key(i), i.get("direction")) for i in items),
+            )
             # Progress sig: all mutable fields
-            p_sig = tuple(
-                (_row_key(i), i.get("status"), i.get("delivered"),
-                 i.get("chunks_downloaded", 0), i.get("recipient_chunks_downloaded", 0))
-                for i in items
+            p_sig = (
+                selected_id,
+                tuple(
+                    (_row_key(i), i.get("status"), i.get("delivered"),
+                     i.get("chunks_downloaded", 0),
+                     i.get("recipient_chunks_downloaded", 0))
+                    for i in items
+                ),
             )
 
             if p_sig == progress_sig[0]:
@@ -2125,14 +2184,17 @@ def show_history(config_dir: Path):
                     all_widgets.insert(min(idx, len(all_widgets)), card)
 
                 # Empty-state label if nothing remains.
-                if not items and empty_label[0] is None:
-                    empty = Gtk.Label(label="No transfers yet")
-                    empty.add_css_class("dim-label")
-                    empty.set_margin_top(48)
-                    empty.set_margin_bottom(48)
-                    list_container.append(empty)
-                    all_widgets.append(empty)
-                    empty_label[0] = empty
+                if not items:
+                    if empty_label[0] is None:
+                        empty = Gtk.Label(label=_empty_history_text())
+                        empty.add_css_class("dim-label")
+                        empty.set_margin_top(48)
+                        empty.set_margin_bottom(48)
+                        list_container.append(empty)
+                        all_widgets.append(empty)
+                        empty_label[0] = empty
+                    else:
+                        empty_label[0].set_text(_empty_history_text())
 
             # In-place update on every tick — refresh subtitles and
             # progress bars for rows that existed before AND for rows we
@@ -2146,6 +2208,13 @@ def show_history(config_dir: Path):
                     row_widgets[tid] = (box, row, new_pbar)
 
             return True
+
+        def on_history_device_changed(combo, _pspec):
+            clear_all_btn.set_sensitive(selected_device[0] is not None)
+            _reset_history_view()
+            build_list()
+
+        device_picker.connect("notify::selected", on_history_device_changed)
 
         build_list()
 
