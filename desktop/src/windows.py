@@ -3119,6 +3119,25 @@ def show_find_phone(config_dir: Path):
     # still get the legacy PEM path as fallback.
     crypto = KeyManager(config_dir, secret_store=config.secret_store)
 
+    def decode_target_find_device_update(raw: dict, target_id: str, symmetric_key: bytes):
+        if (raw.get("sender_id") or "") != target_id:
+            return None
+        mid = raw.get("id")
+        enc_data = raw.get("encrypted_data", "")
+        try:
+            enc_bytes = base64.b64decode(enc_data)
+            plain = crypto.decrypt_blob(enc_bytes, symmetric_key)
+            resp = json.loads(plain)
+        except Exception as exc:
+            log.error("Decrypt failed: %s", exc)
+            return None
+        if not isinstance(resp, dict):
+            return None
+        msg = FasttrackAdapter.to_device_message(resp)
+        if not msg or msg.type != MessageType.FIND_PHONE_LOCATION_UPDATE:
+            return None
+        return mid, resp
+
     # Check WebKit availability
     has_webkit = False
     try:
@@ -3372,14 +3391,20 @@ function updatePos(lat,lng,acc) {
                 shared_target[0] = target_id
                 shared_key[0] = symmetric_key
 
-                # Flush stale messages from previous sessions
+                # Flush only stale sender-side updates from this target.
+                # Other pending fasttrack messages belong to the tray receiver.
                 stale = api.fasttrack_pending()
+                flushed_count = 0
                 for m in stale:
-                    mid = m.get("id")
+                    decoded = decode_target_find_device_update(m, target_id, symmetric_key)
+                    if decoded is None:
+                        continue
+                    mid, _resp = decoded
                     if mid:
                         api.fasttrack_ack(mid)
-                if stale:
-                    log.info("fasttrack.message.flushed_stale count=%d", len(stale))
+                        flushed_count += 1
+                if flushed_count:
+                    log.info("fasttrack.message.flushed_stale count=%d", flushed_count)
 
                 log.info("fasttrack.command.sent fn=find-phone action=start volume=%d silent=%s recipient=%s",
                          volume, is_silent[0], target_id[:12])
@@ -3417,39 +3442,33 @@ function updatePos(lat,lng,acc) {
                     try:
                         messages = api.fasttrack_pending()
                         for m in messages:
-                            mid = m.get("id")
-                            enc_data = m.get("encrypted_data", "")
-                            try:
-                                enc_bytes = base64.b64decode(enc_data)
-                                plain = crypto.decrypt_blob(enc_bytes, symmetric_key)
-                                resp = json.loads(plain)
-                                # Never log resp directly — it contains GPS coordinates for find-phone.
-                                log.info("Response: fn=%s state=%s", resp.get("fn"), resp.get("state"))
+                            decoded = decode_target_find_device_update(m, target_id, symmetric_key)
+                            if decoded is None:
+                                continue
+                            mid, resp = decoded
+                            # Never log resp directly — it contains GPS coordinates for find-phone.
+                            log.info("Response: fn=%s state=%s", resp.get("fn"), resp.get("state"))
 
-                                msg = FasttrackAdapter.to_device_message(resp)
-                                if msg and msg.type == MessageType.FIND_PHONE_LOCATION_UPDATE:
-                                    resp_state = resp.get("state", "")
-                                    lat = resp.get("lat")
-                                    lng = resp.get("lng")
-                                    accuracy = resp.get("accuracy")
+                            resp_state = resp.get("state", "")
+                            lat = resp.get("lat")
+                            lng = resp.get("lng")
+                            accuracy = resp.get("accuracy")
 
-                                    if resp_state == "ringing":
-                                        last_heartbeat = time.time()
-                                        comms_lost_shown = False
-                                        label = "Search in progress" if is_silent[0] else "Device is ringing!"
-                                        GLib.idle_add(set_ui, label, False, False, True)
-                                        if lat is not None:
-                                            # Never log raw lat/lng — accuracy only.
-                                            log.info("GPS fix received acc=%.1f", accuracy or 0)
-                                            GLib.idle_add(update_location, lat, lng, accuracy)
-                                    elif resp_state == "stopped":
-                                        log.info("Device confirmed stopped")
-                                        GLib.idle_add(set_ui, "Alarm stopped", True, True, False)
-                                        if mid:
-                                            api.fasttrack_ack(mid)
-                                        return  # clean exit
-                            except Exception as e:
-                                log.error("Decrypt failed: %s", e)
+                            if resp_state == "ringing":
+                                last_heartbeat = time.time()
+                                comms_lost_shown = False
+                                label = "Search in progress" if is_silent[0] else "Device is ringing!"
+                                GLib.idle_add(set_ui, label, False, False, True)
+                                if lat is not None:
+                                    # Never log raw lat/lng — accuracy only.
+                                    log.info("GPS fix received acc=%.1f", accuracy or 0)
+                                    GLib.idle_add(update_location, lat, lng, accuracy)
+                            elif resp_state == "stopped":
+                                log.info("Device confirmed stopped")
+                                GLib.idle_add(set_ui, "Alarm stopped", True, True, False)
+                                if mid:
+                                    api.fasttrack_ack(mid)
+                                return  # clean exit
                             if mid:
                                 api.fasttrack_ack(mid)
                     except Exception as e:

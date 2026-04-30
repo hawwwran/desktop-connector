@@ -282,11 +282,22 @@ def _sync_script_dir(
         new_content = _script_text(device, launcher)
         if target.exists():
             try:
-                if target.read_text() == new_content:
+                existing = target.read_text()
+                if existing == new_content:
                     target.chmod(0o755)
                     continue
-            except OSError:
-                pass
+                if not (_is_managed_script(existing) or _is_legacy_script(existing)):
+                    log.warning(
+                        "file_manager.%s.skip_unmanaged_collision name=%s",
+                        kind, target.name,
+                    )
+                    continue
+            except OSError as exc:
+                log.warning(
+                    "file_manager.%s.skip_unreadable_collision name=%s error=%s",
+                    kind, target.name, exc,
+                )
+                continue
         _atomic_write(target, new_content)
         target.chmod(0o755)
         log.info(
@@ -360,9 +371,13 @@ def _sync_dolphin_service(
     if path.exists():
         try:
             existing = path.read_text()
-        except OSError:
-            existing = ""
+        except OSError as exc:
+            log.warning("file_manager.dolphin.skip_unreadable_collision: %s", exc)
+            return
         if existing == new_content:
+            return
+        if not (_is_managed_dolphin(existing) or _is_legacy_dolphin(existing)):
+            log.warning("file_manager.dolphin.skip_unmanaged_collision")
             return
 
     _atomic_write(path, new_content)

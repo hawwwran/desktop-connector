@@ -177,6 +177,21 @@ class FileManagerIntegrationTests(unittest.TestCase):
             "#!/bin/bash\necho user wrote this\n",
         )
 
+    def test_unmarked_matching_script_name_is_never_overwritten(self) -> None:
+        self._add("dev-A", name="Alpha", paired_at=10)
+        self.nautilus_dir.mkdir(parents=True, exist_ok=True)
+        user_script = self.nautilus_dir / "Send to Alpha"
+        user_script.write_text("#!/bin/bash\necho custom alpha\n")
+        user_script.chmod(0o755)
+
+        self._sync(file_managers=("nautilus",))
+
+        self.assertEqual(
+            user_script.read_text(),
+            "#!/bin/bash\necho custom alpha\n",
+        )
+        self.assertNotIn(MANAGED_SENTINEL, user_script.read_text())
+
     def test_unmarked_send_to_phone_user_file_is_never_deleted(self) -> None:
         # If a user happens to have an unrelated script literally named
         # "Send to Phone" (no sentinel, no legacy fingerprint), sync
@@ -235,6 +250,25 @@ class FileManagerIntegrationTests(unittest.TestCase):
         self.assertIn("Name=Send to Alpha", text)
         self.assertNotIn("Name=Send to Phone", text)
         self.assertNotIn("/old/bin", text)
+
+    def test_unmarked_dolphin_service_is_never_overwritten(self) -> None:
+        self._add("dev-A", name="Alpha", paired_at=10)
+        self.dolphin_path.parent.mkdir(parents=True, exist_ok=True)
+        original = (
+            "[Desktop Entry]\n"
+            "Type=Service\n"
+            "Name=Custom service menu\n"
+            "Actions=custom\n\n"
+            "[Desktop Action custom]\n"
+            "Name=Custom action\n"
+            "Exec=/usr/bin/custom %f\n"
+        )
+        self.dolphin_path.write_text(original)
+
+        self._sync(file_managers=("dolphin",))
+
+        self.assertEqual(self.dolphin_path.read_text(), original)
+        self.assertNotIn(MANAGED_SENTINEL, self.dolphin_path.read_text())
 
     def test_idempotent_no_rewrite_when_unchanged(self) -> None:
         self._add("dev-A", name="Alpha", paired_at=10)

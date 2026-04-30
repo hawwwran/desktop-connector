@@ -1213,17 +1213,15 @@ class Poller:
 
         Cadence: ``FASTTRACK_POLL_INTERVAL_S`` while connected, paused
         while disconnected. Per-message work runs in this loop's
-        thread; handlers must not block on UI. Each message is ACK'd
-        regardless of dispatch outcome — leaving an undispatched
-        message in the queue would cause it to expire (10 min) and
-        flood logs every poll.
+        thread; handlers must not block on UI. Each receiver-side
+        message is ACK'd regardless of dispatch outcome — leaving an
+        undispatched command in the queue would cause it to expire
+        (10 min) and flood logs every poll.
 
         Coexists with the GTK find-device sender window's own polling
         loop — they race for messages, but FIND_PHONE_LOCATION_UPDATE
-        responses are only meaningful inside that sender session, and
-        the sender's loop polls faster (3 s) so it usually wins. After
-        the sender window closes, this loop drains whatever is left
-        plus all incoming locate requests.
+        responses are sender-side ownership and must be left unacked
+        here so the active sender UI can consume them.
         """
         log.info("findphone.consumer.started")
         while self._running:
@@ -1255,9 +1253,11 @@ class Poller:
         msg_id = raw.get("id")
         sender_id = raw.get("sender_id") or ""
         encrypted_b64 = raw.get("encrypted_data") or ""
+        should_ack = True
 
-        # Always ACK on the way out so a malformed/unauthorized msg
-        # doesn't sit in the queue.
+        # ACK malformed / unauthorized receiver-side messages on the way
+        # out so they don't sit in the queue. Sender-side location
+        # updates are explicitly left for the find-device window.
         try:
             if not sender_id:
                 log.warning("findphone.consumer.dropped reason=no_sender_id")
@@ -1312,6 +1312,13 @@ class Poller:
                     sender_id[:12],
                 )
                 return
+            if message.type == MessageType.FIND_PHONE_LOCATION_UPDATE:
+                should_ack = False
+                log.debug(
+                    "findphone.consumer.left_sender_update_unacked peer=%s",
+                    sender_id[:12],
+                )
+                return
             # Mark active only on inbound start/stop from a paired
             # sender (D2: directed device action).
             if message.type in (
@@ -1321,7 +1328,7 @@ class Poller:
                 self._mark_active_device(sender_id, reason="find_device_incoming")
             self._message_dispatcher.dispatch(message)
         finally:
-            if msg_id is not None:
+            if should_ack and msg_id is not None:
                 try:
                     self.api.fasttrack_ack(int(msg_id))
                 except Exception:

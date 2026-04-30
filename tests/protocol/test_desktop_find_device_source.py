@@ -93,6 +93,17 @@ class FindDeviceWindowSourceTests(unittest.TestCase):
             "mark_active must be guarded by the successful-queue branch",
         )
 
+    def test_sender_poll_only_acks_updates_from_selected_target(self):
+        for text in (
+            "def decode_target_find_device_update(",
+            '(raw.get("sender_id") or "") != target_id',
+            "MessageType.FIND_PHONE_LOCATION_UPDATE",
+            "decoded = decode_target_find_device_update(m, target_id, symmetric_key)",
+            "flushed_count += 1",
+        ):
+            self.assertIn(text, self.source, msg=f"missing: {text!r}")
+        self.assertNotIn("for m in stale:\n                    mid = m.get(\"id\")", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()

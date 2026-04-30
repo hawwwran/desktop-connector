@@ -202,6 +202,24 @@ class FasttrackConsumerTests(unittest.TestCase):
         # Responder fired its initial ringing heartbeat.
         api.fasttrack_send.assert_called_once()
 
+    def test_sender_side_find_device_update_is_left_unacked(self) -> None:
+        poller, api, crypto = _make_poller(
+            self.tmp,
+            paired={"peer-A": {"name": "Peer A"}},
+        )
+        msg = _make_pending(
+            crypto,
+            sender_id="peer-A",
+            payload={"fn": "find-phone", "state": "ringing"},
+            msg_id=9,
+        )
+        api.fasttrack_pending.return_value = [msg]
+
+        poller._process_fasttrack_pending()
+
+        api.fasttrack_ack.assert_not_called()
+        api.fasttrack_send.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
