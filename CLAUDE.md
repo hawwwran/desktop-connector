@@ -1,6 +1,6 @@
 # Desktop Connector
 
-E2E encrypted file and clipboard sharing between Android phone and Linux desktop, via a PHP relay server.
+E2E encrypted file and clipboard sharing for Android devices and Linux desktops, via a PHP relay server.
 
 ## Architecture
 
@@ -15,14 +15,15 @@ E2E encrypted file and clipboard sharing between Android phone and Linux desktop
 
 ## Special filename convention (`.fn.*`)
 
-Files named `.fn.<function>.<subtype>` trigger receiver-side behavior instead of saving:
-- `.fn.clipboard.text` / `.fn.clipboard.image` — push to system clipboard
+Files named `.fn.<function>.<subtype>` trigger receiver-side behavior instead of a plain file save:
+- `.fn.clipboard.text` — write text to the system clipboard
+- `.fn.clipboard.image` — save as `clipboard-image.<ext>` and render as a normal image transfer in history
 - `.fn.unpair` — remove pairing on the receiver (sender sends this on unpair so both sides sync)
 - Always forced through **classic** transfer mode (never streaming — too small to benefit).
 
 ## Fasttrack: lightweight encrypted message relay
 
-For commands too small for the full transfer pipeline. `fasttrack_messages` table stores opaque blobs; three endpoints (send/pending/ack); server fires `{type:"fasttrack"}` FCM wake — no content leaked. Payload `{fn, action, …}` is E2E-encrypted (same AES-256-GCM as transfers), so the server is function-agnostic. 10-minute expiry, 100 pending per recipient, bidirectional. 128 KB ceiling (`MessageTransportPolicy`). Used by find-my-phone; extensible via new `fn` values with zero server changes.
+For commands too small for the full transfer pipeline. `fasttrack_messages` table stores opaque blobs; three endpoints (send/pending/ack); server fires `{type:"fasttrack"}` FCM wake — no content leaked. Payload `{fn, action, …}` is E2E-encrypted (same AES-256-GCM as transfers), so the server is function-agnostic. 10-minute expiry, 100 pending per recipient, bidirectional. 128 KB ceiling (`MessageTransportPolicy`). Used by Find my Device; the compatibility wire value remains `fn=find-phone` while receivers also accept `fn=find-device`.
 
 ## Building
 
@@ -43,7 +44,7 @@ python3 -m src.windows {send-files|settings|history|pairing|find-phone} --config
 export ANDROID_HOME=/opt/android-sdk
 cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-debug.apk
 
-# Desktop AppImage (release shape — packaging plan: docs/plans/desktop-appimage-packaging-plan.md)
+# Desktop AppImage (release shape; see desktop/packaging/appimage/README.md)
 ./desktop/packaging/appimage/build-appimage.sh --source=$PWD --output=/tmp/dc-out
 
 # Full integration loop
@@ -58,7 +59,7 @@ Idempotent installer:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
 ```
-Fetches the latest `desktop/v*` release, GPG-verifies against `docs/release/desktop-signing.pub.asc` (fingerprint `FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`), drops the AppImage at `~/.local/share/desktop-connector/desktop-connector.AppImage`, runs it once. The AppImage's first-launch hook (`bootstrap/appimage_install_hook.py`) writes the `.desktop` menu entry + autostart entry + Nautilus/Nemo "Send to Phone" scripts + Dolphin service menu, all pointing at `$APPIMAGE`. The onboarding dialog (`bootstrap/appimage_onboarding.py`) asks for the relay server URL on a fresh machine. P.4b's migration removes any prior install-from-source layout cleanly. Uninstall: `~/.local/share/desktop-connector/uninstall.sh`. Releases are signed + reproducibly built by `.github/workflows/desktop-release.yml` on `desktop/v*` tag push; see `docs/release/desktop-signing-recovery.md` for the signing key's storage / rotation runbook + the in-app update flow's load-bearing details (`UPDATE_INFORMATION` embed, rolling `desktop-latest` GitHub Release for stream isolation, runtime relocate when asset filename ≠ install path).
+Fetches the latest `desktop/v*` release, GPG-verifies against `docs/release/desktop-signing.pub.asc` (fingerprint `FBEF CEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`), drops the AppImage at `~/.local/share/desktop-connector/desktop-connector.AppImage`, runs it once. The AppImage's first-launch hook (`bootstrap/appimage_install_hook.py`) writes the `.desktop` menu entry + autostart entry + per-device Nautilus/Nemo `Send to <device>` scripts + Dolphin service menu, all pointing at `$APPIMAGE`. The onboarding dialog (`bootstrap/appimage_onboarding.py`) asks for the relay server URL on a fresh machine. The migration path removes any prior install-from-source layout cleanly. Uninstall: `~/.local/share/desktop-connector/uninstall.sh`. Releases are signed + reproducibly built by `.github/workflows/desktop-release.yml` on `desktop/v*` tag push; see `docs/release/desktop-signing-recovery.md` for the signing key's storage / rotation runbook + the in-app update flow's load-bearing details (`UPDATE_INFORMATION` embed, rolling `desktop-latest` GitHub Release for stream isolation, runtime relocate when asset filename != install path).
 
 Contributors can use `install-from-source.sh` (the old apt+pip+`src/`-copy path) — drops `src/` into `~/.local/share/desktop-connector/`, creates `~/.local/bin/desktop-connector` shell wrapper, runs `python3 -m src.main`. Bouncing between AppImage and source-tree installs is safe (last install wins for system integration; `~/.config/desktop-connector/` is shared and preserved).
 
@@ -86,7 +87,7 @@ Requires PHP 8.0+, SQLite3, mod_rewrite (+ curl/openssl for FCM). Router auto-de
 Shared dot-notation event vocabulary (`transfer.init.accepted`, `ping.request.rate_limited`, `clipboard.write_text.succeeded`). Catalog: `docs/diagnostics.events.md`. Events are prose anchors in the log message (not structured fields); all runtimes share `[timestamp] [level] [tag] message`. Correlation IDs (`transfer_id`, `device_id`…) truncate to 12 chars so flows grep across server/desktop/Android. **Never log**: keys, auth/FCM tokens, decrypted clipboard/file/GPS content, public keys, encrypted payloads. Server-side `apierror.caught` is a central Router catch that logs every 4xx/5xx — no per-throw instrumentation needed.
 
 ### Transfers
-- **Chunked**: 2 MB chunks for resume + memory. `PROJECTED_CHUNK_SIZE = 2 MB` on server must match client `CHUNK_SIZE`.
+- **Chunked**: 2 MiB chunks for resume + memory. `PROJECTED_CHUNK_SIZE = 2 MiB` on server must match client `CHUNK_SIZE`.
 - **Three-phase state** (outgoing): `uploading → delivering → delivered`, each with its own progress bar and field set. Uploading owns `chunksUploaded`/`totalChunks` (Android) or `chunks_downloaded`/`chunks_total` (desktop, historical name). Delivering owns `deliveryChunks`/`deliveryTotal` or `recipient_chunks_downloaded`/`recipient_chunks_total`. Each phase clears its own fields on completion — no shared state.
 - **Authoritative delivery state**: `sent-status` returns `delivery_state ∈ {not_started, in_progress, delivered}` + `chunks_downloaded`/`chunk_count`. `chunks_downloaded` caps at `chunk_count - 1` during chunk serving; only `ack` bumps to `chunk_count`. Invariant: `chunks_downloaded == chunk_count ⇔ downloaded == 1 ⇔ delivery_state == "delivered"`.
 - **Delivery tracker**: dedicated 500 ms loop (Android `PollService.deliveryTrackerLoop`, desktop `Poller._delivery_tracker_loop`). 750 ms abort per poll; overlapping polls skipped and logged. Idle when no active deliveries (Android also gates on screen-on). Paints "Delivering X/Y"; does **not** mark delivered — on `delivery_state == "delivered"` it clears its fields and delegates to the standard sent-status path (single source of truth). DB writes only on value change.
@@ -129,9 +130,9 @@ Optional. Server reads `firebase-service-account.json` + `google-services.json` 
 Both clients treat 401/403 as **terminal pairing failure**, not transient. 3-in-a-row latching streak surfaces a home-screen banner ("Pairing lost — re-pair to continue"). Desktop: `on_auth_failure` callbacks (single-pair scope). Android: `AuthObservation` `SharedFlow` on `ApiClient`'s companion object, per-peer attribution under `ConnectionManager._authFailureByPeer: Map<peerId, AuthFailureKind>`. Empty-string key = global (every CREDENTIALS_INVALID, plus 403s without peer attribution); a real device id = scoped to that pair only. Per-key 3-in-a-row latch so 401-then-403-to-different-peers doesn't collapse. Tapping "Re-pair X" on a per-peer banner removes only that pair (`deleteAllForPeer` + `pairingRepo.unpair`); global key wipes all paired devices and resets the keypair on CREDENTIALS_INVALID.
 
 ### Android multi-pair
-Phone supports N paired desktops simultaneously. `PairingRepository` (process-singleton) is the source of truth — wraps `KeyManager`'s per-peer `paired_<deviceId>` blobs with reactive `pairs` / `selectedDeviceId` / derived `selected` `StateFlow`s. Mutation paths (pairing-confirm, settings rename / unpair, `.fn.unpair` handler) call `refresh()`; no polling backstop. Selection persists in `AppPreferences.selectedDeviceId`; falls back to most-recently-paired when null. **Every transfer row is keyed by `peerDeviceId`** ("the other party": recipient for OUTGOING, sender for INCOMING — Room v8→v9 migration `MIGRATION_8_9` renames the legacy `recipientDeviceId`). History list filters per-peer via `getRecentForPeer(peerId)`. ApiClient endpoints that target a peer thread `peerId` to `reportAuthStatus` so 403 attribution is per-pair. **UI**: when N>1, the `HomeScreen` title swaps to `<selected-name> ▾` opening a `ModalBottomSheet` of pairs with online dots; Settings has a `PairingsCard` with rename + trash per row plus "Pair with another desktop"; incoming notifications append " from `<name>`"; a backgrounded phone (driven by `ProcessLifecycleOwner` via `ForegroundTracker`) auto-switches the selected pair to whoever just sent a transfer or fasttrack message — foreground arrivals never auto-switch. Find-my-phone is FCFS: a second desktop's start while ringing for another is dropped (`findphone.start.dropped_concurrent`).
+Android supports N paired desktops simultaneously. `PairingRepository` (process-singleton) is the source of truth — wraps `KeyManager`'s per-peer `paired_<deviceId>` blobs with reactive `pairs` / `selectedDeviceId` / derived `selected` `StateFlow`s. Mutation paths (pairing-confirm, settings rename / unpair, `.fn.unpair` handler) call `refresh()`; no polling backstop. Selection persists in `AppPreferences.selectedDeviceId`; falls back to most-recently-paired when null. **Every transfer row is keyed by `peerDeviceId`** ("the other party": recipient for OUTGOING, sender for INCOMING — Room v8→v9 migration `MIGRATION_8_9` renames the legacy `recipientDeviceId`). History list filters per-peer via `getRecentForPeer(peerId)`. ApiClient endpoints that target a peer thread `peerId` to `reportAuthStatus` so 403 attribution is per-pair. **UI**: when N>1, the `HomeScreen` title swaps to `<selected-name> ▾` opening a `ModalBottomSheet` of pairs with online dots; Settings has a `PairingsCard` with rename + trash per row plus "Pair with another desktop"; incoming notifications append " from `<name>`"; a backgrounded Android device (driven by `ProcessLifecycleOwner` via `ForegroundTracker`) auto-switches the selected pair to whoever just sent a transfer or fasttrack message — foreground arrivals never auto-switch. Find my Device is FCFS: a second desktop's start while ringing for another is dropped (`findphone.start.dropped_concurrent`).
 
-### Find my phone
+### Find my device
 Desktop sends encrypted start/stop via fasttrack. Phone: alarm (STREAM_ALARM, bypasses silent), vibrates, reports encrypted GPS every 5 s. Desktop: location on Leaflet/OSM map (WebKitWebView, text fallback). Requires FCM — menu hidden without it. Configurable volume, hardcoded 5-min phone-side timeout. Silent search mode (GPS only, no alarm/vibration/notification, for stolen phone); Android "Allow silent search" toggle (default on). Desktop heartbeat-based status with "Lost communication" detection. Generation-counter thread safety for poll loop.
 - **GPS permission**: Android prompts on app open when FCM active + not granted + not dismissed. "Dismiss" is permanent (user can grant later in Settings). Alarm works without GPS (just no coords).
 - **Overlay**: full-screen when alarm active (stop button; "Silent search in progress" in silent mode — no overlay notification for silent).
@@ -152,7 +153,7 @@ Desktop sends encrypted start/stop via fasttrack. Phone: alarm (STREAM_ALARM, by
 - **History clear**: both platforms have "Clear all" with confirm. Android preserves active uploads/downloads; desktop removes all. Swipe-to-delete animated (250 ms shrink+fade).
 
 ### Desktop UX bits
-- **Tray icon**: donut-shaped. Green/yellow = connected to server, phone offline; green/white = both online. Checked every 30 s via stats.
+- **Tray icon**: sparkle status indicator. Filled blue = connected, sky-blue = paired device offline, yellow = reconnecting/uploading, orange = disconnected.
 - **Config reload**: `paired_devices` reloads from disk on every access to pick up subprocess-window changes (settings, pairing).
 - **Dependency checker** at startup — GTK4 dialog with "Install" button opens installer in terminal.
 
@@ -178,7 +179,7 @@ See [`docs/visual-identity-guide.md`](docs/visual-identity-guide.md). Blue-domin
 
 Monochrome notifications encode state via shape (full sparkle = connected, outline = disconnected). `Notification.Builder.setColor(#2058F0)` tints the shade header brand blue.
 
-**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop + server not started — see `docs/plans/brand-rollout.md`.
+**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop and server branding landed on 2026-04-30; see `docs/plans/brand-rollout.md`.
 
 ## Project structure
 

@@ -24,7 +24,7 @@
 # (the recovery doc at docs/release/desktop-signing-recovery.md, the
 # README, the project's social-media presence, etc.):
 #
-#   FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B
+#   FBEF CEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B
 #
 # The signature itself protects against post-CI tampering of the
 # AppImage on releases.github.com.

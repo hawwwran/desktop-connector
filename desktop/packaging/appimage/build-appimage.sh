@@ -63,8 +63,8 @@ EXIT STATUS
   *  build failure (propagates from underlying tools).
 
 NOTES
-  P.1b stage: ships Python + pure-Python deps + src/. GTK4 bundling
-  arrives in P.2a. See docs/plans/desktop-appimage-packaging-plan.md.
+  Builds the release AppImage with bundled Python, GTK4/libadwaita, WebKitGTK,
+  pure-Python deps, and the desktop source tree.
 EOF
 }
 

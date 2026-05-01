@@ -10,10 +10,11 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Both apps detect single URLs, show link icon, Open/Copy dialog
 - Desktop auto-opens links by default (configurable in Settings)
 
-### ~~Right-click "Send to Phone"~~
+### ~~Right-click send targets~~
 - File manager integration for Nautilus, Nemo, and Dolphin
-- Right-click any file(s) → Scripts → Send to Phone
-- Auto-detected and installed by install.sh
+- Right-click any file(s) -> Scripts -> `Send to <device>`
+- One generated target per paired device
+- Auto-detected and installed by install.sh / AppImage first-run integration
 
 ### ~~Long polling~~
 - Server endpoint blocks up to 25s, returns instantly on new data
@@ -35,16 +36,26 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Optional: falls back to long-polling if server has no FCM config
 - Status and manual "Check" button in Android settings
 
-### ~~Find my phone~~
+### ~~Find my device~~
 - Uses fasttrack encrypted message relay (not `.fn.` transfers — too heavy for lightweight commands)
-- Desktop tray menu: "Find my Phone" (only visible when FCM available)
+- Desktop tray menu: "Find my Device" (only visible when FCM is available)
 - GTK4 window with volume/timeout sliders, start/stop, Leaflet/OSM map (WebKit fallback to text coordinates)
-- Phone: `MediaPlayer` with `STREAM_ALARM` at configurable volume, vibration, looping
+- Android device: `MediaPlayer` with `STREAM_ALARM` at configurable volume, vibration, looping
 - Encrypted GPS reporting every 5s via fasttrack (server never sees coordinates)
 - Auto-stop on configurable timeout (max 5 min)
-- Notification with "Stop Alarm" action on phone
+- Notification with "Stop Alarm" action on the Android device
 - GPS permission: prompted on app open (FCM active + not yet granted + not dismissed), grantable from Settings
 - Requires FCM — feature gated on server FCM availability
+- Desktop receivers can also be located by another paired desktop; the wire
+  command remains `fn=find-phone` for compatibility.
+
+### ~~Multi-device support~~
+- Android and desktop both support multiple paired devices
+- Pair phones, tablets, and desktops
+- Send, history, and Find my Device surfaces include target/device pickers
+- File manager integration creates one `Send to <device>` target per pair
+- Each pairing has its own X25519 keypair and symmetric key
+- Server already supports multiple pairings per device
 
 ### ~~Logging infrastructure~~
 - Opt-in file logging on desktop and Android ("Allow logging" toggle in Settings, off by default)
@@ -84,12 +95,6 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Important for large video files on unstable connections
 - *Partial: retry reuses DB row and restarts from chunk 0. Full resume (skip downloaded chunks) not yet implemented.*
 
-### Multi-device support
-- Pair with multiple desktops or multiple phones
-- Each pairing has its own X25519 keypair and symmetric key
-- UI: device picker when sending, or send to all
-- Server already supports multiple devices — just need client UI
-
 ### Auto-update
 - `version.json` in repo tracks current versions for all components
 - Both apps check on startup, show update banner if newer version available
@@ -121,4 +126,3 @@ Potential features organized by effort. All use the existing `.fn.` transfer con
 - Session included many APK reinstalls, find-phone tests, and ~10h on battery
 - No ANR recorded, no user-visible error reported — crash may have been during an APK self-replace
 - Next step: capture `logcat --buffer=crash` or a tombstone after reproducing, check whether `PollService`/`FcmService` survives APK upgrade cleanly
-

@@ -40,7 +40,7 @@ Bouncing between this and the AppImage install is safe — `~/.config/desktop-co
 
 ## Building the AppImage locally
 
-The packaging plan lives in [`docs/plans/desktop-appimage-packaging-plan.md`](docs/plans/desktop-appimage-packaging-plan.md). To build a local AppImage from the source tree:
+AppImage packaging details live in [`desktop/packaging/appimage/README.md`](desktop/packaging/appimage/README.md). To build a local AppImage from the source tree:
 
 ```bash
 ./desktop/packaging/appimage/build-appimage.sh --source=$PWD --output=/tmp/dc-out
@@ -65,7 +65,7 @@ export ANDROID_HOME=/opt/android-sdk
 cd android && ./gradlew assembleDebug
 ```
 
-APK lands at `android/app/build/outputs/apk/debug/app-debug.apk`. Release builds need the keystore — see [`docs/plans/secrets-and-signing-plan.md`](docs/plans/secrets-and-signing-plan.md).
+APK lands at `android/app/build/outputs/apk/debug/app-debug.apk`. Release builds need the keystore — see [`docs/release/android-signing-recovery.md`](docs/release/android-signing-recovery.md).
 
 ## Tests
 
@@ -77,6 +77,6 @@ python3 -m unittest discover -s tests/protocol     # cross-runtime contract test
 ## Conventions
 
 - **Commit messages**: `feat(scope): subject`, `fix(scope): subject`, `docs(scope): subject`, `ci(scope): subject`. Body wraps at ~72 cols and explains the *why*. Use `Co-Authored-By:` for AI-assisted commits.
-- **No secrets in repo**: no API tokens, no signing keys, no passwords. The Android signing keystore is `.gitignored`; CI signing keys live in GitHub Actions secrets — see `docs/plans/secrets-and-signing-plan.md` and `docs/release/desktop-signing-recovery.md`.
+- **No secrets in repo**: no API tokens, no signing keys, no passwords. The Android signing keystore is `.gitignored`; desktop CI signing keys live in GitHub Actions secrets — see [`docs/release/android-signing-recovery.md`](docs/release/android-signing-recovery.md) and [`docs/release/desktop-signing-recovery.md`](docs/release/desktop-signing-recovery.md).
 - **Diagnostics events**: dot-notation event vocabulary (`transfer.init.accepted`, `clipboard.write_text.succeeded`); catalog at [`docs/diagnostics.events.md`](docs/diagnostics.events.md). Never log keys, tokens, decrypted clipboard/file/GPS content, public keys, or encrypted payloads.
 - **Plans before invasive changes**: large refactors get a working note in `docs/plans/`. Small fixes can go straight to a PR.

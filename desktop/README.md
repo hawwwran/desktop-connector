@@ -10,7 +10,7 @@ The released form is a signed AppImage — single self-contained file, no apt or
 curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install.sh | bash
 ```
 
-Or download the AppImage manually from [Releases](../../releases), `chmod +x`, run it. The first-launch onboarding dialog asks for your relay URL; after that the app drops a `.desktop` menu entry plus an autostart entry. Per-device "Send to <device>" scripts (Nautilus, Nemo, Dolphin) appear once you pair at least one device — one entry per pairing.
+Or download the AppImage manually from [Releases](../../releases), `chmod +x`, run it. The first-launch onboarding dialog asks for your relay URL; after that the app drops a `.desktop` menu entry plus an autostart entry. Per-device `Send to <device>` scripts (Nautilus, Nemo, Dolphin) appear once you pair at least one device — one entry per pairing.
 
 In-app updates land via the tray's "Check for updates" item or automatically once a day in the background — both pull only the binary delta (~few hundred KB), not the whole AppImage.
 
@@ -26,7 +26,7 @@ The AppImage and `SHA256SUMS` are signed with the project's release key:
 | Field | Value |
 |---|---|
 | Identity | `Desktop Connector Releases <github@hawwwran.com>` |
-| Fingerprint | `FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B` |
+| Fingerprint | `FBEF CEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B` |
 | Public key | [`docs/release/desktop-signing.pub.asc`](../docs/release/desktop-signing.pub.asc) |
 | Recovery runbook | [`docs/release/desktop-signing-recovery.md`](../docs/release/desktop-signing-recovery.md) |
 
@@ -77,7 +77,7 @@ $APPIMAGE --gtk-window={send-files|settings|history|pairing|find-phone} \
 
 - System tray icon with status indicator (sparkle star: filled blue = both online, sky-blue = paired device offline, yellow = reconnecting/uploading, orange = disconnected)
 - Drag-and-drop files onto the Send Files window
-- Right-click "Send to <device>" in file managers (Nautilus, Nemo, Dolphin) — one entry per paired device
+- Right-click `Send to <device>` in file managers (Nautilus, Nemo, Dolphin) — one entry per paired device
 - Multi-device support: pair as many phones / tablets / desktops as you like; pickers in Send / History / Find appear once a second device is paired
 - "Find my Device" — locate a paired device (alarm + GPS map) or be located by another paired desktop
 - Clipboard sharing (text and images)
@@ -111,7 +111,7 @@ The build script lives at [`packaging/appimage/build-appimage.sh`](packaging/app
     --source=$PWD --output=/tmp/dc-out
 ```
 
-Releases are published by [`.github/workflows/desktop-release.yml`](../.github/workflows/desktop-release.yml) on `desktop/v*` tag pushes. See [`docs/plans/desktop-appimage-packaging-plan.md`](../docs/plans/desktop-appimage-packaging-plan.md) for the full packaging story.
+Releases are published by [`.github/workflows/desktop-release.yml`](../.github/workflows/desktop-release.yml) on `desktop/v*` tag pushes. See [`packaging/appimage/README.md`](packaging/appimage/README.md) for AppImage build details.
 
 ## Config
 

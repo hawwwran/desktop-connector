@@ -1,5 +1,340 @@
 # readme-changes-plan.md
 
+Status: P.0 - P.5 complete; post-P.0 cleanup applied. README rewrite plan is complete.
+
+Branch: `readme-rewrite-plan`
+
+Execution model: this is now the live implementation ledger for the README
+rewrite. Work one `P.X` chunk at a time, update that chunk's status and
+verification notes before moving to the next chunk, and do not broaden the
+rewrite beyond the stated README presentation goals without a new decision.
+
+## Implementation chunks
+
+### P.0 - Baseline and claims audit
+
+Status: completed 2026-05-01
+
+Goal: establish the current README shape and identify claims that must remain
+true after the rewrite.
+
+Scope:
+
+- Map the current README section order, screenshots, links, install commands,
+  and security claims.
+- Check nearby project docs for authoritative wording: roadmap, protocol,
+  desktop README, release/signing docs, and self-hosting notes.
+- List any claims that need current verification before they are made more
+  prominent, especially comparison claims against other tools.
+
+Verification notes:
+
+- No README content changes were made in P.0.
+- Current README section order:
+  1. banner image
+  2. title + two-sentence positioning/security summary
+  3. Android and desktop screenshot strips
+  4. flat `Features` list
+  5. Linux desktop install
+  6. Android install
+  7. setup
+  8. server/self-hosting/local development
+  9. `How it works`
+  10. `Security`
+  11. roadmap
+  12. license
+- Root README local image/doc targets checked and present:
+  `docs/assets/banner.png`, all six `images/*` screenshots,
+  `docs/release/desktop-signing.pub.asc`, `desktop/README.md`, `CLAUDE.md`,
+  and `docs/ROADMAP.md`.
+- `gpg --show-keys --with-fingerprint docs/release/desktop-signing.pub.asc`
+  confirms the README fingerprint:
+  `FBEF CEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`.
+- Authoritative docs checked for rewrite facts:
+  `desktop/README.md`, `android/README.md`, `server/README.md`,
+  `docs/protocol/protocol.md`, `docs/protocol/explain.protocol.md`,
+  `docs/protocol.compatibility.md`, `docs/PLANS.md`,
+  `docs/ROADMAP.md`, `docs/release/desktop-signing-recovery.md`,
+  `docs/release/android-signing-recovery.md`,
+  `desktop/packaging/appimage/README.md`, `CLAUDE.md`,
+  `version.json`, and release workflow/version references.
+- Claims that should be preserved:
+  - Desktop released form is a signed AppImage, installed by
+    `desktop/install.sh`, placed at
+    `~/.local/share/desktop-connector/desktop-connector.AppImage`, with
+    first-launch relay URL onboarding and system integration.
+  - Desktop release signing key identity is
+    `Desktop Connector Releases <github@hawwwran.com>` with the fingerprint
+    above.
+  - Manual desktop verification should import
+    `docs/release/desktop-signing.pub.asc`, verify the AppImage `.sig`,
+    verify `SHA256SUMS.sig`, then run `sha256sum -c SHA256SUMS`.
+  - In-app desktop updates are AppImage/zsync based and use the rolling
+    `desktop-latest` update stream; they are not equivalent to a fresh GPG
+    verification on every update.
+  - Android install path is sideloaded APK from GitHub Releases. Release APKs
+    are signed locally with the Android keystore; there is no Android GitHub
+    Actions signing path yet.
+  - Server requirements are PHP 8.0+, SQLite3, URL rewriting, and optional
+    curl/openssl for FCM push wake. The server auto-creates SQLite/storage
+    directories and can run under a subdirectory.
+  - Protocol security model uses long-lived X25519 device keys,
+    X25519 ECDH, HKDF-SHA256, and AES-256-GCM. Metadata is encrypted; chunks
+    are 2 MiB except the final chunk.
+  - The relay stores ciphertext and routing metadata only. It must not be
+    described as seeing plaintext file contents, plaintext filenames,
+    clipboard content, GPS coordinates, symmetric keys, auth tokens, or FCM
+    tokens.
+  - The relay still sees metadata such as device IDs/pairing relationships,
+    timing, and chunk counts/approximate size.
+  - Desktop multi-device support is implemented in the current branch history:
+    target selection, per-peer history, per-device file-manager send targets,
+    `Find my Device`, and desktop-to-desktop pairing are represented by
+    `docs/plans/desktop-multi-device-support.md`.
+- Claims or wording fixed in the post-P.0 cleanup pass:
+  - README clipboard wording now distinguishes clipboard text from clipboard
+    image saved-file/history behavior.
+  - README opening/setup/architecture wording now uses Android device /
+    connected-device language where the feature is no longer phone-only.
+  - README setup and pairing wording now mentions desktop-to-desktop pairing
+    key exchange at a high level.
+  - README security table now distinguishes plaintext metadata from
+    approximate transfer size metadata.
+  - `desktop/VERSION.md` now matches `version.json`'s desktop version
+    (`0.3.2`).
+  - `docs/ROADMAP.md` now marks multi-device support done and rewords
+    user-facing "Find my phone" / "Send to Phone" references.
+  - `docs/PLANS.md` now marks brand rollout and desktop multi-device support
+    done.
+  - Missing-plan links to `docs/plans/desktop-appimage-packaging-plan.md` and
+    `docs/plans/secrets-and-signing-plan.md` were removed from the docs that
+    linked them.
+- Remaining local wording risks:
+  - `docs/protocol/protocol.md` was lightly reworded for multi-device scope,
+    but it is still a formal protocol spec and should be reviewed separately
+    before any larger protocol wording rewrite.
+  - Legacy `Send to Phone`, `find-phone`, and `phone` strings remain in code,
+    tests, compatibility notes, and historical plan ledgers where they describe
+    legacy filenames, window names, wire values, or migration behavior.
+- Claims needing external/current verification before P.2 comparison:
+  - KDE Connect and LocalSend feature cells should be verified from current
+    primary docs before writing specific comparison claims.
+  - If verification is not done in P.2, keep the comparison at stable,
+    conservative fit-level dimensions or omit uncertain cells.
+
+### Post-P.0 cleanup - Locally verifiable wording drift
+
+Status: completed 2026-05-01
+
+Goal: fix high-confidence stale wording and broken local doc references found
+during P.0 before starting the larger README rewrite chunks.
+
+Scope completed:
+
+- Reworded the root README for Android devices / connected devices rather than
+  phone-only phrasing where appropriate.
+- Corrected README clipboard-image behavior, pairing overview, transfer chunk
+  size wording, and server metadata/security wording.
+- Refreshed `docs/ROADMAP.md` for multi-device, Find my Device, and per-device
+  file-manager send targets.
+- Refreshed `docs/PLANS.md` statuses for completed brand and multi-device
+  ledgers.
+- Updated `desktop/VERSION.md` to match `version.json`.
+- Removed links to missing plan files from contributor, desktop packaging, and
+  release docs.
+- Lightly corrected deep-dive wording in `CLAUDE.md` and
+  `docs/protocol/protocol.md` where it was locally stale.
+
+Verification notes:
+
+- Changes are limited to local, repo-verifiable drift. External comparison
+  claims remain out of scope for this cleanup.
+- P.1 is still pending because the README has not yet been restructured into
+  the planned positioning/status/tradeoffs flow.
+
+### P.1 - Positioning and reader-fit pass
+
+Status: completed 2026-05-01
+
+Goal: make the first-screen and near-top README answer what the project is, who
+it is for, why it exists, and what tradeoffs readers should understand.
+
+Scope:
+
+- Strengthen the opening without making it heavier.
+- Add concise "Who this is for" and "Why this exists" sections.
+- Add a clear "Current status" section.
+- Add short "Tradeoffs / current limitations" content.
+- Keep wording factual, technically credible, and not over-marketed.
+
+Verification notes:
+
+- Strengthened the opening to position Desktop Connector as self-hosted,
+  end-to-end encrypted Android/Linux sharing through a user-controlled PHP
+  relay.
+- Added `Who this is for`, focused on Android + Linux users, self-hosters,
+  end-to-end encryption, practical Linux desktop integration, and multi-device
+  target selection.
+- Added `Why this exists`, describing the blind-relay reachability tradeoff and
+  Linux-native desktop workflow without naming or comparing specific
+  alternatives.
+- Added `Current status`, stating that the project is usable now for Android
+  and Linux desktop workflows and listing locally verified shipped surfaces.
+- Added `Tradeoffs`, covering Linux-focused desktop support, sideloaded Android
+  APKs, personal/small relay deployment fit, relay-visible metadata, and modern
+  distro expectations for the AppImage.
+- Top-level wording uses Android device / connected device language instead of
+  phone-only framing where the feature applies to desktops or tablets too.
+- P.1 intentionally did not add the P.2 comparison table, P.3 feature grouping,
+  or P.4 architecture/security/doc-map rewrite.
+
+### P.2 - Differentiation and comparison
+
+Status: completed 2026-05-01
+
+Goal: help readers understand what Desktop Connector is optimized for compared
+with nearby tools, without attacking alternatives or making brittle claims.
+
+Scope:
+
+- Add a compact comparison section or table.
+- Prefer stable comparison dimensions: self-hosted relay, relay E2EE model,
+  Android/Linux focus, clipboard/file workflow, desktop integration, share
+  intent, and file-manager send targets.
+- Verify any non-obvious current claims before writing them into the README.
+- Phrase comparison as fit/optimization, not superiority.
+
+Verification notes:
+
+- Added a compact `How it differs` section after `Why this exists`.
+- Used current primary sources:
+  - KDE Connect site/download/UserBase docs for broad device-integration scope,
+    Linux/Android availability, local-network pairing, Bluetooth, VPN/manual IP
+    paths, and plugin examples.
+  - LocalSend official site for cross-platform file/text sharing, local
+    network/offline model, no account/login/server, and E2EE/HTTPS transfer
+    claims.
+- Kept the comparison fit-oriented:
+  - KDE Connect: broad device integration.
+  - LocalSend: nearby/local-network cross-platform transfer.
+  - Desktop Connector: Android/Linux workflow through a self-hosted blind relay
+    with relay E2EE and Linux desktop integration.
+- Avoided unsupported or brittle claims about every feature/cell of alternatives.
+- Did not add P.3 feature grouping or P.4 security/architecture restructuring.
+
+### P.3 - Features, install, and release clarity
+
+Status: completed 2026-05-01
+
+Goal: make the README easier to scan for people deciding whether to try the
+project today.
+
+Scope:
+
+- Group the current flat feature list into practical categories.
+- Make Linux, Android, and server install paths easier to spot.
+- Add or sharpen a short requirements/release expectations block if it reduces
+  scanning friction.
+- Keep existing commands and release/signing details accurate.
+
+Verification notes:
+
+- Replaced the flat feature list with grouped categories:
+  - `Transfer and clipboard`
+  - `Multi-device workflow`
+  - `Linux desktop integration`
+  - `Delivery and reliability`
+  - `Self-hosting`
+- Added a `Quick install paths` table covering Linux desktop, Android, relay
+  server, and desktop development.
+- Preserved the full Linux desktop installer command in both the quick table
+  and the detailed `Install (Linux Desktop)` section.
+- Preserved the GitHub Releases Android path, relay server requirements, manual
+  AppImage verification link, signing fingerprint, updater note, uninstall
+  command, and `desktop/README.md` contributor path.
+- Confirmed feature grouping still surfaces multi-device, clipboard text,
+  clipboard image handling, share intents, file-manager integration, offline
+  behavior, and self-hosting.
+- P.3 did not rewrite the deeper architecture/security sections; those were
+  covered in P.4.
+
+### P.4 - Architecture, security, docs, and contributor route
+
+Status: completed 2026-05-01
+
+Goal: make the README communicate engineering maturity and route deeper readers
+to the right documents.
+
+Scope:
+
+- Strengthen "How it works" into a concise architecture-at-a-glance section.
+- Improve the security model explanation while keeping the existing server
+  visibility table.
+- Add a compact documentation map to relevant project docs.
+- Add a short contributor-facing section with practical contribution areas.
+
+Verification notes:
+
+- Replaced the old short `How it works` section with `Architecture at a
+  glance`, covering the Android app, Linux desktop app, PHP relay server, the
+  encrypted upload/download path, X25519 device keys, and AES-256-GCM
+  encryption/decryption responsibilities.
+- Expanded the core flow to cover registered device keys and auth tokens,
+  QR-code and desktop-to-desktop pairing, HKDF-SHA256 key derivation, encrypted
+  file metadata, 2 MiB encrypted chunks, clipboard synthetic filenames,
+  delivery tracking, and encrypted fasttrack commands.
+- Reworded the security model around the correct trust boundary: the relay
+  routes encrypted data, but paired devices own content keys and plaintext
+  content handling.
+- Preserved and sharpened the server visibility table so it distinguishes
+  content confidentiality from metadata the relay still handles: device IDs,
+  pairing relationships, timing, delivery state, and approximate transfer size.
+- Added a compact `Project docs` map to protocol, compatibility, examples,
+  roadmap, plans, diagnostics, desktop, Android, server, and release signing
+  documents.
+- Added a `Contributing` section that routes readers to `CONTRIBUTING.md` and
+  `CLAUDE.md`, then names practical contribution areas.
+- Confirmed all new README doc links resolve to local files.
+- `git diff --check` passed for the P.4 changes.
+- P.5 handled the final top-to-bottom polish and verification pass.
+
+### P.5 - Final polish and verification
+
+Status: completed 2026-05-01
+
+Goal: finish the README as one coherent document and update this plan ledger.
+
+Scope:
+
+- Review narrative flow from top to bottom.
+- Remove duplicated claims introduced during phased edits.
+- Check Markdown rendering, image references, relative links, and headings.
+- Run lightweight verification commands for Markdown/link-sensitive changes
+  available in the repo.
+- Mark completed chunks and record verification results in this plan.
+
+Verification notes:
+
+- Read the final README top to bottom after P.1-P.4 and kept the overall flow:
+  opening, audience, rationale, comparison, status, tradeoffs, features,
+  install/setup, server, architecture, security, docs, contributing, roadmap.
+- Removed final awkwardness and duplication introduced during phased edits:
+  tightened relay wording, replaced `phone-finding` comparison wording with
+  `device-finding`, changed `relay E2EE` to `relay-based E2E encryption`,
+  fixed the signing fingerprint spacing, and routed self-hosting details to
+  `server/README.md` instead of the contributor/agent guide.
+- Kept the quick install table command render-safe by using an HTML code span
+  with `&#124;` for the shell pipe, while preserving the normal fenced command
+  in the detailed Linux install section.
+- Confirmed the README answers the final questions: what it does, who it is
+  for, why it exists, how it differs, what ships today, what the tradeoffs are,
+  how to install it, what the security model is, and where to go next.
+- Confirmed all local README image and document targets referenced by the final
+  file exist.
+- Confirmed the final heading outline is coherent and has no duplicate section
+  titles.
+- `git diff --check` passed after final polish.
+
 ## Purpose
 
 This document describes how the README should be improved so the project presents more strongly to:
