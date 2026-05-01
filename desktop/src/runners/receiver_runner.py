@@ -46,8 +46,10 @@ def run_receiver(
         find_device_alert=alert,
     )
 
-    # Wire up notifications
-    poller.on_file_received(platform.notifications.notify_file_received)
+    # File-received toast is fired directly from the poller, gated on
+    # whether a configured Receive Action already ran (so we don't
+    # double-up on user feedback). The on_file_received hook stays
+    # available for non-notification consumers.
 
     last_notified = [None]  # "connected", "disconnected", or None (never notified)
 

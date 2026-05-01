@@ -105,6 +105,30 @@ _DOCUMENT_EXTENSIONS = {
 }
 
 
+@dataclass(frozen=True)
+class ReceiveActionResult:
+    """Outcome of one apply_receive_action / apply_receive_text_actions call.
+
+    ``ok`` keeps the legacy bool semantics — falsy iff something went wrong
+    (open returned False, clipboard write raised, …). Existing callers do
+    ``if not apply_receive_action(...)`` and ``self.assertTrue(...)``; both
+    keep working through ``__bool__``.
+
+    ``action_ran`` is the new signal: True iff at least one configured
+    action successfully took effect (URL opened, file launched, clipboard
+    actually written). False when the configured action was ``none``,
+    when the rate-limiter dropped it, or when the side effect failed.
+    Notification suppression in the receiver gates on this — the
+    user-visible action is enough of a "I just received something"
+    signal, so an extra notification is noise.
+    """
+    ok: bool
+    action_ran: bool
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
 @dataclass
 class ReceiveActionBatch:
     """Counts action attempts for one pending-transfer poll result."""
@@ -365,34 +389,42 @@ def _run_receive_action(
     pending_clipboard: list[str | None],
     limiter: ReceiveActionLimiter | None = None,
     batch: ReceiveActionBatch | None = None,
-) -> bool:
+) -> tuple[bool, bool]:
+    """Returns ``(ok, attempted)``.
+
+    ``attempted`` is True iff a real action passed the configured /
+    rate-limit gates and reached the dispatch try-block — i.e. we
+    actually fired ``open_url`` / ``open_path`` or staged a clipboard
+    write. ``RECEIVE_ACTION_NONE`` and rate-limited drops keep
+    ``attempted=False`` so the caller can still notify.
+    """
     action = _configured_action(config, kind)
     if action == RECEIVE_ACTION_NONE:
-        return True
+        return True, False
 
     action_key = _receive_action_key(kind, action)
     if not _action_allowed(limiter, batch, action_key):
-        return True
+        return True, False
 
     try:
         if kind == RECEIVE_KIND_URL and action == RECEIVE_ACTION_OPEN and url:
-            return bool(platform.shell.open_url(url))
+            return bool(platform.shell.open_url(url)), True
         if kind == RECEIVE_KIND_URL and action == RECEIVE_ACTION_COPY and url:
             pending_clipboard[0] = url
-            return True
+            return True, True
         if (
             kind == RECEIVE_KIND_TEXT
             and action == RECEIVE_ACTION_COPY
             and text is not None
         ):
             pending_clipboard[0] = text
-            return True
+            return True, True
         if (
             kind in (RECEIVE_KIND_IMAGE, RECEIVE_KIND_VIDEO, RECEIVE_KIND_DOCUMENT)
             and action == RECEIVE_ACTION_OPEN
             and path is not None
         ):
-            return bool(platform.shell.open_path(Path(path)))
+            return bool(platform.shell.open_path(Path(path))), True
 
         log.warning(
             "receive_action.unsupported kind=%s action=%s has_url=%s has_path=%s",
@@ -401,7 +433,7 @@ def _run_receive_action(
             url is not None,
             path is not None,
         )
-        return False
+        return False, True
     except Exception as e:
         log.warning(
             "receive_action.failed kind=%s action=%s error_kind=%s",
@@ -409,7 +441,7 @@ def _run_receive_action(
             action,
             type(e).__name__,
         )
-        return False
+        return False, True
 
 
 def apply_receive_action(
@@ -422,14 +454,17 @@ def apply_receive_action(
     path: Path | None = None,
     limiter: ReceiveActionLimiter | None = None,
     batch: ReceiveActionBatch | None = None,
-) -> bool:
+) -> ReceiveActionResult:
     """Run one configured safe built-in receive action.
 
-    The action is best-effort: failures are logged and returned as False,
-    but exceptions never escape into the receive loop.
+    The action is best-effort: failures are logged and reflected as
+    ``ok=False`` on the result, but exceptions never escape into the
+    receive loop. ``action_ran`` is True iff a configured action passed
+    the rate-limit gate AND its side effect completed (open succeeded
+    or clipboard write flushed).
     """
     pending_clipboard: list[str | None] = [None]
-    ok = _run_receive_action(
+    ok, attempted = _run_receive_action(
         config,
         platform,
         kind,
@@ -440,7 +475,9 @@ def apply_receive_action(
         limiter=limiter,
         batch=batch,
     )
-    return _flush_pending_clipboard(platform, pending_clipboard) and ok
+    flushed = _flush_pending_clipboard(platform, pending_clipboard)
+    final_ok = bool(flushed and ok)
+    return ReceiveActionResult(ok=final_ok, action_ran=attempted and final_ok)
 
 
 def apply_receive_text_actions(
@@ -450,20 +487,26 @@ def apply_receive_text_actions(
     *,
     limiter: ReceiveActionLimiter | None = None,
     batch: ReceiveActionBatch | None = None,
-) -> bool:
+) -> ReceiveActionResult:
     """Apply URL/text actions for a received text payload.
 
     Exact single-URL text runs only the URL action. Text that merely
     contains a URL runs the URL action for the first detected URL and
     then the text action for the full payload. Clipboard writes are
     staged and flushed once after all actions are evaluated.
+
+    ``action_ran`` is True iff at least one of the two possible actions
+    (URL + text) actually fired and succeeded — used by the receiver
+    to suppress the redundant "Clipboard received" notification when
+    the user already saw the action effect.
     """
     pending_clipboard: list[str | None] = [None]
     ok = True
+    any_attempted = False
 
     kind, exact_url = classify_received_text(text)
     if kind == RECEIVE_KIND_URL and exact_url is not None:
-        ok = _run_receive_action(
+        url_ok, url_attempted = _run_receive_action(
             config,
             platform,
             RECEIVE_KIND_URL,
@@ -471,11 +514,13 @@ def apply_receive_text_actions(
             pending_clipboard=pending_clipboard,
             limiter=limiter,
             batch=batch,
-        ) and ok
+        )
+        ok = url_ok and ok
+        any_attempted = any_attempted or url_attempted
     else:
         urls = extract_received_urls(text)
         if urls:
-            ok = _run_receive_action(
+            url_ok, url_attempted = _run_receive_action(
                 config,
                 platform,
                 RECEIVE_KIND_URL,
@@ -483,8 +528,10 @@ def apply_receive_text_actions(
                 pending_clipboard=pending_clipboard,
                 limiter=limiter,
                 batch=batch,
-            ) and ok
-        ok = _run_receive_action(
+            )
+            ok = url_ok and ok
+            any_attempted = any_attempted or url_attempted
+        text_ok, text_attempted = _run_receive_action(
             config,
             platform,
             RECEIVE_KIND_TEXT,
@@ -492,6 +539,10 @@ def apply_receive_text_actions(
             pending_clipboard=pending_clipboard,
             limiter=limiter,
             batch=batch,
-        ) and ok
+        )
+        ok = text_ok and ok
+        any_attempted = any_attempted or text_attempted
 
-    return _flush_pending_clipboard(platform, pending_clipboard) and ok
+    flushed = _flush_pending_clipboard(platform, pending_clipboard)
+    final_ok = bool(flushed and ok)
+    return ReceiveActionResult(ok=final_ok, action_ran=any_attempted and final_ok)

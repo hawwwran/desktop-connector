@@ -31,6 +31,7 @@ from desktop.src.config import (  # noqa: E402
 from desktop.src.messaging.message_model import DeviceMessage  # noqa: E402
 from desktop.src.messaging.message_types import MessageTransport, MessageType  # noqa: E402
 from desktop.src.poller import Poller  # noqa: E402
+from desktop.src.receive_actions import ReceiveActionResult  # noqa: E402
 
 
 class _Config:
@@ -87,9 +88,13 @@ class _Shell:
 class _Notifications:
     def __init__(self):
         self.events: list[tuple[str, str]] = []
+        self.file_received: list[Path] = []
 
     def notify(self, title: str, body: str, icon: str = "dialog-information") -> None:
         self.events.append((title, body))
+
+    def notify_file_received(self, filepath: Path) -> None:
+        self.file_received.append(filepath)
 
 
 class _Platform:
@@ -147,10 +152,9 @@ class ReceiveActionsPollerTests(unittest.TestCase):
 
         self.assertEqual(poller.platform.shell.opened_urls, ["https://example.com"])
         self.assertEqual(poller.platform.clipboard.written_text, [])
-        self.assertEqual(
-            poller.platform.notifications.events,
-            [("Clipboard received", "https://example.com")],
-        )
+        # Browser opening IS the user feedback — no extra "Clipboard
+        # received" toast on top of it.
+        self.assertEqual(poller.platform.notifications.events, [])
         history.add.assert_called_once()
 
     def test_exact_url_copy_copies_url_once(self):
@@ -246,7 +250,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
         def record_action(_config, _platform, kind, *, path, **_kwargs):
             events.append(("action", path.name))
             self.assertEqual(kind, RECEIVE_KIND_IMAGE)
-            return True
+            return ReceiveActionResult(ok=True, action_ran=True)
 
         with patch.object(
             poller,
@@ -265,6 +269,9 @@ class ReceiveActionsPollerTests(unittest.TestCase):
         self.assertTrue((poller.config.save_directory / "photo.jpg").exists())
         action.assert_called_once()
         self.assertEqual(events, [("action", "photo.jpg"), ("callback", "photo.jpg")])
+        # Image viewer launching IS the user feedback — suppress the
+        # file-received toast.
+        self.assertEqual(poller.platform.notifications.file_received, [])
 
     def test_streaming_file_receive_runs_action_before_callbacks(self):
         poller, _history = self._build_poller({
@@ -277,7 +284,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
         def record_action(_config, _platform, kind, *, path, **_kwargs):
             events.append(("action", path.name))
             self.assertEqual(kind, RECEIVE_KIND_VIDEO)
-            return True
+            return ReceiveActionResult(ok=True, action_ran=True)
 
         with patch.object(
             poller,
@@ -296,6 +303,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
         self.assertTrue((poller.config.save_directory / "movie.mp4").exists())
         action.assert_called_once()
         self.assertEqual(events, [("action", "movie.mp4"), ("callback", "movie.mp4")])
+        self.assertEqual(poller.platform.notifications.file_received, [])
 
     def test_file_action_is_not_run_after_failed_download(self):
         poller, _history = self._build_poller({
@@ -330,7 +338,10 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             poller,
             "_download_and_decrypt_chunk",
             return_value=b"image",
-        ), patch("desktop.src.poller.apply_receive_action", return_value=False):
+        ), patch(
+            "desktop.src.poller.apply_receive_action",
+            return_value=ReceiveActionResult(ok=False, action_ran=False),
+        ):
             poller._receive_file_transfer(
                 "tid-action-fail",
                 "sender",
@@ -341,6 +352,12 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             )
 
         self.assertEqual(callbacks, ["photo.jpg"])
+        # Action failed — the user didn't see the image viewer open, so
+        # the toast IS helpful here.
+        self.assertEqual(
+            [p.name for p in poller.platform.notifications.file_received],
+            ["photo.jpg"],
+        )
 
     def test_other_file_type_does_not_run_action(self):
         poller, _history = self._build_poller({})

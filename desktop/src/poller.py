@@ -556,10 +556,15 @@ class Poller:
             chunks_downloaded=0,
             chunks_total=0,
         )
-        self._apply_receive_file_action(
+        action_ran = self._apply_receive_file_action(
             final_path,
             receive_action_batch=receive_action_batch,
         )
+        if not action_ran:
+            try:
+                self.platform.notifications.notify_file_received(final_path)
+            except Exception:
+                log.exception("notify_file_received failed")
         for cb in self._on_file_received:
             try:
                 cb(final_path)
@@ -735,10 +740,15 @@ class Poller:
             chunks_downloaded=0,
             chunks_total=0,
         )
-        self._apply_receive_file_action(
+        action_ran = self._apply_receive_file_action(
             final_path,
             receive_action_batch=receive_action_batch,
         )
+        if not action_ran:
+            try:
+                self.platform.notifications.notify_file_received(final_path)
+            except Exception:
+                log.exception("notify_file_received failed")
         for cb in self._on_file_received:
             try:
                 cb(final_path)
@@ -750,22 +760,33 @@ class Poller:
         filepath: Path,
         *,
         receive_action_batch: ReceiveActionBatch | None = None,
-    ) -> None:
+    ) -> bool:
+        """Run the configured receive action for a saved file.
+
+        Returns True iff a configured action actually fired successfully
+        — used by callers to suppress the redundant "File received"
+        notification when the user already saw the action effect (image
+        viewer launching, document opening, etc.). Files classified as
+        ``RECEIVE_KIND_OTHER`` (no configurable action) always return
+        False so the notification still fires.
+        """
         kind = classify_received_file(filepath)
         if kind == RECEIVE_KIND_OTHER:
-            return
-        if not apply_receive_action(
+            return False
+        result = apply_receive_action(
             self.config,
             self.platform,
             kind,
             path=filepath,
             limiter=self._receive_action_limiter,
             batch=receive_action_batch,
-        ):
+        )
+        if not result.ok:
             log.warning(
                 "receive_action.file.failed kind=%s",
                 kind,
             )
+        return result.action_ran
 
     def _stream_download_chunk(self, transfer_id: str, index: int,
                                chunk_count: int,
@@ -1048,19 +1069,24 @@ class Poller:
 
         urls = extract_received_urls(text)
         preview = text if len(urls) == 1 else (text[:60] + "..." if len(text) > 60 else text)
-        self.platform.notifications.notify("Clipboard received", preview[:60])
         self.history.add(filename=message.metadata.get("filename", ".fn.clipboard.text"),
                          display_label=preview, direction="received", size=len(text),
                          sender_id=message.sender_id or "",
                          peer_device_id=message.sender_id or "")
-        if not apply_receive_text_actions(
+        result = apply_receive_text_actions(
             self.config,
             self.platform,
             text,
             limiter=self._receive_action_limiter,
             batch=receive_action_batch,
-        ):
+        )
+        if not result.ok:
             log.warning("receive_action.text.failed length=%d", len(text))
+        # Suppress the "Clipboard received" toast when a configured
+        # action already gave the user feedback (browser opened,
+        # clipboard updated). The action effect is the notification.
+        if not result.action_ran:
+            self.platform.notifications.notify("Clipboard received", preview[:60])
 
     def _handle_message_clipboard_image(
         self,
@@ -1114,10 +1140,15 @@ class Poller:
             peer_device_id=sender_id or message.sender_id or "",
             transfer_id=transfer_id,
         )
-        self._apply_receive_file_action(
+        action_ran = self._apply_receive_file_action(
             final_path,
             receive_action_batch=receive_action_batch,
         )
+        if not action_ran:
+            try:
+                self.platform.notifications.notify_file_received(final_path)
+            except Exception:
+                log.exception("notify_file_received failed")
         for cb in self._on_file_received:
             try:
                 cb(final_path)
