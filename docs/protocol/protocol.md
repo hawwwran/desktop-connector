@@ -8,9 +8,9 @@ Scope: wire protocol, cryptographic envelope, state transitions, and compatibili
 
 ## 1. Goals
 
-Desktop Connector is a point-to-point device protocol for:
+Desktop Connector is a point-to-point connected-device protocol for:
 
-- pairing one Linux desktop and one Android phone
+- pairing registered Android devices and Linux desktops
 - end-to-end encrypted file transfer through a blind relay server
 - end-to-end encrypted lightweight command delivery through the `fasttrack` channel
 - optional FCM-assisted wake-up for low-latency delivery and liveness probing
@@ -1160,4 +1160,3 @@ To move from “reverse-specified” to “owned protocol”, the project should
 3. capability negotiation
 4. canonical plaintext schema for fasttrack function payloads
 5. explicit receiver semantics for `.fn.*` reserved filenames
-

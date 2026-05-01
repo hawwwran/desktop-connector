@@ -25,14 +25,14 @@ set -e
 #
 # Bouncing between this and the AppImage installer is safe (last
 # install wins for system integration; ~/.config/desktop-connector/
-# is shared and preserved). See
-# `docs/plans/desktop-appimage-packaging-plan.md` for the model.
+# is shared and preserved). See desktop/packaging/appimage/README.md
+# for the release packaging model.
 #
 # Idempotent: safe to run multiple times (install, update, repair).
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/hawwwran/desktop-connector/main/desktop/install-from-source.sh | bash
-#   curl -fsSL ... | bash -s -- --version=0.1.1
+#   curl -fsSL ... | bash -s -- --version=0.3.2
 
 APP_NAME="desktop-connector"
 INSTALL_VERSION=""

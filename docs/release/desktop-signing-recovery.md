@@ -4,9 +4,9 @@ Recovery + operations runbook for the GPG key that signs the
 AppImage and `SHA256SUMS` published by the
 [`desktop-release` workflow](../../.github/workflows/desktop-release.yml).
 
-Companion to `docs/plans/secrets-and-signing-plan.md`, which covers the
-broader credential-hygiene model. The rules here are specific to the
-desktop signing key, but the storage pattern (password manager primary,
+Companion to [`android-signing-recovery.md`](android-signing-recovery.md),
+which covers the Android APK signing key. The rules here are specific to
+the desktop signing key, but the storage pattern (password manager primary,
 encrypted secondary, two physically distinct copies) is the same.
 
 ## Identity
@@ -30,8 +30,7 @@ The released AppImage is built on `ubuntu-24.04` (glibc 2.39). Coverage
 floor: **Zorin 17+, Mint 22+, Pop! 24.04+, Ubuntu 24.04+, Debian 13+,
 Fedora 40+**. Earlier releases (Ubuntu 22.04 / Mint 21 / Zorin 16)
 should use `install-from-source.sh` (apt+pip path) — the AppImage
-won't run on glibc < 2.39. Build base decision is recorded in
-[`docs/plans/desktop-appimage-packaging-plan.md`](../plans/desktop-appimage-packaging-plan.md).
+won't run on glibc < 2.39.
 
 Manual smoke checklist before announcing a release widely: at minimum
 one Ubuntu, one Mint or Zorin, and one Fedora install. Sign-off

@@ -6,8 +6,7 @@
 # ~/.config/desktop-connector-build/state.json so re-runs default to
 # previous answers.
 #
-# Implements B.1–B.6 from docs/plans/open-work-plan.md (the surviving
-# tail of P.1c in desktop-appimage-packaging-plan.md).
+# Interactive wrapper around the mechanical AppImage builder.
 set -euo pipefail
 
 PROG="$(basename -- "$0")"

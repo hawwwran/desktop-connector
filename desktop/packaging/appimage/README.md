@@ -1,7 +1,6 @@
 # desktop/packaging/appimage/
 
-Linux AppImage packaging for the desktop client. See
-`docs/plans/desktop-appimage-packaging-plan.md` for the full plan.
+Linux AppImage packaging for the desktop client.
 
 **Status:** P.3 complete. `build-appimage.sh` produces a runnable
 ~111 MB AppImage with bundled Python + pure-Python deps + GTK4 +
@@ -31,10 +30,9 @@ save / rename / unpair.
 
 `build-appimage.sh` uses `niess/python-appimage` to source the relocatable
 Python interpreter, not `niess/linuxdeploy-plugin-python` (which is
-deprecated upstream in favour of python-appimage). The plan
-(`desktop-appimage-packaging-plan.md`) names the plugin; this is the same
-upstream wheel layout, just delivered as a self-contained AppImage instead
-of a linuxdeploy plugin.
+deprecated upstream in favour of python-appimage). This is the same upstream
+wheel layout, just delivered as a self-contained AppImage instead of a
+linuxdeploy plugin.
 
 linuxdeploy itself is still vendored — it lands in P.2a for GTK4 +
 libadwaita + native lib bundling.

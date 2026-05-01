@@ -1,5 +1,5 @@
 ---
 component: desktop
-version: 0.1.1
-tag: desktop/v0.1.1
+version: 0.3.2
+tag: desktop/v0.3.2
 ---

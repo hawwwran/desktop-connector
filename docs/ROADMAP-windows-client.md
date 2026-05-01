@@ -90,7 +90,7 @@ Goal: make it launchable and installable on Windows.
    - Copy app to `%LOCALAPPDATA%/desktop-connector/`.
    - Create Start Menu shortcut.
    - Add to startup (`HKCU\...\Run` or Startup folder).
-   - Create SendTo shortcut for right-click "Send to Phone".
+   - Create SendTo shortcut for right-click `Send to <device>`.
 3. Optional: PyInstaller single-exe distribution for users without Python.
    - Watch for hidden-import issues (PyNaCl, cryptography).
    - Consider Inno Setup or NSIS for a proper installer GUI.
@@ -100,11 +100,11 @@ Goal: make it launchable and installable on Windows.
 
 ### Phase 7 — Windows file manager integration
 
-Goal: right-click "Send to Phone" in Explorer.
+Goal: right-click `Send to <device>` in Explorer.
 
 - **Simple**: shortcut in `shell:sendto` (`%APPDATA%/Microsoft/Windows/SendTo/`).
   - Points to `desktop-connector.exe --send="%1"` (or a small `.bat` wrapper).
-  - Shows up in right-click → Send to → "Send to Phone".
+  - Shows up in right-click -> Send to -> `Send to <device>`.
   - Zero code; just a shortcut file created by the installer.
 - **Advanced** (later): shell extension via `IContextMenu` for a top-level right-click entry.
   - Requires a COM DLL (C++ or C#) — significantly more work. Not worth it for v1.
