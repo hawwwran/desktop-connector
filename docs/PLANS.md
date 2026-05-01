@@ -20,7 +20,7 @@ current set). Protocol reference docs under
 |------|--------|--------|
 | [brand-rollout.md](plans/brand-rollout.md) | Apply `visual-identity-guide.md` across Android, desktop, and server. | Done |
 | [desktop-multi-device-support.md](plans/desktop-multi-device-support.md) | Add desktop support for multiple paired connected devices, target pickers, per-device file-manager actions, and find-device receiver behavior. | Done; manual GTK smoke / lock-screen hardening remain documented follow-ups |
-| [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Open |
+| [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Done |
 
 ## Protocol reference (living docs)
 

@@ -108,7 +108,7 @@ or running anything:
 
 1. Fetch the public key from `raw.githubusercontent.com/.../main/docs/release/desktop-signing.pub.asc`.
 2. Compute its fingerprint, compare against the literal hardcoded
-   in `install.sh` (`FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`).
+   in `install.sh` (`FBEF CEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B`).
    Mismatch → refuse to proceed.
 3. Import into a throwaway `GNUPGHOME`, fetch the AppImage + the
    detached `.sig`, run `gpg --batch --verify` against it.
@@ -243,7 +243,7 @@ ideal:
    (will prompt to remove the revoked key first).
 5. Update GitHub Actions secrets with the new private key + passphrase.
 6. Cut a release that ships the new public key, alongside a notice that the
-   old fingerprint `FBEFCEC1 3D7A EC08 …` is revoked. Old releases still
+   old fingerprint `FBEF CEC1 3D7A EC08 …` is revoked. Old releases still
    verify with the (now-revoked) old public key — `gpg --verify` will report
    the signature as good *but the key as revoked*.
 

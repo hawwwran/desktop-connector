@@ -26,7 +26,7 @@ The AppImage and `SHA256SUMS` are signed with the project's release key:
 | Field | Value |
 |---|---|
 | Identity | `Desktop Connector Releases <github@hawwwran.com>` |
-| Fingerprint | `FBEFCEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B` |
+| Fingerprint | `FBEF CEC1 3D7A EC08 1081 2975 491C 9043 90F4 E03B` |
 | Public key | [`docs/release/desktop-signing.pub.asc`](../docs/release/desktop-signing.pub.asc) |
 | Recovery runbook | [`docs/release/desktop-signing-recovery.md`](../docs/release/desktop-signing-recovery.md) |
 
