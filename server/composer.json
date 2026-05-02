@@ -1,0 +1,16 @@
+{
+    "name": "desktop-connector/relay",
+    "description": "PHP relay server for Desktop Connector — blind ciphertext + routing only.",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.2",
+        "ext-sqlite3": "*",
+        "ext-openssl": "*",
+        "ext-curl": "*",
+        "ext-sodium": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    }
+}

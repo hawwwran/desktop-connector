@@ -17,12 +17,14 @@ require_once __DIR__ . '/../src/Config.php';
 // --- Http pipeline ---
 require_once __DIR__ . '/../src/Http/RequestContext.php';
 require_once __DIR__ . '/../src/Http/ApiError.php';
+require_once __DIR__ . '/../src/Http/VaultApiError.php';
 require_once __DIR__ . '/../src/Http/ErrorResponder.php';
 require_once __DIR__ . '/../src/Http/Validators.php';
 
 // --- Auth ---
 require_once __DIR__ . '/../src/Auth/AuthIdentity.php';
 require_once __DIR__ . '/../src/Auth/AuthService.php';
+require_once __DIR__ . '/../src/Auth/VaultAuthService.php';
 
 // --- Repositories ---
 require_once __DIR__ . '/../src/Repositories/DeviceRepository.php';
@@ -31,6 +33,9 @@ require_once __DIR__ . '/../src/Repositories/TransferRepository.php';
 require_once __DIR__ . '/../src/Repositories/ChunkRepository.php';
 require_once __DIR__ . '/../src/Repositories/FasttrackRepository.php';
 require_once __DIR__ . '/../src/Repositories/PingRateRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultsRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultManifestsRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultChunksRepository.php';
 
 require_once __DIR__ . '/../src/Router.php';
 

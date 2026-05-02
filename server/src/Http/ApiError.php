@@ -15,6 +15,18 @@ class ApiError extends RuntimeException
         string $message,
         public readonly array $extra = [],
         public readonly array $headers = [],
+        /**
+         * vault_v1 error code, e.g. "vault_auth_failed". When non-null
+         * ErrorResponder emits the T0 §"Error codes" envelope:
+         *   {"ok": false, "error": {"code": ..., "message": ..., "details": ...}}
+         * Legacy non-vault errors leave this null and stay on the
+         * existing {"error": "<message>", ...$extra} shape.
+         *
+         * Named `errorCode` rather than `code` to avoid colliding with
+         * Exception::$code (which carries the integer libc-style code).
+         */
+        public readonly ?string $errorCode = null,
+        public readonly array $details = [],
     ) {
         parent::__construct($message);
     }

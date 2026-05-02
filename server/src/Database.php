@@ -32,6 +32,16 @@ class Database
         return self::$instance;
     }
 
+    /**
+     * Construct an isolated Database against an explicit path, bypassing
+     * the singleton. Used by PHPUnit tests that need a fresh per-test
+     * SQLite file; production never calls this.
+     */
+    public static function fromPath(string $dbPath): self
+    {
+        return new self($dbPath);
+    }
+
     public function migrate(): void
     {
         $sql = file_get_contents(__DIR__ . '/../migrations/001_initial.sql');
@@ -120,15 +130,37 @@ class Database
             $this->db->exec('ALTER TABLE transfers ADD COLUMN chunks_uploaded INTEGER NOT NULL DEFAULT 0');
         }
         $this->db->exec('CREATE INDEX IF NOT EXISTS idx_transfers_aborted ON transfers(aborted)');
+
+        // Vault schema (vault_v1). T1.1 — eight tables under server/migrations/002_vault.sql.
+        // Idempotent: every CREATE uses IF NOT EXISTS, so re-running on an existing DB is a no-op.
+        $vaultSql = file_get_contents(__DIR__ . '/../migrations/002_vault.sql');
+        $this->db->exec($vaultSql);
     }
 
     public function query(string $sql, array $params = []): SQLite3Result
     {
         $stmt = $this->db->prepare($sql);
+        if ($stmt === false) {
+            throw new RuntimeException(
+                'SQLite prepare failed: ' . $this->db->lastErrorMsg(),
+                $this->db->lastErrorCode()
+            );
+        }
         foreach ($params as $key => $value) {
             $stmt->bindValue($key, $value);
         }
-        return $stmt->execute();
+        // Suppress the PHP warning that SQLite3Stmt::execute() emits on
+        // constraint violations etc. — we surface the failure as a clean
+        // RuntimeException with the underlying message/code instead, so
+        // controllers can map it to ApiError without parsing PHP warnings.
+        $result = @$stmt->execute();
+        if ($result === false) {
+            throw new RuntimeException(
+                'SQLite execute failed: ' . $this->db->lastErrorMsg(),
+                $this->db->lastErrorCode()
+            );
+        }
+        return $result;
     }
 
     public function querySingle(string $sql, array $params = []): ?array

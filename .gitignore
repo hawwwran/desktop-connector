@@ -4,6 +4,10 @@ server/storage/
 server/test.php
 server/firebase-service-account.json
 server/google-services.json
+server/vendor/
+server/composer.lock
+server/.phpunit.cache/
+server/.phpunit.result.cache
 
 # Desktop
 desktop/__pycache__/

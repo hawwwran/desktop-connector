@@ -102,15 +102,15 @@ If a sub-task genuinely requires something the default stack can't provide:
 
 ### T1 — Relay persistent vault storage
 
-- [ ] **T1.1** — Write `server/migrations/002_vault.sql` defining tables: `vaults`, `vault_manifests`, `vault_chunks`, `vault_chunk_uploads`, `vault_join_requests`, `vault_audit_events`, `vault_gc_jobs`, `vault_op_log_segments`. Columns + types + indexes per T0 §D2 / §D14 / §A21. Storage path `server/storage/vaults/<vault_id>/<chunk_id_prefix>/<chunk_id>` (per §D13).
+- [x] **T1.1** — Write `server/migrations/002_vault.sql` defining tables: `vaults`, `vault_manifests`, `vault_chunks`, `vault_chunk_uploads`, `vault_join_requests`, `vault_audit_events`, `vault_gc_jobs`, `vault_op_log_segments`. Columns + types + indexes per T0 §D2 / §D14 / §A21. Storage path `server/storage/vaults/<vault_id>/<chunk_id_prefix>/<chunk_id>` (per §D13).
   - Accept: Migration runs cleanly on a fresh deploy, existing transfer/fasttrack tests still pass, schema introspection (`SELECT * FROM sqlite_master`) confirms all eight tables.
-- [ ] **T1.2** — `VaultsRepository` with `create()`, `getById()`, `getHeaderCiphertext()`, `setHeaderCiphertext()`, `incUsedBytes()`, `getQuotaRemaining()`, `markMigratedTo()`, `cancelMigration()`.
+- [x] **T1.2** — `VaultsRepository` with `create()`, `getById()`, `getHeaderCiphertext()`, `setHeaderCiphertext()`, `incUsedBytes()`, `getQuotaRemaining()`, `markMigratedTo()`, `cancelMigration()`.
   - Accept: PHPUnit unit tests for each method; `markMigratedTo` makes vault read-only-on-source per H2.
-- [ ] **T1.3** — `VaultManifestsRepository` with `create()`, `getCurrent()`, `getByRevision()`, `tryCAS(expectedRevision, …)`. CAS path returns the *current ciphertext + hash + revision* on conflict (per A1).
+- [x] **T1.3** — `VaultManifestsRepository` with `create()`, `getCurrent()`, `getByRevision()`, `tryCAS(expectedRevision, …)`. CAS path returns the *current ciphertext + hash + revision* on conflict (per A1).
   - Accept: Concurrent CAS test (two writers, same expected_revision) — exactly one wins, loser receives 409 with full current-manifest payload.
-- [ ] **T1.4** — `VaultChunksRepository` with `put()`, `get()`, `head()`, `batchHead()`, `setState()` (active / retained / gc_pending / purged). Strict chunk-id regex `^ch_v1_[a-z2-7]{24}$` (per A19) — invalid IDs return 400.
+- [x] **T1.4** — `VaultChunksRepository` with `put()`, `get()`, `head()`, `batchHead()`, `setState()` (active / retained / gc_pending / purged). Strict chunk-id regex `^ch_v1_[a-z2-7]{24}$` (per A19) — invalid IDs return 400.
   - Accept: Idempotent PUT (same id + same ciphertext = 200; same id + different ciphertext = 409 `vault_chunk_size_mismatch` or `vault_chunk_tampered`); regex rejection tested.
-- [ ] **T1.5** — Vault auth middleware (`requireVaultAuth($vault_id)`): validates `X-Vault-Authorization: Bearer <secret>` against stored `vault_access_token_hash`. Returns 401 `vault_auth_failed` (`details.kind = "vault"`) if missing or wrong. Composes with existing `requireAuth()` (device auth) for endpoints that need both.
+- [x] **T1.5** — Vault auth middleware (`requireVaultAuth($vault_id)`): validates `X-Vault-Authorization: Bearer <secret>` against stored `vault_access_token_hash`. Returns 401 `vault_auth_failed` (`details.kind = "vault"`) if missing or wrong. Composes with existing `requireAuth()` (device auth) for endpoints that need both.
   - Accept: Middleware-only PHPUnit test verifies 401 on missing/invalid header; integration test with stub controller verifies device + vault auth combine.
 - [ ] **T1.6** — Implement endpoints: `POST /api/vaults` (create), `GET /api/vaults/{id}/header`, `PUT /api/vaults/{id}/header` (CAS), `PUT /api/vaults/{id}/manifest` (CAS, A1 conflict shape), `GET /api/vaults/{id}/manifest`, `PUT /api/vaults/{id}/chunks/{chunk_id}`, `GET /api/vaults/{id}/chunks/{chunk_id}`, `HEAD …`, `POST /api/vaults/{id}/chunks/batch-head`, `POST /api/vaults/{id}/gc/plan`, `POST /api/vaults/{id}/gc/execute`, `POST /api/vaults/{id}/gc/cancel`.
   - Accept: For each endpoint, a PHPUnit integration test exercises happy path + at least one error case from the T0 error-code table. All routes registered through existing `Router::authPost` / `Router::authGet` pattern.
@@ -497,7 +497,22 @@ After M7 you can: clear folders / vaults with appropriate guards, schedule + can
 11. Repair → "Mark broken in next manifest revision" → vault back to clean.
 12. Maintenance → Download debug bundle → ZIP saved. `unzip -p bundle.zip | grep -i 'master_key\|passphrase\|recovery\|Authorization' || echo OK` → "OK".
 
-If all 12 pass, **M7 done. v1 SHIPS.**
+If all 12 pass, **M7 done.**
+
+---
+
+### Final step — Critical risks evaluation (gates v1 ship)
+
+Before declaring v1 shipped, read [`desktop-connector-vault-critical-risks-and-weaknesses.md`](desktop-connector-vault-critical-risks-and-weaknesses.md) end-to-end and evaluate every risk it lists against the **then-current state of the app** (not the plan as written, the code as built).
+
+For each risk:
+
+- **Resolved** — point at the commit / file / test that handles it.
+- **Mitigated** — describe the mitigation that's in place, even if the underlying weakness still exists.
+- **Accepted** — document the rationale for shipping with the risk open + when it gets re-evaluated.
+- **Open** — open a follow-up tracker item before v1 ships.
+
+The risks doc is allowed to grow new entries during M1–M7 as we learn things; this final step is the gate that confirms each one was taken seriously rather than silently rolling past it. **v1 SHIPS only after this evaluation is complete and every risk has a labeled outcome.**
 
 ---
 
