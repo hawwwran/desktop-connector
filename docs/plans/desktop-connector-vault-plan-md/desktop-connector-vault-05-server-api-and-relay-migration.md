@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 05 Server API and Relay Migration
+# Desktop Connector Vault — 05 Server API and Relay Migration
 
 ## Goal
 
@@ -12,7 +12,7 @@ Use:
 /api/vaults/*
 ```
 
-The product name remains Tresor.
+The product name remains Vault.
 
 ## Authentication layers
 
@@ -56,9 +56,9 @@ Add relay capability endpoint or extend existing status response:
   "capabilities": [
     "transfer_v1",
     "fasttrack_v1",
-    "tresor_v1",
-    "tresor_manifest_cas_v1",
-    "tresor_export_v1"
+    "vault_v1",
+    "vault_manifest_cas_v1",
+    "vault_export_v1"
   ]
 }
 ```
@@ -251,7 +251,7 @@ Later enhancement.
 User flow:
 
 ```text
-Tresor settings
+Vault settings
 → Migrate vault to another relay
 → enter new relay URL
 → authenticate/register device on new relay

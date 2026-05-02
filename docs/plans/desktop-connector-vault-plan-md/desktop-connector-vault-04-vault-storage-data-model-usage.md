@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 04 Vault Storage, Data Model, and Usage Accounting
+# Desktop Connector Vault — 04 Vault Storage, Data Model, and Usage Accounting
 
 ## Goal
 
@@ -103,7 +103,7 @@ Conceptual plaintext before encryption:
 
 ```json
 {
-  "schema": "dc-tresor-manifest-v1",
+  "schema": "dc-vault-manifest-v1",
   "vault_id": "H9K7-M4Q2-Z8TD",
   "revision": 42,
   "parent_revision": 41,

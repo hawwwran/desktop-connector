@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 07 Remote Browser, Upload, Delete, and Versions
+# Desktop Connector Vault — 07 Remote Browser, Upload, Delete, and Versions
 
 ## Goal
 
@@ -38,7 +38,7 @@ Browser actions should not require selecting a local sync target.
 Recommended layout:
 
 ```text
-Tresor
+Vault
   Vault ID: H9K7-M4Q2-Z8TD
   Used: 18.1 GB / 50 GB
 

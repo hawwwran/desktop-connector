@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 10 UI/UX: Desktop and Android
+# Desktop Connector Vault — 10 UI/UX: Desktop and Android
 
 ## Goal
 
@@ -9,15 +9,15 @@ Define how the feature should appear in the app.
 Add tray menu item:
 
 ```text
-Tresor
+Vault
 ```
 
 Possible submenu:
 
 ```text
-Open Tresor
+Open Vault
 Sync now
-Pause all Tresor sync
+Pause all Vault sync
 Export vault
 Import vault
 Settings
@@ -26,10 +26,10 @@ Settings
 Launch GTK window:
 
 ```text
-desktop-connector --gtk-window=tresor
+desktop-connector --gtk-window=vault
 ```
 
-## Desktop main Tresor window
+## Desktop main Vault window
 
 Recommended sections:
 
@@ -44,7 +44,7 @@ Settings
 Header:
 
 ```text
-Tresor Vault
+Vault Vault
 Vault ID: H9K7-M4Q2-Z8TD   [Copy] [Show QR]
 Remote storage used: 18.1 GB / 50 GB
 Current files: 16.9 GB
@@ -170,7 +170,7 @@ When uploading in browser mode:
 
 ```text
 Upload to:
-Tresor / Documents / Invoices / 2026
+Vault / Documents / Invoices / 2026
 
 Files:
   example.pdf
@@ -199,7 +199,7 @@ add as new version
 For file delete:
 
 ```text
-Delete "example.pdf" from Tresor?
+Delete "example.pdf" from Vault?
 
 This removes it from the current remote view.
 Previous versions remain recoverable until 2026-06-01.
@@ -240,7 +240,7 @@ Type the full Vault ID to continue.
 Flow:
 
 ```text
-Open Tresor
+Open Vault
 → Import vault
 → choose export file or enter relay/recovery
 → unlock
@@ -318,7 +318,7 @@ No local files will be deleted during initial binding.
 ## Export UX
 
 ```text
-Tresor settings
+Vault settings
 → Export vault
 → choose destination
 → enter export passphrase
@@ -336,7 +336,7 @@ Store this file and passphrase safely.
 ## Migration UX
 
 ```text
-Tresor settings
+Vault settings
 → Migrate to another relay
 → enter new relay URL
 → check capabilities
@@ -372,7 +372,7 @@ Android background folder watching is not as reliable as desktop filesystem watc
 
 ## Settings
 
-Tresor settings:
+Vault settings:
 
 ```text
 Vault

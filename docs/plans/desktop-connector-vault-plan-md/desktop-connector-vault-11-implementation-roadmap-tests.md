@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 11 Implementation Roadmap and Tests
+# Desktop Connector Vault — 11 Implementation Roadmap and Tests
 
 ## Goal
 
@@ -11,10 +11,10 @@ Each phase should produce a useful, testable result.
 Deliverables:
 
 ```text
-docs/plans/tresor-00-index.md
-docs/protocol/tresor-v1.md
-docs/security/tresor-threat-model.md
-docs/ui/tresor-wireflow.md
+docs/plans/vault-00-index.md
+docs/protocol/vault-v1.md
+docs/security/vault-threat-model.md
+docs/ui/vault-wireflow.md
 ```
 
 Decisions to lock:
@@ -75,7 +75,7 @@ tampered ciphertext fail
 Output test vector files:
 
 ```text
-tests/protocol/tresor-v1/*.json
+tests/protocol/vault-v1/*.json
 ```
 
 ## Phase T3 — Desktop vault create/open
@@ -184,7 +184,7 @@ bound-folder delete warning appears when relevant
 Implement:
 
 ```text
-full protected .dc-tresor-export
+full protected .dc-vault-export
 export passphrase
 export verification
 import into empty relay
@@ -398,28 +398,28 @@ chunk verification
 Diagnostic events:
 
 ```text
-tresor.vault.created
-tresor.vault.opened
-tresor.vault.restored
-tresor.vault.export.started
-tresor.vault.export.completed
-tresor.vault.import.started
-tresor.vault.import.completed
-tresor.vault.migration.started
-tresor.vault.migration.completed
-tresor.folder.created
-tresor.folder.bound
-tresor.folder.unbound
-tresor.folder.cleared
-tresor.browser.upload.started
-tresor.browser.upload.completed
-tresor.browser.delete.created
-tresor.version.downloaded
-tresor.sync.scan.started
-tresor.sync.scan.completed
-tresor.sync.conflict.created
-tresor.gc.started
-tresor.gc.completed
+vault.created
+vault.opened
+vault.restored
+vault.export.started
+vault.export.completed
+vault.import.started
+vault.import.completed
+vault.migration.started
+vault.migration.completed
+vault.folder.created
+vault.folder.bound
+vault.folder.unbound
+vault.folder.cleared
+vault.browser.upload.started
+vault.browser.upload.completed
+vault.browser.delete.created
+vault.version.downloaded
+vault.sync.scan.started
+vault.sync.scan.completed
+vault.sync.conflict.created
+vault.gc.started
+vault.gc.completed
 ```
 
 Never log:
@@ -440,7 +440,7 @@ PR 1:
 
 ```text
 docs only:
-  protocol/tresor-v1.md
+  protocol/vault-v1.md
   threat model
   product model
 ```

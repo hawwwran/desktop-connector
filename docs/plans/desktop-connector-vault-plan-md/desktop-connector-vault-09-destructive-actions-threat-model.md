@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 09 Destructive Actions and Threat Model
+# Desktop Connector Vault — 09 Destructive Actions and Threat Model
 
 ## Goal
 

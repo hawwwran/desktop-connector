@@ -1,8 +1,8 @@
-# Desktop Connector Tresor — 03 Crypto, Recovery, and Identity
+# Desktop Connector Vault — 03 Crypto, Recovery, and Identity
 
 ## Goal
 
-Tresor must be account-less but recoverable.
+Vault must be account-less but recoverable.
 
 This means the app cannot rely on email/password reset.
 
@@ -10,7 +10,7 @@ Recovery must be based on user-held secrets.
 
 ## Key roles
 
-Tresor needs separate concepts:
+Vault needs separate concepts:
 
 ```text
 Vault ID
@@ -53,12 +53,12 @@ export_auth_key
 Recommended labels:
 
 ```text
-dc-tresor-v1/metadata
-dc-tresor-v1/chunk
-dc-tresor-v1/manifest-auth
-dc-tresor-v1/folder-wrap
-dc-tresor-v1/device-grant
-dc-tresor-v1/export
+dc-vault-v1/metadata
+dc-vault-v1/chunk
+dc-vault-v1/manifest-auth
+dc-vault-v1/folder-wrap
+dc-vault-v1/device-grant
+dc-vault-v1/export
 ```
 
 Do not use the existing pairwise transfer key as the vault key.
@@ -87,7 +87,7 @@ Examples:
 ### Manifest AAD
 
 ```text
-dc-tresor-manifest-v1
+dc-vault-manifest-v1
 vault_id
 manifest_revision
 parent_revision
@@ -97,7 +97,7 @@ author_device_id
 ### Chunk AAD
 
 ```text
-dc-tresor-chunk-v1
+dc-vault-chunk-v1
 vault_id
 remote_folder_id
 file_id
@@ -109,7 +109,7 @@ chunk_plaintext_size
 ### Header AAD
 
 ```text
-dc-tresor-header-v1
+dc-vault-header-v1
 vault_id
 schema_version
 ```
@@ -126,7 +126,7 @@ Conceptual structure:
 
 ```json
 {
-  "schema": "dc-tresor-header-v1",
+  "schema": "dc-vault-header-v1",
   "vault_id": "H9K7-M4Q2-Z8TD",
   "created_at": 1777650000,
   "kdf_profiles": {
@@ -280,7 +280,7 @@ Device grant should include:
 
 ## Permission model
 
-Tresor should not assume that every device with vault access can perform all actions.
+Vault should not assume that every device with vault access can perform all actions.
 
 Recommended roles:
 
@@ -399,7 +399,7 @@ UI must treat it like a password vault backup, not like a pairing QR.
 ## QR join flow
 
 ```text
-1. New device chooses "Join existing Tresor from another device".
+1. New device chooses "Join existing Vault from another device".
 2. New device creates ephemeral key pair.
 3. New device shows or sends join request.
 4. Existing authorized device displays approval dialog.

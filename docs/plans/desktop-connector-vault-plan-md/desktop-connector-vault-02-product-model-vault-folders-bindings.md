@@ -1,8 +1,8 @@
-# Desktop Connector Tresor — 02 Product Model: Vault, Remote Folders, Local Bindings
+# Desktop Connector Vault — 02 Product Model: Vault, Remote Folders, Local Bindings
 
 ## Goal
 
-Tresor should support multiple synced folders inside one vault.
+Vault should support multiple synced folders inside one vault.
 
 A remote folder and a local folder are not the same thing.
 
@@ -17,7 +17,7 @@ First implementation can support one vault per relay/device, but the data model 
 A vault contains top-level remote folders:
 
 ```text
-Tresor Vault: H9K7-M4Q2-Z8TD
+Vault Vault: H9K7-M4Q2-Z8TD
 
 Remote folders:
   Documents
@@ -312,7 +312,7 @@ The vault should allow adding multiple main folders.
 UI example:
 
 ```text
-Tresor
+Vault
   Vault ID: H9K7-M4Q2-Z8TD
   Used: 18.4 GB encrypted / 17.9 GB logical
 

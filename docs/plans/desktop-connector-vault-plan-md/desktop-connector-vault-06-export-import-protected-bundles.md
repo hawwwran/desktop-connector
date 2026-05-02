@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 06 Export, Import, and Protected Bundles
+# Desktop Connector Vault — 06 Export, Import, and Protected Bundles
 
 ## Goal
 
@@ -24,14 +24,14 @@ support resume or partial retry if possible
 Use one primary format first:
 
 ```text
-.dc-tresor-export
+.dc-vault-export
 ```
 
 Optional later:
 
 ```text
-.dc-tresor-folder-export
-.dc-tresor-key-backup
+.dc-vault-folder-export
+.dc-vault-key-backup
 ```
 
 ## Two export security layers
@@ -44,7 +44,7 @@ Recommended:
 
 ```text
 inner layer:
-  normal Tresor encrypted vault header/manifests/chunks
+  normal Vault encrypted vault header/manifests/chunks
 
 outer layer:
   export bundle encrypted with export passphrase or export key file
@@ -58,7 +58,7 @@ Plain conceptual structure before outer encryption:
 
 ```json
 {
-  "schema": "dc-tresor-export-v1",
+  "schema": "dc-vault-export-v1",
   "created_at": 1777650000,
   "source_relay_url": "https://old.example.com",
   "vault_id": "H9K7-M4Q2-Z8TD",
@@ -124,7 +124,7 @@ Do not rely on classic ZIP password encryption.
 Export flow:
 
 ```text
-Tresor
+Vault
 → Export vault
 → choose destination file
 → app requires vault unlock
@@ -191,9 +191,9 @@ safe folder binding later
 ## Import flow
 
 ```text
-Tresor
+Vault
 → Import vault
-→ select .dc-tresor-export
+→ select .dc-vault-export
 → enter export passphrase
 → app opens protected bundle
 → app shows Vault ID and export summary

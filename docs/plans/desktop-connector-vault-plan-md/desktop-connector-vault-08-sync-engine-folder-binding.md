@@ -1,4 +1,4 @@
-# Desktop Connector Tresor — 08 Sync Engine and Folder Binding
+# Desktop Connector Vault — 08 Sync Engine and Folder Binding
 
 ## Goal
 
@@ -157,13 +157,13 @@ Use a local SQLite database.
 Tables:
 
 ```text
-tresor_vaults
-tresor_remote_folders_cache
-tresor_bindings
-tresor_local_entries
-tresor_pending_operations
-tresor_download_cache
-tresor_conflicts
+vaults
+vault_remote_folders_cache
+vault_bindings
+vault_local_entries
+vault_pending_operations
+vault_download_cache
+vault_conflicts
 ```
 
 ## Upload sync flow

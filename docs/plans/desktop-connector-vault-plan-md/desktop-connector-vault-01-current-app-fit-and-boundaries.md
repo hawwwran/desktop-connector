@@ -1,14 +1,14 @@
-# Desktop Connector Tresor — 01 Current App Fit and Boundaries
+# Desktop Connector Vault — 01 Current App Fit and Boundaries
 
 ## Purpose
 
-This document defines how Tresor should fit into the existing Desktop Connector architecture.
+This document defines how Vault should fit into the existing Desktop Connector architecture.
 
 The goal is to reuse what is already good in the app while avoiding a design that fights the current protocol.
 
 ## Existing strengths to reuse
 
-Desktop Connector already has the right base concepts for Tresor:
+Desktop Connector already has the right base concepts for Vault:
 
 ```text
 Android app
@@ -28,7 +28,7 @@ desktop tray and GTK windows
 Android share integration
 ```
 
-This means Tresor does not need to invent a separate ecosystem.
+This means Vault does not need to invent a separate ecosystem.
 
 It should look like another major capability inside Desktop Connector:
 
@@ -37,7 +37,7 @@ Send
 Clipboard
 Find device
 History
-Tresor
+Vault
 ```
 
 ## Existing model that must not be reused directly
@@ -55,7 +55,7 @@ file selected
 → relay can clean it up
 ```
 
-Tresor:
+Vault:
 
 ```text
 file/folder state changes
@@ -66,7 +66,7 @@ file/folder state changes
 → versions and deleted files remain recoverable during retention
 ```
 
-Do not implement Tresor as "very long-lived transfers".
+Do not implement Vault as "very long-lived transfers".
 
 That would create problems:
 
@@ -89,7 +89,7 @@ Add new capability:
   "capabilities": [
     "transfer_v1",
     "fasttrack_v1",
-    "tresor_v1"
+    "vault_v1"
   ]
 }
 ```
@@ -113,18 +113,18 @@ Add a new namespace:
 or:
 
 ```text
-/api/tresor/...
+/api/vault/...
 ```
 
 Recommended naming:
 
 ```text
 server API: /api/vaults/*
-product/UI name: Tresor
+product/UI name: Vault
 internal protocol term: vault
 ```
 
-Reason: `vault` is clearer in API/data structures; `Tresor` is the user-facing feature name.
+Reason: `vault` is clearer in API/data structures; `Vault` is the user-facing feature name.
 
 ## Key architectural separation
 
@@ -153,7 +153,7 @@ Vault layer
   - folder bindings
 ```
 
-Tresor should use device identity for API authentication, but vault access must be separate.
+Vault should use device identity for API authentication, but vault access must be separate.
 
 Why:
 
@@ -164,7 +164,7 @@ but not authorized for a specific vault.
 
 ## Existing relay trust model
 
-Tresor should preserve the existing blind relay idea.
+Vault should preserve the existing blind relay idea.
 
 The relay should be able to:
 
@@ -198,7 +198,7 @@ Current pairwise keys are good for device-to-device transfer:
 Device A <-> Device B
 ```
 
-Tresor needs something different:
+Vault needs something different:
 
 ```text
 Device A
@@ -223,14 +223,14 @@ Vault Master Key
 
 ## Compatibility requirement
 
-Tresor must be optional.
+Vault must be optional.
 
-Older clients should continue to work with file transfer and clipboard features even if the relay supports Tresor.
+Older clients should continue to work with file transfer and clipboard features even if the relay supports Vault.
 
-New clients should detect whether the relay supports Tresor and show:
+New clients should detect whether the relay supports Vault and show:
 
 ```text
-Tresor is not supported by this relay version.
+Vault is not supported by this relay version.
 Update the relay to use encrypted vaults.
 ```
 
@@ -238,7 +238,7 @@ Update the relay to use encrypted vaults.
 
 Do not implement full sync first.
 
-The first useful Tresor milestone should be:
+The first useful Vault milestone should be:
 
 ```text
 create vault

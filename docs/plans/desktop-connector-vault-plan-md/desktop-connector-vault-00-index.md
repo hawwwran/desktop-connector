@@ -1,6 +1,8 @@
-# Desktop Connector Tresor — 00 Index
+# Desktop Connector Vault — 00 Index
 
-This is an incremental implementation plan for adding a robust **Tresor / Vault** feature to Desktop Connector.
+> **T0 lock takes precedence.** When this plan and [`desktop-connector-vault-T0-decisions.md`](desktop-connector-vault-T0-decisions.md) disagree, the T0 decisions doc wins. Implementation tracking lives in [`VAULT-progress.md`](VAULT-progress.md).
+
+This is an incremental implementation plan for adding a robust **Vault** feature to Desktop Connector.
 
 The feature is designed as a persistent encrypted vault inside the existing Desktop Connector ecosystem:
 
@@ -17,21 +19,21 @@ The feature is designed as a persistent encrypted vault inside the existing Desk
 
 ## File order
 
-1. `desktop-connector-tresor-01-current-app-fit-and-boundaries.md`
-2. `desktop-connector-tresor-02-product-model-vault-folders-bindings.md`
-3. `desktop-connector-tresor-03-crypto-recovery-identity.md`
-4. `desktop-connector-tresor-04-vault-storage-data-model-usage.md`
-5. `desktop-connector-tresor-05-server-api-and-relay-migration.md`
-6. `desktop-connector-tresor-06-export-import-protected-bundles.md`
-7. `desktop-connector-tresor-07-remote-browser-upload-delete-versions.md`
-8. `desktop-connector-tresor-08-sync-engine-folder-binding.md`
-9. `desktop-connector-tresor-09-destructive-actions-threat-model.md`
-10. `desktop-connector-tresor-10-ui-ux-desktop-android.md`
-11. `desktop-connector-tresor-11-implementation-roadmap-tests.md`
+1. `desktop-connector-vault-01-current-app-fit-and-boundaries.md`
+2. `desktop-connector-vault-02-product-model-vault-folders-bindings.md`
+3. `desktop-connector-vault-03-crypto-recovery-identity.md`
+4. `desktop-connector-vault-04-vault-storage-data-model-usage.md`
+5. `desktop-connector-vault-05-server-api-and-relay-migration.md`
+6. `desktop-connector-vault-06-export-import-protected-bundles.md`
+7. `desktop-connector-vault-07-remote-browser-upload-delete-versions.md`
+8. `desktop-connector-vault-08-sync-engine-folder-binding.md`
+9. `desktop-connector-vault-09-destructive-actions-threat-model.md`
+10. `desktop-connector-vault-10-ui-ux-desktop-android.md`
+11. `desktop-connector-vault-11-implementation-roadmap-tests.md`
 
 ## Core design position
 
-Tresor should not be implemented as a hidden extension of the current transfer lifecycle.
+Vault should not be implemented as a hidden extension of the current transfer lifecycle.
 
 Current transfer behavior is delivery-oriented:
 
@@ -43,7 +45,7 @@ sender encrypts chunks
 → relay may delete transfer/chunks
 ```
 
-Tresor must be storage-oriented:
+Vault must be storage-oriented:
 
 ```text
 folder/file changes
