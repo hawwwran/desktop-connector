@@ -64,7 +64,7 @@ If a sub-task genuinely requires something the default stack can't provide:
 
 | Phase | Title | Milestone | Status |
 |-------|-------|:---------:|:------:|
-| T0  | Documentation + protocol skeleton (lock decisions, capability bits, vault-v1 protocol doc, test-vector contract) | M1 | `[~]` |
+| T0  | Documentation + protocol skeleton (lock decisions, capability bits, vault-v1 protocol doc, test-vector contract) | M1 | `[x]` |
 | T1  | Relay persistent vault storage (tables, repos, endpoints, CAS, quota) | M1 | `[ ]` |
 | T2  | Shared crypto + format test vectors (cross-platform, Python harness) | M1 | `[ ]` |
 | T3  | Desktop vault create / open / Vault settings window skeleton + main-settings toggle | M1 | `[ ]` |
@@ -91,11 +91,11 @@ If a sub-task genuinely requires something the default stack can't provide:
 
 - [x] **T0.1** — Lock all 16 D-decisions, H2, gaps §1–§22 closures, error-code list, and audit clarifications (A1–A21) in `desktop-connector-vault-T0-decisions.md`.
   - Accept: T0 doc has zero "TBD" / "Decision needed" / "Items still open" markers; review confirms no ambiguity in any locked item.
-- [ ] **T0.2** — Create `docs/protocol/vault-v1.md` consolidating the wire format (request/response shapes for all vault endpoints) by extracting from T0 + plan file 05.
+- [x] **T0.2** — Create `docs/protocol/vault-v1.md` consolidating the wire format (request/response shapes for all vault endpoints) by extracting from T0 + plan file 05.
   - Accept: Every vault endpoint listed with: HTTP method, path, auth headers, request body schema, all success-status response shapes (200/201/204), all error response shapes referencing the T0 error-code table, idempotency semantics. Includes the new H2 migration endpoints + A1 manifest CAS 409 shape + `vault_v1` capability list with phase-of-introduction column.
-- [ ] **T0.3** — Create `docs/protocol/vault-v1-formats.md` defining byte-exact AAD constructions, HKDF labels, manifest envelope structure (plaintext header + AEAD body), chunk envelope, recovery envelope, export bundle CBOR record types.
+- [x] **T0.3** — Create `docs/protocol/vault-v1-formats.md` defining byte-exact AAD constructions, HKDF labels, manifest envelope structure (plaintext header + AEAD body), chunk envelope, recovery envelope, export bundle CBOR record types.
   - Accept: A second implementer could write a compatible client/server from this doc alone. Formats match the test-vector schema agreed in A18.
-- [ ] **T0.4** — Stub `tests/protocol/vault-v1/` directory with empty `manifest_v1.json`, `chunk_v1.json`, `header_v1.json`, `recovery_envelope_v1.json`, `export_bundle_v1.json`, `device_grant_v1.json`. Add `tests/protocol/test_vault_v1_vectors.py` skeleton that loops the JSON files (will be filled in T2).
+- [x] **T0.4** — Stub `tests/protocol/vault-v1/` directory with empty `manifest_v1.json`, `chunk_v1.json`, `header_v1.json`, `recovery_envelope_v1.json`, `export_bundle_v1.json`, `device_grant_v1.json`. Add `tests/protocol/test_vault_v1_vectors.py` skeleton that loops the JSON files (will be filled in T2).
   - Accept: `pytest tests/protocol/test_vault_v1_vectors.py` runs and reports "0 vectors loaded" without crashing.
 
 ---
