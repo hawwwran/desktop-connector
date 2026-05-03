@@ -456,7 +456,7 @@ class Vault:
 
     # ---------------------------------------------------------------- decryption helpers
 
-    def decrypt_manifest(self) -> dict:
+    def decrypt_manifest(self, *, local_index=None) -> dict:
         """AEAD-decrypt the current manifest ciphertext and return the
         canonical-JSON-decoded plaintext as a dict.
 
@@ -481,7 +481,10 @@ class Vault:
             parent_revision=parent, author_device_id=author,
         )
         plaintext = aead_decrypt(ct, manifest_subkey, nonce, aad)
-        return normalize_manifest_plaintext(json.loads(plaintext.decode("utf-8")))
+        manifest = normalize_manifest_plaintext(json.loads(plaintext.decode("utf-8")))
+        if local_index is not None:
+            local_index.refresh_remote_folders_cache(manifest)
+        return manifest
 
     # ---------------------------------------------------------------- close + zeroize
 
