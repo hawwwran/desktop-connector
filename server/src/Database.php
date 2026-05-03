@@ -1,5 +1,21 @@
 <?php
 
+/**
+ * Marker class for parameter values that must be bound as SQLITE3_BLOB
+ * rather than the default SQLITE3_TEXT inferred from a PHP string.
+ *
+ * Background: `SQLite3Stmt::bindValue($key, $stringValue)` without an
+ * explicit type binds as TEXT, which goes through `sqlite3_bind_text()`
+ * with -1 length — that truncates at the first null byte. SHA-256
+ * digests, AEAD ciphertext, and X25519 keys all contain ~12% probability
+ * of an embedded null per 32-byte field, so they MUST bind as BLOB to
+ * round-trip cleanly. Repositories wrap these fields in `new Blob(...)`.
+ */
+class Blob
+{
+    public function __construct(public readonly string $bytes) {}
+}
+
 class Database
 {
     private static ?Database $instance = null;
@@ -147,7 +163,14 @@ class Database
             );
         }
         foreach ($params as $key => $value) {
-            $stmt->bindValue($key, $value);
+            // Wrap binary values in Blob so PHP's default SQLITE3_TEXT
+            // binding doesn't truncate at the first null byte. Plain
+            // strings/ints/etc. fall through to type inference.
+            if ($value instanceof Blob) {
+                $stmt->bindValue($key, $value->bytes, SQLITE3_BLOB);
+            } else {
+                $stmt->bindValue($key, $value);
+            }
         }
         // Suppress the PHP warning that SQLite3Stmt::execute() emits on
         // constraint violations etc. — we surface the failure as a clean

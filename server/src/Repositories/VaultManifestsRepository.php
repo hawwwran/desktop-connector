@@ -64,7 +64,7 @@ class VaultManifestsRepository
                 ':revision'        => $revision,
                 ':parent_revision' => $parentRevision,
                 ':hash'            => $manifestHash,
-                ':ciphertext'      => $manifestCiphertext,
+                ':ciphertext'      => new Blob($manifestCiphertext),
                 ':size'            => $manifestSize,
                 ':author'          => $authorDeviceId,
                 ':now'             => $now,

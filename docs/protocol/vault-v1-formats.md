@@ -64,8 +64,8 @@ All nonces, salts, and random IDs MUST come from a CSPRNG (`/dev/urandom` on Lin
 
 ```text
 12 base32 characters (RFC 4648, uppercase canonical), grouped 4-4-4 for display
-example display:  H9K7-M4Q2-Z8TD
-example wire:     H9K7M4Q2Z8TD
+example display:  ABCD-2345-WXYZ
+example wire:     ABCD2345WXYZ
 entropy:          60 bits
 ```
 
@@ -344,7 +344,7 @@ The relay parses the first 21 bytes (version + vault_id + header_revision) for C
 ```json
 {
   "schema": "dc-vault-header-v1",
-  "vault_id": "H9K7M4Q2Z8TD",
+  "vault_id": "ABCD2345WXYZ",
   "created_at": "2026-05-02T10:00:00.000Z",
   "genesis_fingerprint": "<32 hex>",
   "kdf_profiles": {
@@ -410,7 +410,7 @@ The first 85 bytes are deterministic from the field values. The relay parses the
 ```json
 {
   "schema": "dc-vault-manifest-v1",
-  "vault_id": "H9K7M4Q2Z8TD",
+  "vault_id": "ABCD2345WXYZ",
   "revision": 42,
   "parent_revision": 41,
   "created_at": "2026-05-02T10:00:00.000Z",
@@ -628,14 +628,14 @@ Per T0 §A11, the recovery kit is a file the user keeps. The QR is an optional r
 
 ```text
 filename: <vault-id-with-dashes>.dc-vault-recovery
-example:  H9K7-M4Q2-Z8TD.dc-vault-recovery
+example:  ABCD-2345-WXYZ.dc-vault-recovery
 ```
 
 File contents are **plaintext** (the security comes from the user keeping the file safe + needing the passphrase to unlock the envelope it can decrypt):
 
 ```text
 # Desktop Connector — Vault Recovery Kit
-# Vault ID: H9K7-M4Q2-Z8TD
+# Vault ID: ABCD-2345-WXYZ
 # Created:  2026-05-02
 #
 # This file plus your recovery passphrase can restore the vault.
@@ -643,7 +643,7 @@ File contents are **plaintext** (the security comes from the user keeping the fi
 # Keep this file somewhere safe and offline (USB drive, password manager,
 # printed in a safe).
 
-vault_id: H9K7-M4Q2-Z8TD
+vault_id: ABCD-2345-WXYZ
 created_at: 2026-05-02T10:00:00.000Z
 recovery_secret: <base32, 56 chars without padding>
 argon_params: argon2id-v1
@@ -746,7 +746,7 @@ device_grant_envelope := format_version_u8        # 1 byte (0x01)
 {
   "schema": "dc-vault-device-grant-v1",
   "grant_id": "gr_v1_…",
-  "vault_id": "H9K7M4Q2Z8TD",
+  "vault_id": "ABCD2345WXYZ",
   "claimant_device_id": "<32 hex>",
   "approved_role": "sync",
   "granted_by_device_id": "<32 hex>",
@@ -898,7 +898,7 @@ Where `record_payload` is a 3-element CBOR array per T0 §A10:
 ```text
 {
   "schema": "dc-vault-export-v1",
-  "vault_id": "H9K7M4Q2Z8TD",
+  "vault_id": "ABCD2345WXYZ",
   "vault_genesis_fingerprint": h'<16 bytes>',
   "created_at": "2026-05-02T10:00:00.000Z",
   "source_relay_url": "https://old.example.com",
@@ -1024,7 +1024,7 @@ Each file is a JSON array of cases. Each case:
   "description": "Happy-path encryption + decryption of a genesis manifest with one folder and one file.",
   "inputs": {
     "vault_master_key": "<hex 64 chars>",
-    "vault_id": "H9K7M4Q2Z8TD",
+    "vault_id": "ABCD2345WXYZ",
     "revision": 1,
     "parent_revision": 0,
     "author_device_id": "<hex 32 chars>",

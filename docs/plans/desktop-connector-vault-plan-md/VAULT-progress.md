@@ -65,7 +65,7 @@ If a sub-task genuinely requires something the default stack can't provide:
 | Phase | Title | Milestone | Status |
 |-------|-------|:---------:|:------:|
 | T0  | Documentation + protocol skeleton (lock decisions, capability bits, vault-v1 protocol doc, test-vector contract) | M1 | `[x]` |
-| T1  | Relay persistent vault storage (tables, repos, endpoints, CAS, quota) | M1 | `[ ]` |
+| T1  | Relay persistent vault storage (tables, repos, endpoints, CAS, quota) | M1 | `[x]` |
 | T2  | Shared crypto + format test vectors (cross-platform, Python harness) | M1 | `[ ]` |
 | T3  | Desktop vault create / open / Vault settings window skeleton + main-settings toggle | M1 | `[ ]` |
 | T4  | Remote folders + per-folder usage | M2 | `[ ]` |
@@ -112,11 +112,11 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: Idempotent PUT (same id + same ciphertext = 200; same id + different ciphertext = 409 `vault_chunk_size_mismatch` or `vault_chunk_tampered`); regex rejection tested.
 - [x] **T1.5** — Vault auth middleware (`requireVaultAuth($vault_id)`): validates `X-Vault-Authorization: Bearer <secret>` against stored `vault_access_token_hash`. Returns 401 `vault_auth_failed` (`details.kind = "vault"`) if missing or wrong. Composes with existing `requireAuth()` (device auth) for endpoints that need both.
   - Accept: Middleware-only PHPUnit test verifies 401 on missing/invalid header; integration test with stub controller verifies device + vault auth combine.
-- [ ] **T1.6** — Implement endpoints: `POST /api/vaults` (create), `GET /api/vaults/{id}/header`, `PUT /api/vaults/{id}/header` (CAS), `PUT /api/vaults/{id}/manifest` (CAS, A1 conflict shape), `GET /api/vaults/{id}/manifest`, `PUT /api/vaults/{id}/chunks/{chunk_id}`, `GET /api/vaults/{id}/chunks/{chunk_id}`, `HEAD …`, `POST /api/vaults/{id}/chunks/batch-head`, `POST /api/vaults/{id}/gc/plan`, `POST /api/vaults/{id}/gc/execute`, `POST /api/vaults/{id}/gc/cancel`.
+- [x] **T1.6** — Implement endpoints: `POST /api/vaults` (create), `GET /api/vaults/{id}/header`, `PUT /api/vaults/{id}/header` (CAS), `PUT /api/vaults/{id}/manifest` (CAS, A1 conflict shape), `GET /api/vaults/{id}/manifest`, `PUT /api/vaults/{id}/chunks/{chunk_id}`, `GET /api/vaults/{id}/chunks/{chunk_id}`, `HEAD …`, `POST /api/vaults/{id}/chunks/batch-head`, `POST /api/vaults/{id}/gc/plan`, `POST /api/vaults/{id}/gc/execute`, `POST /api/vaults/{id}/gc/cancel`.
   - Accept: For each endpoint, a PHPUnit integration test exercises happy path + at least one error case from the T0 error-code table. All routes registered through existing `Router::authPost` / `Router::authGet` pattern.
-- [ ] **T1.7** — Extend `GET /api/health.capabilities` to advertise vault bits: aggregate `vault_v1` only flips on when **all** T1 mandatory bits are present (`vault_create_v1` + `vault_header_v1` + `vault_manifest_cas_v1` + `vault_chunk_v1` + `vault_gc_v1`).
+- [x] **T1.7** — Extend `GET /api/health.capabilities` to advertise vault bits: aggregate `vault_v1` only flips on when **all** T1 mandatory bits are present (`vault_create_v1` + `vault_header_v1` + `vault_manifest_cas_v1` + `vault_chunk_v1` + `vault_gc_v1`).
   - Accept: Test verifies a partially-implemented build (one endpoint missing) doesn't advertise `vault_v1`. Existing transfer-only relays also don't advertise it (regression test).
-- [ ] **T1.8** — Add quota-pressure tracking for the warnings UX: extend `vaults` row with `used_ciphertext_bytes`; expose in `GET /api/vaults/{id}/header` response so the desktop client can compute 80/90/100% bands without querying separately.
+- [x] **T1.8** — Add quota-pressure tracking for the warnings UX: extend `vaults` row with `used_ciphertext_bytes`; expose in `GET /api/vaults/{id}/header` response so the desktop client can compute 80/90/100% bands without querying separately.
   - Accept: Header response includes `quota_ciphertext_bytes` + `used_ciphertext_bytes`; uploading until 80% / 90% / 100% returns the right thresholds in subsequent header reads.
 
 ---

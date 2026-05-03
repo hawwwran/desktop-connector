@@ -68,8 +68,8 @@ class VaultsRepository
              )',
             [
                 ':vault_id'      => $vaultId,
-                ':token_hash'    => $vaultAccessTokenHash,
-                ':enc_header'    => $encryptedHeader,
+                ':token_hash'    => new Blob($vaultAccessTokenHash),
+                ':enc_header'    => new Blob($encryptedHeader),
                 ':header_hash'   => $headerHash,
                 ':manifest_hash' => $initialManifestHash,
                 ':now'           => $now,
@@ -138,7 +138,7 @@ class VaultsRepository
              WHERE vault_id        = :id
                AND header_revision = :expected',
             [
-                ':enc_header'  => $encryptedHeader,
+                ':enc_header'  => new Blob($encryptedHeader),
                 ':header_hash' => $headerHash,
                 ':now'         => $now,
                 ':id'          => $vaultId,

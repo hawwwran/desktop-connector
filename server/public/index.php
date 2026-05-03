@@ -36,7 +36,10 @@ require_once __DIR__ . '/../src/Repositories/PingRateRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultManifestsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultChunksRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultGcJobsRepository.php';
 
+require_once __DIR__ . '/../src/VaultStorage.php';
+require_once __DIR__ . '/../src/VaultCapabilities.php';
 require_once __DIR__ . '/../src/Router.php';
 
 // --- Controllers ---
@@ -46,6 +49,7 @@ require_once __DIR__ . '/../src/Controllers/TransferController.php';
 require_once __DIR__ . '/../src/Controllers/DashboardController.php';
 require_once __DIR__ . '/../src/Controllers/FcmController.php';
 require_once __DIR__ . '/../src/Controllers/FasttrackController.php';
+require_once __DIR__ . '/../src/Controllers/VaultController.php';
 
 require_once __DIR__ . '/../src/FcmSender.php';
 require_once __DIR__ . '/../src/AppLog.php';
@@ -174,6 +178,46 @@ $router->authGet('/api/fasttrack/pending', function (RequestContext $ctx) use ($
 
 $router->authPost('/api/fasttrack/{id}/ack', function (RequestContext $ctx) use ($db) {
     FasttrackController::ack($db, $ctx);
+});
+
+// --- Vault routes (vault_v1) ---
+// All vault routes use vault*() helpers because their auth produces the
+// vault_v1 error envelope; controllers call VaultAuthService themselves.
+$router->vaultPost('/api/vaults', function (RequestContext $ctx) use ($db) {
+    VaultController::create($db, $ctx);
+});
+$router->vaultGet('/api/vaults/{vault_id}/header', function (RequestContext $ctx) use ($db) {
+    VaultController::getHeader($db, $ctx);
+});
+$router->vaultPut('/api/vaults/{vault_id}/header', function (RequestContext $ctx) use ($db) {
+    VaultController::putHeader($db, $ctx);
+});
+$router->vaultGet('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
+    VaultController::getManifest($db, $ctx);
+});
+$router->vaultPut('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
+    VaultController::putManifest($db, $ctx);
+});
+$router->vaultPut('/api/vaults/{vault_id}/chunks/{chunk_id}', function (RequestContext $ctx) use ($db) {
+    VaultController::putChunk($db, $ctx);
+});
+$router->vaultGet('/api/vaults/{vault_id}/chunks/{chunk_id}', function (RequestContext $ctx) use ($db) {
+    VaultController::getChunk($db, $ctx);
+});
+$router->vaultHead('/api/vaults/{vault_id}/chunks/{chunk_id}', function (RequestContext $ctx) use ($db) {
+    VaultController::headChunk($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/chunks/batch-head', function (RequestContext $ctx) use ($db) {
+    VaultController::batchHead($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/gc/plan', function (RequestContext $ctx) use ($db) {
+    VaultController::gcPlan($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/gc/execute', function (RequestContext $ctx) use ($db) {
+    VaultController::gcExecute($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/gc/cancel', function (RequestContext $ctx) use ($db) {
+    VaultController::gcCancel($db, $ctx);
 });
 
 // Dispatch

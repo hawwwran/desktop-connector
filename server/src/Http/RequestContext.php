@@ -19,7 +19,18 @@ class RequestContext
         public readonly array $params = [],
         public readonly array $query = [],
         public ?string $deviceId = null,
-    ) {}
+        /**
+         * Test-only: stub the raw body without going through php://input.
+         * Production callers leave this null and the lazy read pulls
+         * php://input on demand. Tests pass bytes here so the controller
+         * doesn't depend on a stream-wrapper hack.
+         */
+        ?string $bodyOverride = null,
+    ) {
+        if ($bodyOverride !== null) {
+            $this->rawBodyCache = $bodyOverride;
+        }
+    }
 
     public function rawBody(): string
     {

@@ -108,12 +108,12 @@ Insufficient role surfaces 403 `vault_access_denied` with `details.required_role
 Vault IDs are 12 base32 characters arranged as three groups of four separated by `-`:
 
 ```text
-H9K7-M4Q2-Z8TD
+ABCD-2345-WXYZ
 ```
 
 The dashes are **display-only**. On the wire and in URLs the canonical form is the 12 base32 chars without dashes; servers normalize by stripping `-` and uppercasing before matching. UI surfaces always render with dashes for readability.
 
-Path templates accept either form: `/api/vaults/H9K7M4Q2Z8TD` and `/api/vaults/H9K7-M4Q2-Z8TD` resolve to the same vault. Byte-exact alphabet and hash-truncation rules: see `vault-v1-formats.md`.
+Path templates accept either form: `/api/vaults/ABCD2345WXYZ` and `/api/vaults/ABCD-2345-WXYZ` resolve to the same vault. Byte-exact alphabet and hash-truncation rules: see `vault-v1-formats.md`.
 
 ### Chunk ID
 
@@ -209,7 +209,7 @@ Request:
 
 ```json
 {
-  "vault_id": "H9K7-M4Q2-Z8TD",
+  "vault_id": "ABCD-2345-WXYZ",
   "vault_access_token_hash": "<base64 hash(vault_access_secret) — server stores as-is>",
   "encrypted_header": "<base64 ciphertext>",
   "header_hash": "<hex sha-256>",
@@ -224,7 +224,7 @@ Success: **201 Created**
 {
   "ok": true,
   "data": {
-    "vault_id": "H9K7-M4Q2-Z8TD",
+    "vault_id": "ABCD-2345-WXYZ",
     "header_revision": 1,
     "manifest_revision": 1,
     "quota_ciphertext_bytes": 1073741824,
@@ -256,7 +256,7 @@ Success: **200 OK**
 {
   "ok": true,
   "data": {
-    "vault_id": "H9K7-M4Q2-Z8TD",
+    "vault_id": "ABCD-2345-WXYZ",
     "encrypted_header": "<base64>",
     "header_hash": "<hex>",
     "header_revision": 5,
@@ -809,9 +809,9 @@ Success: **201 Created**
   "ok": true,
   "data": {
     "join_request_id": "jr_<random>",
-    "vault_id": "H9K7-M4Q2-Z8TD",
+    "vault_id": "ABCD-2345-WXYZ",
     "expires_at": "2026-05-02T10:15:00Z",
-    "claim_url": "vault://relay.example.com/H9K7-M4Q2-Z8TD/jr_<random>/<ephemeral_pubkey>?expires=…"
+    "claim_url": "vault://relay.example.com/ABCD-2345-WXYZ/jr_<random>/<ephemeral_pubkey>?expires=…"
   }
 }
 ```

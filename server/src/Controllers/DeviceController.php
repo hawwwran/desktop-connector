@@ -275,6 +275,11 @@ class DeviceController
         if (Config::streamingEnabled()) {
             $capabilities[] = 'stream_v1';
         }
+        // Vault bits per T0 §D12. Aggregate `vault_v1` only flips on when
+        // every T1 sub-bit is present; transfer-only relays advertise an
+        // empty list from VaultCapabilities (since the class can be a
+        // no-op return until the full T1 surface is wired).
+        $capabilities = array_merge($capabilities, VaultCapabilities::current());
         Router::json([
             'status' => 'ok',
             'time' => time(),

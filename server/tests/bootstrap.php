@@ -31,3 +31,14 @@ require_once $root . '/src/Repositories/DeviceRepository.php';
 require_once $root . '/src/Repositories/VaultsRepository.php';
 require_once $root . '/src/Repositories/VaultManifestsRepository.php';
 require_once $root . '/src/Repositories/VaultChunksRepository.php';
+require_once $root . '/src/Repositories/VaultGcJobsRepository.php';
+
+// Storage helper + capability advertising.
+require_once $root . '/src/VaultStorage.php';
+require_once $root . '/src/VaultCapabilities.php';
+
+// Router + controllers (needed for integration tests).
+require_once $root . '/src/Router.php';
+require_once $root . '/src/Http/Validators.php';
+require_once $root . '/src/Controllers/VaultController.php';
+require_once $root . '/src/Controllers/DeviceController.php';
