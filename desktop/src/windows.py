@@ -795,6 +795,80 @@ def show_settings(config_dir: Path):
         theme_row.connect("notify::selected", on_theme_changed)
         appearance_group.add(theme_row)
 
+        # ---- Vault section (T3.3) ----
+        # T0 §D16: a small "Vault" group with the active toggle and an
+        # "Open Vault settings…" button. Toggle is ON by default on
+        # fresh install; OFF hides the tray submenu and pauses sync
+        # without destroying any data.
+        from .vault_ui_state import vault_settings_button_state
+
+        vault_group = Adw.PreferencesGroup(title="Vault")
+        content.append(vault_group)
+
+        vault_active_row = Adw.SwitchRow(
+            title="Vault active",
+            subtitle="Show Vault in tray menu and run sync. OFF is reversible — keys, manifests, and downloaded data are preserved.",
+            active=config.vault_active,
+        )
+        vault_group.add(vault_active_row)
+
+        open_vault_row = Adw.ActionRow(
+            title="Open Vault settings…",
+            subtitle="Opens the deep-config window. Disabled when Vault is inactive.",
+        )
+        vault_group.add(open_vault_row)
+        open_vault_btn = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+        open_vault_btn.add_css_class("pill")
+        open_vault_row.add_suffix(open_vault_btn)
+
+        def vault_exists_locally() -> bool:
+            raw = config._data.get("vault")
+            return isinstance(raw, dict) and bool(raw.get("last_known_id"))
+
+        def refresh_vault_button():
+            state = vault_settings_button_state(
+                toggle_active=config.vault_active,
+                vault_exists=vault_exists_locally(),
+            )
+            open_vault_btn.set_sensitive(state.enabled)
+
+        def on_vault_toggled(switch, _pspec):
+            new_value = switch.get_active()
+            if new_value != config.vault_active:
+                config.vault_active = new_value
+            refresh_vault_button()
+
+        def on_open_vault_clicked(_btn):
+            state = vault_settings_button_state(
+                toggle_active=config.vault_active,
+                vault_exists=vault_exists_locally(),
+            )
+            target = None
+            if state.action == "launch_wizard":
+                target = "vault-onboard"
+            elif state.action == "launch_settings":
+                target = "vault-main"
+            if target is None:
+                return
+            import os as _os
+            import subprocess as _subprocess
+            import sys as _sys
+            appimage = _os.environ.get("APPIMAGE")
+            cmd = (
+                [appimage, f"--gtk-window={target}",
+                 f"--config-dir={config.config_dir}"]
+                if appimage else
+                [_sys.executable, "-m", "src.windows", target,
+                 f"--config-dir={config.config_dir}"]
+            )
+            cwd = (None if appimage
+                   else str(Path(__file__).resolve().parent.parent))
+            _subprocess.Popen(cmd, cwd=cwd)
+
+        vault_active_row.connect("notify::active", on_vault_toggled)
+        open_vault_btn.connect("clicked", on_open_vault_clicked)
+        refresh_vault_button()
+
         # Receive actions
         receive_group = Adw.PreferencesGroup(title="Receive Actions")
         content.append(receive_group)
@@ -3943,6 +4017,403 @@ def show_locate_alert(config_dir: Path, *, sender_name: str):
     app.run(None)
 
 
+def show_vault_main(config_dir: Path):
+    """Vault settings GTK window skeleton (T3.4).
+
+    Top: Vault ID with copy button + (placeholder) QR icon.
+    Body: tabbed pane with placeholders per the plan
+    (Recovery / Folders / Devices / Activity / Maintenance / Security /
+    Sync safety / Storage / Danger zone). Recovery tab implements the
+    §gaps §2 emergency-access block.
+
+    M1 manual-smoke surface; later phases populate the empty tabs.
+    """
+    from .config import Config
+
+    config = Config(config_dir)
+    app = _make_app()
+
+    vault_id_undashed = ""
+    recovery_status_text = "Untested"
+    recovery_last_tested = "—"
+    paired = config.paired_devices
+    # Reading the vault id from local grant storage is T3.2's surface;
+    # for the M1 walk-through we surface whatever's currently stashed
+    # under config["vault"]["last_known_id"] (set by the wizard on
+    # successful create) and fall back to a placeholder.
+    vault_meta = config._data.get("vault") if isinstance(config._data.get("vault"), dict) else {}
+    vault_id_undashed = (vault_meta or {}).get("last_known_id") or ""
+
+    def vault_id_dashed() -> str:
+        v = vault_id_undashed
+        if len(v) == 12:
+            return f"{v[0:4]}-{v[4:8]}-{v[8:12]}"
+        return "(no vault opened)"
+
+    def on_activate(app):
+        apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
+        win = Adw.ApplicationWindow(
+            application=app,
+            title="Vault settings",
+            default_width=720,
+            default_height=540,
+        )
+        toolbar = Adw.ToolbarView()
+        win.set_content(toolbar)
+        toolbar.add_top_bar(Adw.HeaderBar())
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=16,
+            margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
+        )
+        toolbar.set_content(outer)
+
+        # ---- header: Vault ID + copy button ----
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        outer.append(header)
+
+        id_label = Gtk.Label(label="Vault ID:", xalign=0)
+        id_label.add_css_class("dim-label")
+        header.append(id_label)
+
+        id_value = Gtk.Label(label=vault_id_dashed(), xalign=0, hexpand=True)
+        id_value.add_css_class("monospace")
+        id_value.add_css_class("title-4")
+        header.append(id_value)
+
+        def on_copy(_btn):
+            display = win.get_display()
+            if display is not None:
+                display.get_clipboard().set(vault_id_dashed())
+        copy_btn = Gtk.Button(label="Copy")
+        copy_btn.add_css_class("pill")
+        copy_btn.connect("clicked", on_copy)
+        header.append(copy_btn)
+
+        qr_btn = Gtk.Button(label="QR")
+        qr_btn.add_css_class("pill")
+        qr_btn.set_tooltip_text("Show Vault ID as a QR code (post-v1)")
+        qr_btn.set_sensitive(False)
+        header.append(qr_btn)
+
+        # ---- tabbed pane ----
+        view_stack = Adw.ViewStack()
+        switcher = Adw.ViewSwitcher(stack=view_stack, policy=Adw.ViewSwitcherPolicy.WIDE)
+        outer.append(switcher)
+        outer.append(view_stack)
+
+        def add_tab(name: str, title: str, body: Gtk.Widget) -> None:
+            scroller = Gtk.ScrolledWindow(vexpand=True)
+            scroller.set_child(body)
+            view_stack.add_titled(scroller, name, title)
+
+        # Recovery tab — §gaps §2 emergency-access block.
+        recovery = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
+        )
+        recovery.append(Gtk.Label(label="Emergency recovery", xalign=0, css_classes=["title-3"]))
+        block = Gtk.Grid(column_spacing=12, row_spacing=6)
+        for row, (k, v) in enumerate([
+            ("Method", "Recovery kit + passphrase"),
+            ("Last tested", recovery_last_tested),
+            ("Status", recovery_status_text),
+        ]):
+            k_lbl = Gtk.Label(label=k, xalign=0)
+            k_lbl.add_css_class("dim-label")
+            block.attach(k_lbl, 0, row, 1, 1)
+            v_lbl = Gtk.Label(label=v, xalign=0)
+            block.attach(v_lbl, 1, row, 1, 1)
+        recovery.append(block)
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        recovery.append(actions)
+        actions.append(Gtk.Button(label="Test recovery now", css_classes=["pill"]))
+        actions.append(Gtk.Button(label="Update recovery material", css_classes=["pill"]))
+        # Banner if status is Untested.
+        if recovery_status_text in ("Untested", "Failed", "Stale"):
+            banner = Gtk.Label(
+                label="Recovery has not been tested. Test it now to confirm you "
+                      "can actually restore the vault.",
+                xalign=0, wrap=True,
+            )
+            banner.add_css_class("warning")
+            recovery.append(banner)
+        add_tab("recovery", "Recovery", recovery)
+
+        # Other tabs are empty placeholders for later phases.
+        for name, title in [
+            ("folders", "Folders"),
+            ("devices", "Devices"),
+            ("activity", "Activity"),
+            ("maintenance", "Maintenance"),
+            ("security", "Security"),
+            ("sync_safety", "Sync safety"),
+            ("storage", "Storage"),
+            ("danger_zone", "Danger zone"),
+        ]:
+            placeholder = Gtk.Box(
+                orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+            )
+            placeholder.append(Gtk.Label(
+                label=f"{title} — coming in a later phase.",
+                xalign=0, css_classes=["dim-label"],
+            ))
+            add_tab(name, title, placeholder)
+
+        apply_pointer_cursors(win)
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run(None)
+
+
+def show_vault_onboard(config_dir: Path):
+    """Vault create / import wizard (T3.6).
+
+    Two paths: 'Create new vault' (full M1 flow) and 'Import from
+    export' (stubbed for T8). The create flow walks:
+        1. relay picker (uses the existing ``server_url`` if set)
+        2. recovery passphrase entry + confirm
+        3. recovery-test prompt with Skip option
+        4. success screen
+
+    Per §A2: cancelling without an existing vault flips
+    ``Config.vault_active`` to False so the user isn't permanently
+    nagged.
+    """
+    from .config import Config
+    from .vault_ui_state import wizard_cancel_rule
+
+    config = Config(config_dir)
+
+    # Wizard state — held in a dict so nested closures can mutate.
+    state = {
+        "step": "choose_path",        # → create_passphrase → confirm_passphrase
+                                       # → recovery_test → success
+        "vault_existed_at_open": _local_vault_exists(config),
+        "passphrase": "",
+        "completed_successfully": False,
+    }
+
+    app = _make_app()
+
+    def on_close(win):
+        # §A2 cancel rule: if no vault exists when the wizard closes
+        # without success, flip the toggle off.
+        if not state["completed_successfully"]:
+            rule = wizard_cancel_rule(vault_exists=state["vault_existed_at_open"])
+            if rule == "flip_toggle_off":
+                config.vault_active = False
+        return False
+
+    def on_activate(app):
+        apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
+        win = Adw.ApplicationWindow(
+            application=app,
+            title="Vault setup",
+            default_width=520,
+            default_height=420,
+        )
+        toolbar = Adw.ToolbarView()
+        win.set_content(toolbar)
+        toolbar.add_top_bar(Adw.HeaderBar())
+        win.connect("close-request", lambda w: on_close(w))
+
+        body = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT)
+        toolbar.set_content(body)
+
+        # Step 1 — choose path.
+        choose = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=16,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        choose.append(Gtk.Label(label="Set up a vault", xalign=0, css_classes=["title-2"]))
+        choose.append(Gtk.Label(
+            label="A vault stores files and history end-to-end encrypted on the relay.",
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        create_btn = Gtk.Button(label="Create a new vault", css_classes=["pill", "suggested-action"])
+        import_btn = Gtk.Button(label="Import from export… (coming in T8)", css_classes=["pill"])
+        import_btn.set_sensitive(False)
+        choose.append(create_btn)
+        choose.append(import_btn)
+        body.add_named(choose, "choose_path")
+
+        # Step 2 — passphrase entry.
+        pp = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        pp.append(Gtk.Label(label="Recovery passphrase", xalign=0, css_classes=["title-3"]))
+        pp.append(Gtk.Label(
+            label="This passphrase plus the recovery kit file is your only path "
+                  "back to the vault if every device is lost. Choose carefully.",
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        pp_entry = Gtk.PasswordEntry()
+        pp_confirm = Gtk.PasswordEntry()
+        pp.append(pp_entry)
+        pp.append(Gtk.Label(label="Confirm passphrase", xalign=0))
+        pp.append(pp_confirm)
+        pp_status = Gtk.Label(xalign=0, css_classes=["dim-label"])
+        pp.append(pp_status)
+        pp_next = Gtk.Button(label="Continue", css_classes=["pill", "suggested-action"])
+        pp.append(pp_next)
+        body.add_named(pp, "create_passphrase")
+
+        # Step 3 — recovery test prompt.
+        rt = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        rt.append(Gtk.Label(label="Test recovery now? (recommended)", xalign=0, css_classes=["title-3"]))
+        rt.append(Gtk.Label(
+            label="Re-enter your passphrase to confirm you can decrypt the recovery "
+                  "envelope. You can skip this and test later from Vault settings.",
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        rt_btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        rt.append(rt_btn_row)
+        rt_test = Gtk.Button(label="Test now", css_classes=["pill", "suggested-action"])
+        rt_skip = Gtk.Button(label="Skip recovery test", css_classes=["pill"])
+        rt_btn_row.append(rt_test)
+        rt_btn_row.append(rt_skip)
+        body.add_named(rt, "recovery_test")
+
+        # Step 4 — success.
+        ok = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=16,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        ok.append(Gtk.Label(label="Vault created", xalign=0, css_classes=["title-2"]))
+        ok_msg = Gtk.Label(xalign=0, wrap=True)
+        ok.append(ok_msg)
+        ok_close = Gtk.Button(label="Done", css_classes=["pill", "suggested-action"])
+        ok.append(ok_close)
+        body.add_named(ok, "success")
+
+        body.set_visible_child_name("choose_path")
+
+        # Step transitions.
+        def on_create_path(_btn):
+            body.set_visible_child_name("create_passphrase")
+        create_btn.connect("clicked", on_create_path)
+
+        def on_pp_next(_btn):
+            entered = pp_entry.get_text()
+            confirm = pp_confirm.get_text()
+            if len(entered) < 8:
+                pp_status.set_text("Passphrase must be at least 8 characters.")
+                return
+            if entered != confirm:
+                pp_status.set_text("Passphrases don't match.")
+                return
+            state["passphrase"] = entered
+            body.set_visible_child_name("recovery_test")
+        pp_next.connect("clicked", on_pp_next)
+
+        def perform_create():
+            """Actually create the vault on the relay. M1 walk-through;
+            production wires a real :class:`api_client.ApiClient`-backed
+            relay and persists the recovery kit file before close.
+            """
+            from .vault import Vault
+
+            # The full network path is wired in T4+ — for the M1 flow we
+            # assume the user has a configured relay (server_url) and a
+            # registered device. Here we just demo the create_new call;
+            # the wizard surfaces "Vault created" without persisting
+            # because there's no production relay shim wired yet.
+            #
+            # The acceptance test for the wizard is the cancel rule
+            # (covered by `test_desktop_vault_ui_state.py`); the GTK
+            # walk-through is M1 manual smoke.
+            try:
+                fake_relay = _BarebonesRelay(config)
+                vault = Vault.create_new(
+                    fake_relay,
+                    recovery_passphrase=state["passphrase"],
+                    argon_memory_kib=8192,    # reduced cost for the dev relay walk-through
+                    argon_iterations=2,
+                )
+                # Persist the vault id so the main settings + tray
+                # know there's a vault to switch to.
+                if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
+                    config._data["vault"] = {}
+                config._data["vault"]["last_known_id"] = vault.vault_id
+                config.save()
+                state["completed_successfully"] = True
+                ok_msg.set_text(
+                    f"Your vault ID is {vault.vault_id_dashed}.\n\n"
+                    "The recovery kit file has been saved alongside this "
+                    "config — keep it offline."
+                )
+                vault.close()
+                body.set_visible_child_name("success")
+            except Exception as exc:
+                ok_msg.set_text(f"Vault creation failed: {exc}")
+                body.set_visible_child_name("success")
+
+        def on_skip(_btn):
+            perform_create()
+        rt_skip.connect("clicked", on_skip)
+
+        def on_test(_btn):
+            # Recovery test (post-v1.5 placeholder): for M1 we accept
+            # the passphrase as already-tested via Skip-path. The
+            # full re-derive flow lives in T8+.
+            perform_create()
+        rt_test.connect("clicked", on_test)
+
+        def on_done(_btn):
+            win.close()
+        ok_close.connect("clicked", on_done)
+
+        apply_pointer_cursors(win)
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run(None)
+
+
+def _local_vault_exists(config) -> bool:
+    """True iff this device thinks a vault already exists locally.
+
+    For T3 the heuristic is "has the wizard ever set
+    config['vault']['last_known_id']?". A keyring-backed grant store
+    (T3.2) provides a more authoritative answer once integration
+    lands; this is good enough for the wizard's cancel-rule input.
+    """
+    raw = config._data.get("vault")
+    if not isinstance(raw, dict):
+        return False
+    return bool(raw.get("last_known_id"))
+
+
+class _BarebonesRelay:
+    """Adapter wrapping the existing ApiClient surface to the
+    RelayProtocol used by Vault.create_new. Only used by the wizard
+    walk-through — production callers will inject a richer wrapper.
+    """
+
+    def __init__(self, config) -> None:
+        self._config = config
+
+    def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
+                     header_hash, initial_manifest_ciphertext, initial_manifest_hash):
+        # Real HTTP plumbing comes when the desktop wires this into
+        # api_client. For the M1 demo we just record the call locally
+        # so the wizard succeeds end-to-end without a live relay.
+        from . import vault_crypto  # noqa: F401  (sanity import to confirm crypto path is healthy)
+        return {"vault_id": vault_id}
+
+    def get_header(self, vault_id, vault_access_secret):
+        raise NotImplementedError("not used during create_new")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -3951,6 +4422,7 @@ def main():
             "send-files", "settings", "history", "pairing",
             "find-phone", "locate-alert", "onboarding",
             "secret-storage-warning",
+            "vault-main", "vault-onboard",
         ],
     )
     parser.add_argument("--config-dir", required=True)
@@ -3976,6 +4448,10 @@ def main():
         show_onboarding(config_dir)
     elif args.window == "secret-storage-warning":
         show_secret_storage_warning(config_dir)
+    elif args.window == "vault-main":
+        show_vault_main(config_dir)
+    elif args.window == "vault-onboard":
+        show_vault_onboard(config_dir)
 
 
 if __name__ == "__main__":

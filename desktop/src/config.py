@@ -777,3 +777,30 @@ class Config:
     @property
     def is_paired(self) -> bool:
         return len(self.paired_devices) > 0
+
+    @property
+    def vault_active(self) -> bool:
+        """The Vault feature toggle from main Settings (T0 §D16).
+
+        Default: ON on a fresh install (key absent from config.json).
+        Once written by a user toggle, the explicit value persists.
+
+        OFF hides the tray Vault submenu and stops the sync engine but
+        is **never** destructive — keys, manifests, downloaded chunks,
+        and local indexes are preserved. Re-flipping ON resumes from
+        the last persisted state.
+        """
+        # Use a sentinel to distinguish "key absent" from "explicitly false".
+        # Fresh installs default to True; a user setting it to False
+        # writes False explicitly and we honor it.
+        raw = self._data.get("vault", {})
+        if not isinstance(raw, dict):
+            return True
+        return bool(raw.get("active", True))
+
+    @vault_active.setter
+    def vault_active(self, value: bool) -> None:
+        if "vault" not in self._data or not isinstance(self._data.get("vault"), dict):
+            self._data["vault"] = {}
+        self._data["vault"]["active"] = bool(value)
+        self.save()

@@ -37,6 +37,9 @@ require_once $root . '/src/Repositories/VaultGcJobsRepository.php';
 require_once $root . '/src/VaultStorage.php';
 require_once $root . '/src/VaultCapabilities.php';
 
+// Crypto twin (PHP equivalent of desktop/src/vault_crypto.py).
+require_once $root . '/src/Crypto/VaultCrypto.php';
+
 // Router + controllers (needed for integration tests).
 require_once $root . '/src/Router.php';
 require_once $root . '/src/Http/Validators.php';

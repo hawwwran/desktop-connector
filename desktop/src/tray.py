@@ -276,6 +276,14 @@ class TrayApp:
                                else "Pair another device..."),
                     self._pair,
                 ),
+                # Vault submenu (T3.5). Visibility + contents driven by
+                # the pure helpers in vault_ui_state so behavior matches
+                # the §D16 lock without knowing about pystray.
+                pystray.MenuItem(
+                    "Vault",
+                    self._build_vault_submenu(),
+                    visible=lambda _: self._vault_submenu_visible(),
+                ),
                 pystray.MenuItem("Settings...", self._show_settings),
                 # Update items appear only inside an AppImage — apt-pip and
                 # dev-tree installs can't act on an in-app update anyway.
@@ -898,3 +906,90 @@ class TrayApp:
             subprocess.Popen(["xdg-open", info.release_url], start_new_session=True)
         except Exception:
             log.exception("update_runner.open_url_failed url=%s", info.release_url)
+
+    # -------------------------------------------------------------- vault submenu (T3.5)
+
+    def _vault_submenu_visible(self) -> bool:
+        """The submenu is visible when the user has vault.active=True."""
+        from .vault_ui_state import should_show_vault_submenu
+        return should_show_vault_submenu(self.config.vault_active)
+
+    def _local_vault_exists(self) -> bool:
+        """T3 heuristic: a vault exists locally iff the wizard recorded
+        its id under ``config['vault']['last_known_id']``. T3.2's grant
+        store provides the authoritative answer once integrated.
+        """
+        raw = self.config._data.get("vault")
+        if not isinstance(raw, dict):
+            return False
+        return bool(raw.get("last_known_id"))
+
+    def _build_vault_submenu(self) -> "pystray.Menu":
+        """Build the Vault submenu items based on the §D16 routing rules.
+
+        Submenu contents are static — we register every possible item up
+        front and gate visibility per item via lambdas. pystray rebuilds
+        the menu on every refresh so the user sees the right entries.
+        """
+        return pystray.Menu(
+            pystray.MenuItem(
+                "Create vault…",
+                self._spawn_vault_wizard,
+                visible=lambda _: self._vault_submenu_entry_visible("create_vault"),
+            ),
+            pystray.MenuItem(
+                "Import vault…",
+                self._spawn_vault_wizard,
+                visible=lambda _: self._vault_submenu_entry_visible("import_vault"),
+            ),
+            pystray.MenuItem(
+                "Open Vault…",
+                self._spawn_vault_main,
+                visible=lambda _: self._vault_submenu_entry_visible("open_vault"),
+            ),
+            pystray.MenuItem(
+                "Sync now",
+                self._vault_sync_now_stub,
+                visible=lambda _: self._vault_submenu_entry_visible("sync_now"),
+            ),
+            pystray.MenuItem(
+                "Export…",
+                self._vault_export_stub,
+                visible=lambda _: self._vault_submenu_entry_visible("export"),
+            ),
+            pystray.MenuItem(
+                "Import…",
+                self._vault_import_stub,
+                visible=lambda _: self._vault_submenu_entry_visible("import"),
+            ),
+            pystray.MenuItem(
+                "Settings",
+                self._spawn_vault_main,
+                visible=lambda _: self._vault_submenu_entry_visible("settings"),
+            ),
+        )
+
+    def _vault_submenu_entry_visible(self, token: str) -> bool:
+        from .vault_ui_state import vault_submenu_entries
+        if not self.config.vault_active:
+            return False
+        entries = vault_submenu_entries(
+            toggle_active=self.config.vault_active,
+            vault_exists=self._local_vault_exists(),
+        )
+        return token in entries
+
+    def _spawn_vault_wizard(self, *_) -> None:
+        self._open_gtk4_window("vault-onboard")
+
+    def _spawn_vault_main(self, *_) -> None:
+        self._open_gtk4_window("vault-main")
+
+    def _vault_sync_now_stub(self, *_) -> None:
+        log.info("vault.tray.sync_now.stub")
+
+    def _vault_export_stub(self, *_) -> None:
+        log.info("vault.tray.export.stub")
+
+    def _vault_import_stub(self, *_) -> None:
+        log.info("vault.tray.import.stub")

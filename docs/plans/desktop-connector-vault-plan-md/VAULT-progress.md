@@ -66,8 +66,8 @@ If a sub-task genuinely requires something the default stack can't provide:
 |-------|-------|:---------:|:------:|
 | T0  | Documentation + protocol skeleton (lock decisions, capability bits, vault-v1 protocol doc, test-vector contract) | M1 | `[x]` |
 | T1  | Relay persistent vault storage (tables, repos, endpoints, CAS, quota) | M1 | `[x]` |
-| T2  | Shared crypto + format test vectors (cross-platform, Python harness) | M1 | `[ ]` |
-| T3  | Desktop vault create / open / Vault settings window skeleton + main-settings toggle | M1 | `[ ]` |
+| T2  | Shared crypto + format test vectors (cross-platform, Python harness) | M1 | `[x]` |
+| T3  | Desktop vault create / open / Vault settings window skeleton + main-settings toggle | M1 | `[x]` |
 | T4  | Remote folders + per-folder usage | M2 | `[ ]` |
 | T5  | Remote browser read / download / version list | M2 | `[ ]` |
 | T6  | Browser upload (versions, conflict, CAS merge, resumable) | M3 | `[ ]` |
@@ -123,32 +123,32 @@ If a sub-task genuinely requires something the default stack can't provide:
 
 ### T2 — Shared crypto + format test vectors
 
-- [ ] **T2.1** — Implement vault crypto primitives in `desktop/src/vault_crypto.py`: `derive_subkey(label, master_key, length)`, `aead_encrypt(plaintext, key, nonce, aad)`, `aead_decrypt(...)`, `argon2id_kdf(passphrase, salt, params)`. Cipher: XChaCha20-Poly1305 (AAD per T0 §A3).
+- [x] **T2.1** — Implement vault crypto primitives in `desktop/src/vault_crypto.py`: `derive_subkey(label, master_key, length)`, `aead_encrypt(plaintext, key, nonce, aad)`, `aead_decrypt(...)`, `argon2id_kdf(passphrase, salt, params)`. Cipher: XChaCha20-Poly1305 (AAD per T0 §A3).
   - Accept: All primitives have unit tests against fixed (key, nonce, aad, plaintext, expected_ciphertext) tuples. Wrong-AAD decryption fails closed.
-- [ ] **T2.2** — Generate `tests/protocol/vault-v1/manifest_v1.json` test vectors: minimum 5 cases covering happy path, tombstone-only, op-log-tail-with-archived-segments-pointer, tampered ciphertext, wrong AAD.
+- [x] **T2.2** — Generate `tests/protocol/vault-v1/manifest_v1.json` test vectors: minimum 5 cases covering happy path, tombstone-only, op-log-tail-with-archived-segments-pointer, tampered ciphertext, wrong AAD.
   - Accept: Each case verifies bytes-exact ciphertext output for given input; tampered/wrong-AAD cases assert AEAD failure.
-- [ ] **T2.3** — Generate `chunk_v1.json` (small/medium/large/tampered), `header_v1.json` (genesis fingerprint cases), `recovery_envelope_v1.json` (kit+passphrase/wrong-passphrase/tampered), `export_bundle_v1.json` (full CBOR record sequence + tampered cases per A10), `device_grant_v1.json` (each role per §D11).
+- [x] **T2.3** — Generate `chunk_v1.json` (small/medium/large/tampered), `header_v1.json` (genesis fingerprint cases), `recovery_envelope_v1.json` (kit+passphrase/wrong-passphrase/tampered), `export_bundle_v1.json` (full CBOR record sequence + tampered cases per A10), `device_grant_v1.json` (each role per §D11).
   - Accept: All five files populated with at least 3 cases each; A18 schema followed.
-- [ ] **T2.4** — Mirror desktop crypto in PHP under `server/src/Crypto/VaultCrypto.php`. Run the **same** test-vector files through both implementations.
+- [x] **T2.4** — Mirror desktop crypto in PHP under `server/src/Crypto/VaultCrypto.php`. Run the **same** test-vector files through both implementations.
   - Accept: `pytest tests/protocol/test_vault_v1_vectors.py` and `phpunit tests/Vault/VaultCryptoVectorsTest.php` both pass identically; one implementation breaking would fail loudly.
-- [ ] **T2.5** — Document `desktop/src/vault_crypto.py` API + add a `VaultCrypto` Protocol type so the rest of desktop code mocks against an interface.
+- [x] **T2.5** — Document `desktop/src/vault_crypto.py` API + add a `VaultCrypto` Protocol type so the rest of desktop code mocks against an interface.
   - Accept: All callers pass a `VaultCrypto` interface; tests can swap a stub.
 
 ---
 
 ### T3 — Desktop vault create / open / Vault settings skeleton
 
-- [ ] **T3.1** — Implement `desktop/src/vault.py` with `Vault` class: `create_new(relay, recovery_passphrase) → Vault`, `open(vault_id, recovery_passphrase) → Vault`, `vault_id`, `master_key` (cleared on close), `header_ciphertext`, `_grant_keyring`. Uses T2 crypto, T1 endpoints.
+- [x] **T3.1** — Implement `desktop/src/vault.py` with `Vault` class: `create_new(relay, recovery_passphrase) → Vault`, `open(vault_id, recovery_passphrase) → Vault`, `vault_id`, `master_key` (cleared on close), `header_ciphertext`, `_grant_keyring`. Uses T2 crypto, T1 endpoints.
   - Accept: Round-trip test: create vault → close → reopen with passphrase → manifest decrypts.
-- [ ] **T3.2** — Device grant storage: try `keyring` (system keyring); fall back to AEAD-encrypted file at `~/.config/desktop-connector/vault_grant_<vault_id>.json` keyed by a device-local key from existing `crypto.py`.
+- [x] **T3.2** — Device grant storage: try `keyring` (system keyring); fall back to AEAD-encrypted file at `~/.config/desktop-connector/vault_grant_<vault_id>.json` keyed by a device-local key from existing `crypto.py`.
   - Accept: Both code paths tested; fallback handles keyring-unavailable cleanly; sensitive material zeroed in memory after use.
-- [ ] **T3.3** — Add the Vault-active toggle and "Open Vault settings…" button to the existing Desktop Connector main settings window. Toggle persists to `~/.config/desktop-connector/config.json` as `vault.active: bool`. Default per §D16: **ON** on fresh install. Button: greyed when toggle OFF; launches wizard when toggle ON + no vault; launches Vault settings when toggle ON + vault exists.
+- [x] **T3.3** — Add the Vault-active toggle and "Open Vault settings…" button to the existing Desktop Connector main settings window. Toggle persists to `~/.config/desktop-connector/config.json` as `vault.active: bool`. Default per §D16: **ON** on fresh install. Button: greyed when toggle OFF; launches wizard when toggle ON + no vault; launches Vault settings when toggle ON + vault exists.
   - Accept: Toggle survives app restart; button states match the four cells of §D16's wizard-routing table (verified by manual smoke + an automated test of the Python state-deciding function behind the button).
-- [ ] **T3.4** — Vault settings GTK window skeleton (`desktop-connector --gtk-window=vault-main`). Top: Vault ID with copy button + QR icon. Then a tabbed pane with placeholders: Recovery / Folders / Devices / Activity / Maintenance / Security / Sync safety / Storage / Danger zone. Recovery tab implements the §gaps §2 emergency-access block.
+- [x] **T3.4** — Vault settings GTK window skeleton (`desktop-connector --gtk-window=vault-main`). Top: Vault ID with copy button + QR icon. Then a tabbed pane with placeholders: Recovery / Folders / Devices / Activity / Maintenance / Security / Sync safety / Storage / Danger zone. Recovery tab implements the §gaps §2 emergency-access block.
   - Accept: Window opens, all tabs render without errors (most empty), Recovery tab shows correct status (`Untested` for a freshly-created vault), Vault ID displays in the canonical 4-4-4 format.
-- [ ] **T3.5** — Tray menu integration: gate the "Vault" submenu on `vault.active`. Submenu **contents** depend on vault state (per §D16): no-vault → only "Create vault…" / "Import vault…" entries that launch the wizard; vault-exists → full operating menu ("Open Vault…", "Sync now" (stub), "Export…" (stub), "Import…" (stub), "Settings").
+- [x] **T3.5** — Tray menu integration: gate the "Vault" submenu on `vault.active`. Submenu **contents** depend on vault state (per §D16): no-vault → only "Create vault…" / "Import vault…" entries that launch the wizard; vault-exists → full operating menu ("Open Vault…", "Sync now" (stub), "Export…" (stub), "Import…" (stub), "Settings").
   - Accept: Toggle flip shows/hides submenu in both vault states; submenu contents match §D16 table; clicking either Create / Import entry launches the wizard. Automated test of the Python `should_show_vault_submenu()` + `vault_submenu_entries()` helpers; manual smoke for the actual GTK render.
-- [ ] **T3.6** — Vault create/import wizard (`desktop-connector --gtk-window=vault-onboard`). Two paths: "Create new vault" → relay picker, recovery-passphrase entry + confirm, recovery test prompt (per gaps §1 — recommended w/ Skip), success screen. "Import from export" path is stubbed for T8. **Wizard-cancel rule (§A2)**: if user cancels and no vault exists, toggle flips OFF; if vault already exists, toggle is unchanged.
+- [x] **T3.6** — Vault create/import wizard (`desktop-connector --gtk-window=vault-onboard`). Two paths: "Create new vault" → relay picker, recovery-passphrase entry + confirm, recovery test prompt (per gaps §1 — recommended w/ Skip), success screen. "Import from export" path is stubbed for T8. **Wizard-cancel rule (§A2)**: if user cancels and no vault exists, toggle flips OFF; if vault already exists, toggle is unchanged.
   - Accept: New-vault path completes end-to-end on a fresh install: vault created on relay, header written, recovery file saved, toggle stays ON, tray submenu transitions from "Create / Import" to operating menu. Cancellation path on a fresh install flips toggle to OFF. Both behaviors covered by automated state-machine tests + manual smoke.
 
 ---

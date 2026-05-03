@@ -1,1 +1,66 @@
-[]
+[
+  {
+    "name": "recovery-v1-kit-plus-passphrase-happy",
+    "description": "Recovery envelope wrapped with passphrase + 32-byte recovery_secret kit. Decryption with both yields the master key. Reduced-cost Argon2id (8 MiB, 2it) for test speed.",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "vault_id": "ABCD2345WXYZ",
+      "envelope_id": "rk_v1_eeeeeeeeeeeeeeeeeeeeeeee",
+      "passphrase": "correct horse battery staple",
+      "recovery_secret": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "argon_salt": "00010203040506070809101112131415",
+      "argon_memory_kib": 8192,
+      "argon_iterations": 2,
+      "nonce": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7"
+    },
+    "expected": {
+      "aad": "64632d7661756c742d7265636f766572792d763141424344323334355758595a726b5f76315f656565656565656565656565656565656565656565656565",
+      "wrap_key": "abba6ebd36b77adc7b42b286da185d789c2bc183547a4883c649dd88f6073bd4",
+      "aead_ciphertext_and_tag": "af16d5e052476add58dab2e0bd1a3ebd99f0da6786c3ca44247a482cf6369d2a0e563b0a80222972bba00a986d0e0707",
+      "envelope_bytes": "0141424344323334355758595a726b5f76315f65656565656565656565656565656565656565656565656500010203040506070809101112131415e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7af16d5e052476add58dab2e0bd1a3ebd99f0da6786c3ca44247a482cf6369d2a0e563b0a80222972bba00a986d0e0707"
+    }
+  },
+  {
+    "name": "recovery-v1-wrong-passphrase",
+    "description": "Same envelope as the happy case but decrypt is attempted with the wrong passphrase ('wrong-pp'). The harness re-derives wrap_key with the wrong passphrase and asserts AEAD verification fails \u2014 the right kit alone is insufficient.",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "vault_id": "ABCD2345WXYZ",
+      "envelope_id": "rk_v1_eeeeeeeeeeeeeeeeeeeeeeee",
+      "passphrase": "correct horse battery staple",
+      "recovery_secret": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "argon_salt": "00010203040506070809101112131415",
+      "argon_memory_kib": 8192,
+      "argon_iterations": 2,
+      "nonce": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7",
+      "decrypt_passphrase_override": "wrong-pp"
+    },
+    "expected": {
+      "expected_error": "vault_recovery_failed"
+    }
+  },
+  {
+    "name": "recovery-v1-tampered-ciphertext",
+    "description": "Same envelope as the happy case but the AEAD ciphertext byte at envelope offset 83 (start of ciphertext: 1+12+30+16+24=83) is XOR'd with 0x01. Verification must fail.",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "vault_id": "ABCD2345WXYZ",
+      "envelope_id": "rk_v1_eeeeeeeeeeeeeeeeeeeeeeee",
+      "passphrase": "correct horse battery staple",
+      "recovery_secret": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "argon_salt": "00010203040506070809101112131415",
+      "argon_memory_kib": 8192,
+      "argon_iterations": 2,
+      "nonce": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7"
+    },
+    "tamper": {
+      "envelope_byte_xor": {
+        "offset": 83,
+        "xor": "01"
+      }
+    },
+    "expected": {
+      "expected_error": "vault_recovery_failed"
+    }
+  }
+]

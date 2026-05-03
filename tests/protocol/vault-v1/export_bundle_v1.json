@@ -1,1 +1,63 @@
-[]
+[
+  {
+    "name": "export-v1-outer-and-wrapped-key",
+    "description": "Outer envelope (DCVE magic + Argon2 params + nonce) plus the wrapped 32-byte export_file_key. Reduced-cost Argon2id for test speed; full v1 lock exercised elsewhere.",
+    "inputs": {
+      "vault_id": "ABCD2345WXYZ",
+      "passphrase": "user-export-passphrase",
+      "argon_salt": "a1a2a3a4a5a6a7a8a9aaabacadaeafb0",
+      "argon_memory_kib": 8192,
+      "argon_iterations": 2,
+      "argon_parallelism": 1,
+      "outer_nonce": "505152535455565758595a5b5c5d5e5f6061626364656667",
+      "export_file_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "expected": {
+      "outer_header_bytes": "4443564501000020000000000200000001a1a2a3a4a5a6a7a8a9aaabacadaeafb0505152535455565758595a5b5c5d5e5f6061626364656667",
+      "wrap_key": "9c40cd5ba7e28d27fa6fc940f0029e0d3ca2603be09665997768f06a50a06c12",
+      "wrap_aad": "64632d7661756c742d6578706f72742d777261702d763141424344323334355758595a",
+      "wrapped_key_envelope": "8ccb4ccf554868e9f8c02db49c9c1281217961d364ed0f4742e77bc0b7a4e748ca2474cdd4c59b746b62fa68dd26dc2e"
+    }
+  },
+  {
+    "name": "export-v1-wrong-passphrase",
+    "description": "Same outer header as happy case but decrypt is attempted with the wrong passphrase. wrap_key derivation fails to reproduce; AEAD on wrapped_key_envelope must fail.",
+    "inputs": {
+      "vault_id": "ABCD2345WXYZ",
+      "passphrase": "user-export-passphrase",
+      "argon_salt": "a1a2a3a4a5a6a7a8a9aaabacadaeafb0",
+      "argon_memory_kib": 8192,
+      "argon_iterations": 2,
+      "argon_parallelism": 1,
+      "outer_nonce": "505152535455565758595a5b5c5d5e5f6061626364656667",
+      "export_file_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "decrypt_passphrase_override": "wrong-export-pp"
+    },
+    "expected": {
+      "expected_error": "vault_export_passphrase_invalid"
+    }
+  },
+  {
+    "name": "export-v1-tampered-wrapped-key",
+    "description": "Same outer header as happy case but the wrapped_key_envelope's first byte is XOR'd with 0x01. Decryption with the right passphrase still fails.",
+    "inputs": {
+      "vault_id": "ABCD2345WXYZ",
+      "passphrase": "user-export-passphrase",
+      "argon_salt": "a1a2a3a4a5a6a7a8a9aaabacadaeafb0",
+      "argon_memory_kib": 8192,
+      "argon_iterations": 2,
+      "argon_parallelism": 1,
+      "outer_nonce": "505152535455565758595a5b5c5d5e5f6061626364656667",
+      "export_file_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "tamper": {
+      "wrapped_key_byte_xor": {
+        "offset": 0,
+        "xor": "01"
+      }
+    },
+    "expected": {
+      "expected_error": "vault_export_tampered"
+    }
+  }
+]
