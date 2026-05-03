@@ -52,6 +52,26 @@ class VaultFolderUiStateTests(unittest.TestCase):
             "status": "Active",
         }])
 
+    def test_folder_rows_render_usage_columns(self) -> None:
+        rows = folder_rows_from_cache(
+            [{
+                "remote_folder_id": "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                "display_name_enc": "Documents",
+                "state": "active",
+            }],
+            usage_by_folder={
+                "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa": {
+                    "current_bytes": 1536,
+                    "stored_bytes": 2 * 1024 * 1024,
+                    "history_bytes": 0,
+                }
+            },
+        )
+
+        self.assertEqual(rows[0]["current"], "1 KB")
+        self.assertEqual(rows[0]["stored"], "2.0 MB")
+        self.assertEqual(rows[0]["history"], "0 B")
+
 
 if __name__ == "__main__":
     unittest.main()

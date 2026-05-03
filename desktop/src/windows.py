@@ -4413,7 +4413,7 @@ def show_vault_main(config_dir: Path):
         log.info("vault.recovery_test.button.connected vault_id_present=%s", bool(vault_id_undashed))
         add_tab("recovery", "Recovery", recovery)
 
-        # Folders tab — T4.3 remote-folder list + add-folder flow.
+        # Folders tab — T4.3 remote-folder list + T4.4 usage display.
         from .vault_cache import VaultLocalIndex
         from .vault_folder_ui_state import (
             FOLDER_COLUMNS,
@@ -4421,8 +4421,10 @@ def show_vault_main(config_dir: Path):
             folder_rows_from_cache,
             parse_ignore_patterns_text,
         )
+        from .vault_usage import calculate_vault_usage
 
         local_index = VaultLocalIndex(config_dir)
+        usage_by_folder_state = {"value": {}}
         folders = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=12,
             margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
@@ -4473,7 +4475,8 @@ def show_vault_main(config_dir: Path):
             if vault_id_undashed:
                 try:
                     rows = folder_rows_from_cache(
-                        local_index.list_remote_folders(vault_id_undashed)
+                        local_index.list_remote_folders(vault_id_undashed),
+                        usage_by_folder=usage_by_folder_state["value"],
                     )
                 except Exception as exc:
                     folders_status.set_label(f"Could not load the local folder cache: {exc}")
@@ -4495,6 +4498,40 @@ def show_vault_main(config_dir: Path):
                 folders_status.set_label(f"{len(rows)} remote folder(s).")
             else:
                 folders_status.set_label("No local vault is connected.")
+
+        def refresh_folders_usage_async(message: str | None = None) -> None:
+            if not vault_id_undashed:
+                return
+            folders_status.set_label("Refreshing folder usage...")
+
+            def worker() -> None:
+                try:
+                    config.reload()
+                    relay = _create_vault_relay(config)
+                    vault = _open_local_vault_from_grant(config_dir, config, vault_id_undashed)
+                    try:
+                        manifest = vault.fetch_manifest(relay, local_index=local_index)
+                    finally:
+                        vault.close()
+                    usage = calculate_vault_usage(manifest).by_folder
+                except Exception as exc:
+                    error_message = str(exc)
+
+                    def fail() -> bool:
+                        refresh_folders_table(f"Folder usage unavailable: {error_message}")
+                        return False
+
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    usage_by_folder_state["value"] = usage
+                    refresh_folders_table(message)
+                    return False
+
+                GLib.idle_add(succeed)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def open_add_folder_dialog(_btn) -> None:
             dialog = Adw.ApplicationWindow(
@@ -4585,13 +4622,14 @@ def show_vault_main(config_dir: Path):
                         )
                         try:
                             author_device_id = config.device_id or ("0" * 32)
-                            vault.add_remote_folder(
+                            manifest = vault.add_remote_folder(
                                 relay,
                                 display_name=folder_name,
                                 ignore_patterns=patterns,
                                 author_device_id=author_device_id,
                                 local_index=local_index,
                             )
+                            usage = calculate_vault_usage(manifest).by_folder
                         finally:
                             vault.close()
                     except Exception as exc:
@@ -4605,6 +4643,7 @@ def show_vault_main(config_dir: Path):
                         return
 
                     def succeed() -> bool:
+                        usage_by_folder_state["value"] = usage
                         dialog.close()
                         refresh_folders_table(f"Added {folder_name}.")
                         return False
@@ -4617,6 +4656,7 @@ def show_vault_main(config_dir: Path):
 
         add_folder_btn.connect("clicked", open_add_folder_dialog)
         refresh_folders_table()
+        refresh_folders_usage_async()
         add_tab("folders", "Folders", folders)
 
         # Other tabs are empty placeholders for later phases.
