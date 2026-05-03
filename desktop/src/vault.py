@@ -66,8 +66,11 @@ from .vault_crypto import (
     normalize_vault_id,
 )
 from .vault_manifest import (
+    add_remote_folder as manifest_add_remote_folder,
     canonical_manifest_json,
+    generate_remote_folder_id,
     make_manifest,
+    make_remote_folder,
     normalize_manifest_plaintext,
 )
 
@@ -110,6 +113,24 @@ class RelayProtocol(Protocol):
         self,
         vault_id: str,
         vault_access_secret: str,
+    ) -> dict: ...
+
+    def get_manifest(
+        self,
+        vault_id: str,
+        vault_access_secret: str,
+    ) -> dict: ...
+
+    def put_manifest(
+        self,
+        vault_id: str,
+        vault_access_secret: str,
+        *,
+        expected_current_revision: int,
+        new_revision: int,
+        parent_revision: int,
+        manifest_hash: str,
+        manifest_ciphertext: bytes,
     ) -> dict: ...
 
 
@@ -453,6 +474,127 @@ class Vault:
             manifest_ciphertext=manifest_envelope,
             crypto=crypto,
         )
+
+    @classmethod
+    def from_grant(
+        cls,
+        grant,
+        *,
+        crypto: VaultCrypto = DefaultVaultCrypto,
+    ) -> "Vault":
+        """Open in-memory vault state from a local per-device grant."""
+        return cls(
+            vault_id=grant.vault_id,
+            master_key=grant.master_key,
+            recovery_secret=None,
+            vault_access_secret=grant.vault_access_secret,
+            header_revision=0,
+            manifest_revision=0,
+            manifest_ciphertext=b"",
+            crypto=crypto,
+        )
+
+    # ---------------------------------------------------------------- manifest helpers
+
+    def fetch_manifest(self, relay: RelayProtocol, *, local_index=None) -> dict:
+        """Fetch, store, decrypt, and optionally cache the current manifest."""
+        if self._closed:
+            raise ValueError("vault is closed")
+        resp = relay.get_manifest(self._vault_id, self._vault_access_secret)
+        envelope = resp.get("manifest_ciphertext", resp.get("manifest_envelope_bytes"))
+        if not isinstance(envelope, (bytes, bytearray)):
+            raise ValueError("relay returned an invalid manifest ciphertext")
+        self._manifest_ciphertext = bytes(envelope)
+        self._manifest_revision = int(resp.get("revision", self._manifest_revision or 0))
+        return self.decrypt_manifest(local_index=local_index)
+
+    def publish_manifest(
+        self,
+        relay: RelayProtocol,
+        manifest: dict,
+        *,
+        local_index=None,
+    ) -> dict:
+        """Encrypt and CAS-publish a new manifest revision."""
+        if self._closed or not self._master_key:
+            raise ValueError("vault is closed")
+
+        normalized = normalize_manifest_plaintext(manifest)
+        revision = int(normalized["revision"])
+        parent_revision = int(normalized["parent_revision"])
+        author_device_id = str(normalized["author_device_id"])
+
+        manifest_plaintext = canonical_manifest_json(normalized)
+        manifest_subkey = derive_subkey("dc-vault-v1/manifest", bytes(self._master_key))
+        manifest_nonce = secrets.token_bytes(24)
+        manifest_aad = build_manifest_aad(
+            vault_id=self._vault_id,
+            revision=revision,
+            parent_revision=parent_revision,
+            author_device_id=author_device_id,
+        )
+        manifest_ciphertext = aead_encrypt(
+            manifest_plaintext, manifest_subkey, manifest_nonce, manifest_aad,
+        )
+        manifest_envelope = build_manifest_envelope(
+            vault_id=self._vault_id,
+            revision=revision,
+            parent_revision=parent_revision,
+            author_device_id=author_device_id,
+            nonce=manifest_nonce,
+            aead_ciphertext_and_tag=manifest_ciphertext,
+        )
+        manifest_hash = hashlib.sha256(manifest_envelope).hexdigest()
+
+        relay.put_manifest(
+            self._vault_id,
+            self._vault_access_secret,
+            expected_current_revision=parent_revision,
+            new_revision=revision,
+            parent_revision=parent_revision,
+            manifest_hash=manifest_hash,
+            manifest_ciphertext=manifest_envelope,
+        )
+        self._manifest_revision = revision
+        self._manifest_ciphertext = manifest_envelope
+        if local_index is not None:
+            local_index.refresh_remote_folders_cache(normalized)
+        return normalized
+
+    def add_remote_folder(
+        self,
+        relay: RelayProtocol,
+        *,
+        display_name: str,
+        ignore_patterns: list[str],
+        author_device_id: str,
+        created_at: str | None = None,
+        remote_folder_id: str | None = None,
+        local_index=None,
+    ) -> dict:
+        """Fetch head, append one remote folder, and publish a new revision."""
+        name = str(display_name).strip()
+        if not name:
+            raise ValueError("folder name is required")
+
+        current = self.fetch_manifest(relay, local_index=local_index)
+        parent_revision = int(current["revision"])
+        timestamp = created_at or _now_rfc3339()
+        next_manifest = dict(current)
+        next_manifest["revision"] = parent_revision + 1
+        next_manifest["parent_revision"] = parent_revision
+        next_manifest["created_at"] = timestamp
+        next_manifest["author_device_id"] = str(author_device_id)
+
+        folder = make_remote_folder(
+            remote_folder_id=remote_folder_id or generate_remote_folder_id(),
+            display_name_enc=name,
+            created_at=timestamp,
+            created_by_device_id=str(author_device_id),
+            ignore_patterns=ignore_patterns,
+        )
+        updated = manifest_add_remote_folder(next_manifest, folder)
+        return self.publish_manifest(relay, updated, local_index=local_index)
 
     # ---------------------------------------------------------------- decryption helpers
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import secrets
 import unicodedata
 from typing import Any
 
@@ -26,6 +27,7 @@ DEFAULT_RETENTION_POLICY = {
 
 _REMOTE_FOLDER_ID_RE = re.compile(r"^rf_v1_[a-z2-7]{24}$")
 _DEVICE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_BASE32_LOWER = "abcdefghijklmnopqrstuvwxyz234567"
 
 
 def make_manifest(
@@ -83,6 +85,21 @@ def make_remote_folder(
     if entries is not None:
         folder["entries"] = list(entries)
     return normalize_remote_folder(folder)
+
+
+def generate_remote_folder_id() -> str:
+    """Generate ``rf_v1_<24 lowercase base32>`` remote folder ids."""
+    raw = secrets.token_bytes(15)
+    out = []
+    bits = 0
+    buf = 0
+    for byte in raw:
+        buf = (buf << 8) | byte
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.append(_BASE32_LOWER[(buf >> bits) & 0x1f])
+    return "rf_v1_" + "".join(out[:24])
 
 
 def normalize_manifest_plaintext(manifest: dict[str, Any]) -> dict[str, Any]:

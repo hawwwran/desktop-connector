@@ -4017,6 +4017,62 @@ def show_locate_alert(config_dir: Path, *, sender_name: str):
     app.run(None)
 
 
+def _vault_device_seed_provider(config_dir: Path, config):
+    """Return the fallback grant-store seed provider for this device."""
+    def provider() -> bytes:
+        from cryptography.hazmat.primitives import serialization
+        from .crypto import KeyManager
+
+        key_manager = KeyManager(Path(config_dir), secret_store=config.secret_store)
+        return key_manager.private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    return provider
+
+
+def _save_local_vault_grant(config_dir: Path, config, vault) -> None:
+    """Persist the creating device's local vault unlock grant."""
+    from .vault_grant import VaultGrant, open_default_grant_store
+
+    master_key = vault.master_key
+    vault_access_secret = vault.vault_access_secret
+    if master_key is None or vault_access_secret is None:
+        raise RuntimeError("Vault material was closed before the local grant could be saved.")
+
+    store = open_default_grant_store(
+        config_dir=Path(config_dir),
+        device_seed_provider=_vault_device_seed_provider(Path(config_dir), config),
+    )
+    grant = VaultGrant.from_bytes(vault.vault_id, master_key, vault_access_secret)
+    try:
+        store.save(grant)
+    finally:
+        grant.zero()
+
+
+def _open_local_vault_from_grant(config_dir: Path, config, vault_id: str):
+    """Open vault state from this machine's saved grant."""
+    from .vault import Vault
+    from .vault_grant import open_default_grant_store
+
+    store = open_default_grant_store(
+        config_dir=Path(config_dir),
+        device_seed_provider=_vault_device_seed_provider(Path(config_dir), config),
+    )
+    grant = store.load(vault_id)
+    if grant is None:
+        raise RuntimeError(
+            "This vault is locked on this machine. Reopen or import the vault "
+            "before adding folders."
+        )
+    try:
+        return Vault.from_grant(grant)
+    finally:
+        grant.zero()
+
+
 def show_vault_main(config_dir: Path):
     """Vault settings GTK window skeleton (T3.4).
 
@@ -4357,9 +4413,214 @@ def show_vault_main(config_dir: Path):
         log.info("vault.recovery_test.button.connected vault_id_present=%s", bool(vault_id_undashed))
         add_tab("recovery", "Recovery", recovery)
 
+        # Folders tab — T4.3 remote-folder list + add-folder flow.
+        from .vault_cache import VaultLocalIndex
+        from .vault_folder_ui_state import (
+            FOLDER_COLUMNS,
+            default_ignore_patterns_text,
+            folder_rows_from_cache,
+            parse_ignore_patterns_text,
+        )
+
+        local_index = VaultLocalIndex(config_dir)
+        folders = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
+        )
+        folders.append(Gtk.Label(label="Remote folders", xalign=0, css_classes=["title-3"]))
+
+        folder_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        folders.append(folder_actions)
+        add_folder_btn = Gtk.Button(label="Add", css_classes=["pill", "suggested-action"])
+        add_folder_btn.set_sensitive(bool(vault_id_undashed))
+        rename_folder_btn = Gtk.Button(label="Rename", css_classes=["pill"])
+        rename_folder_btn.set_sensitive(False)
+        rename_folder_btn.set_tooltip_text("Folder rename is implemented in T4.5")
+        delete_folder_btn = Gtk.Button(label="Delete", css_classes=["pill", "destructive-action"])
+        delete_folder_btn.set_sensitive(False)
+        delete_folder_btn.set_tooltip_text("Folder delete is implemented in T7/T14")
+        folder_actions.append(add_folder_btn)
+        folder_actions.append(rename_folder_btn)
+        folder_actions.append(delete_folder_btn)
+
+        folders_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        folders.append(folders_status)
+
+        folders_grid = Gtk.Grid(column_spacing=16, row_spacing=8, hexpand=True)
+        folders.append(folders_grid)
+
+        def clear_folders_grid() -> None:
+            child = folders_grid.get_first_child()
+            while child is not None:
+                next_child = child.get_next_sibling()
+                folders_grid.remove(child)
+                child = next_child
+
+        def attach_folder_cell(text: str, col: int, row: int, *, header: bool = False) -> None:
+            label = Gtk.Label(label=text, xalign=0, hexpand=(col == 0))
+            label.set_wrap(True)
+            label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            if header:
+                label.add_css_class("dim-label")
+            folders_grid.attach(label, col, row, 1, 1)
+
+        def refresh_folders_table(message: str | None = None) -> None:
+            clear_folders_grid()
+            for col, title in enumerate(FOLDER_COLUMNS):
+                attach_folder_cell(title, col, 0, header=True)
+
+            rows = []
+            if vault_id_undashed:
+                try:
+                    rows = folder_rows_from_cache(
+                        local_index.list_remote_folders(vault_id_undashed)
+                    )
+                except Exception as exc:
+                    folders_status.set_label(f"Could not load the local folder cache: {exc}")
+            for index, row in enumerate(rows, start=1):
+                attach_folder_cell(row["name"], 0, index)
+                attach_folder_cell(row["binding"], 1, index)
+                attach_folder_cell(row["current"], 2, index)
+                attach_folder_cell(row["stored"], 3, index)
+                attach_folder_cell(row["history"], 4, index)
+                attach_folder_cell(row["status"], 5, index)
+
+            if not rows:
+                empty = "No remote folders yet." if vault_id_undashed else "Open a vault before adding folders."
+                attach_folder_cell(empty, 0, 1)
+
+            if message is not None:
+                folders_status.set_label(message)
+            elif vault_id_undashed:
+                folders_status.set_label(f"{len(rows)} remote folder(s).")
+            else:
+                folders_status.set_label("No local vault is connected.")
+
+        def open_add_folder_dialog(_btn) -> None:
+            dialog = Adw.ApplicationWindow(
+                application=app,
+                title="Add folder",
+                default_width=540,
+                default_height=420,
+            )
+            dialog.set_transient_for(win)
+            dialog.set_modal(True)
+            dialog_toolbar = Adw.ToolbarView()
+            dialog.set_content(dialog_toolbar)
+            dialog_toolbar.add_top_bar(Adw.HeaderBar())
+
+            body_box = Gtk.Box(
+                orientation=Gtk.Orientation.VERTICAL,
+                spacing=12,
+                margin_top=16,
+                margin_bottom=16,
+                margin_start=16,
+                margin_end=16,
+            )
+            dialog_toolbar.set_content(body_box)
+            body_box.append(Gtk.Label(label="Add remote folder", xalign=0, css_classes=["title-2"]))
+
+            body_box.append(Gtk.Label(label="Name", xalign=0, css_classes=["dim-label"]))
+            name_entry = Gtk.Entry(hexpand=True)
+            name_entry.set_placeholder_text("Folder name")
+            body_box.append(name_entry)
+
+            body_box.append(Gtk.Label(label="Ignore patterns", xalign=0, css_classes=["dim-label"]))
+            ignore_buffer = Gtk.TextBuffer()
+            ignore_buffer.set_text(default_ignore_patterns_text())
+            ignore_view = Gtk.TextView(buffer=ignore_buffer, monospace=True)
+            ignore_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            ignore_scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+            ignore_scroller.set_min_content_height(140)
+            ignore_scroller.set_child(ignore_view)
+            body_box.append(ignore_scroller)
+
+            dialog_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+            body_box.append(dialog_status)
+
+            dialog_buttons = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                spacing=8,
+                halign=Gtk.Align.END,
+            )
+            body_box.append(dialog_buttons)
+            cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
+            confirm_btn = Gtk.Button(label="Add", css_classes=["pill", "suggested-action"])
+            dialog_buttons.append(cancel_btn)
+            dialog_buttons.append(confirm_btn)
+
+            cancel_btn.connect("clicked", lambda _button: dialog.close())
+
+            def set_dialog_status(message: str, css_class: str = "dim-label") -> None:
+                for klass in ("dim-label", "error", "success"):
+                    dialog_status.remove_css_class(klass)
+                dialog_status.add_css_class(css_class)
+                dialog_status.set_label(message)
+
+            def read_ignore_patterns() -> list[str]:
+                start = ignore_buffer.get_start_iter()
+                end = ignore_buffer.get_end_iter()
+                return parse_ignore_patterns_text(ignore_buffer.get_text(start, end, False))
+
+            def on_confirm(_button) -> None:
+                folder_name = name_entry.get_text().strip()
+                if not folder_name:
+                    set_dialog_status("Enter a folder name.", "error")
+                    return
+                if not vault_id_undashed:
+                    set_dialog_status("No local vault is connected.", "error")
+                    return
+
+                patterns = read_ignore_patterns()
+                confirm_btn.set_sensitive(False)
+                cancel_btn.set_sensitive(False)
+                set_dialog_status("Adding folder...", "dim-label")
+
+                def worker() -> None:
+                    try:
+                        config.reload()
+                        relay = _create_vault_relay(config)
+                        vault = _open_local_vault_from_grant(
+                            config_dir, config, vault_id_undashed
+                        )
+                        try:
+                            author_device_id = config.device_id or ("0" * 32)
+                            vault.add_remote_folder(
+                                relay,
+                                display_name=folder_name,
+                                ignore_patterns=patterns,
+                                author_device_id=author_device_id,
+                                local_index=local_index,
+                            )
+                        finally:
+                            vault.close()
+                    except Exception as exc:
+                        error_message = str(exc)
+                        def fail() -> bool:
+                            confirm_btn.set_sensitive(True)
+                            cancel_btn.set_sensitive(True)
+                            set_dialog_status(f"Could not add folder: {error_message}", "error")
+                            return False
+                        GLib.idle_add(fail)
+                        return
+
+                    def succeed() -> bool:
+                        dialog.close()
+                        refresh_folders_table(f"Added {folder_name}.")
+                        return False
+                    GLib.idle_add(succeed)
+
+                threading.Thread(target=worker, daemon=True).start()
+
+            confirm_btn.connect("clicked", on_confirm)
+            dialog.present()
+
+        add_folder_btn.connect("clicked", open_add_folder_dialog)
+        refresh_folders_table()
+        add_tab("folders", "Folders", folders)
+
         # Other tabs are empty placeholders for later phases.
         for name, title in [
-            ("folders", "Folders"),
             ("devices", "Devices"),
             ("activity", "Activity"),
             ("maintenance", "Maintenance"),
@@ -4842,6 +5103,7 @@ def show_vault_onboard(config_dir: Path):
             """
             from .vault import Vault, recovery_envelope_meta_to_json
 
+            vault = None
             try:
                 relay = _create_vault_relay(config)
                 vault = Vault.create_new(
@@ -4860,6 +5122,7 @@ def show_vault_onboard(config_dir: Path):
                 state["recovery_secret_bytes"] = vault.recovery_secret
                 state["vault_access_secret"] = vault.vault_access_secret
                 state["recovery_envelope_meta"] = vault.recovery_envelope_meta
+                _save_local_vault_grant(config_dir, config, vault)
 
                 # Persist the vault id so the main settings + tray
                 # know there's a vault to switch to.
@@ -4874,8 +5137,14 @@ def show_vault_onboard(config_dir: Path):
 
                 ok_id_entry.set_text(vault.vault_id_dashed)
                 vault.close()
+                vault = None
                 body.set_visible_child_name("success")
             except Exception as exc:
+                if vault is not None:
+                    try:
+                        vault.close()
+                    except Exception:
+                        pass
                 # Surface the failure on the success screen — the layout
                 # is the same; we just leave the export status in error
                 # state and disable Done.
@@ -5069,6 +5338,65 @@ class _VaultHttpRelay:
         except Exception as exc:
             raise RuntimeError("Relay returned an invalid vault header response.") from exc
 
+    def get_manifest(self, vault_id, vault_access_secret):
+        resp = self._conn.request(
+            "GET",
+            f"/api/vaults/{vault_id}/manifest",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while fetching the vault manifest.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault manifest fetch: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            body = resp.json()
+            data = body["data"]
+            data["manifest_ciphertext"] = base64.b64decode(data["manifest_ciphertext"])
+            return data
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid vault manifest response.") from exc
+
+    def put_manifest(
+        self,
+        vault_id,
+        vault_access_secret,
+        *,
+        expected_current_revision,
+        new_revision,
+        parent_revision,
+        manifest_hash,
+        manifest_ciphertext,
+    ):
+        payload = {
+            "expected_current_revision": int(expected_current_revision),
+            "new_revision": int(new_revision),
+            "parent_revision": int(parent_revision),
+            "manifest_hash": manifest_hash,
+            "manifest_ciphertext": base64.b64encode(manifest_ciphertext).decode("ascii"),
+        }
+        resp = self._conn.request(
+            "PUT",
+            f"/api/vaults/{vault_id}/manifest",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=payload,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while publishing the vault manifest.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault manifest publish: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            body = resp.json()
+            data = body["data"]
+            return data
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid vault manifest publish response.") from exc
+
     @staticmethod
     def _error_message(resp) -> str:
         try:
@@ -5102,6 +5430,12 @@ class _VaultLocalDevelopmentRelay:
 
     def get_header(self, vault_id, vault_access_secret):
         raise NotImplementedError("local development relay does not support header fetch")
+
+    def get_manifest(self, vault_id, vault_access_secret):
+        raise NotImplementedError("local development relay does not support manifest fetch")
+
+    def put_manifest(self, vault_id, vault_access_secret, **kwargs):
+        raise NotImplementedError("local development relay does not support manifest publish")
 
 
 def main():
