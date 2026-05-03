@@ -789,7 +789,14 @@ class Config:
         is **never** destructive — keys, manifests, downloaded chunks,
         and local indexes are preserved. Re-flipping ON resumes from
         the last persisted state.
+
+        Calls ``self.reload()`` on every read because the tray reads
+        this on every menu open and the settings subprocess writes it
+        from a separate process — without the reload, the tray sees
+        stale in-memory state and the submenu doesn't refresh until
+        the tray is restarted.
         """
+        self.reload()
         # Use a sentinel to distinguish "key absent" from "explicitly false".
         # Fresh installs default to True; a user setting it to False
         # writes False explicitly and we honor it.

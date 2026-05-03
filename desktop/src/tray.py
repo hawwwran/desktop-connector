@@ -358,6 +358,14 @@ class TrayApp:
         self._was_uploading = False
         self._was_paired = self.config.is_paired
         self._remote_online = False
+        # Vault submenu state — `vault_active` is mutated by the
+        # settings subprocess and `vault_exists` flips when the wizard
+        # subprocess writes `last_known_id`. Both must be polled because
+        # pystray takes a snapshot of `visible=` lambdas at icon
+        # construction; without an explicit `update_menu()` call the
+        # submenu doesn't refresh until app restart.
+        self._was_vault_active = self.config.vault_active
+        self._was_vault_exists = self._local_vault_exists()
         self._last_ping_time = 0.0
         self._ping_in_flight = False
         self._ping_lock = threading.Lock()
@@ -383,6 +391,20 @@ class TrayApp:
                 paired = self.config.is_paired
                 if paired != self._was_paired:
                     self._was_paired = paired
+                    changed = True
+
+                # Vault submenu state — both inputs to vault_ui_state
+                # decision functions. config.vault_active reloads from
+                # disk on read (see config.py vault_active getter), so
+                # the settings subprocess's writes propagate here on
+                # the next 2-second tick.
+                vault_active_now = self.config.vault_active
+                if vault_active_now != self._was_vault_active:
+                    self._was_vault_active = vault_active_now
+                    changed = True
+                vault_exists_now = self._local_vault_exists()
+                if vault_exists_now != self._was_vault_exists:
+                    self._was_vault_exists = vault_exists_now
                     changed = True
 
                 # One-time FCM availability check on first connection
@@ -918,7 +940,13 @@ class TrayApp:
         """T3 heuristic: a vault exists locally iff the wizard recorded
         its id under ``config['vault']['last_known_id']``. T3.2's grant
         store provides the authoritative answer once integrated.
+
+        Calls ``self.config.reload()`` first because the wizard
+        subprocess writes ``last_known_id`` and the tray needs to see
+        it to flip its submenu from Create/Import to operating mode.
+        Same propagation pattern as ``Config.vault_active``.
         """
+        self.config.reload()
         raw = self.config._data.get("vault")
         if not isinstance(raw, dict):
             return False
@@ -930,7 +958,12 @@ class TrayApp:
         Submenu contents are static — we register every possible item up
         front and gate visibility per item via lambdas. pystray rebuilds
         the menu on every refresh so the user sees the right entries.
+
+        ``pystray`` is imported inside ``TrayApp.run()`` (lazy ImportError
+        fallback for headless boxes); this method also imports it locally
+        so callers from outside ``run`` don't NameError.
         """
+        import pystray
         return pystray.Menu(
             pystray.MenuItem(
                 "Create vault…",

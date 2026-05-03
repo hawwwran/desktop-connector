@@ -91,10 +91,17 @@ class VaultSubmenuTests(unittest.TestCase):
 
 
 class WizardCancelRuleTests(unittest.TestCase):
-    """T3.6 — §A2 wizard cancellation behavior."""
+    """T3.6 — wizard cancellation never reverses the user's toggle.
 
-    def test_cancel_with_no_vault_flips_toggle_off(self) -> None:
-        self.assertEqual(wizard_cancel_rule(vault_exists=False), "flip_toggle_off")
+    Deviation from the original T0 §A2 rule. See
+    :func:`vault_ui_state.wizard_cancel_rule` docstring for rationale.
+    """
+
+    def test_cancel_with_no_vault_does_not_change_toggle(self) -> None:
+        # Was "flip_toggle_off" pre-2026-05-03; intentionally relaxed
+        # so a user who deliberately turned the toggle ON keeps it ON
+        # even after dismissing the wizard mid-flow.
+        self.assertEqual(wizard_cancel_rule(vault_exists=False), "no_change")
 
     def test_cancel_with_existing_vault_does_nothing(self) -> None:
         self.assertEqual(wizard_cancel_rule(vault_exists=True), "no_change")
@@ -148,6 +155,24 @@ class ConfigVaultActiveTests(unittest.TestCase):
             json.dump({"theme_mode": "dark"}, f)
         cfg = self._open_config()
         self.assertTrue(cfg.vault_active)
+
+    def test_vault_active_reloads_on_read_picks_up_subprocess_writes(self) -> None:
+        # Regression: the settings subprocess writes vault.active = False
+        # via its own Config instance; the tray's Config instance must
+        # see the change on its next read of `vault_active` without
+        # being told to reload manually. This is the pattern the
+        # existing `paired_devices` property uses (see CLAUDE.md
+        # "Config reload" note).
+        tray_cfg = self._open_config()
+        self.assertTrue(tray_cfg.vault_active)
+
+        # Simulate the settings subprocess flipping the toggle.
+        subprocess_cfg = self._open_config()
+        subprocess_cfg.vault_active = False
+
+        # Tray's Config has not been touched in-memory — but the next
+        # property read should reload from disk and observe False.
+        self.assertFalse(tray_cfg.vault_active)
 
 
 if __name__ == "__main__":

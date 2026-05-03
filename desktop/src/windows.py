@@ -4189,23 +4189,73 @@ def show_vault_onboard(config_dir: Path):
     config = Config(config_dir)
 
     # Wizard state — held in a dict so nested closures can mutate.
+    # `recovery_secret_bytes` and `vault_access_secret` are stashed
+    # post-create so the Export+Verify button can build the kit
+    # content on demand (no silent auto-save anywhere). Both are
+    # zeroed when the wizard closes. `recovery_envelope_meta` is
+    # non-secret but needed to run the real recovery test.
     state = {
-        "step": "choose_path",        # → create_passphrase → confirm_passphrase
-                                       # → recovery_test → success
+        "step": "choose_path",        # → create_passphrase → success
         "vault_existed_at_open": _local_vault_exists(config),
         "passphrase": "",
         "completed_successfully": False,
+        "vault_id": None,
+        "recovery_secret_bytes": None,
+        "vault_access_secret": None,
+        "recovery_envelope_meta": None,
+        "exported_kit_path": None,
+        "verify_passed": False,
+        "delete_after_close": False,
     }
 
     app = _make_app()
 
+    def _zero_state_secrets():
+        """Best-effort overwrite of in-memory copies of the kit material
+        before the wizard process exits. The Vault object's own
+        master_key was already zero'd by ``vault.close()`` inside
+        perform_create; this covers the duplicates we stashed for the
+        Export flow.
+        """
+        rs = state.get("recovery_secret_bytes")
+        if isinstance(rs, (bytes, bytearray)):
+            buf = bytearray(rs)
+            for i in range(len(buf)):
+                buf[i] = 0
+            state["recovery_secret_bytes"] = None
+        state["vault_access_secret"] = None
+        state["passphrase"] = ""
+
     def on_close(win):
-        # §A2 cancel rule: if no vault exists when the wizard closes
-        # without success, flip the toggle off.
-        if not state["completed_successfully"]:
-            rule = wizard_cancel_rule(vault_exists=state["vault_existed_at_open"])
-            if rule == "flip_toggle_off":
-                config.vault_active = False
+        # If "Safely delete after close" is on AND a kit file was
+        # exported during this wizard session, shred it now.
+        if state.get("delete_after_close") and state.get("exported_kit_path"):
+            from .vault import shred_file
+            shred_file(state["exported_kit_path"])
+
+        # If the wizard closes WITHOUT the user completing the
+        # success flow (export + verify + confirmation), wipe any
+        # local trace of vault creation so they can retry from
+        # scratch on the next click. The relay-side vault row is
+        # orphaned (no kit was saved → master key can't be
+        # recovered → unusable anyway). Per
+        # `feedback_respect_user_intent.md`: clean up partial state,
+        # but never auto-flip the user's toggle.
+        if not state["completed_successfully"] and state.get("vault_id"):
+            try:
+                cfg_dict = config._data.get("vault")
+                if isinstance(cfg_dict, dict):
+                    cfg_dict.pop("last_known_id", None)
+                    config.save()
+            except Exception:
+                pass
+
+        # The wizard's cancel rule (revised 2026-05-03) never changes
+        # the toggle — the user's deliberate ON stays ON. Function
+        # call kept for signature stability.
+        wizard_cancel_rule(vault_exists=state["vault_existed_at_open"])
+
+        _zero_state_secrets()
         return False
 
     def on_activate(app):
@@ -4214,8 +4264,8 @@ def show_vault_onboard(config_dir: Path):
         win = Adw.ApplicationWindow(
             application=app,
             title="Vault setup",
-            default_width=520,
-            default_height=420,
+            default_width=720,
+            default_height=520,
         )
         toolbar = Adw.ToolbarView()
         win.set_content(toolbar)
@@ -4253,9 +4303,42 @@ def show_vault_onboard(config_dir: Path):
                   "back to the vault if every device is lost. Choose carefully.",
             xalign=0, wrap=True, css_classes=["dim-label"],
         ))
-        pp_entry = Gtk.PasswordEntry()
-        pp_confirm = Gtk.PasswordEntry()
-        pp.append(pp_entry)
+        # ``show_peek_icon=True`` adds the eye icon inside the entry —
+        # GTK's built-in reveal-on-demand. Click toggles between
+        # masked dots and plaintext characters; the unmasked state
+        # persists only while the icon is held / toggled, so it doesn't
+        # leak the passphrase to anyone who happens to glance later.
+        pp_entry = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
+        pp_confirm = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
+
+        # Generate button — opens the standalone passphrase generator
+        # window. The user copies the result and pastes it into the
+        # passphrase fields manually (matches the existing subprocess-
+        # window pattern; no IPC needed).
+        gen_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        pp_entry.set_hexpand(True)
+        gen_row.append(pp_entry)
+        gen_btn = Gtk.Button(label="Generate", css_classes=["pill"])
+        gen_btn.set_tooltip_text("Open a passphrase generator in a new window")
+        def on_generate(_btn):
+            import os as _os
+            import subprocess as _subprocess
+            import sys as _sys
+            appimage = _os.environ.get("APPIMAGE")
+            cmd = (
+                [appimage, "--gtk-window=vault-passphrase-generator",
+                 f"--config-dir={config.config_dir}"]
+                if appimage else
+                [_sys.executable, "-m", "src.windows", "vault-passphrase-generator",
+                 f"--config-dir={config.config_dir}"]
+            )
+            cwd = (None if appimage
+                   else str(Path(__file__).resolve().parent.parent))
+            _subprocess.Popen(cmd, cwd=cwd)
+        gen_btn.connect("clicked", on_generate)
+        gen_row.append(gen_btn)
+        pp.append(gen_row)
+
         pp.append(Gtk.Label(label="Confirm passphrase", xalign=0))
         pp.append(pp_confirm)
         pp_status = Gtk.Label(xalign=0, css_classes=["dim-label"])
@@ -4264,35 +4347,209 @@ def show_vault_onboard(config_dir: Path):
         pp.append(pp_next)
         body.add_named(pp, "create_passphrase")
 
-        # Step 3 — recovery test prompt.
-        rt = Gtk.Box(
+        # (Step 3 — vestigial "recovery test prompt" with Test/Skip
+        # buttons that did the same thing has been removed. The real
+        # recovery test now happens on the success screen, bundled
+        # with kit export, mandatory before Done. See
+        # `feedback_no_fake_tests.md` and `T0 §gaps §1` revision.)
+
+        # Step 4 — success: vault is created, user MUST back up the
+        # recovery kit + passphrase before leaving. Layout follows the
+        # "explicit user-controlled flow + severity messaging +
+        # confirmation gate" pattern (see memory feedback_security_ux.md).
+        ok = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=12,
             margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
         )
-        rt.append(Gtk.Label(label="Test recovery now? (recommended)", xalign=0, css_classes=["title-3"]))
-        rt.append(Gtk.Label(
-            label="Re-enter your passphrase to confirm you can decrypt the recovery "
-                  "envelope. You can skip this and test later from Vault settings.",
-            xalign=0, wrap=True, css_classes=["dim-label"],
-        ))
-        rt_btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        rt.append(rt_btn_row)
-        rt_test = Gtk.Button(label="Test now", css_classes=["pill", "suggested-action"])
-        rt_skip = Gtk.Button(label="Skip recovery test", css_classes=["pill"])
-        rt_btn_row.append(rt_test)
-        rt_btn_row.append(rt_skip)
-        body.add_named(rt, "recovery_test")
-
-        # Step 4 — success.
-        ok = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=16,
-            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
-        )
         ok.append(Gtk.Label(label="Vault created", xalign=0, css_classes=["title-2"]))
-        ok_msg = Gtk.Label(xalign=0, wrap=True)
-        ok.append(ok_msg)
+
+        # ---- Severity warning (always visible) ----
+        warn = Gtk.Label(
+            xalign=0, wrap=True,
+            label=(
+                "⚠ Your data is unrecoverable without BOTH the recovery kit "
+                "file AND your passphrase. There is no password reset. Lose "
+                "either one and the vault is gone forever."
+            ),
+        )
+        warn.add_css_class("warning")
+        ok.append(warn)
+
+        # ---- Copyable Vault ID ----
+        ok.append(Gtk.Label(label="Your Vault ID:", xalign=0, css_classes=["dim-label"]))
+        ok_id_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ok.append(ok_id_row)
+        ok_id_entry = Gtk.Entry()
+        ok_id_entry.set_editable(False)
+        ok_id_entry.set_can_focus(True)
+        ok_id_entry.add_css_class("monospace")
+        ok_id_entry.set_hexpand(True)
+        ok_id_row.append(ok_id_entry)
+        ok_id_copy = Gtk.Button(label="Copy", css_classes=["pill"])
+        def on_copy_vault_id(_btn):
+            display = win.get_display()
+            if display is not None:
+                display.get_clipboard().set(ok_id_entry.get_text())
+        ok_id_copy.connect("clicked", on_copy_vault_id)
+        ok_id_row.append(ok_id_copy)
+
+        # ---- Export + verify recovery kit ----
+        # Bundled as one user action: there's no point exporting a kit
+        # without confirming the kit + passphrase actually produce the
+        # master key. The verify is real — re-runs derive_recovery_wrap_key
+        # against the saved kit and AEAD-decrypts the recovery envelope.
+        ok.append(Gtk.Label(label="Recovery kit file:", xalign=0, css_classes=["dim-label"]))
+        export_btn = Gtk.Button(
+            label="Export and verify recovery kit…",
+            css_classes=["pill", "suggested-action"],
+        )
+        ok.append(export_btn)
+
+        # Status line — shows the exported path + verify result.
+        export_status = Gtk.Label(xalign=0, wrap=True, selectable=True, css_classes=["monospace", "dim-label"])
+        ok.append(export_status)
+        verify_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        ok.append(verify_status)
+
+        # "Safely delete" toggle — only meaningful after an export.
+        # Shown but disabled until the user has actually picked a path.
+        delete_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ok.append(delete_row)
+        delete_switch = Gtk.Switch(valign=Gtk.Align.CENTER, sensitive=False)
+        delete_row.append(delete_switch)
+        delete_label = Gtk.Label(
+            xalign=0, wrap=True, hexpand=True,
+            label=(
+                "Securely delete the exported file when I close this wizard "
+                "(use this if you're moving it into a password manager and "
+                "don't want a copy left in Downloads)"
+            ),
+        )
+        delete_label.add_css_class("dim-label")
+        delete_row.append(delete_label)
+
+        # ---- Confirmation gate ----
+        confirm_check = Gtk.CheckButton(
+            label=(
+                "I have backed up the recovery kit file AND remember my passphrase. "
+                "I understand my vault data is unrecoverable without both."
+            ),
+        )
+        confirm_check.set_sensitive(False)   # disabled until export+verify pass
+        ok.append(confirm_check)
+
         ok_close = Gtk.Button(label="Done", css_classes=["pill", "suggested-action"])
+        ok_close.set_sensitive(False)
         ok.append(ok_close)
+
+        # ---- Wire up the success-screen logic ----
+        def _refresh_done_button():
+            """Done is enabled only when the user has confirmed AND the
+            export+verify step has succeeded.
+            """
+            ok_close.set_sensitive(
+                state["verify_passed"] and confirm_check.get_active()
+            )
+
+        confirm_check.connect("toggled", lambda _w: _refresh_done_button())
+
+        def on_delete_toggled(switch, _pspec):
+            state["delete_after_close"] = switch.get_active()
+        delete_switch.connect("notify::active", on_delete_toggled)
+
+        def on_export_clicked(_btn):
+            """Open a save dialog, write the kit, then **verify** that
+            the kit + passphrase actually produce the master key. This
+            is the real recovery test — replaces the prior decorative
+            'Test now / Skip' branches that did nothing.
+            """
+            from .vault import (
+                vault_id_dashed,
+                verify_recovery_kit,
+                write_recovery_kit_file,
+            )
+
+            file_dialog = Gtk.FileDialog()
+            file_dialog.set_title("Save recovery kit")
+            file_dialog.set_initial_name(
+                f"{vault_id_dashed(state['vault_id'])}.dc-vault-recovery"
+            )
+
+            def on_file_chosen(dialog, result):
+                try:
+                    gio_file = dialog.save_finish(result)
+                except GLib.Error:
+                    # User cancelled the file dialog — no error state.
+                    return
+                if gio_file is None:
+                    return
+                target_path = gio_file.get_path()
+
+                # 1) Write the kit.
+                try:
+                    write_recovery_kit_file(
+                        target_path,
+                        vault_id=state["vault_id"],
+                        recovery_secret=state["recovery_secret_bytes"],
+                        vault_access_secret=state["vault_access_secret"],
+                    )
+                except Exception as exc:
+                    export_status.remove_css_class("dim-label")
+                    export_status.add_css_class("error")
+                    export_status.set_label(f"Export failed: {exc}")
+                    verify_status.set_label("")
+                    state["verify_passed"] = False
+                    confirm_check.set_sensitive(False)
+                    _refresh_done_button()
+                    return
+
+                state["exported_kit_path"] = target_path
+                export_status.remove_css_class("error")
+                export_status.add_css_class("dim-label")
+                export_status.set_label(f"Saved to: {target_path}")
+                delete_switch.set_sensitive(True)
+
+                # 2) Real recovery verify — re-derive wrap_key from
+                #    the saved kit + the typed passphrase, AEAD-decrypt
+                #    the recovery envelope. Poly1305 verifies the
+                #    kit/passphrase combo end-to-end.
+                ok_, msg = verify_recovery_kit(
+                    target_path,
+                    passphrase=state["passphrase"],
+                    envelope_meta=state["recovery_envelope_meta"],
+                )
+                if ok_:
+                    verify_status.remove_css_class("error")
+                    verify_status.remove_css_class("dim-label")
+                    verify_status.add_css_class("success")
+                    verify_status.set_label(
+                        f"✓ Recovery verified — {msg}."
+                    )
+                    state["verify_passed"] = True
+                    confirm_check.set_sensitive(True)
+                else:
+                    verify_status.remove_css_class("success")
+                    verify_status.remove_css_class("dim-label")
+                    verify_status.add_css_class("error")
+                    verify_status.set_label(
+                        f"✗ {msg}. Check that you typed the passphrase correctly, "
+                        "then click Export and verify recovery kit again."
+                    )
+                    state["verify_passed"] = False
+                    confirm_check.set_active(False)
+                    confirm_check.set_sensitive(False)
+                _refresh_done_button()
+
+            file_dialog.save(parent=win, callback=on_file_chosen)
+
+        export_btn.connect("clicked", on_export_clicked)
+
+        def on_done(_btn):
+            # The shred-on-close logic + secret zeroing happens in
+            # on_close(); we just need to dismiss the window.
+            win.close()
+        ok_close.connect("clicked", on_done)
+
         body.add_named(ok, "success")
 
         body.set_visible_child_name("choose_path")
@@ -4312,25 +4569,25 @@ def show_vault_onboard(config_dir: Path):
                 pp_status.set_text("Passphrases don't match.")
                 return
             state["passphrase"] = entered
-            body.set_visible_child_name("recovery_test")
+            # Skip the prior decorative recovery_test step — go straight
+            # to vault creation and the success screen, where the real
+            # bundled Export-and-Verify happens.
+            perform_create()
         pp_next.connect("clicked", on_pp_next)
 
         def perform_create():
-            """Actually create the vault on the relay. M1 walk-through;
-            production wires a real :class:`api_client.ApiClient`-backed
-            relay and persists the recovery kit file before close.
+            """Actually create the vault on the relay, then stash the
+            recovery_secret + vault_access_secret in wizard state so
+            the user-controlled Export flow on the success screen can
+            write the kit file at a path they pick.
+
+            The kit file is **not** auto-saved anywhere on disk —
+            silent auto-save would hide the act of "you have a thing
+            you must back up", and per design feedback users rarely
+            go look for files they didn't choose to save.
             """
             from .vault import Vault
 
-            # The full network path is wired in T4+ — for the M1 flow we
-            # assume the user has a configured relay (server_url) and a
-            # registered device. Here we just demo the create_new call;
-            # the wizard surfaces "Vault created" without persisting
-            # because there's no production relay shim wired yet.
-            #
-            # The acceptance test for the wizard is the cancel rule
-            # (covered by `test_desktop_vault_ui_state.py`); the GTK
-            # walk-through is M1 manual smoke.
             try:
                 fake_relay = _BarebonesRelay(config)
                 vault = Vault.create_new(
@@ -4339,6 +4596,19 @@ def show_vault_onboard(config_dir: Path):
                     argon_memory_kib=8192,    # reduced cost for the dev relay walk-through
                     argon_iterations=2,
                 )
+
+                # Stash the kit material into wizard state. Both buffers
+                # die when on_close calls _zero_state_secrets — but they
+                # MUST live until the user chooses to Export, otherwise
+                # the kit is unrecoverable.
+                # `recovery_envelope_meta` is non-secret (envelope_id,
+                # salts, nonces, ciphertext) but needed to run the
+                # mandatory verify step.
+                state["vault_id"] = vault.vault_id
+                state["recovery_secret_bytes"] = vault.recovery_secret
+                state["vault_access_secret"] = vault.vault_access_secret
+                state["recovery_envelope_meta"] = vault.recovery_envelope_meta
+
                 # Persist the vault id so the main settings + tray
                 # know there's a vault to switch to.
                 if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
@@ -4346,31 +4616,111 @@ def show_vault_onboard(config_dir: Path):
                 config._data["vault"]["last_known_id"] = vault.vault_id
                 config.save()
                 state["completed_successfully"] = True
-                ok_msg.set_text(
-                    f"Your vault ID is {vault.vault_id_dashed}.\n\n"
-                    "The recovery kit file has been saved alongside this "
-                    "config — keep it offline."
-                )
+
+                ok_id_entry.set_text(vault.vault_id_dashed)
                 vault.close()
                 body.set_visible_child_name("success")
             except Exception as exc:
-                ok_msg.set_text(f"Vault creation failed: {exc}")
+                # Surface the failure on the success screen — the layout
+                # is the same; we just leave the export status in error
+                # state and disable Done.
+                ok_id_entry.set_text("")
+                export_status.remove_css_class("dim-label")
+                export_status.add_css_class("error")
+                export_status.set_label(f"Vault creation failed: {exc}")
+                export_btn.set_sensitive(False)
                 body.set_visible_child_name("success")
-
-        def on_skip(_btn):
-            perform_create()
-        rt_skip.connect("clicked", on_skip)
-
-        def on_test(_btn):
-            # Recovery test (post-v1.5 placeholder): for M1 we accept
-            # the passphrase as already-tested via Skip-path. The
-            # full re-derive flow lives in T8+.
-            perform_create()
-        rt_test.connect("clicked", on_test)
 
         def on_done(_btn):
             win.close()
         ok_close.connect("clicked", on_done)
+
+        apply_pointer_cursors(win)
+        win.present()
+
+    app.connect("activate", on_activate)
+    app.run(None)
+
+
+def show_vault_passphrase_generator(config_dir: Path):
+    """Standalone passphrase-generator window opened from the wizard's
+    Generate button. Shows a random diceware-style passphrase, lets
+    the user Regenerate or Copy. The user pastes the result back into
+    the wizard's passphrase fields manually.
+    """
+    from .vault_passphrase import generate_passphrase, estimated_entropy_bits
+
+    app = _make_app()
+
+    def on_activate(app):
+        apply_brand_css()
+        apply_theme_mode_from_config_dir(config_dir)
+        win = Adw.ApplicationWindow(
+            application=app,
+            title="Generate passphrase",
+            default_width=720,
+            default_height=320,
+        )
+        toolbar = Adw.ToolbarView()
+        win.set_content(toolbar)
+        toolbar.add_top_bar(Adw.HeaderBar())
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        toolbar.set_content(outer)
+
+        outer.append(Gtk.Label(label="Random passphrase", xalign=0, css_classes=["title-3"]))
+        outer.append(Gtk.Label(
+            label=(
+                f"7 random words from a 520-word list ≈ {estimated_entropy_bits():.0f} "
+                "bits of entropy. Copy this into the wizard's passphrase fields, "
+                "or click Regenerate if you don't like it."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+
+        # Read-only Entry so it's selectable + Ctrl-C friendly.
+        pp_entry = Gtk.Entry()
+        pp_entry.set_editable(False)
+        pp_entry.set_text(generate_passphrase())
+        pp_entry.add_css_class("monospace")
+        pp_entry.set_hexpand(True)
+        outer.append(pp_entry)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        outer.append(btn_row)
+
+        regen_btn = Gtk.Button(label="Regenerate", css_classes=["pill"])
+        def on_regen(_b):
+            pp_entry.set_text(generate_passphrase())
+        regen_btn.connect("clicked", on_regen)
+        btn_row.append(regen_btn)
+
+        copy_btn = Gtk.Button(label="Copy", css_classes=["pill", "suggested-action"])
+        def on_copy(_b):
+            display = win.get_display()
+            if display is not None:
+                display.get_clipboard().set(pp_entry.get_text())
+        copy_btn.connect("clicked", on_copy)
+        btn_row.append(copy_btn)
+
+        spacer = Gtk.Box(hexpand=True)
+        btn_row.append(spacer)
+
+        close_btn = Gtk.Button(label="Close", css_classes=["pill"])
+        close_btn.connect("clicked", lambda _b: win.close())
+        btn_row.append(close_btn)
+
+        outer.append(Gtk.Label(
+            xalign=0, wrap=True, css_classes=["dim-label"],
+            label=(
+                "Tip: write the passphrase down somewhere safe BEFORE you paste "
+                "it. If you lose it, the recovery kit file alone won't get you "
+                "back into the vault."
+            ),
+        ))
 
         apply_pointer_cursors(win)
         win.present()
@@ -4422,7 +4772,7 @@ def main():
             "send-files", "settings", "history", "pairing",
             "find-phone", "locate-alert", "onboarding",
             "secret-storage-warning",
-            "vault-main", "vault-onboard",
+            "vault-main", "vault-onboard", "vault-passphrase-generator",
         ],
     )
     parser.add_argument("--config-dir", required=True)
@@ -4452,6 +4802,8 @@ def main():
         show_vault_main(config_dir)
     elif args.window == "vault-onboard":
         show_vault_onboard(config_dir)
+    elif args.window == "vault-passphrase-generator":
+        show_vault_passphrase_generator(config_dir)
 
 
 if __name__ == "__main__":

@@ -636,24 +636,36 @@ File contents are **plaintext** (the security comes from the user keeping the fi
 ```text
 # Desktop Connector — Vault Recovery Kit
 # Vault ID: ABCD-2345-WXYZ
-# Created:  2026-05-02
+# Created:  2026-05-02T10:00:00.000Z
 #
-# This file plus your recovery passphrase can restore the vault.
-# Both are required. Lose either, and the vault cannot be recovered.
-# Keep this file somewhere safe and offline (USB drive, password manager,
-# printed in a safe).
+# This file PLUS your recovery passphrase can restore the vault on a
+# new device. BOTH are required. Lose either, and the vault cannot be
+# recovered — there is no password reset.
+#
+# Keep this file somewhere safe and offline — a USB drive, a password
+# manager attachment, or printed and stored in a safe. The relay
+# server is NOT a backup; if it's lost or wiped, this file is your
+# only path back.
 
 vault_id: ABCD-2345-WXYZ
 created_at: 2026-05-02T10:00:00.000Z
 recovery_secret: <base32, 56 chars without padding>
+vault_access_secret: <URL-safe base64; the X-Vault-Authorization bearer>
 argon_params: argon2id-v1
 ```
 
 Format: UTF-8, LF line endings, key/value pairs after a `# …` comment block. The lines starting with `#` are required for human readability and are skipped by parsers.
 
-`recovery_secret`: 32 bytes encoded as 56 base32 chars (RFC 4648, lowercase, no padding). Decoders accept upper- or lowercase, with or without spacing.
+Field summary:
 
-The QR-render of the kit encodes only the `recovery_secret`. The passphrase is **never** in the file or the QR.
+- `vault_id` — display form (with dashes), used by the relay to look up the vault.
+- `recovery_secret` — 32 bytes encoded as 56 base32 chars (RFC 4648, lowercase, no padding). Decoders accept upper- or lowercase, with or without spacing. Mixed with the user's passphrase via Argon2id + HKDF (§12.3) to derive the master-key wrap key.
+- `vault_access_secret` — bearer for `X-Vault-Authorization` (§2). A new device cannot fetch the encrypted header from the relay without it. Stored URL-safe-base64 as written by `secrets.token_urlsafe(32)` on the desktop; the relay only sees `SHA-256(vault_access_secret)` (§2 / §15).
+- `argon_params` — version tag for the Argon2id parameter set; `argon2id-v1` resolves to (m=131 072 KiB, t=4, p=1).
+
+Why the kit must contain both `recovery_secret` AND `vault_access_secret`: recovery on a fresh device needs (a) the relay-fetch capability (the access secret) and (b) the second-factor for unwrapping the master key (the recovery secret). Without the access secret, the new device can't reach the encrypted header at all; without the recovery secret, even with the header in hand, the master key stays sealed. **Stealing the kit alone doesn't yield the master key — Argon2id makes brute-forcing the passphrase expensive even when the kit is in the attacker's hands** (§12.3). Stealing the relay's bytes alone yields nothing; the relay never sees a kit file.
+
+The QR-render of the kit (post-v1.5) encodes the same fields as the file. The passphrase is **never** in the file or the QR.
 
 ### 12.6 24-word mnemonic
 

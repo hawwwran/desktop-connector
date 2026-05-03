@@ -127,6 +127,7 @@ class Vault:
         manifest_revision: int,
         manifest_ciphertext: bytes,
         crypto: VaultCrypto,
+        recovery_envelope_meta: dict | None = None,
     ) -> None:
         self._vault_id = normalize_vault_id(vault_id)
         # Buffers held as bytearrays so close() can zero them in place.
@@ -140,6 +141,14 @@ class Vault:
         self._closed = False
         # T3.2 will replace this with a real GrantStore.
         self._grant_keyring: dict[str, bytes] = {}
+        # Recovery-envelope plaintext metadata — non-secret values
+        # (envelope_id, argon_salt, argon_params, nonce, the AEAD-wrapped
+        # master_key ciphertext) needed to re-run the unwrap during a
+        # recovery verify. The ciphertext alone is harmless; without
+        # both ``passphrase`` and the kit file's ``recovery_secret`` it
+        # can't be decrypted. Kept readable after ``close()`` so the
+        # wizard can still verify after zeroing the master key.
+        self._recovery_envelope_meta = dict(recovery_envelope_meta or {})
 
     # ---------------------------------------------------------------- properties
 
@@ -184,6 +193,14 @@ class Vault:
     @property
     def manifest_ciphertext(self) -> bytes:
         return self._manifest_ciphertext
+
+    @property
+    def recovery_envelope_meta(self) -> dict:
+        """Non-secret recovery-envelope plaintext fields (envelope_id,
+        argon_salt + params, nonce, the wrapped-master-key ciphertext).
+        Used by the wizard's verify-recovery step. Survives ``close()``.
+        """
+        return dict(self._recovery_envelope_meta)
 
     # ---------------------------------------------------------------- factory: create new vault
 
@@ -318,6 +335,14 @@ class Vault:
             manifest_revision=1,
             manifest_ciphertext=manifest_envelope,
             crypto=crypto,
+            recovery_envelope_meta={
+                "envelope_id": recovery_envelope_id,
+                "argon_salt": recovery_argon_salt,
+                "argon_memory_kib": argon_memory_kib,
+                "argon_iterations": argon_iterations,
+                "nonce": recovery_envelope_nonce,
+                "aead_ciphertext_and_tag": recovery_envelope_ct,
+            },
         )
 
     # ---------------------------------------------------------------- factory: open existing vault
@@ -544,3 +569,245 @@ def _now_rfc3339() -> str:
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+# ---------------------------------------------------------------- recovery kit
+
+
+def vault_id_dashed(vault_id_undashed: str) -> str:
+    """``ABCD2345WXYZ`` → ``ABCD-2345-WXYZ`` for display + filenames."""
+    v = vault_id_undashed
+    if len(v) == 12:
+        return f"{v[0:4]}-{v[4:8]}-{v[8:12]}"
+    return v
+
+
+def recovery_kit_path(config_dir, vault_id: str):
+    """Resolve the on-disk path for a vault's recovery kit per
+    formats §12.5: ``<vault-id-with-dashes>.dc-vault-recovery``.
+    """
+    from pathlib import Path
+    return Path(config_dir) / f"{vault_id_dashed(vault_id)}.dc-vault-recovery"
+
+
+def write_recovery_kit_file(
+    path,
+    *,
+    vault_id: str,
+    recovery_secret: bytes,
+    vault_access_secret: str,
+    created_at: str | None = None,
+) -> None:
+    """Persist the recovery kit per formats §12.5.
+
+    Writes a plaintext UTF-8 file (LF line endings, mode 0o600)
+    containing every piece of state a fresh device needs to recover:
+
+      - ``vault_id``         — which vault on the relay to fetch.
+      - ``recovery_secret``  — 32 random bytes; the "kit" half of the
+                                two-factor unlock (passphrase is the other).
+      - ``vault_access_secret`` — bearer for ``X-Vault-Authorization``,
+                                   needed to fetch the encrypted header
+                                   from the relay during recovery.
+      - ``argon_params``     — locked at v1 (argon2id-v1).
+
+    The file is **not encrypted at rest** — security comes from physical
+    custody (USB drive, password-manager attachment, paper in a safe)
+    *plus* the user's passphrase. An attacker who steals only the kit
+    file still has to brute-force the user's passphrase against
+    Argon2id (m=128 MiB, t=4) to derive the master key. An attacker
+    who steals the relay's bytes but not the kit gets nothing — the
+    relay never sees a kit file.
+
+    Caller must persist this BEFORE ``Vault.close()`` zeros the
+    in-memory ``recovery_secret`` buffer.
+    """
+    import base64
+    import os
+    from pathlib import Path
+
+    if len(recovery_secret) != 32:
+        raise ValueError(f"recovery_secret must be 32 bytes; got {len(recovery_secret)}")
+    if not vault_access_secret:
+        raise ValueError("vault_access_secret is required")
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    secret_b32 = base64.b32encode(recovery_secret).decode("ascii").lower().rstrip("=")
+    if created_at is None:
+        created_at = _now_rfc3339()
+
+    body = (
+        "# Desktop Connector — Vault Recovery Kit\n"
+        f"# Vault ID: {vault_id_dashed(vault_id)}\n"
+        f"# Created:  {created_at}\n"
+        "#\n"
+        "# This file PLUS your recovery passphrase can restore the vault\n"
+        "# on a new device. BOTH are required. Lose either, and the vault\n"
+        "# cannot be recovered — there is no password reset.\n"
+        "#\n"
+        "# Keep this file somewhere safe and offline — a USB drive, a password\n"
+        "# manager attachment, or printed and stored in a safe. The relay\n"
+        "# server is NOT a backup; if it's lost or wiped, this file is your\n"
+        "# only path back.\n"
+        "\n"
+        f"vault_id: {vault_id_dashed(vault_id)}\n"
+        f"created_at: {created_at}\n"
+        f"recovery_secret: {secret_b32}\n"
+        f"vault_access_secret: {vault_access_secret}\n"
+        "argon_params: argon2id-v1\n"
+    )
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def parse_recovery_kit_file(path) -> dict:
+    """Parse a kit file written by :func:`write_recovery_kit_file`.
+
+    Returns a dict with:
+        ``vault_id`` (str, 12-char canonical undashed),
+        ``vault_id_dashed`` (str, 4-4-4 display form),
+        ``recovery_secret`` (bytes, 32),
+        ``vault_access_secret`` (str),
+        ``argon_params`` (str — the ``argon2id-v1`` tag).
+
+    Raises ``ValueError`` if any required field is missing or malformed.
+    Tolerant to upper/lower case in ``recovery_secret`` per formats §12.5.
+    """
+    import base64
+
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    fields: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            raise ValueError(f"malformed kit line: {raw!r}")
+        key, value = line.split(":", 1)
+        fields[key.strip()] = value.strip()
+
+    for required in ("vault_id", "recovery_secret", "vault_access_secret", "argon_params"):
+        if required not in fields:
+            raise ValueError(f"recovery kit missing required field: {required}")
+
+    raw_b32 = fields["recovery_secret"].upper()
+    pad = (8 - len(raw_b32) % 8) % 8
+    try:
+        recovery_secret = base64.b32decode(raw_b32 + "=" * pad)
+    except Exception as exc:
+        raise ValueError(f"recovery_secret is not valid base32: {exc}") from exc
+    if len(recovery_secret) != 32:
+        raise ValueError(f"recovery_secret decodes to {len(recovery_secret)} bytes; expected 32")
+
+    return {
+        "vault_id": normalize_vault_id(fields["vault_id"]),
+        "vault_id_dashed": vault_id_dashed(normalize_vault_id(fields["vault_id"])),
+        "recovery_secret": recovery_secret,
+        "vault_access_secret": fields["vault_access_secret"],
+        "argon_params": fields["argon_params"],
+    }
+
+
+def verify_recovery_kit(
+    kit_path,
+    *,
+    passphrase: str,
+    envelope_meta: dict,
+) -> tuple[bool, str]:
+    """Re-run the recovery flow against a saved kit + the user's
+    passphrase. Returns ``(ok, message)``.
+
+    This is the **real** recovery test the wizard runs after the user
+    exports their kit: it parses the kit file from disk, re-derives
+    ``wrap_key`` from passphrase + ``recovery_secret`` exactly the way
+    a future "I'm on a new device" recovery would, and tries to
+    AEAD-decrypt the recovery envelope (whose ciphertext we wrap the
+    master key inside at create time, exposed via
+    :attr:`Vault.recovery_envelope_meta`).
+
+    If the AEAD decryption succeeds, the kit + passphrase combination
+    can produce the master key — recovery will work. If Poly1305
+    verification fails (wrong passphrase typed, kit file edited,
+    bytes corrupted), AEAD raises and we return ``(False, …)``.
+    """
+    try:
+        parsed = parse_recovery_kit_file(kit_path)
+    except (OSError, ValueError) as exc:
+        return False, f"Could not parse kit file: {exc}"
+
+    try:
+        wrap_key = derive_recovery_wrap_key(
+            passphrase=passphrase,
+            recovery_secret=parsed["recovery_secret"],
+            argon_salt=envelope_meta["argon_salt"],
+            memory_kib=int(envelope_meta["argon_memory_kib"]),
+            iterations=int(envelope_meta["argon_iterations"]),
+        )
+        from .vault_crypto import build_recovery_aad as _build_recovery_aad
+        aad = _build_recovery_aad(
+            parsed["vault_id"],
+            envelope_meta["envelope_id"],
+        )
+        aead_decrypt(
+            envelope_meta["aead_ciphertext_and_tag"],
+            wrap_key,
+            envelope_meta["nonce"],
+            aad,
+        )
+    except Exception as exc:
+        # Catches CryptoError (Poly1305 failure → wrong passphrase or
+        # corrupted kit), KeyError on missing envelope_meta fields, etc.
+        return False, f"Recovery test failed: {type(exc).__name__}"
+
+    return True, "kit + passphrase produce the correct master key"
+
+
+def shred_file(path) -> bool:
+    """Best-effort secure delete: overwrite the file with random bytes,
+    fsync, then unlink.
+
+    Returns ``True`` if the file was overwritten + removed, ``False`` if
+    it didn't exist or the operation hit an OSError. Intentionally
+    swallows IO errors so the wizard's Done button can't fail because
+    the user moved the file between Export and Done.
+
+    Caveat — on modern SSDs with wear leveling, the OS may have written
+    copies to spare blocks we can't reach. This is best-effort cleanup
+    suitable for "I already copied it into a password manager, now make
+    sure it's not just sitting in Downloads"; users who need true
+    deletion should rely on full-disk encryption + secure-erase at
+    decommission time.
+    """
+    import os
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        return False
+    try:
+        size = p.stat().st_size
+        # Two passes: random, then zeros. More is theatre on SSD; this
+        # at least covers the obvious filesystem-cache + on-disk paths.
+        with open(p, "r+b") as f:
+            for fill in (os.urandom(size), b"\x00" * size):
+                f.seek(0)
+                f.write(fill)
+                f.flush()
+                os.fsync(f.fileno())
+        p.unlink()
+        return True
+    except OSError:
+        return False

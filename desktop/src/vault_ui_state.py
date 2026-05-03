@@ -102,13 +102,24 @@ def vault_submenu_entries(
 
 
 def wizard_cancel_rule(*, vault_exists: bool) -> CancelRule:
-    """T3.6 — what to do when the user cancels the create/import wizard.
+    """What to do when the user cancels the create/import wizard.
 
-    Per §A2:
-        - No vault yet → flip the Vault-active toggle back to OFF, so
-          the user isn't permanently nagged to set up a feature they
-          declined.
-        - Vault already exists → no change (the toggle stays as it was;
-          the cancellation is a transient UI choice, not a config one).
+    Always ``"no_change"``: the wizard wipes its own partial state
+    (in-memory secrets zeroed, optionally exported kit shredded), but
+    the Vault-active toggle stays exactly where the user put it.
+
+    **Deviation from T0 §A2.** The original spec auto-flipped the
+    toggle OFF on cancel-without-vault, on the theory that a user who
+    cancels probably "doesn't actually want a vault yet". User
+    feedback (2026-05-03) showed this is paternalistic — a user who
+    deliberately turned the toggle ON has stated their intent, and
+    canceling a wizard step is not a signal to reverse that. They
+    might be reconsidering a passphrase, refreshing the generator,
+    or just clicked too soon; auto-disabling the feature and hiding
+    the entry point is confusing.
+
+    Argument signature kept for backward-compat with callers that
+    still pass ``vault_exists``; ignored.
     """
-    return "no_change" if vault_exists else "flip_toggle_off"
+    _ = vault_exists  # intentionally unused
+    return "no_change"
