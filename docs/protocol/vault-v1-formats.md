@@ -419,9 +419,11 @@ The first 85 bytes are deterministic from the field values. The relay parses the
   "remote_folders": [
     {
       "remote_folder_id": "rf_v1_…",
-      "name": "Documents",
+      "display_name_enc": "<opaque client string protected by the manifest envelope>",
+      "created_at": "2026-05-02T10:00:00.000Z",
+      "created_by_device_id": "<32 hex>",
       "state": "active",
-      "retention": {
+      "retention_policy": {
         "keep_deleted_days": 30,
         "keep_versions": 10
       },
@@ -471,6 +473,9 @@ The first 85 bytes are deterministic from the field values. The relay parses the
 Field-by-field byte-level notes:
 
 - `created_at` / `modified_at` / `timestamp`: RFC 3339, ms precision, UTC. Used for `(timestamp, device_id_hash)` tie-breakers per T0 §A7.
+- `remote_folders[].display_name_enc`: opaque client-owned display-name payload inside the encrypted manifest. T4.5 folder rename changes this field only; local bindings remain tied to `remote_folder_id`.
+- `remote_folders[].retention_policy`: immutable after folder creation in v1. Defaults: `keep_deleted_days = 30`, `keep_versions = 10`.
+- `remote_folders[].entries`: optional until the browser/upload phases populate file entries. Missing `remote_folders` on early manifests normalizes to `[]` after decrypt.
 - `content_fingerprint`: 32 bytes of HMAC-SHA256 over the plaintext file (key = `HKDF(ikm=master_key, info="dc-vault-v1/content-fingerprint")`). Encoded base64 in plaintext JSON.
 - `chunks[].plaintext_size` is exact; `chunks[].ciphertext_size` = plaintext_size + 16 (AEAD tag) + 0 (no per-chunk plaintext header).
 - `archived_op_segments` is **newest seq first** per T0 §D14.

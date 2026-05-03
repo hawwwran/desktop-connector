@@ -68,7 +68,7 @@ If a sub-task genuinely requires something the default stack can't provide:
 | T1  | Relay persistent vault storage (tables, repos, endpoints, CAS, quota) | M1 | `[x]` |
 | T2  | Shared crypto + format test vectors (cross-platform, Python harness) | M1 | `[x]` |
 | T3  | Desktop vault create / open / Vault settings window skeleton + main-settings toggle | M1 | `[x]` |
-| T4  | Remote folders + per-folder usage | M2 | `[ ]` |
+| T4  | Remote folders + per-folder usage | M2 | `[~]` |
 | T5  | Remote browser read / download / version list | M2 | `[ ]` |
 | T6  | Browser upload (versions, conflict, CAS merge, resumable) | M3 | `[ ]` |
 | T7  | Browser soft delete + restore (tombstones, retention) | M3 | `[ ]` |
@@ -160,8 +160,10 @@ If a sub-task genuinely requires something the default stack can't provide:
 
 ### T4 — Remote folders + per-folder usage
 
-- [ ] **T4.1** — Manifest plaintext schema additions: `remote_folders: [{ remote_folder_id, display_name_enc, created_at, created_by_device_id, retention_policy: { keep_deleted_days, keep_versions }, ignore_patterns: [...], state }]`. Encrypt/decrypt round-trip in test vectors.
+- [x] **T4.1** — Manifest plaintext schema additions: `remote_folders: [{ remote_folder_id, display_name_enc, created_at, created_by_device_id, retention_policy: { keep_deleted_days, keep_versions }, ignore_patterns: [...], state }]`. Encrypt/decrypt round-trip in test vectors.
   - Accept: Adding/removing folders produces deterministic manifest ciphertext (matches new test vectors); old manifests without the field decrypt cleanly (default empty list).
+  - 2026-05-03 update: Added `desktop/src/vault_manifest.py` as the manifest plaintext model, normalized early manifests with missing `remote_folders` to `[]`, regenerated `manifest_v1.json` with T4 add/remove folder vectors, and aligned the protocol manifest schema docs to `display_name_enc` / `retention_policy`.
+  - Verification: `python3 -m unittest tests.protocol.test_desktop_vault_manifest tests.protocol.test_desktop_vault tests.protocol.test_vault_v1_vectors`; `cd server && vendor/bin/phpunit tests/Vault/VaultCryptoVectorsTest.php`; `git diff --check`.
 - [ ] **T4.2** — Local SQLite cache `vault_remote_folders_cache` per §D6: per-device decrypted snapshot. Refresh on every manifest fetch. Atomic replace, never partial update.
   - Accept: Two manifest fetches with different folder lists produce two correct cache states; no stale rows.
 - [ ] **T4.3** — Vault settings → Folders tab: list view with columns `Name / Binding / Current / Stored / History / Status`. Add/Rename/Delete buttons (Add wired up; Rename/Delete in T7/T14). Add-folder dialog supports default ignore-pattern list (per gaps §7) — user can edit before confirm.

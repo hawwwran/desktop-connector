@@ -10,10 +10,8 @@ Schema lock: T0 §A18 in
 Byte-format reference: ``docs/protocol/vault-v1-formats.md``.
 
 Files filled so far:
-    manifest_v1.json (T2.2) — 5 cases.
-Files still empty:
-    chunk_v1.json, header_v1.json, recovery_envelope_v1.json,
-    device_grant_v1.json, export_bundle_v1.json — populated in T2.3.
+    manifest_v1.json (T2.2 + T4.1) — base manifest vectors plus T4
+    remote-folder add/remove cases.
 """
 
 from __future__ import annotations
@@ -142,10 +140,9 @@ def _run_manifest_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
             buf = bytearray(envelope)
             buf[offset] ^= xor_byte
             decrypt_envelope = bytes(buf)
-            # Re-extract the ciphertext from the tampered envelope: the
-            # plaintext header is 85 bytes, the nonce is the next 24,
-            # the rest is the AEAD output.
-            decrypt_ct = decrypt_envelope[85 + 24:]
+            # Manifest envelope plaintext header already includes the
+            # nonce; byte 85 is the AEAD ciphertext start.
+            decrypt_ct = decrypt_envelope[85:]
 
         if "aad_override" in tamper:
             decrypt_aad = bytes.fromhex(tamper["aad_override"])

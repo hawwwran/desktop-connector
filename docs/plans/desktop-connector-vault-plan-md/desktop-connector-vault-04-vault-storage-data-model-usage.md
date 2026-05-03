@@ -112,12 +112,15 @@ Conceptual plaintext before encryption:
   "remote_folders": [
     {
       "remote_folder_id": "rf_...",
-      "name": "Documents",
+      "display_name_enc": "...",
+      "created_at": "2026-05-03T13:00:00.000Z",
+      "created_by_device_id": "desktop_...",
       "state": "active",
-      "retention": {
+      "retention_policy": {
         "keep_deleted_days": 30,
         "keep_versions": 10
       },
+      "ignore_patterns": [],
       "entries": []
     }
   ],

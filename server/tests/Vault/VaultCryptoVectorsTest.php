@@ -91,9 +91,9 @@ final class VaultCryptoVectorsTest extends TestCase
                 $spec = $tamper['envelope_byte_xor'];
                 $buf = $envelope;
                 $buf[$spec['offset']] = chr(ord($buf[$spec['offset']]) ^ hexdec($spec['xor']));
-                // Manifest envelope plaintext header = 85 bytes, then nonce(24)
-                // skipped to reach AEAD ciphertext.
-                $decryptCt = substr($buf, 85 + 24);
+                // Manifest envelope plaintext header already includes the
+                // nonce; byte 85 is the AEAD ciphertext start.
+                $decryptCt = substr($buf, 85);
             }
             if (isset($tamper['aad_override'])) {
                 $decryptAad = hex2bin($tamper['aad_override']);

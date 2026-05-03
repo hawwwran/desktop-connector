@@ -65,6 +65,11 @@ from .vault_crypto import (
     derive_subkey,
     normalize_vault_id,
 )
+from .vault_manifest import (
+    canonical_manifest_json,
+    make_manifest,
+    normalize_manifest_plaintext,
+)
 
 log = logging.getLogger(__name__)
 
@@ -287,18 +292,16 @@ class Vault:
 
         # Genesis manifest — empty folder list, no op-log entries yet.
         author_device_id = "0" * 32  # caller plugs in a real device id later
-        manifest_plaintext = _canonical_json({
-            "schema": "dc-vault-manifest-v1",
-            "vault_id": vault_id,
-            "revision": 1,
-            "parent_revision": 0,
-            "created_at": _now_rfc3339(),
-            "author_device_id": author_device_id,
-            "manifest_format_version": 1,
-            "remote_folders": [],
-            "operation_log_tail": [],
-            "archived_op_segments": [],
-        })
+        manifest_plaintext = canonical_manifest_json(make_manifest(
+            vault_id=vault_id,
+            revision=1,
+            parent_revision=0,
+            created_at=_now_rfc3339(),
+            author_device_id=author_device_id,
+            remote_folders=[],
+            operation_log_tail=[],
+            archived_op_segments=[],
+        ))
         manifest_subkey = derive_subkey("dc-vault-v1/manifest", master_key)
         manifest_nonce = secrets.token_bytes(24)
         manifest_aad = build_manifest_aad(
@@ -478,7 +481,7 @@ class Vault:
             parent_revision=parent, author_device_id=author,
         )
         plaintext = aead_decrypt(ct, manifest_subkey, nonce, aad)
-        return json.loads(plaintext.decode("utf-8"))
+        return normalize_manifest_plaintext(json.loads(plaintext.decode("utf-8")))
 
     # ---------------------------------------------------------------- close + zeroize
 
