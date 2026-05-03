@@ -12,10 +12,7 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _settings_window_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
-    start = source.index("def show_settings(")
-    end = source.index("# ─── History Window", start)
-    return source[start:end]
+    return Path(REPO_ROOT, "desktop/src/windows_settings.py").read_text()
 
 
 class SettingsMultiDeviceSourceTests(unittest.TestCase):

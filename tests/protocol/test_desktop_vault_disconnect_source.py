@@ -12,17 +12,21 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _vault_main_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+    source = Path(REPO_ROOT, "desktop/src/windows_vault.py").read_text()
     start = source.index("def show_vault_main(")
     end = source.index("def show_vault_onboard(", start)
     return source[start:end]
 
 
 def _vault_onboard_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+    source = Path(REPO_ROOT, "desktop/src/windows_vault.py").read_text()
     start = source.index("def show_vault_onboard(")
     end = source.index("def show_vault_passphrase_generator(", start)
     return source[start:end]
+
+
+def _vault_runtime_source() -> str:
+    return Path(REPO_ROOT, "desktop/src/vault_runtime.py").read_text()
 
 
 class VaultDisconnectSourceTests(unittest.TestCase):
@@ -85,23 +89,24 @@ class VaultDisconnectSourceTests(unittest.TestCase):
 
     def test_wizard_creates_vault_on_real_relay(self) -> None:
         source = _vault_onboard_source()
-        full_source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+        runtime_source = _vault_runtime_source()
         for text in (
-            "relay = _create_vault_relay(config)",
+            "relay = create_vault_relay(config)",
+            "save_local_vault_grant(config_dir, config, vault)",
         ):
             self.assertIn(text, source, msg=f"missing: {text!r}")
         for text in (
-            "def _create_vault_relay(config):",
+            "def create_vault_relay(config):",
             'os.environ.get("DESKTOP_CONNECTOR_VAULT_LOCAL_RELAY") == "1"',
-            "class _VaultHttpRelay:",
-            "class _VaultLocalDevelopmentRelay:",
+            "class VaultHttpRelay:",
+            "class VaultLocalDevelopmentRelay:",
             'self._conn.request("POST", "/api/vaults", json=payload)',
             '"vault_access_token_hash": base64.b64encode(vault_access_token_hash).decode("ascii")',
             '"encrypted_header": base64.b64encode(encrypted_header).decode("ascii")',
             '"initial_manifest_ciphertext": base64.b64encode(initial_manifest_ciphertext).decode("ascii")',
         ):
-            self.assertIn(text, full_source, msg=f"missing: {text!r}")
-        self.assertNotIn("_BarebonesRelay", full_source)
+            self.assertIn(text, runtime_source, msg=f"missing: {text!r}")
+        self.assertNotIn("_BarebonesRelay", runtime_source)
 
 
 if __name__ == "__main__":

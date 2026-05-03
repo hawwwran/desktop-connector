@@ -12,24 +12,23 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _find_device_window_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+    source = Path(REPO_ROOT, "desktop/src/windows_find_phone.py").read_text()
+    # Stop at show_locate_alert so the slice covers only the find-phone
+    # window — keeps these tests insulated from the alert-modal copy.
     start = source.index("def show_find_phone(")
-    end = source.index("# ─── CLI entry point", start)
+    end = source.index("def show_locate_alert(", start)
     return source[start:end]
 
 
 class FindDeviceWindowSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.full_source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+        cls.full_source = Path(REPO_ROOT, "desktop/src/windows_find_phone.py").read_text()
         cls.source = _find_device_window_source()
         cls.tray_source = Path(REPO_ROOT, "desktop/src/tray.py").read_text()
 
     def test_window_uses_device_wording(self):
         self.assertIn('title="Find my Device"', self.source)
-        self.assertIn(
-            "# ─── Find My Device Window", self.full_source
-        )
         # Status copy and start-failure copy say "device".
         self.assertIn('"Device is ringing!"', self.source)
         self.assertIn('"Failed to reach device"', self.source)

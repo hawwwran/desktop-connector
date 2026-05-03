@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from _paths import REPO_ROOT  # noqa: E402
 
 
-WINDOWS_PY = Path(REPO_ROOT) / "desktop" / "src" / "windows.py"
+WINDOWS_PY = Path(REPO_ROOT) / "desktop" / "src" / "windows_settings.py"
 
 
 class ReceiveActionsSettingsSourceTests(unittest.TestCase):

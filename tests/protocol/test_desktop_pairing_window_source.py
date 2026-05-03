@@ -12,10 +12,7 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _pairing_window_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
-    start = source.index("def show_pairing(")
-    end = source.index("# ─── Find My Device Window", start)
-    return source[start:end]
+    return Path(REPO_ROOT, "desktop/src/windows_pairing.py").read_text()
 
 
 class PairingWindowSourceTests(unittest.TestCase):
