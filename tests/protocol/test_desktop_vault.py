@@ -186,6 +186,106 @@ class VaultRoundTripTests(unittest.TestCase):
             vault.close()
 
 
+class VaultPrepareThenPublishTests(unittest.TestCase):
+    """T8-pre: prepare_new + publish_initial split (the wizard's
+    defer-the-relay-create safety net).
+    """
+
+    PASSPHRASE = "correct horse battery staple"
+    ARGON_KIB = 8192
+    ARGON_ITERS = 2
+
+    def test_prepare_new_does_not_post_to_relay(self) -> None:
+        relay = FakeRelay()
+        vault = Vault.prepare_new(
+            recovery_passphrase=self.PASSPHRASE,
+            argon_memory_kib=self.ARGON_KIB, argon_iterations=self.ARGON_ITERS,
+        )
+        try:
+            self.assertEqual(relay.vaults, {})
+            self.assertTrue(vault.has_pending_publish)
+            self.assertEqual(len(vault.master_key), 32)
+            self.assertEqual(len(vault.recovery_secret), 32)
+            self.assertRegex(vault.vault_id, r"^[A-Z2-7]{12}$")
+        finally:
+            vault.close()
+
+    def test_publish_initial_posts_once_and_clears_pending(self) -> None:
+        relay = FakeRelay()
+        vault = Vault.prepare_new(
+            recovery_passphrase=self.PASSPHRASE,
+            argon_memory_kib=self.ARGON_KIB, argon_iterations=self.ARGON_ITERS,
+        )
+        try:
+            vault.publish_initial(relay)
+            self.assertIn(vault.vault_id, relay.vaults)
+            self.assertFalse(vault.has_pending_publish)
+
+            # A second call must not double-POST — the second relay.create_vault
+            # would 409 in production; here we just guarantee we don't
+            # hand it the same payload again.
+            with self.assertRaises(ValueError):
+                vault.publish_initial(relay)
+            self.assertEqual(len(relay.vaults), 1)
+        finally:
+            vault.close()
+
+    def test_publish_failure_keeps_payload_for_retry(self) -> None:
+        """A relay flake on the first publish must leave the prepared
+        payload in place so the wizard's Retry button can re-POST the
+        byte-identical bundle (no fork between local grant and relay
+        vault_id).
+        """
+
+        class FlakyRelay(FakeRelay):
+            def __init__(self) -> None:
+                super().__init__()
+                self.attempts = 0
+
+            def create_vault(self, **kwargs):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError("relay unreachable")
+                return super().create_vault(**kwargs)
+
+        relay = FlakyRelay()
+        vault = Vault.prepare_new(
+            recovery_passphrase=self.PASSPHRASE,
+            argon_memory_kib=self.ARGON_KIB, argon_iterations=self.ARGON_ITERS,
+        )
+        try:
+            with self.assertRaises(RuntimeError):
+                vault.publish_initial(relay)
+            # Pending payload survives so a retry uses the same bundle.
+            self.assertTrue(vault.has_pending_publish)
+            self.assertEqual(relay.vaults, {})
+
+            # Retry succeeds.
+            vault.publish_initial(relay)
+            self.assertFalse(vault.has_pending_publish)
+            self.assertIn(vault.vault_id, relay.vaults)
+            self.assertEqual(relay.attempts, 2)
+        finally:
+            vault.close()
+
+    def test_create_new_is_prepare_plus_publish(self) -> None:
+        """The back-compat path goes through prepare + publish so a
+        single relay POST happens with the same body shape that
+        prepare_new produced.
+        """
+        relay = FakeRelay()
+        vault = Vault.create_new(
+            relay,
+            recovery_passphrase=self.PASSPHRASE,
+            argon_memory_kib=self.ARGON_KIB, argon_iterations=self.ARGON_ITERS,
+        )
+        try:
+            self.assertIn(vault.vault_id, relay.vaults)
+            self.assertFalse(vault.has_pending_publish)
+        finally:
+            vault.close()
+
+
 # ---------------------------------------------------------------- test helpers
 
 

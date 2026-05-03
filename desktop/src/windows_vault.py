@@ -485,6 +485,15 @@ def show_vault_onboard(config_dir: Path):
         "exported_kit_path": None,
         "verify_passed": False,
         "delete_after_close": False,
+        # T8-pre safety net: defer the relay POST until the local grant
+        # is durable. The wizard transitions through three flags so the
+        # cancel cleanup knows what to undo on a partial run:
+        #   grant_saved → save_local_vault_grant returned without raising
+        #   published   → publish_initial returned without raising
+        # Both must be true (plus completed_successfully) for a real vault.
+        "vault": None,                # prepared Vault held until publish
+        "grant_saved": False,
+        "published": False,
     }
 
     app = _make_app()
@@ -512,22 +521,37 @@ def show_vault_onboard(config_dir: Path):
             from .vault import shred_file
             shred_file(state["exported_kit_path"])
 
-        # If the wizard closes WITHOUT the user completing the
-        # success flow (export + verify + confirmation), wipe any
-        # local trace of vault creation so they can retry from
-        # scratch on the next click. The relay-side vault row is
-        # orphaned (no kit was saved → master key can't be
-        # recovered → unusable anyway). Per
-        # `feedback_respect_user_intent.md`: clean up partial state,
-        # but never auto-flip the user's toggle.
-        if not state["completed_successfully"] and state.get("vault_id"):
+        # Partial-state cleanup, by phase. Per
+        # `feedback_respect_user_intent.md`: clean up partial state on
+        # cancel, but never auto-flip the user's toggle.
+        #
+        # The new prepare → save_grant → publish → save_config order
+        # means:
+        #   * grant_saved and NOT published → the local grant is for a
+        #     vault that does NOT exist on the relay. Drop it so the
+        #     keyring/file backend doesn't accumulate dead entries.
+        #   * published and NOT completed_successfully → an extremely
+        #     rare case where publish succeeded but the config write
+        #     immediately after failed. Both the relay vault and the
+        #     grant are real; recovery script can wire up
+        #     last_known_id later. We don't auto-clean here because the
+        #     vault is usable.
+        if state.get("grant_saved") and not state.get("published") and state.get("vault_id"):
             try:
-                cfg_dict = config._data.get("vault")
-                if isinstance(cfg_dict, dict):
-                    cfg_dict.pop("last_known_id", None)
-                    config.save()
+                from .vault_grant import delete_local_grant_artifacts
+                delete_local_grant_artifacts(Path(config.config_dir), state["vault_id"])
             except Exception:
                 pass
+
+        # Close the in-memory Vault to zero its master_key. Idempotent
+        # if perform_create already closed it.
+        prepared = state.get("vault")
+        if prepared is not None:
+            try:
+                prepared.close()
+            except Exception:
+                pass
+            state["vault"] = None
 
         # The wizard's cancel rule (revised 2026-05-03) never changes
         # the toggle — the user's deliberate ON stays ON. Function
@@ -689,6 +713,18 @@ def show_vault_onboard(config_dir: Path):
         ok.append(export_status)
         verify_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
         ok.append(verify_status)
+
+        # Publish-failure retry button. Hidden on the happy path; shown
+        # only when prepare + grant-save succeeded but publish_initial
+        # raised. Reusing the same Vault instance makes the retry POST
+        # byte-identical, so a relay flake doesn't fork the local grant
+        # against a different vault_id.
+        retry_publish_btn = Gtk.Button(
+            label="Retry publish",
+            css_classes=["pill", "suggested-action"],
+        )
+        retry_publish_btn.set_visible(False)
+        ok.append(retry_publish_btn)
 
         # "Safely delete" toggle — only meaningful after an export.
         # Shown but disabled until the user has actually picked a path.
@@ -855,71 +891,179 @@ def show_vault_onboard(config_dir: Path):
             perform_create()
         pp_next.connect("clicked", on_pp_next)
 
-        def perform_create():
-            """Actually create the vault on the relay, then stash the
-            recovery_secret + vault_access_secret in wizard state so
-            the user-controlled Export flow on the success screen can
-            write the kit file at a path they pick.
+        def _set_export_status_error(message: str) -> None:
+            export_status.remove_css_class("dim-label")
+            export_status.add_css_class("error")
+            export_status.set_label(message)
 
-            The kit file is **not** auto-saved anywhere on disk —
-            silent auto-save would hide the act of "you have a thing
-            you must back up", and per design feedback users rarely
-            go look for files they didn't choose to save.
+        def _commit_after_publish(vault) -> None:
+            """Final step once the relay has accepted the bundle:
+            persist last_known_id + envelope meta to config.json, mark
+            the wizard completed, swap to the success screen.
             """
-            from .vault import Vault, recovery_envelope_meta_to_json
+            from .vault import recovery_envelope_meta_to_json
+
+            if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
+                config._data["vault"] = {}
+            config._data["vault"]["last_known_id"] = vault.vault_id
+            config._data["vault"]["recovery_envelope_meta"] = recovery_envelope_meta_to_json(
+                vault.recovery_envelope_meta
+            )
+            config.save()
+            state["completed_successfully"] = True
+
+            ok_id_entry.set_text(vault.vault_id_dashed)
+            export_status.remove_css_class("error")
+            export_status.add_css_class("dim-label")
+            export_status.set_label("")
+            retry_publish_btn.set_visible(False)
+            export_btn.set_sensitive(True)
+
+            # Master key + recovery secret aren't needed beyond this
+            # point (the export flow reads them from wizard state, not
+            # from the live Vault instance).
+            try:
+                vault.close()
+            except Exception:
+                pass
+            state["vault"] = None
+
+        def perform_create():
+            """Defer-the-relay-create wizard transition (T8-pre).
+
+            Order:
+              1. ``Vault.prepare_new`` — pure crypto, no relay POST.
+              2. ``save_local_vault_grant`` — durable local unlock.
+              3. ``Vault.publish_initial`` — first relay write.
+              4. ``config.save`` — last_known_id + envelope meta.
+
+            If step 1 or 2 fails, no vault row exists on the relay and
+            no orphan accumulates. If step 3 fails, the user sees a
+            "Retry publish" button on the success screen that re-runs
+            POST against the same prepared bundle (so a relay flake
+            doesn't fork the local grant against a different vault_id).
+
+            The kit file itself is **not** auto-saved anywhere — silent
+            auto-save would hide the act of "you have a thing you must
+            back up", and per design feedback users rarely go look for
+            files they didn't choose to save.
+            """
+            from .vault import Vault
             from .vault_runtime import create_vault_relay, save_local_vault_grant
 
-            vault = None
+            # Phase 1 — prepare in memory only.
             try:
-                relay = create_vault_relay(config)
-                vault = Vault.create_new(
-                    relay,
+                vault = Vault.prepare_new(
                     recovery_passphrase=state["passphrase"],
                 )
-
-                # Stash the kit material into wizard state. Both buffers
-                # die when on_close calls _zero_state_secrets — but they
-                # MUST live until the user chooses to Export, otherwise
-                # the kit is unrecoverable.
-                # `recovery_envelope_meta` is non-secret (envelope_id,
-                # salts, nonces, ciphertext) but needed to run the
-                # mandatory verify step.
-                state["vault_id"] = vault.vault_id
-                state["recovery_secret_bytes"] = vault.recovery_secret
-                state["vault_access_secret"] = vault.vault_access_secret
-                state["recovery_envelope_meta"] = vault.recovery_envelope_meta
-                save_local_vault_grant(config_dir, config, vault)
-
-                # Persist the vault id so the main settings + tray
-                # know there's a vault to switch to.
-                if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
-                    config._data["vault"] = {}
-                config._data["vault"]["last_known_id"] = vault.vault_id
-                config._data["vault"]["recovery_envelope_meta"] = recovery_envelope_meta_to_json(
-                    vault.recovery_envelope_meta
-                )
-                config.save()
-                state["completed_successfully"] = True
-
-                ok_id_entry.set_text(vault.vault_id_dashed)
-                vault.close()
-                vault = None
-                body.set_visible_child_name("success")
             except Exception as exc:
-                if vault is not None:
-                    try:
-                        vault.close()
-                    except Exception:
-                        pass
-                # Surface the failure on the success screen — the layout
-                # is the same; we just leave the export status in error
-                # state and disable Done.
-                ok_id_entry.set_text("")
-                export_status.remove_css_class("dim-label")
-                export_status.add_css_class("error")
-                export_status.set_label(f"Vault creation failed: {exc}")
+                pp_status.set_text(f"Could not prepare vault: {exc}")
+                return
+
+            state["vault"] = vault
+            state["vault_id"] = vault.vault_id
+            state["recovery_secret_bytes"] = vault.recovery_secret
+            state["vault_access_secret"] = vault.vault_access_secret
+            state["recovery_envelope_meta"] = vault.recovery_envelope_meta
+
+            # Phase 2 — local grant, before any relay write. A failure
+            # here means the keyring/file fallback couldn't store the
+            # unlock material on this machine; retrying the wizard is
+            # safe because no relay vault exists yet.
+            try:
+                save_local_vault_grant(config_dir, config, vault)
+                state["grant_saved"] = True
+            except Exception as exc:
+                try:
+                    vault.close()
+                except Exception:
+                    pass
+                state["vault"] = None
+                pp_status.set_text(
+                    f"Could not save the local unlock material: {exc}. "
+                    "Install a Secret Service backend (gnome-keyring / "
+                    "kwallet) or re-launch and try again."
+                )
+                return
+
+            # Phase 3 — first relay POST. From here on the body lives on
+            # the success screen so the user can retry / see what
+            # happened. body switches even on failure because the export
+            # workflow needs to be reachable once publish succeeds.
+            body.set_visible_child_name("success")
+            ok_id_entry.set_text(vault.vault_id_dashed)
+
+            try:
+                relay = create_vault_relay(config)
+                vault.publish_initial(relay)
+                state["published"] = True
+            except Exception as exc:
+                _set_export_status_error(
+                    f"Vault prepared locally but the relay rejected the "
+                    f"first publish: {exc}. Click Retry publish to try "
+                    "again with the same vault material."
+                )
                 export_btn.set_sensitive(False)
-                body.set_visible_child_name("success")
+                retry_publish_btn.set_visible(True)
+                return
+
+            # Phase 4 — record the connection on this machine.
+            try:
+                _commit_after_publish(vault)
+            except Exception as exc:
+                _set_export_status_error(
+                    f"Vault published, but config.json could not be "
+                    f"updated: {exc}. Restart the app — the vault is "
+                    "real on the relay; the recovery script can re-link "
+                    "it locally."
+                )
+                export_btn.set_sensitive(False)
+
+        def on_retry_publish(_btn) -> None:
+            """User-triggered retry after a phase-3 failure.
+
+            Reuses the in-memory ``Vault`` so the publish payload is
+            byte-identical. If the relay accepts on retry, the wizard
+            transitions to the normal post-publish state.
+            """
+            from .vault_runtime import create_vault_relay
+
+            vault = state.get("vault")
+            if vault is None or not vault.has_pending_publish:
+                _set_export_status_error(
+                    "No pending publish to retry. Close this window and "
+                    "re-open the wizard."
+                )
+                retry_publish_btn.set_visible(False)
+                return
+
+            retry_publish_btn.set_sensitive(False)
+            export_status.remove_css_class("error")
+            export_status.add_css_class("dim-label")
+            export_status.set_label("Retrying publish…")
+
+            try:
+                relay = create_vault_relay(config)
+                vault.publish_initial(relay)
+                state["published"] = True
+            except Exception as exc:
+                _set_export_status_error(
+                    f"Retry failed: {exc}. The local unlock material is "
+                    "still saved; you can close this window and try again "
+                    "later from the Vault setup wizard."
+                )
+                retry_publish_btn.set_sensitive(True)
+                return
+
+            try:
+                _commit_after_publish(vault)
+            except Exception as exc:
+                _set_export_status_error(
+                    f"Vault published, but config.json could not be "
+                    f"updated: {exc}."
+                )
+
+        retry_publish_btn.connect("clicked", on_retry_publish)
 
         def on_done(_btn):
             win.close()

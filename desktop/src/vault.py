@@ -241,12 +241,42 @@ class Vault:
         argon_memory_kib: int = 131_072,
         argon_iterations: int = 4,
     ) -> "Vault":
-        """Generate fresh vault material and POST /api/vaults.
+        """Generate fresh vault material and POST ``/api/vaults`` in
+        one shot. Equivalent to ``prepare_new(...).publish_initial(relay)``.
 
-        Returns a fully-open ``Vault`` (master_key in memory). The
-        caller MUST persist :attr:`recovery_secret` to the kit file
-        and the device grant to the OS keyring (T3.2) before
-        ``close()`` zeros the buffers.
+        The wizard prefers the two-step :meth:`prepare_new` /
+        :meth:`publish_initial` pair so it can save the local grant
+        BEFORE creating the vault on the relay — that ordering means a
+        failed local-persistence step never leaves an orphaned vault row
+        on the server. Tests and headless code paths still use this
+        one-call form.
+        """
+        vault = cls.prepare_new(
+            recovery_passphrase,
+            crypto=crypto,
+            argon_memory_kib=argon_memory_kib,
+            argon_iterations=argon_iterations,
+        )
+        vault.publish_initial(relay)
+        return vault
+
+    @classmethod
+    def prepare_new(
+        cls,
+        recovery_passphrase: str,
+        *,
+        crypto: VaultCrypto = DefaultVaultCrypto,
+        argon_memory_kib: int = 131_072,
+        argon_iterations: int = 4,
+    ) -> "Vault":
+        """Generate fresh vault material in memory **without touching the relay**.
+
+        Returns a Vault holding the master key, recovery envelope, encrypted
+        header, and genesis manifest. The relay POST is deferred until
+        :meth:`publish_initial` is called, so the caller can save the local
+        device grant first and avoid orphaned relay rows on local-persistence
+        failures (see ``docs/plans/desktop-connector-vault-plan-md/VAULT-progress.md``
+        on the wizard ordering).
 
         ``argon_memory_kib`` / ``argon_iterations`` default to the
         v1-locked params; tests override to keep the suite fast.
@@ -341,17 +371,8 @@ class Vault:
         )
         manifest_hash = hashlib.sha256(manifest_envelope).hexdigest()
 
-        relay.create_vault(
-            vault_id=vault_id,
-            vault_access_token_hash=token_hash,
-            encrypted_header=header_envelope,
-            header_hash=header_hash,
-            initial_manifest_ciphertext=manifest_envelope,
-            initial_manifest_hash=manifest_hash,
-        )
-
-        log.info("vault.create.ok vault_id=%s", vault_id[:8] + "…")
-        return cls(
+        log.info("vault.prepare.ok vault_id=%s", vault_id[:8] + "…")
+        instance = cls(
             vault_id=vault_id,
             master_key=master_key,
             recovery_secret=recovery_secret,
@@ -369,6 +390,39 @@ class Vault:
                 "aead_ciphertext_and_tag": recovery_envelope_ct,
             },
         )
+        # Publish payload is held on the instance so a later
+        # publish_initial() retry uses byte-identical bundles. Cleared
+        # after a successful POST.
+        instance._pending_publish = {
+            "vault_id": vault_id,
+            "vault_access_token_hash": token_hash,
+            "encrypted_header": header_envelope,
+            "header_hash": header_hash,
+            "initial_manifest_ciphertext": manifest_envelope,
+            "initial_manifest_hash": manifest_hash,
+        }
+        return instance
+
+    def publish_initial(self, relay: RelayProtocol) -> None:
+        """POST the prepared bundle to ``/api/vaults``.
+
+        Idempotent under retry: keeps the publish payload on the instance
+        until the relay accepts it. After success the payload is cleared
+        and a second call raises (the vault is already on the relay).
+        """
+        if self._closed:
+            raise ValueError("vault is closed")
+        payload = getattr(self, "_pending_publish", None)
+        if not payload:
+            raise ValueError("vault has no pending publish (already published or opened from grant)")
+        relay.create_vault(**payload)
+        self._pending_publish = None
+        log.info("vault.publish.ok vault_id=%s", self._vault_id[:8] + "…")
+
+    @property
+    def has_pending_publish(self) -> bool:
+        """True between prepare_new() and a successful publish_initial()."""
+        return bool(getattr(self, "_pending_publish", None))
 
     # ---------------------------------------------------------------- factory: open existing vault
 
