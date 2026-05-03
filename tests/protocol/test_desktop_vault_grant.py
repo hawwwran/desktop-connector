@@ -20,6 +20,8 @@ from src.vault_grant import (  # noqa: E402
     KeyringGrantStore,
     KeyringUnavailable,
     VaultGrant,
+    delete_local_grant_artifacts,
+    fallback_grant_path,
     open_default_grant_store,
 )
 
@@ -175,6 +177,41 @@ class OpenDefaultGrantStoreTests(unittest.TestCase):
                     device_seed_provider=lambda: b"\x33" * 32,
                 )
                 self.assertIsInstance(store, FileGrantStore)
+        finally:
+            vault_grant.KeyringGrantStore.open_default = original
+
+
+class DeleteLocalGrantArtifactsTests(unittest.TestCase):
+    def test_removes_file_fallback_without_device_seed(self) -> None:
+        import src.vault_grant as vault_grant
+        original = vault_grant.KeyringGrantStore.open_default
+        vault_grant.KeyringGrantStore.open_default = classmethod(
+            lambda cls: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = fallback_grant_path(tmp, VAULT_ID)
+                path.write_text("encrypted envelope", encoding="utf-8")
+                self.assertTrue(path.exists())
+
+                delete_local_grant_artifacts(tmp, VAULT_ID)
+
+                self.assertFalse(path.exists())
+        finally:
+            vault_grant.KeyringGrantStore.open_default = original
+
+    def test_removes_keyring_grant_when_keyring_available(self) -> None:
+        import src.vault_grant as vault_grant
+        fake = FakeKeyring()
+        store = KeyringGrantStore(fake)
+        grant = VaultGrant.from_bytes(VAULT_ID, b"\x22" * 32, "bearer")
+        store.save(grant)
+        original = vault_grant.KeyringGrantStore.open_default
+        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls: store)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                delete_local_grant_artifacts(tmp, VAULT_ID)
+                self.assertIsNone(store.load(VAULT_ID))
         finally:
             vault_grant.KeyringGrantStore.open_default = original
 

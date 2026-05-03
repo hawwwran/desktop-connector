@@ -791,6 +791,33 @@ class ServerProtocolContractTests(unittest.TestCase):
             data = json.load(fd)
         self.assertEqual(data.get("storageQuotaMB"), 500)
 
+    def test_dashboard_shows_vaults_with_last_sync_time(self):
+        device_id, auth_token, _ = self._register_device("desktop")
+        vault_id = "DASH2345WXY2"
+        status, _h, body = self.h.request(
+            "POST",
+            "/api/vaults",
+            token=auth_token,
+            device_id=device_id,
+            json_body={
+                "vault_id": "DASH-2345-WXY2",
+                "vault_access_token_hash": base64.b64encode(os.urandom(32)).decode("ascii"),
+                "encrypted_header": base64.b64encode(b"header").decode("ascii"),
+                "header_hash": "a" * 64,
+                "initial_manifest_ciphertext": base64.b64encode(b"manifest").decode("ascii"),
+                "initial_manifest_hash": "b" * 64,
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(body["data"]["vault_id"], "DASH-2345-WXY2")
+
+        status, _h, html = self.h.request("GET", "/dashboard")
+        self.assertEqual(status, 200)
+        self.assertIn("<h2>Vaults</h2>", html)
+        self.assertIn("Last sync", html)
+        self.assertIn("DASH-2345-WXY2", html)
+        self.assertIn(vault_id, html)
+
 
     # --- Extra streaming contract coverage (review follow-ups) --------------
 

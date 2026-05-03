@@ -209,7 +209,7 @@ class FileGrantStore:
         ).derive(device_seed)
 
     def _path(self, vault_id: str) -> Path:
-        return self._config_dir / f"vault_grant_{vault_id}.json"
+        return fallback_grant_path(self._config_dir, vault_id)
 
     def _aad(self, vault_id: str) -> bytes:
         return _FILE_AAD_SCHEMA + vault_id.encode("ascii")
@@ -290,3 +290,35 @@ def open_default_grant_store(
         log.warning("vault_grant.backend.fallback reason=%s", exc)
         seed = device_seed_provider()
         return FileGrantStore(config_dir=config_dir, device_seed=seed)
+
+
+def fallback_grant_path(config_dir: Path, vault_id: str) -> Path:
+    """Fallback grant file path for a vault id.
+
+    Kept as a free function so disconnect flows can remove the local
+    file without needing the device seed required to decrypt it.
+    """
+    return Path(config_dir) / f"vault_grant_{vault_id}.json"
+
+
+def delete_local_grant_artifacts(config_dir: Path, vault_id: str) -> None:
+    """Best-effort removal of this machine's grant for ``vault_id``.
+
+    Disconnecting a vault is a local operation: it must remove the
+    machine's unlock material but must not call the relay or delete the
+    vault itself. Try both storage locations because a machine may have
+    switched between keyring and file fallback over time.
+    """
+    try:
+        KeyringGrantStore.open_default().delete(vault_id)
+    except KeyringUnavailable:
+        pass
+    except Exception as exc:
+        log.warning("vault_grant.keyring.disconnect_delete_failed vault=%s error=%s", vault_id, exc)
+
+    try:
+        fallback_grant_path(config_dir, vault_id).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log.warning("vault_grant.file.disconnect_delete_failed vault=%s error=%s", vault_id, exc)

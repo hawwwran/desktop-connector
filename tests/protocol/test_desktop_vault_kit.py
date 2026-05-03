@@ -24,10 +24,13 @@ ensure_desktop_on_path()
 from src.vault import (  # noqa: E402
     Vault,
     parse_recovery_kit_file,
+    recovery_envelope_meta_from_json,
+    recovery_envelope_meta_to_json,
     shred_file,
     verify_recovery_kit,
     write_recovery_kit_file,
 )
+from src.vault_local import run_recovery_material_test  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"
@@ -212,6 +215,7 @@ class VerifyRecoveryKitTests(unittest.TestCase):
             vault_id=self.vault.vault_id,
             recovery_secret=self.vault.recovery_secret,
             vault_access_secret=self.vault.vault_access_secret,
+            recovery_envelope_meta=self.vault.recovery_envelope_meta,
         )
 
     def tearDown(self) -> None:
@@ -236,6 +240,76 @@ class VerifyRecoveryKitTests(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("failed", msg.lower())
+
+    def test_recovery_envelope_meta_config_round_trip(self) -> None:
+        encoded = recovery_envelope_meta_to_json(self.vault.recovery_envelope_meta)
+        decoded = recovery_envelope_meta_from_json(encoded)
+
+        ok, msg = verify_recovery_kit(
+            self.path,
+            passphrase=self.passphrase,
+            envelope_meta=decoded,
+        )
+        self.assertTrue(ok, msg)
+
+    def test_recovery_kit_can_embed_test_metadata(self) -> None:
+        parsed = parse_recovery_kit_file(self.path)
+        self.assertIn("recovery_envelope_meta", parsed)
+
+        ok, msg = verify_recovery_kit(
+            self.path,
+            passphrase=self.passphrase,
+            envelope_meta=parsed["recovery_envelope_meta"],
+        )
+        self.assertTrue(ok, msg)
+
+    def test_recovery_material_test_checks_vault_id_and_passphrase(self) -> None:
+        result = run_recovery_material_test(
+            self.path,
+            passphrase=self.passphrase,
+            vault_id=self.vault.vault_id_dashed,
+        )
+        self.assertTrue(result.ok, result.message)
+        self.assertFalse(result.wiped)
+
+        wrong_id = run_recovery_material_test(
+            self.path,
+            passphrase=self.passphrase,
+            vault_id="ZZZZ-ZZZZ-ZZZZ",
+        )
+        self.assertFalse(wrong_id.ok)
+        self.assertIn("mismatch", wrong_id.message.lower())
+
+    def test_recovery_material_test_explains_old_incomplete_kit_format(self) -> None:
+        old_path = Path(self.tmpdir) / "old.dc-vault-recovery"
+        write_recovery_kit_file(
+            old_path,
+            vault_id=self.vault.vault_id,
+            recovery_secret=self.vault.recovery_secret,
+            vault_access_secret=self.vault.vault_access_secret,
+        )
+
+        result = run_recovery_material_test(
+            old_path,
+            passphrase=self.passphrase,
+            vault_id=self.vault.vault_id_dashed,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("old incomplete format", result.message)
+        self.assertIn("recovery envelope", result.message)
+
+    def test_recovery_material_test_can_securely_delete_after_success(self) -> None:
+        result = run_recovery_material_test(
+            self.path,
+            passphrase=self.passphrase,
+            vault_id=self.vault.vault_id_dashed,
+            wipe_after_success=True,
+        )
+
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(result.wiped)
+        self.assertFalse(self.path.exists())
 
     def test_missing_kit_file_fails(self) -> None:
         ok, msg = verify_recovery_kit(

@@ -118,6 +118,8 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: Test verifies a partially-implemented build (one endpoint missing) doesn't advertise `vault_v1`. Existing transfer-only relays also don't advertise it (regression test).
 - [x] **T1.8** — Add quota-pressure tracking for the warnings UX: extend `vaults` row with `used_ciphertext_bytes`; expose in `GET /api/vaults/{id}/header` response so the desktop client can compute 80/90/100% bands without querying separately.
   - Accept: Header response includes `quota_ciphertext_bytes` + `used_ciphertext_bytes`; uploading until 80% / 90% / 100% returns the right thresholds in subsequent header reads.
+- [x] **T1.9** — Relay dashboard surfaces vault inventory.
+  - Accept: `/dashboard` shows a Vaults table with Vault ID, last sync timestamp (`vaults.updated_at`), manifest revision, chunk count, and storage usage. Repository and protocol-dashboard tests cover the row shape.
 
 ---
 
@@ -146,10 +148,13 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: Toggle survives app restart; button states match the four cells of §D16's wizard-routing table (verified by manual smoke + an automated test of the Python state-deciding function behind the button).
 - [x] **T3.4** — Vault settings GTK window skeleton (`desktop-connector --gtk-window=vault-main`). Top: Vault ID with copy button + QR icon. Then a tabbed pane with placeholders: Recovery / Folders / Devices / Activity / Maintenance / Security / Sync safety / Storage / Danger zone. Recovery tab implements the §gaps §2 emergency-access block.
   - Accept: Window opens, all tabs render without errors (most empty), Recovery tab shows correct status (`Untested` for a freshly-created vault), Vault ID displays in the canonical 4-4-4 format.
+  - 2026-05-03 update: Danger zone now includes "Disconnect vault" with the confirmation copy "The vault will still exist. This machine will only lose the connection to it." Confirmation wipes only this machine's local vault marker and grant artifacts so create/import routing becomes available again.
+  - 2026-05-03 update: "Test recovery now" opens a modal that asks for recovery kit file, passphrase, and Vault ID, verifies them against the saved recovery-envelope metadata, records status/last-tested, and can securely delete the kit file after a successful test. Older kits that predate embedded recovery-envelope metadata fail with an explicit old-format message instead of closing silently or implying the user typed something wrong.
 - [x] **T3.5** — Tray menu integration: gate the "Vault" submenu on `vault.active`. Submenu **contents** depend on vault state (per §D16): no-vault → only "Create vault…" / "Import vault…" entries that launch the wizard; vault-exists → full operating menu ("Open Vault…", "Sync now" (stub), "Export…" (stub), "Import…" (stub), "Settings").
   - Accept: Toggle flip shows/hides submenu in both vault states; submenu contents match §D16 table; clicking either Create / Import entry launches the wizard. Automated test of the Python `should_show_vault_submenu()` + `vault_submenu_entries()` helpers; manual smoke for the actual GTK render.
 - [x] **T3.6** — Vault create/import wizard (`desktop-connector --gtk-window=vault-onboard`). Two paths: "Create new vault" → relay picker, recovery-passphrase entry + confirm, recovery test prompt (per gaps §1 — recommended w/ Skip), success screen. "Import from export" path is stubbed for T8. **Wizard-cancel rule (§A2)**: if user cancels and no vault exists, toggle flips OFF; if vault already exists, toggle is unchanged.
   - Accept: New-vault path completes end-to-end on a fresh install: vault created on relay, header written, recovery file saved, toggle stays ON, tray submenu transitions from "Create / Import" to operating menu. Cancellation path on a fresh install flips toggle to OFF. Both behaviors covered by automated state-machine tests + manual smoke.
+  - 2026-05-03 update: Desktop vault creation now posts the encrypted header and genesis manifest to the configured relay's `POST /api/vaults` endpoint by default. The previous local-only walkthrough adapter remains available only for explicit development smoke tests via `DESKTOP_CONNECTOR_VAULT_LOCAL_RELAY=1`.
 
 ---
 

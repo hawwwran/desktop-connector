@@ -4028,14 +4028,14 @@ def show_vault_main(config_dir: Path):
 
     M1 manual-smoke surface; later phases populate the empty tabs.
     """
+    import logging
     from .config import Config
 
+    log = logging.getLogger("desktop-connector.vault-ui")
     config = Config(config_dir)
     app = _make_app()
 
     vault_id_undashed = ""
-    recovery_status_text = "Untested"
-    recovery_last_tested = "—"
     paired = config.paired_devices
     # Reading the vault id from local grant storage is T3.2's surface;
     # for the M1 walk-through we surface whatever's currently stashed
@@ -4043,6 +4043,8 @@ def show_vault_main(config_dir: Path):
     # successful create) and fall back to a placeholder.
     vault_meta = config._data.get("vault") if isinstance(config._data.get("vault"), dict) else {}
     vault_id_undashed = (vault_meta or {}).get("last_known_id") or ""
+    recovery_status_text = (vault_meta or {}).get("recovery_status") or "Untested"
+    recovery_last_tested = (vault_meta or {}).get("recovery_last_tested") or "—"
 
     def vault_id_dashed() -> str:
         v = vault_id_undashed
@@ -4115,6 +4117,7 @@ def show_vault_main(config_dir: Path):
         )
         recovery.append(Gtk.Label(label="Emergency recovery", xalign=0, css_classes=["title-3"]))
         block = Gtk.Grid(column_spacing=12, row_spacing=6)
+        recovery_value_labels = {}
         for row, (k, v) in enumerate([
             ("Method", "Recovery kit + passphrase"),
             ("Last tested", recovery_last_tested),
@@ -4125,20 +4128,233 @@ def show_vault_main(config_dir: Path):
             block.attach(k_lbl, 0, row, 1, 1)
             v_lbl = Gtk.Label(label=v, xalign=0)
             block.attach(v_lbl, 1, row, 1, 1)
+            recovery_value_labels[k] = v_lbl
         recovery.append(block)
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         recovery.append(actions)
-        actions.append(Gtk.Button(label="Test recovery now", css_classes=["pill"]))
-        actions.append(Gtk.Button(label="Update recovery material", css_classes=["pill"]))
-        # Banner if status is Untested.
-        if recovery_status_text in ("Untested", "Failed", "Stale"):
-            banner = Gtk.Label(
-                label="Recovery has not been tested. Test it now to confirm you "
-                      "can actually restore the vault.",
-                xalign=0, wrap=True,
+        test_recovery_btn = Gtk.Button(label="Test recovery now", css_classes=["pill"])
+        actions.append(test_recovery_btn)
+        update_recovery_btn = Gtk.Button(label="Update recovery material", css_classes=["pill"])
+        update_recovery_btn.set_sensitive(False)
+        update_recovery_btn.set_tooltip_text("Recovery-material rotation is not implemented yet")
+        actions.append(update_recovery_btn)
+
+        recovery_warning = Gtk.Label(
+            label="Recovery has not been tested. Test it now to confirm you "
+                  "can actually restore the vault.",
+            xalign=0,
+            wrap=True,
+        )
+        recovery_warning.add_css_class("warning")
+        recovery_warning.set_visible(recovery_status_text in ("Untested", "Stale"))
+        recovery.append(recovery_warning)
+
+        def refresh_recovery_summary(status: str, last_tested: str | None = None) -> None:
+            recovery_value_labels["Status"].set_label(status)
+            if last_tested is not None:
+                recovery_value_labels["Last tested"].set_label(last_tested)
+            recovery_warning.set_visible(status in ("Untested", "Stale"))
+
+        def open_recovery_test_dialog(_btn):
+            log.info(
+                "vault.recovery_test.clicked vault_id_present=%s config_meta_present=%s",
+                bool(vault_id_undashed),
+                isinstance((config._data.get("vault") or {}).get("recovery_envelope_meta"), dict),
             )
-            banner.add_css_class("warning")
-            recovery.append(banner)
+            try:
+                from datetime import datetime, timezone
+                from .vault import recovery_envelope_meta_from_json, vault_id_dashed
+                from .vault_local import run_recovery_material_test
+
+                dialog = Adw.ApplicationWindow(
+                    application=app,
+                    title="Test recovery",
+                    default_width=560,
+                    default_height=420,
+                )
+                dialog.set_transient_for(win)
+                dialog.set_modal(True)
+                toolbar = Adw.ToolbarView()
+                dialog.set_content(toolbar)
+                toolbar.add_top_bar(Adw.HeaderBar())
+
+                extra = Gtk.Box(
+                    orientation=Gtk.Orientation.VERTICAL,
+                    spacing=12,
+                    margin_top=16,
+                    margin_bottom=16,
+                    margin_start=16,
+                    margin_end=16,
+                )
+                toolbar.set_content(extra)
+                extra.append(Gtk.Label(label="Test recovery", xalign=0, css_classes=["title-2"]))
+                extra.append(Gtk.Label(
+                    label="Select the recovery kit file and enter the passphrase saved for this vault.",
+                    xalign=0,
+                    wrap=True,
+                    css_classes=["dim-label"],
+                ))
+
+                kit_path = {"path": None}
+                kit_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                kit_entry = Gtk.Entry(
+                    placeholder_text="Recovery kit file",
+                    editable=False,
+                    hexpand=True,
+                )
+                kit_row.append(kit_entry)
+                browse_btn = Gtk.Button(label="Choose...", css_classes=["pill"])
+                kit_row.append(browse_btn)
+                extra.append(kit_row)
+
+                vault_id_entry = Gtk.Entry(hexpand=True)
+                vault_id_entry.set_text(vault_id_dashed(vault_id_undashed) if vault_id_undashed else "")
+                vault_id_entry.set_placeholder_text("Vault ID")
+                extra.append(vault_id_entry)
+
+                extra.append(Gtk.Label(label="Recovery passphrase", xalign=0))
+                passphrase_entry = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
+                extra.append(passphrase_entry)
+
+                wipe_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+                wipe_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+                wipe_row.append(wipe_switch)
+                wipe_label = Gtk.Label(
+                    label="Securely delete the recovery kit file after a successful test",
+                    xalign=0,
+                    wrap=True,
+                    hexpand=True,
+                )
+                wipe_label.add_css_class("dim-label")
+                wipe_row.append(wipe_label)
+                extra.append(wipe_row)
+
+                status_label = Gtk.Label(xalign=0, wrap=True)
+                status_label.add_css_class("dim-label")
+                extra.append(status_label)
+
+                button_row = Gtk.Box(
+                    orientation=Gtk.Orientation.HORIZONTAL,
+                    spacing=8,
+                    halign=Gtk.Align.END,
+                )
+                extra.append(button_row)
+                close_btn = Gtk.Button(label="Close", css_classes=["pill"])
+                test_btn = Gtk.Button(label="Test recovery", css_classes=["pill", "suggested-action"])
+                button_row.append(close_btn)
+                button_row.append(test_btn)
+
+                def set_status(message: str, css_class: str = "dim-label") -> None:
+                    for klass in ("dim-label", "error", "success"):
+                        status_label.remove_css_class(klass)
+                    status_label.add_css_class(css_class)
+                    status_label.set_label(message)
+
+                def on_choose_file(_button):
+                    log.info("vault.recovery_test.file_choose.clicked")
+                    file_dialog = Gtk.FileDialog()
+                    file_dialog.set_title("Choose recovery kit")
+
+                    def on_file_chosen(file_dialog, result):
+                        try:
+                            gio_file = file_dialog.open_finish(result)
+                        except GLib.Error:
+                            log.info("vault.recovery_test.file_choose.cancelled")
+                            return
+                        if gio_file is None:
+                            log.info("vault.recovery_test.file_choose.empty")
+                            return
+                        path = gio_file.get_path()
+                        if not path:
+                            log.info("vault.recovery_test.file_choose.no_local_path")
+                            return
+                        kit_path["path"] = path
+                        kit_entry.set_text(path)
+                        log.info("vault.recovery_test.file_choose.selected")
+
+                    file_dialog.open(parent=dialog, callback=on_file_chosen)
+
+                browse_btn.connect("clicked", on_choose_file)
+
+                def on_close(_button):
+                    log.info(
+                        "vault.recovery_test.response response=close kit_selected=%s wipe=%s",
+                        bool(kit_path["path"]),
+                        wipe_switch.get_active(),
+                    )
+                    dialog.close()
+
+                close_btn.connect("clicked", on_close)
+
+                def on_test(_button):
+                    log.info(
+                        "vault.recovery_test.response response=%s kit_selected=%s wipe=%s",
+                        "test",
+                        bool(kit_path["path"]),
+                        wipe_switch.get_active(),
+                    )
+                    set_status("Testing recovery...", "dim-label")
+                    test_btn.set_sensitive(False)
+                    try:
+                        meta = recovery_envelope_meta_from_json(
+                            (config._data.get("vault") or {}).get("recovery_envelope_meta")
+                        )
+                        log.info("vault.recovery_test.config_meta.loaded")
+                    except Exception as exc:
+                        meta = None
+                        log.info(
+                            "vault.recovery_test.config_meta.unavailable error_kind=%s",
+                            type(exc).__name__,
+                        )
+
+                    try:
+                        result = run_recovery_material_test(
+                            kit_path["path"],
+                            passphrase=passphrase_entry.get_text(),
+                            vault_id=vault_id_entry.get_text(),
+                            envelope_meta=meta,
+                            wipe_after_success=wipe_switch.get_active(),
+                        )
+                    except Exception:
+                        log.exception("vault.recovery_test.run.exception")
+                        set_status("Recovery test failed unexpectedly. Check the log for details.", "error")
+                        test_btn.set_sensitive(True)
+                        return
+                    finally:
+                        test_btn.set_sensitive(True)
+
+                    log.info(
+                        "vault.recovery_test.result ok=%s wiped=%s message=%s",
+                        result.ok,
+                        result.wiped,
+                        result.message,
+                    )
+                    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
+                        config._data["vault"] = {}
+                    config._data["vault"]["recovery_last_tested"] = now
+                    if result.ok:
+                        config._data["vault"]["recovery_status"] = "Verified"
+                        config.save()
+                        refresh_recovery_summary("Verified", now)
+                        set_status(result.message, "success")
+                        if result.wiped:
+                            kit_path["path"] = None
+                            kit_entry.set_text("")
+                    else:
+                        config._data["vault"]["recovery_status"] = "Failed"
+                        config.save()
+                        refresh_recovery_summary("Failed", now)
+                        set_status(result.message, "error")
+
+                test_btn.connect("clicked", on_test)
+                dialog.present()
+                log.info("vault.recovery_test.dialog.presented")
+            except Exception:
+                log.exception("vault.recovery_test.dialog.exception")
+
+        test_recovery_btn.connect("clicked", open_recovery_test_dialog)
+        log.info("vault.recovery_test.button.connected vault_id_present=%s", bool(vault_id_undashed))
         add_tab("recovery", "Recovery", recovery)
 
         # Other tabs are empty placeholders for later phases.
@@ -4150,7 +4366,6 @@ def show_vault_main(config_dir: Path):
             ("security", "Security"),
             ("sync_safety", "Sync safety"),
             ("storage", "Storage"),
-            ("danger_zone", "Danger zone"),
         ]:
             placeholder = Gtk.Box(
                 orientation=Gtk.Orientation.VERTICAL, spacing=8,
@@ -4161,6 +4376,44 @@ def show_vault_main(config_dir: Path):
                 xalign=0, css_classes=["dim-label"],
             ))
             add_tab(name, title, placeholder)
+
+        danger = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        danger.append(Gtk.Label(label="Disconnect vault", xalign=0, css_classes=["title-3"]))
+        danger.append(Gtk.Label(
+            label="Remove this machine's local connection to the vault.",
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        disconnect_btn = Gtk.Button(label="Disconnect vault", css_classes=["pill", "destructive-action"])
+        disconnect_btn.set_halign(Gtk.Align.START)
+        disconnect_btn.set_sensitive(bool(vault_id_undashed))
+        danger.append(disconnect_btn)
+
+        def on_disconnect_vault(_btn):
+            dlg = Adw.AlertDialog(
+                heading="Disconnect vault?",
+                body="The vault will still exist. This machine will only lose the connection to it.",
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("disconnect", "Disconnect vault")
+            dlg.set_response_appearance("disconnect", Adw.ResponseAppearance.DESTRUCTIVE)
+            dlg.set_default_response("cancel")
+            dlg.set_close_response("cancel")
+
+            def on_resp(_dialog, response):
+                if response != "disconnect":
+                    return
+                from .vault_local import disconnect_local_vault
+                disconnect_local_vault(config)
+                win.close()
+
+            dlg.connect("response", on_resp)
+            dlg.present(win)
+
+        disconnect_btn.connect("clicked", on_disconnect_vault)
+        add_tab("danger_zone", "Danger zone", danger)
 
         apply_pointer_cursors(win)
         win.present()
@@ -4492,6 +4745,7 @@ def show_vault_onboard(config_dir: Path):
                         vault_id=state["vault_id"],
                         recovery_secret=state["recovery_secret_bytes"],
                         vault_access_secret=state["vault_access_secret"],
+                        recovery_envelope_meta=state["recovery_envelope_meta"],
                     )
                 except Exception as exc:
                     export_status.remove_css_class("dim-label")
@@ -4586,15 +4840,13 @@ def show_vault_onboard(config_dir: Path):
             you must back up", and per design feedback users rarely
             go look for files they didn't choose to save.
             """
-            from .vault import Vault
+            from .vault import Vault, recovery_envelope_meta_to_json
 
             try:
-                fake_relay = _BarebonesRelay(config)
+                relay = _create_vault_relay(config)
                 vault = Vault.create_new(
-                    fake_relay,
+                    relay,
                     recovery_passphrase=state["passphrase"],
-                    argon_memory_kib=8192,    # reduced cost for the dev relay walk-through
-                    argon_iterations=2,
                 )
 
                 # Stash the kit material into wizard state. Both buffers
@@ -4614,6 +4866,9 @@ def show_vault_onboard(config_dir: Path):
                 if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
                     config._data["vault"] = {}
                 config._data["vault"]["last_known_id"] = vault.vault_id
+                config._data["vault"]["recovery_envelope_meta"] = recovery_envelope_meta_to_json(
+                    vault.recovery_envelope_meta
+                )
                 config.save()
                 state["completed_successfully"] = True
 
@@ -4743,25 +4998,110 @@ def _local_vault_exists(config) -> bool:
     return bool(raw.get("last_known_id"))
 
 
-class _BarebonesRelay:
-    """Adapter wrapping the existing ApiClient surface to the
-    RelayProtocol used by Vault.create_new. Only used by the wizard
-    walk-through — production callers will inject a richer wrapper.
+def _create_vault_relay(config):
+    """Return the production relay by default.
+
+    Local-only creation is kept for explicit development smoke tests.
+    It must never be the implicit path, because it creates a vault marker
+    that cannot sync or appear on the relay dashboard.
     """
+    import os
+    if os.environ.get("DESKTOP_CONNECTOR_VAULT_LOCAL_RELAY") == "1":
+        return _VaultLocalDevelopmentRelay(config)
+    return _VaultHttpRelay(config)
+
+
+class _VaultHttpRelay:
+    """Adapter from :class:`Vault`'s narrow relay protocol to HTTP."""
+
+    def __init__(self, config) -> None:
+        self._config = config
+        config.reload()
+        if not config.device_id or not config.auth_token:
+            raise RuntimeError("Desktop Connector is not registered with the relay.")
+        from .connection import ConnectionManager
+        self._conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
+
+    def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
+                     header_hash, initial_manifest_ciphertext, initial_manifest_hash):
+        payload = {
+            "vault_id": vault_id,
+            "vault_access_token_hash": base64.b64encode(vault_access_token_hash).decode("ascii"),
+            "encrypted_header": base64.b64encode(encrypted_header).decode("ascii"),
+            "header_hash": header_hash,
+            "initial_manifest_ciphertext": base64.b64encode(initial_manifest_ciphertext).decode("ascii"),
+            "initial_manifest_hash": initial_manifest_hash,
+        }
+        resp = self._conn.request("POST", "/api/vaults", json=payload)
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while creating the vault.")
+        if resp.status_code != 201:
+            raise RuntimeError(
+                f"Relay rejected vault creation: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise RuntimeError("Relay returned a non-JSON vault creation response.") from exc
+        if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
+            raise RuntimeError("Relay returned an invalid vault creation response.")
+        return body["data"]
+
+    def get_header(self, vault_id, vault_access_secret):
+        resp = self._conn.request(
+            "GET",
+            f"/api/vaults/{vault_id}/header",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while fetching the vault header.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault header fetch: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            body = resp.json()
+            data = body["data"]
+            data["encrypted_header"] = base64.b64decode(data["encrypted_header"])
+            return data
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid vault header response.") from exc
+
+    @staticmethod
+    def _error_message(resp) -> str:
+        try:
+            body = resp.json()
+        except ValueError:
+            return resp.text.strip()[:200]
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                code = error.get("code")
+                message = error.get("message")
+                if code and message:
+                    return f"{code}: {message}"
+                if message:
+                    return str(message)
+            if isinstance(error, str):
+                return error
+        return ""
+
+
+class _VaultLocalDevelopmentRelay:
+    """Explicit opt-in local relay for GUI smoke tests without a server."""
 
     def __init__(self, config) -> None:
         self._config = config
 
     def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
                      header_hash, initial_manifest_ciphertext, initial_manifest_hash):
-        # Real HTTP plumbing comes when the desktop wires this into
-        # api_client. For the M1 demo we just record the call locally
-        # so the wizard succeeds end-to-end without a live relay.
-        from . import vault_crypto  # noqa: F401  (sanity import to confirm crypto path is healthy)
+        from . import vault_crypto  # noqa: F401
         return {"vault_id": vault_id}
 
     def get_header(self, vault_id, vault_access_secret):
-        raise NotImplementedError("not used during create_new")
+        raise NotImplementedError("local development relay does not support header fetch")
 
 
 def main():

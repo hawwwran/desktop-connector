@@ -286,9 +286,9 @@ else
     warn "No supported file manager found (Nautilus, Nemo, Dolphin). Right-click integration skipped."
 fi
 
-# --- Autostart (optional, don't overwrite if user removed it) ---
+# --- Autostart (optional; last install wins unless user explicitly disabled it) ---
 
-if [ ! -f "$AUTOSTART_FILE" ] && [ ! -f "$HOME/.config/$APP_NAME/.no-autostart" ]; then
+if [ ! -f "$HOME/.config/$APP_NAME/.no-autostart" ]; then
     mkdir -p "$(dirname "$AUTOSTART_FILE")"
     cat > "$AUTOSTART_FILE" << EOF
 [Desktop Entry]
@@ -301,7 +301,7 @@ NoDisplay=false
 X-GNOME-Autostart-enabled=true
 StartupWMClass=com.desktopconnector.Desktop
 EOF
-    info "Autostart enabled (remove $AUTOSTART_FILE to disable)"
+    info "Autostart entry installed/updated (remove $AUTOSTART_FILE to disable)"
 else
     info "Autostart entry unchanged"
 fi

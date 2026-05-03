@@ -590,12 +590,43 @@ def recovery_kit_path(config_dir, vault_id: str):
     return Path(config_dir) / f"{vault_id_dashed(vault_id)}.dc-vault-recovery"
 
 
+def recovery_envelope_meta_to_json(meta: dict) -> dict:
+    """Serialize non-secret recovery-envelope metadata for config.json."""
+    return {
+        "envelope_id": str(meta["envelope_id"]),
+        "argon_salt_b64": base64.b64encode(meta["argon_salt"]).decode("ascii"),
+        "argon_memory_kib": int(meta["argon_memory_kib"]),
+        "argon_iterations": int(meta["argon_iterations"]),
+        "nonce_b64": base64.b64encode(meta["nonce"]).decode("ascii"),
+        "aead_ciphertext_and_tag_b64": base64.b64encode(
+            meta["aead_ciphertext_and_tag"]
+        ).decode("ascii"),
+    }
+
+
+def recovery_envelope_meta_from_json(data: dict) -> dict:
+    """Deserialize config.json recovery-envelope metadata."""
+    if not isinstance(data, dict):
+        raise ValueError("recovery test metadata is missing")
+    return {
+        "envelope_id": str(data["envelope_id"]),
+        "argon_salt": base64.b64decode(data["argon_salt_b64"]),
+        "argon_memory_kib": int(data["argon_memory_kib"]),
+        "argon_iterations": int(data["argon_iterations"]),
+        "nonce": base64.b64decode(data["nonce_b64"]),
+        "aead_ciphertext_and_tag": base64.b64decode(
+            data["aead_ciphertext_and_tag_b64"]
+        ),
+    }
+
+
 def write_recovery_kit_file(
     path,
     *,
     vault_id: str,
     recovery_secret: bytes,
     vault_access_secret: str,
+    recovery_envelope_meta: dict | None = None,
     created_at: str | None = None,
 ) -> None:
     """Persist the recovery kit per formats §12.5.
@@ -658,6 +689,17 @@ def write_recovery_kit_file(
         f"vault_access_secret: {vault_access_secret}\n"
         "argon_params: argon2id-v1\n"
     )
+    if recovery_envelope_meta is not None:
+        encoded_meta = recovery_envelope_meta_to_json(recovery_envelope_meta)
+        body += (
+            f"recovery_envelope_id: {encoded_meta['envelope_id']}\n"
+            f"recovery_argon_salt: {encoded_meta['argon_salt_b64']}\n"
+            f"recovery_argon_memory_kib: {encoded_meta['argon_memory_kib']}\n"
+            f"recovery_argon_iterations: {encoded_meta['argon_iterations']}\n"
+            f"recovery_envelope_nonce: {encoded_meta['nonce_b64']}\n"
+            "recovery_envelope_ciphertext: "
+            f"{encoded_meta['aead_ciphertext_and_tag_b64']}\n"
+        )
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
@@ -712,13 +754,37 @@ def parse_recovery_kit_file(path) -> dict:
     if len(recovery_secret) != 32:
         raise ValueError(f"recovery_secret decodes to {len(recovery_secret)} bytes; expected 32")
 
-    return {
+    parsed = {
         "vault_id": normalize_vault_id(fields["vault_id"]),
         "vault_id_dashed": vault_id_dashed(normalize_vault_id(fields["vault_id"])),
         "recovery_secret": recovery_secret,
         "vault_access_secret": fields["vault_access_secret"],
         "argon_params": fields["argon_params"],
     }
+    meta_fields = {
+        "recovery_envelope_id",
+        "recovery_argon_salt",
+        "recovery_argon_memory_kib",
+        "recovery_argon_iterations",
+        "recovery_envelope_nonce",
+        "recovery_envelope_ciphertext",
+    }
+    if meta_fields.intersection(fields):
+        missing = sorted(meta_fields - set(fields))
+        if missing:
+            raise ValueError(
+                "recovery kit has incomplete recovery test metadata: "
+                + ", ".join(missing)
+            )
+        parsed["recovery_envelope_meta"] = recovery_envelope_meta_from_json({
+            "envelope_id": fields["recovery_envelope_id"],
+            "argon_salt_b64": fields["recovery_argon_salt"],
+            "argon_memory_kib": fields["recovery_argon_memory_kib"],
+            "argon_iterations": fields["recovery_argon_iterations"],
+            "nonce_b64": fields["recovery_envelope_nonce"],
+            "aead_ciphertext_and_tag_b64": fields["recovery_envelope_ciphertext"],
+        })
+    return parsed
 
 
 def verify_recovery_kit(

@@ -73,6 +73,30 @@ final class VaultsRepositoryTest extends TestCase
         self::assertNull($this->repo->getById('UNKNOWNVAULT'));
     }
 
+    public function test_listForDashboard_exposes_vaults_ordered_by_latest_update(): void
+    {
+        $this->seedVault();
+        $olderVault = 'AAAAAAAAAAAA';
+        $this->repo->create(
+            $olderVault,
+            self::TOKEN_HASH,
+            self::ENC_HEADER,
+            self::HEADER_HASH,
+            self::MFST_HASH,
+            self::NOW + 5
+        );
+        $this->repo->incUsedBytes(self::VAULT_ID, 2048, 2, self::NOW + 30);
+
+        $rows = $this->repo->listForDashboard();
+
+        self::assertCount(2, $rows);
+        self::assertSame(self::VAULT_ID, $rows[0]['vault_id']);
+        self::assertSame(2, (int)$rows[0]['chunk_count']);
+        self::assertSame(2048, (int)$rows[0]['used_ciphertext_bytes']);
+        self::assertSame(self::NOW + 30, (int)$rows[0]['updated_at']);
+        self::assertSame($olderVault, $rows[1]['vault_id']);
+    }
+
     public function test_getHeaderCiphertext_exposes_the_quota_pair(): void
     {
         $this->seedVault();

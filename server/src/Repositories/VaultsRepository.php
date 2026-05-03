@@ -99,6 +99,26 @@ class VaultsRepository
     }
 
     /**
+     * Dashboard summary ordered by freshest activity first. `updated_at`
+     * is the relay-side "last sync" signal for now: manifest CAS, header
+     * writes, chunk accounting, migration state, and GC all stamp it.
+     */
+    public function listForDashboard(): array
+    {
+        return $this->db->queryAll(
+            'SELECT vault_id,
+                    current_manifest_revision,
+                    used_ciphertext_bytes,
+                    chunk_count,
+                    quota_ciphertext_bytes,
+                    created_at,
+                    updated_at
+             FROM vaults
+             ORDER BY updated_at DESC, vault_id ASC'
+        );
+    }
+
+    /**
      * Header-only fetch for GET /api/vaults/{id}/header. Returned shape
      * matches what the controller serializes onto the wire (vault-v1.md §6.2):
      * encrypted_header, header_hash, header_revision, plus the quota counters

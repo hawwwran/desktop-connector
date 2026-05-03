@@ -11,6 +11,7 @@ class DashboardController
     {
         $devices = (new DeviceRepository($db))->findAll();
         $pairings = (new PairingRepository($db))->findAll();
+        $vaults = (new VaultsRepository($db))->listForDashboard();
         $transfers = new TransferRepository($db);
         $chunks = new ChunkRepository($db);
 
@@ -23,6 +24,7 @@ class DashboardController
         $stats = [
             'device_count' => count($devices),
             'pairing_count' => count($pairings),
+            'vault_count' => count($vaults),
             'pending_count' => $transfers->countPendingByCompleteDownloaded(1, 0),
             'uploading_count' => $transfers->countPendingByCompleteDownloaded(0, 0),
             'storage_bytes' => $chunks->sumAllBytes(),
@@ -41,14 +43,15 @@ class DashboardController
         // Without service-account.json the whole row disappears — no point
         // scolding phones for missing tokens on a server that can't use them.
         $fcmAvailable = FcmSender::isAvailable();
-        echo self::render($devices, $pairings, $pendingTransfers, $stats, $now, $fcmAvailable);
+        echo self::render($devices, $pairings, $vaults, $pendingTransfers, $stats, $now, $fcmAvailable);
     }
 
-    private static function render(array $devices, array $pairings, array $transfers,
+    private static function render(array $devices, array $pairings, array $vaults, array $transfers,
                                    ?array $stats, int $now, bool $fcmAvailable): string
     {
         $deviceCount = $stats['device_count'] ?? 0;
         $pairingCount = $stats['pairing_count'] ?? 0;
+        $vaultCount = $stats['vault_count'] ?? 0;
         $pendingCount = $stats['pending_count'] ?? 0;
         $uploadingCount = $stats['uploading_count'] ?? 0;
         $storageBytes = $stats['storage_bytes'] ?? 0;
@@ -140,6 +143,28 @@ class DashboardController
             </tr>";
         }
 
+        $vaultRows = '';
+        foreach ($vaults as $v) {
+            $vaultId = self::formatVaultId((string)$v['vault_id']);
+            $fullVaultId = htmlspecialchars((string)$v['vault_id']);
+            $rev = (int)$v['current_manifest_revision'];
+            $chunksCount = (int)$v['chunk_count'];
+            $used = self::formatBytes((int)$v['used_ciphertext_bytes']);
+            $quota = self::formatBytes((int)$v['quota_ciphertext_bytes']);
+            $lastSyncAt = (int)$v['updated_at'];
+            $lastSync = $lastSyncAt > 0 ? date('Y-m-d H:i:s', $lastSyncAt) : '&mdash;';
+            $vaultRows .= "<tr>
+                <td title=\"{$fullVaultId}\">{$vaultId}</td>
+                <td>{$lastSync}</td>
+                <td>{$rev}</td>
+                <td>{$chunksCount}</td>
+                <td>{$used} / {$quota}</td>
+            </tr>";
+        }
+        if ($vaultRows === '') {
+            $vaultRows = '<tr><td colspan="5" style="color:#5898FB">No vaults</td></tr>';
+        }
+
         $transferRows = '';
         foreach ($transfers as $t) {
             $tid = htmlspecialchars(substr($t['id'], 0, 12) . '...');
@@ -196,6 +221,7 @@ class DashboardController
     <div class="stats">
         <div class="stat"><div class="stat-value">{$deviceCount}</div><div class="stat-label">Devices</div></div>
         <div class="stat"><div class="stat-value">{$pairingCount}</div><div class="stat-label">Pairings</div></div>
+        <div class="stat"><div class="stat-value">{$vaultCount}</div><div class="stat-label">Vaults</div></div>
         <div class="stat"><div class="stat-value">{$pendingCount}</div><div class="stat-label">Pending transfers</div></div>
         <div class="stat"><div class="stat-value">{$uploadingCount}</div><div class="stat-label">Uploading</div></div>
         <div class="stat"><div class="stat-value">{$storageDisplay}</div><div class="stat-label">Storage used</div></div>
@@ -212,6 +238,12 @@ class DashboardController
     <table>
         <tr><th>Device A</th><th>Device B</th><th>Transfers</th><th>Data</th><th>Since</th></tr>
         {$pairingRows}
+    </table>
+
+    <h2>Vaults</h2>
+    <table>
+        <tr><th>Vault ID</th><th>Last sync</th><th>Manifest rev</th><th>Chunks</th><th>Storage</th></tr>
+        {$vaultRows}
     </table>
 
     <h2>Transfer Queue</h2>
@@ -245,6 +277,17 @@ HTML;
             return $m[1];
         }
         return null;
+    }
+
+    private static function formatVaultId(string $vaultId): string
+    {
+        $compact = strtoupper(str_replace('-', '', $vaultId));
+        if (strlen($compact) === 12) {
+            return htmlspecialchars(
+                substr($compact, 0, 4) . '-' . substr($compact, 4, 4) . '-' . substr($compact, 8, 4)
+            );
+        }
+        return htmlspecialchars($vaultId);
     }
 
     private static function formatBytes(int $bytes): string
