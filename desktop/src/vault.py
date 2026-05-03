@@ -72,6 +72,7 @@ from .vault_manifest import (
     make_manifest,
     make_remote_folder,
     normalize_manifest_plaintext,
+    rename_remote_folder as manifest_rename_remote_folder,
 )
 
 log = logging.getLogger(__name__)
@@ -594,6 +595,33 @@ class Vault:
             ignore_patterns=ignore_patterns,
         )
         updated = manifest_add_remote_folder(next_manifest, folder)
+        return self.publish_manifest(relay, updated, local_index=local_index)
+
+    def rename_remote_folder(
+        self,
+        relay: RelayProtocol,
+        *,
+        remote_folder_id: str,
+        new_display_name: str,
+        author_device_id: str,
+        created_at: str | None = None,
+        local_index=None,
+    ) -> dict:
+        """Fetch head, flip one folder's display_name_enc, CAS-publish (T4.5)."""
+        name = str(new_display_name).strip()
+        if not name:
+            raise ValueError("folder name is required")
+
+        current = self.fetch_manifest(relay, local_index=local_index)
+        parent_revision = int(current["revision"])
+        timestamp = created_at or _now_rfc3339()
+        next_manifest = dict(current)
+        next_manifest["revision"] = parent_revision + 1
+        next_manifest["parent_revision"] = parent_revision
+        next_manifest["created_at"] = timestamp
+        next_manifest["author_device_id"] = str(author_device_id)
+
+        updated = manifest_rename_remote_folder(next_manifest, remote_folder_id, name)
         return self.publish_manifest(relay, updated, local_index=local_index)
 
     # ---------------------------------------------------------------- decryption helpers

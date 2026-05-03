@@ -208,6 +208,28 @@ def remove_remote_folder(manifest: dict[str, Any], remote_folder_id: str) -> dic
     return out
 
 
+def rename_remote_folder(
+    manifest: dict[str, Any],
+    remote_folder_id: str,
+    new_display_name: str,
+) -> dict[str, Any]:
+    """Return a manifest copy with ``display_name_enc`` updated for one folder.
+
+    Per §D6, rename touches **only** the encrypted display name; binding,
+    retention, ignore patterns, state, and the per-device local-path map
+    are unaffected.
+    """
+    out = normalize_manifest_plaintext(manifest)
+    name = unicodedata.normalize("NFC", str(new_display_name)).strip()
+    if not name:
+        raise ValueError("folder name is required")
+    for folder in out["remote_folders"]:
+        if folder.get("remote_folder_id") == remote_folder_id:
+            folder["display_name_enc"] = name
+            return out
+    raise ValueError(f"remote folder not found: {remote_folder_id}")
+
+
 def canonical_manifest_json(manifest: dict[str, Any]) -> bytes:
     """Canonical JSON bytes for manifest AEAD plaintext."""
     normalized = normalize_manifest_plaintext(manifest)

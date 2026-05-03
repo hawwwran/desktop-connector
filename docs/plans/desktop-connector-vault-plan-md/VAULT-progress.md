@@ -68,7 +68,7 @@ If a sub-task genuinely requires something the default stack can't provide:
 | T1  | Relay persistent vault storage (tables, repos, endpoints, CAS, quota) | M1 | `[x]` |
 | T2  | Shared crypto + format test vectors (cross-platform, Python harness) | M1 | `[x]` |
 | T3  | Desktop vault create / open / Vault settings window skeleton + main-settings toggle | M1 | `[x]` |
-| T4  | Remote folders + per-folder usage | M2 | `[~]` |
+| T4  | Remote folders + per-folder usage | M2 | `[x]` |
 | T5  | Remote browser read / download / version list | M2 | `[ ]` |
 | T6  | Browser upload (versions, conflict, CAS merge, resumable) | M3 | `[ ]` |
 | T7  | Browser soft delete + restore (tombstones, retention) | M3 | `[ ]` |
@@ -176,8 +176,10 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: A vault with two folders sharing one chunk shows that chunk's size in **both** folder rows but only once in the whole-vault total.
   - 2026-05-03 update: Added `desktop/src/vault_usage.py` to compute per-folder current logical bytes, current stored chunk bytes, retained history/deleted bytes, and a client-side whole-vault unique-chunk total for validation. The Folders tab now refreshes usage from the decrypted current manifest and shows those numbers in the Current / Stored / History columns.
   - Verification: `python3 -m unittest discover -s tests/protocol -p 'test_desktop_vault*.py'`; `python3 -m py_compile desktop/src/vault_usage.py desktop/src/vault.py desktop/src/vault_manifest.py desktop/src/vault_folder_ui_state.py desktop/src/windows.py tests/protocol/test_desktop_vault_usage.py tests/protocol/test_desktop_vault_folder_ui_state.py tests/protocol/test_desktop_vault_folders.py`; `git diff --check`.
-- [ ] **T4.5** — Folder-rename flow: rename is a manifest op that updates `display_name_enc` only. Local paths in bindings unaffected (per §D6).
+- [x] **T4.5** — Folder-rename flow: rename is a manifest op that updates `display_name_enc` only. Local paths in bindings unaffected (per §D6).
   - Accept: After rename, manifest CAS-publishes a new revision; cached display name updates; no local-binding side effects.
+  - 2026-05-03 update: Added `vault_manifest.rename_remote_folder` (manifest helper that NFC-normalizes + flips `display_name_enc` only, leaving every sibling field byte-equal) and `Vault.rename_remote_folder` (fetch → mutate → CAS publish at `parent_revision + 1`, refreshes the local folder cache). Wired the Folders tab's previously-disabled global Rename button to a dialog with a folder dropdown + new-name entry; on Save the worker thread runs the publish and refreshes the table. Source-pin test enforces the dialog can't regress to a fake/disabled stub.
+  - Verification: `python3 -m unittest discover tests/protocol`; `python3 -m py_compile desktop/src/vault.py desktop/src/vault_manifest.py desktop/src/vault_folders_tab.py`.
 
 ---
 

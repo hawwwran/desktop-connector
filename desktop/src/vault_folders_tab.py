@@ -43,8 +43,7 @@ def build_vault_folders_tab(
     add_folder_btn = Gtk.Button(label="Add", css_classes=["pill", "suggested-action"])
     add_folder_btn.set_sensitive(bool(vault_id))
     rename_folder_btn = Gtk.Button(label="Rename", css_classes=["pill"])
-    rename_folder_btn.set_sensitive(False)
-    rename_folder_btn.set_tooltip_text("Folder rename is implemented in T4.5")
+    rename_folder_btn.set_sensitive(bool(vault_id))
     delete_folder_btn = Gtk.Button(label="Delete", css_classes=["pill", "destructive-action"])
     delete_folder_btn.set_sensitive(False)
     delete_folder_btn.set_tooltip_text("Folder delete is implemented in T7/T14")
@@ -262,7 +261,155 @@ def build_vault_folders_tab(
         confirm_btn.connect("clicked", on_confirm)
         dialog.present()
 
+    def open_rename_folder_dialog(_btn) -> None:
+        if not vault_id:
+            return
+        try:
+            cached = local_index.list_remote_folders(vault_id)
+        except Exception as exc:
+            folders_status.set_label(f"Could not load the local folder cache: {exc}")
+            return
+        if not cached:
+            folders_status.set_label("No remote folders to rename.")
+            return
+
+        choices: list[tuple[str, str]] = [
+            (str(f.get("display_name_enc", "")), str(f.get("remote_folder_id", "")))
+            for f in cached
+            if f.get("remote_folder_id")
+        ]
+
+        dialog = Adw.ApplicationWindow(
+            application=app,
+            title="Rename folder",
+            default_width=480,
+            default_height=260,
+        )
+        dialog.set_transient_for(parent_window)
+        dialog.set_modal(True)
+        dialog_toolbar = Adw.ToolbarView()
+        dialog.set_content(dialog_toolbar)
+        dialog_toolbar.add_top_bar(Adw.HeaderBar())
+
+        body_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        dialog_toolbar.set_content(body_box)
+        body_box.append(Gtk.Label(label="Rename remote folder", xalign=0, css_classes=["title-2"]))
+
+        body_box.append(Gtk.Label(label="Folder", xalign=0, css_classes=["dim-label"]))
+        folder_dropdown = Gtk.DropDown.new_from_strings(
+            [name for name, _ in choices],
+        )
+        folder_dropdown.set_hexpand(True)
+        body_box.append(folder_dropdown)
+
+        body_box.append(Gtk.Label(label="New name", xalign=0, css_classes=["dim-label"]))
+        name_entry = Gtk.Entry(hexpand=True)
+        name_entry.set_text(choices[0][0])
+        body_box.append(name_entry)
+
+        dialog_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        body_box.append(dialog_status)
+
+        dialog_buttons = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+            halign=Gtk.Align.END,
+        )
+        body_box.append(dialog_buttons)
+        cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
+        confirm_btn = Gtk.Button(label="Save", css_classes=["pill", "suggested-action"])
+        dialog_buttons.append(cancel_btn)
+        dialog_buttons.append(confirm_btn)
+
+        cancel_btn.connect("clicked", lambda _button: dialog.close())
+
+        def set_dialog_status(message: str, css_class: str = "dim-label") -> None:
+            for klass in ("dim-label", "error", "success"):
+                dialog_status.remove_css_class(klass)
+            dialog_status.add_css_class(css_class)
+            dialog_status.set_label(message)
+
+        def selected_folder() -> tuple[str, str]:
+            i = folder_dropdown.get_selected()
+            if 0 <= i < len(choices):
+                return choices[i]
+            return choices[0]
+
+        def on_dropdown_changed(_combo, _pspec) -> None:
+            current_name, _rfid = selected_folder()
+            name_entry.set_text(current_name)
+
+        folder_dropdown.connect("notify::selected", on_dropdown_changed)
+
+        def on_confirm(_button) -> None:
+            current_name, rfid = selected_folder()
+            new_name = name_entry.get_text().strip()
+            if not new_name:
+                set_dialog_status("Enter a folder name.", "error")
+                return
+            if new_name == current_name:
+                set_dialog_status("Name is unchanged.", "error")
+                return
+
+            confirm_btn.set_sensitive(False)
+            cancel_btn.set_sensitive(False)
+            folder_dropdown.set_sensitive(False)
+            name_entry.set_sensitive(False)
+            set_dialog_status("Renaming folder...", "dim-label")
+
+            def worker() -> None:
+                try:
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                    try:
+                        author_device_id = config.device_id or ("0" * 32)
+                        manifest = vault.rename_remote_folder(
+                            relay,
+                            remote_folder_id=rfid,
+                            new_display_name=new_name,
+                            author_device_id=author_device_id,
+                            local_index=local_index,
+                        )
+                        usage = calculate_vault_usage(manifest).by_folder
+                    finally:
+                        vault.close()
+                except Exception as exc:
+                    error_message = str(exc)
+
+                    def fail() -> bool:
+                        confirm_btn.set_sensitive(True)
+                        cancel_btn.set_sensitive(True)
+                        folder_dropdown.set_sensitive(True)
+                        name_entry.set_sensitive(True)
+                        set_dialog_status(f"Could not rename folder: {error_message}", "error")
+                        return False
+
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    usage_by_folder_state["value"] = usage
+                    dialog.close()
+                    refresh_folders_table(f"Renamed to {new_name}.")
+                    return False
+
+                GLib.idle_add(succeed)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        confirm_btn.connect("clicked", on_confirm)
+        dialog.present()
+
     add_folder_btn.connect("clicked", open_add_folder_dialog)
+    rename_folder_btn.connect("clicked", open_rename_folder_dialog)
     refresh_folders_table()
     refresh_folders_usage_async()
     return folders

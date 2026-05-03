@@ -130,6 +130,104 @@ class VaultFolderPublishTests(unittest.TestCase):
         self.assertEqual(len(cached), 1)
         self.assertEqual(cached[0]["display_name_enc"], "Documents")
 
+    def test_rename_remote_folder_fetches_and_cas_publishes_revision(self) -> None:
+        """T4.5 — rename round-trips via fetch → mutate display_name_enc →
+        publish, and the per-folder local cache reflects the new name on
+        the next decrypt.
+        """
+        case = _manifest_vector("manifest-v1-legacy-no-remote-folders")
+        relay = FakeManifestRelay(
+            bytes.fromhex(case["expected"]["envelope_bytes"]),
+            revision=int(case["inputs"]["revision"]),
+            parent_revision=int(case["inputs"]["parent_revision"]),
+        )
+        vault = Vault(
+            vault_id=VAULT_ID,
+            master_key=MASTER_KEY,
+            recovery_secret=None,
+            vault_access_secret="bearer",
+            header_revision=0,
+            manifest_revision=0,
+            manifest_ciphertext=b"",
+            crypto=DefaultVaultCrypto,
+        )
+        tmpdir = tempfile.mkdtemp(prefix="vault_folder_rename_test_")
+        local_index = VaultLocalIndex(Path(tmpdir))
+
+        # Seed: add a folder so there's something to rename.
+        vault.add_remote_folder(
+            relay,
+            display_name="Documents",
+            ignore_patterns=[".git/"],
+            author_device_id=AUTHOR,
+            created_at="2026-05-03T13:00:00.000Z",
+            remote_folder_id=DOCS_ID,
+            local_index=local_index,
+        )
+
+        renamed = vault.rename_remote_folder(
+            relay,
+            remote_folder_id=DOCS_ID,
+            new_display_name="Notes",
+            author_device_id=AUTHOR,
+            created_at="2026-05-03T13:10:00.000Z",
+            local_index=local_index,
+        )
+
+        # Revision advances by 1 (CAS), parent_revision matches the seed
+        # publish's revision.
+        self.assertEqual(renamed["revision"], 8)
+        self.assertEqual(renamed["parent_revision"], 7)
+        # Only display_name_enc changed.
+        self.assertEqual(len(renamed["remote_folders"]), 1)
+        folder = renamed["remote_folders"][0]
+        self.assertEqual(folder["display_name_enc"], "Notes")
+        self.assertEqual(folder["remote_folder_id"], DOCS_ID)
+        self.assertEqual(folder["ignore_patterns"], [".git/"])
+
+        # Last put_call is the rename publish, with parent_revision=7.
+        last_put = relay.put_calls[-1]
+        self.assertEqual(last_put["expected_current_revision"], 7)
+        self.assertEqual(last_put["new_revision"], 8)
+        self.assertEqual(
+            last_put["manifest_hash"],
+            hashlib.sha256(last_put["manifest_ciphertext"]).hexdigest(),
+        )
+
+        # Local index reflects the new name.
+        cached = local_index.list_remote_folders(VAULT_ID)
+        self.assertEqual(len(cached), 1)
+        self.assertEqual(cached[0]["display_name_enc"], "Notes")
+
+    def test_rename_remote_folder_rejects_unknown_id(self) -> None:
+        case = _manifest_vector("manifest-v1-legacy-no-remote-folders")
+        relay = FakeManifestRelay(
+            bytes.fromhex(case["expected"]["envelope_bytes"]),
+            revision=int(case["inputs"]["revision"]),
+            parent_revision=int(case["inputs"]["parent_revision"]),
+        )
+        vault = Vault(
+            vault_id=VAULT_ID,
+            master_key=MASTER_KEY,
+            recovery_secret=None,
+            vault_access_secret="bearer",
+            header_revision=0,
+            manifest_revision=0,
+            manifest_ciphertext=b"",
+            crypto=DefaultVaultCrypto,
+        )
+
+        with self.assertRaises(ValueError):
+            vault.rename_remote_folder(
+                relay,
+                remote_folder_id=DOCS_ID,
+                new_display_name="Notes",
+                author_device_id=AUTHOR,
+            )
+
+        # Nothing was published.
+        self.assertEqual(relay.put_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

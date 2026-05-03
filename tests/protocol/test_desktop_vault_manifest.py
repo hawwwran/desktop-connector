@@ -21,6 +21,7 @@ from src.vault_manifest import (  # noqa: E402
     make_remote_folder,
     normalize_manifest_plaintext,
     remove_remote_folder,
+    rename_remote_folder,
 )
 from src.vault import Vault  # noqa: E402
 from src.vault_crypto import DefaultVaultCrypto  # noqa: E402
@@ -157,6 +158,100 @@ class VaultManifestSchemaTests(unittest.TestCase):
         plaintext = canonical_manifest_json(remove_remote_folder(base, PHOTOS_ID))
 
         self.assertEqual(plaintext, _manifest_vector_plaintext("manifest-v1-t4-remove-remote-folder"))
+
+    def test_rename_remote_folder_only_changes_display_name(self) -> None:
+        docs = make_remote_folder(
+            remote_folder_id=DOCS_ID,
+            display_name_enc="Documents",
+            created_at="2026-05-03T13:00:00.000Z",
+            created_by_device_id=AUTHOR,
+            ignore_patterns=[".git/", "node_modules/", "*.tmp"],
+        )
+        photos = make_remote_folder(
+            remote_folder_id=PHOTOS_ID,
+            display_name_enc="Photos",
+            created_at="2026-05-03T13:01:00.000Z",
+            created_by_device_id=AUTHOR,
+            retention_policy={"keep_deleted_days": 60, "keep_versions": 20},
+            ignore_patterns=["*.tmp"],
+        )
+        base = make_manifest(
+            vault_id=VAULT_ID,
+            revision=4,
+            parent_revision=3,
+            created_at="2026-05-03T13:05:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[docs, photos],
+        )
+
+        renamed = rename_remote_folder(base, DOCS_ID, "Notes")
+
+        # Only display_name_enc on the targeted folder changed.
+        self.assertEqual(renamed["remote_folders"][0]["display_name_enc"], "Notes")
+        # The untouched folder is byte-equal.
+        self.assertEqual(renamed["remote_folders"][1], base["remote_folders"][1])
+        # Sibling fields on the renamed folder are unchanged (per §D6).
+        renamed_docs = renamed["remote_folders"][0]
+        for field in (
+            "remote_folder_id",
+            "created_at",
+            "created_by_device_id",
+            "retention_policy",
+            "ignore_patterns",
+            "state",
+        ):
+            self.assertEqual(renamed_docs[field], docs[field], msg=f"field changed: {field}")
+        # Source manifest wasn't mutated.
+        self.assertEqual(base["remote_folders"][0]["display_name_enc"], "Documents")
+
+    def test_rename_remote_folder_normalizes_nfc(self) -> None:
+        # NFD-decomposed "Café" must persist as NFC.
+        docs = make_remote_folder(
+            remote_folder_id=DOCS_ID,
+            display_name_enc="Documents",
+            created_at="2026-05-03T13:00:00.000Z",
+            created_by_device_id=AUTHOR,
+        )
+        base = make_manifest(
+            vault_id=VAULT_ID, revision=2, parent_revision=1,
+            created_at="2026-05-03T13:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[docs],
+        )
+
+        nfd = "Café"   # 'e' + combining acute
+        nfc = "Café"
+
+        renamed = rename_remote_folder(base, DOCS_ID, nfd)
+
+        self.assertEqual(renamed["remote_folders"][0]["display_name_enc"], nfc)
+
+    def test_rename_remote_folder_rejects_blank_name(self) -> None:
+        docs = make_remote_folder(
+            remote_folder_id=DOCS_ID,
+            display_name_enc="Documents",
+            created_at="2026-05-03T13:00:00.000Z",
+            created_by_device_id=AUTHOR,
+        )
+        base = make_manifest(
+            vault_id=VAULT_ID, revision=2, parent_revision=1,
+            created_at="2026-05-03T13:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[docs],
+        )
+
+        with self.assertRaises(ValueError):
+            rename_remote_folder(base, DOCS_ID, "   ")
+
+    def test_rename_remote_folder_unknown_id_raises(self) -> None:
+        base = make_manifest(
+            vault_id=VAULT_ID, revision=2, parent_revision=1,
+            created_at="2026-05-03T13:00:00.000Z",
+            author_device_id=AUTHOR,
+        )
+
+        with self.assertRaises(ValueError):
+            rename_remote_folder(base, DOCS_ID, "Notes")
 
 
 if __name__ == "__main__":
