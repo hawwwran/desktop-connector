@@ -38,7 +38,9 @@ class VaultsRepository
         string $encryptedHeader,
         string $headerHash,
         string $initialManifestHash,
-        int $now
+        int $now,
+        int $initialHeaderRevision = 1,
+        int $initialManifestRevision = 1
     ): void {
         $this->db->execute(
             'INSERT INTO vaults (
@@ -57,9 +59,9 @@ class VaultsRepository
                 :vault_id,
                 :token_hash,
                 :enc_header,
-                1,
+                :header_rev,
                 :header_hash,
-                1,
+                :manifest_rev,
                 :manifest_hash,
                 0,
                 0,
@@ -70,7 +72,9 @@ class VaultsRepository
                 ':vault_id'      => $vaultId,
                 ':token_hash'    => new Blob($vaultAccessTokenHash),
                 ':enc_header'    => new Blob($encryptedHeader),
+                ':header_rev'    => $initialHeaderRevision,
                 ':header_hash'   => $headerHash,
+                ':manifest_rev'  => $initialManifestRevision,
                 ':manifest_hash' => $initialManifestHash,
                 ':now'           => $now,
             ]

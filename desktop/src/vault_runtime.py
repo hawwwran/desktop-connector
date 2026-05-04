@@ -87,7 +87,8 @@ class VaultHttpRelay:
         self._conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
 
     def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
-                     header_hash, initial_manifest_ciphertext, initial_manifest_hash):
+                     header_hash, initial_manifest_ciphertext, initial_manifest_hash,
+                     *, initial_manifest_revision=None, initial_header_revision=None):
         payload = {
             "vault_id": vault_id,
             "vault_access_token_hash": base64.b64encode(vault_access_token_hash).decode("ascii"),
@@ -96,6 +97,10 @@ class VaultHttpRelay:
             "initial_manifest_ciphertext": base64.b64encode(initial_manifest_ciphertext).decode("ascii"),
             "initial_manifest_hash": initial_manifest_hash,
         }
+        if initial_manifest_revision is not None:
+            payload["initial_manifest_revision"] = int(initial_manifest_revision)
+        if initial_header_revision is not None:
+            payload["initial_header_revision"] = int(initial_header_revision)
         resp = self._conn.request("POST", "/api/vaults", json=payload)
         if resp is None:
             raise RuntimeError("Could not reach the relay while creating the vault.")
@@ -236,6 +241,65 @@ class VaultHttpRelay:
                 f"{self._error_message(resp)}"
             )
         return resp.content
+
+    def migration_start(self, vault_id, vault_access_secret, *, target_relay_url):
+        """T9.2 — record migration intent on the source relay."""
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/migration/start",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json={"target_relay_url": str(target_relay_url)},
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the source relay while starting migration.")
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Relay rejected migration start: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid migration-start response.") from exc
+
+    def migration_verify_source(self, vault_id, vault_access_secret):
+        """T9.2 — fetch the source's authoritative aggregates for diffing."""
+        resp = self._conn.request(
+            "GET",
+            f"/api/vaults/{vault_id}/migration/verify-source",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the source relay while verifying migration.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected migration verify: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid migration-verify response.") from exc
+
+    def migration_commit(self, vault_id, vault_access_secret, *, target_relay_url):
+        """T9.2 — flip the source vault to read-only, stamping migrated_to."""
+        resp = self._conn.request(
+            "PUT",
+            f"/api/vaults/{vault_id}/migration/commit",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json={"target_relay_url": str(target_relay_url)},
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the source relay while committing migration.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected migration commit: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid migration-commit response.") from exc
 
     def gc_plan(self, vault_id, vault_access_secret, *, manifest_revision, candidate_chunk_ids):
         resp = self._conn.request(

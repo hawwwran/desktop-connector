@@ -76,19 +76,37 @@ class VaultController
         $manifestCipher = self::decodeBase64Field($body, 'initial_manifest_ciphertext');
         $manifestHash = Validators::requireNonEmptyString($body, 'initial_manifest_hash');
 
+        // T9.3 — relay-to-relay migration bootstraps the target at the
+        // source's revision so manifest envelope AAD (which carries
+        // revision/parent_revision) round-trips verbatim. Defaults to 1
+        // for the standard create path.
+        $initialManifestRevision = isset($body['initial_manifest_revision'])
+            ? Validators::requireInt($body, 'initial_manifest_revision') : 1;
+        $initialHeaderRevision = isset($body['initial_header_revision'])
+            ? Validators::requireInt($body, 'initial_header_revision') : 1;
+        if ($initialManifestRevision < 1 || $initialHeaderRevision < 1) {
+            throw new VaultInvalidRequestError(
+                'initial_*_revision must be >= 1',
+                'initial_manifest_revision'
+            );
+        }
+
         $vaultsRepo = new VaultsRepository($db);
         if ($vaultsRepo->getById($vaultId) !== null) {
             throw new VaultAlreadyExistsError($vaultId);
         }
 
         $now = time();
-        $vaultsRepo->create($vaultId, $tokenHash, $encHeader, $headerHash, $manifestHash, $now);
+        $vaultsRepo->create(
+            $vaultId, $tokenHash, $encHeader, $headerHash, $manifestHash, $now,
+            $initialHeaderRevision, $initialManifestRevision,
+        );
 
         $manifestsRepo = new VaultManifestsRepository($db);
         $manifestsRepo->create(
             $vaultId,
-            1,
-            0,
+            $initialManifestRevision,
+            $initialManifestRevision - 1,
             $manifestHash,
             $manifestCipher,
             strlen($manifestCipher),
@@ -100,8 +118,8 @@ class VaultController
             'ok' => true,
             'data' => [
                 'vault_id'               => self::dashedVaultId($vaultId),
-                'header_revision'        => 1,
-                'manifest_revision'      => 1,
+                'header_revision'        => $initialHeaderRevision,
+                'manifest_revision'      => $initialManifestRevision,
                 'quota_ciphertext_bytes' => 1073741824,
                 'used_ciphertext_bytes'  => 0,
                 'created_at'             => self::ts($now),
