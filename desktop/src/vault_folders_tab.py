@@ -10,7 +10,9 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Pango
 
+from .vault_bindings import VaultBindingsStore
 from .vault_cache import VaultLocalIndex
+from .vault_connect_folder_dialog import present_connect_folder_dialog
 from .vault_folder_ui_state import (
     FOLDER_COLUMNS,
     default_ignore_patterns_text,
@@ -44,11 +46,18 @@ def build_vault_folders_tab(
     add_folder_btn.set_sensitive(bool(vault_id))
     rename_folder_btn = Gtk.Button(label="Rename", css_classes=["pill"])
     rename_folder_btn.set_sensitive(bool(vault_id))
+    connect_local_btn = Gtk.Button(label="Connect local folder…", css_classes=["pill"])
+    connect_local_btn.set_sensitive(False)
+    connect_local_btn.set_tooltip_text(
+        "Bind this remote folder to a local path. Default sync mode is "
+        "Backup only (uploads local changes; remote changes never come down)."
+    )
     delete_folder_btn = Gtk.Button(label="Delete", css_classes=["pill", "destructive-action"])
     delete_folder_btn.set_sensitive(False)
     delete_folder_btn.set_tooltip_text("Folder delete is implemented in T7/T14")
     folder_actions.append(add_folder_btn)
     folder_actions.append(rename_folder_btn)
+    folder_actions.append(connect_local_btn)
     folder_actions.append(delete_folder_btn)
 
     folders_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
@@ -410,6 +419,72 @@ def build_vault_folders_tab(
 
     add_folder_btn.connect("clicked", open_add_folder_dialog)
     rename_folder_btn.connect("clicked", open_rename_folder_dialog)
+
+    def open_connect_local_dialog(_btn) -> None:
+        if not vault_id:
+            return
+        # Fetch the live manifest in a worker so the UI thread stays
+        # responsive while the relay round-trip resolves.
+        connect_local_btn.set_sensitive(False)
+
+        def worker() -> None:
+            try:
+                config.reload()
+                relay = create_vault_relay(config)
+                vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                try:
+                    manifest = vault.fetch_manifest(relay, local_index=local_index)
+                finally:
+                    vault.close()
+            except Exception as exc:
+                error_message = str(exc)
+
+                def fail() -> bool:
+                    connect_local_btn.set_sensitive(True)
+                    folders_status.set_label(
+                        f"Could not load manifest for connect: {error_message}"
+                    )
+                    return False
+
+                GLib.idle_add(fail)
+                return
+
+            def show() -> bool:
+                connect_local_btn.set_sensitive(True)
+                choices = [
+                    (str(f.get("display_name_enc", "")),
+                     str(f.get("remote_folder_id", "")))
+                    for f in manifest.get("remote_folders", []) or []
+                    if isinstance(f, dict)
+                    and str(f.get("state", "active")) == "active"
+                ]
+                if not choices:
+                    folders_status.set_label(
+                        "No remote folders yet — create one before connecting a "
+                        "local folder."
+                    )
+                    return False
+                store = VaultBindingsStore(local_index.db_path)
+                present_connect_folder_dialog(
+                    parent_window=parent_window,
+                    folder_choices=choices,
+                    manifest=manifest,
+                    vault_id=vault_id,
+                    store=store,
+                    on_confirmed=lambda record: folders_status.set_label(
+                        f"Binding created (state: needs-preflight). "
+                        f"Initial baseline lands in T10.3."
+                    ),
+                )
+                return False
+
+            GLib.idle_add(show)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    connect_local_btn.set_sensitive(bool(vault_id))
+    connect_local_btn.connect("clicked", open_connect_local_dialog)
+
     refresh_folders_table()
     refresh_folders_usage_async()
     return folders
