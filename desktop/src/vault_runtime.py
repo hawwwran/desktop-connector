@@ -192,6 +192,47 @@ class VaultHttpRelay:
         except Exception as exc:
             raise RuntimeError("Relay returned an invalid vault manifest publish response.") from exc
 
+    def batch_head_chunks(self, vault_id, vault_access_secret, chunk_ids):
+        chunks = {}
+        ids = list(chunk_ids)
+        for start in range(0, len(ids), 1024):
+            batch = ids[start:start + 1024]
+            resp = self._conn.request(
+                "POST",
+                f"/api/vaults/{vault_id}/chunks/batch-head",
+                headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+                json={"chunk_ids": batch},
+            )
+            if resp is None:
+                raise RuntimeError("Could not reach the relay while checking vault chunks.")
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"Relay rejected vault chunk check: HTTP {resp.status_code} "
+                    f"{self._error_message(resp)}"
+                )
+            try:
+                body = resp.json()
+                data = body["data"]
+                chunks.update(data["chunks"])
+            except Exception as exc:
+                raise RuntimeError("Relay returned an invalid vault chunk check response.") from exc
+        return chunks
+
+    def get_chunk(self, vault_id, vault_access_secret, chunk_id):
+        resp = self._conn.request(
+            "GET",
+            f"/api/vaults/{vault_id}/chunks/{chunk_id}",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while downloading a vault chunk.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault chunk download: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        return resp.content
+
     @staticmethod
     def _error_message(resp) -> str:
         try:
@@ -231,3 +272,9 @@ class VaultLocalDevelopmentRelay:
 
     def put_manifest(self, vault_id, vault_access_secret, **kwargs):
         raise NotImplementedError("local development relay does not support manifest publish")
+
+    def batch_head_chunks(self, vault_id, vault_access_secret, chunk_ids):
+        raise NotImplementedError("local development relay does not support chunk checks")
+
+    def get_chunk(self, vault_id, vault_access_secret, chunk_id):
+        raise NotImplementedError("local development relay does not support chunk download")

@@ -134,6 +134,20 @@ class RelayProtocol(Protocol):
         manifest_ciphertext: bytes,
     ) -> dict: ...
 
+    def batch_head_chunks(
+        self,
+        vault_id: str,
+        vault_access_secret: str,
+        chunk_ids: list[str],
+    ) -> dict: ...
+
+    def get_chunk(
+        self,
+        vault_id: str,
+        vault_access_secret: str,
+        chunk_id: str,
+    ) -> bytes: ...
+
 
 class Vault:
     """Open vault state on the desktop side.
@@ -686,26 +700,9 @@ class Vault:
 
         Raises ``ValueError`` if the vault is closed.
         """
-        if self._closed or not self._master_key:
-            raise ValueError("vault is closed")
-        if len(self._manifest_ciphertext) < 85 + 16:
-            raise ValueError("manifest_ciphertext too short")
-        # Plaintext header layout per formats §10.1:
-        #   format_version(1) | vault_id(12) | revision(8) | parent(8)
-        #   | author_device_id(32) | nonce(24) | aead(N)
-        nonce = self._manifest_ciphertext[1 + 12 + 8 + 8 + 32 : 85]
-        ct = self._manifest_ciphertext[85:]
-        revision = int.from_bytes(self._manifest_ciphertext[13:21], "big")
-        parent = int.from_bytes(self._manifest_ciphertext[21:29], "big")
-        author = self._manifest_ciphertext[29:61].decode("ascii")
+        from .vault_browser_model import decrypt_manifest
 
-        manifest_subkey = derive_subkey("dc-vault-v1/manifest", bytes(self._master_key))
-        aad = build_manifest_aad(
-            vault_id=self._vault_id, revision=revision,
-            parent_revision=parent, author_device_id=author,
-        )
-        plaintext = aead_decrypt(ct, manifest_subkey, nonce, aad)
-        manifest = normalize_manifest_plaintext(json.loads(plaintext.decode("utf-8")))
+        manifest = decrypt_manifest(self, self._manifest_ciphertext)
         if local_index is not None:
             local_index.refresh_remote_folders_cache(manifest)
         return manifest

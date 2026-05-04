@@ -977,7 +977,7 @@ class TrayApp:
             ),
             pystray.MenuItem(
                 "Open Vault…",
-                self._spawn_vault_main,
+                self._spawn_vault_browser,
                 visible=lambda _: self._vault_submenu_entry_visible("open_vault"),
             ),
             pystray.MenuItem(
@@ -1017,6 +1017,9 @@ class TrayApp:
 
     def _spawn_vault_main(self, *_) -> None:
         self._open_gtk4_window("vault-main")
+
+    def _spawn_vault_browser(self, *_) -> None:
+        self._open_gtk4_window("vault-browser")
 
     def _vault_sync_now_stub(self, *_) -> None:
         log.info("vault.tray.sync_now.stub")
