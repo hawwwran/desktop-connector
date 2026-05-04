@@ -141,6 +141,80 @@ class VaultLocalIndex:
                     ON vault_remote_folders_cache (vault_id, manifest_revision)
                 """
             )
+            # T10.1 — local binding + sync state. Per §A12 the binding's
+            # state and sync_mode are independent axes — the same row
+            # carries both, plus the last manifest revision the sync
+            # loop reconciled against. The schema is intentionally
+            # close to a flat join table; richer per-folder config
+            # (ignore patterns, etc.) lives in the encrypted manifest
+            # so we don't need to duplicate it here.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vault_bindings (
+                    binding_id            TEXT PRIMARY KEY,
+                    vault_id              TEXT NOT NULL,
+                    remote_folder_id      TEXT NOT NULL,
+                    local_path            TEXT NOT NULL,
+                    state                 TEXT NOT NULL,
+                    sync_mode             TEXT NOT NULL,
+                    last_synced_revision  INTEGER NOT NULL DEFAULT 0,
+                    created_at            TEXT NOT NULL,
+                    updated_at            TEXT NOT NULL,
+                    UNIQUE (vault_id, remote_folder_id, local_path)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_vault_bindings_vault_state
+                    ON vault_bindings (vault_id, state)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vault_local_entries (
+                    binding_id            TEXT NOT NULL,
+                    relative_path         TEXT NOT NULL,
+                    content_fingerprint   TEXT NOT NULL DEFAULT '',
+                    size_bytes            INTEGER NOT NULL DEFAULT 0,
+                    mtime_ns              INTEGER NOT NULL DEFAULT 0,
+                    last_synced_revision  INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (binding_id, relative_path),
+                    FOREIGN KEY (binding_id) REFERENCES vault_bindings(binding_id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_vault_local_entries_revision
+                    ON vault_local_entries (binding_id, last_synced_revision)
+                """
+            )
+            # Pending ops queue: watcher (T10.4) enqueues here, sync loop
+            # (T10.5) drains. ``op_id`` is autoincrement so the loop
+            # always sees a stable FIFO order.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vault_pending_operations (
+                    op_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    binding_id     TEXT NOT NULL,
+                    op_type        TEXT NOT NULL,
+                    relative_path  TEXT NOT NULL,
+                    enqueued_at    INTEGER NOT NULL,
+                    attempts       INTEGER NOT NULL DEFAULT 0,
+                    last_error     TEXT,
+                    FOREIGN KEY (binding_id) REFERENCES vault_bindings(binding_id)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_vault_pending_operations_binding
+                    ON vault_pending_operations (binding_id, enqueued_at)
+                """
+            )
             conn.commit()
         finally:
             conn.close()
