@@ -472,8 +472,9 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: Manual smoke test on a corrupted vault produces a clean working vault after repair.
 - [ ] **T17.5** — Debug bundle: ZIP including config (redacted), local index schema dump, op-log tail (no plaintext), binding states, error counts. Excludes everything sensitive.
   - Accept: Bundle round-trip-shareable; grep-checked for absence of `vault_master_key`, `recovery`, `passphrase`, `Authorization:` headers, decrypted filenames.
-- [ ] **T17.6** — Event vocabulary catalog: extend `docs/diagnostics.events.md` with vault-prefixed events. Verify each is emitted somewhere in the codebase.
+- [x] **T17.6** — Event vocabulary catalog: extend `docs/diagnostics.events.md` with vault-prefixed events. Verify each is emitted somewhere in the codebase.
   - Accept: Events doc lists all `vault.*` events in alphabetical order; CI grep verifies each event tag has at least one emit site.
+  - 2026-05-05: docs/diagnostics.events.md gained a "### vault" section with 60+ rows. tests/protocol/test_docs_vault_events_catalog.py is the CI-runnable guard — extracts every `vault.*` tag from the catalog, asserts each has at least one grep hit under desktop/src + server/src + tests, AND that the rows are in strict alphabetical order so a human eye-scan stays predictable.
 
 ---
 
