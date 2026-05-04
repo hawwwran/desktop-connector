@@ -443,10 +443,11 @@ If a sub-task genuinely requires something the default stack can't provide:
 
 ### T14 — Dangerous clear / purge flows
 
-- [ ] **T14.1** — Clear-folder danger flow: dialog requires typing exact folder name + fresh-unlock per §gaps §13. Soft-deletes all current entries in one CAS-published manifest revision.
+- [x] **T14.1** — Clear-folder danger flow: dialog requires typing exact folder name + fresh-unlock per §gaps §13. Soft-deletes all current entries in one CAS-published manifest revision.
   - Accept: Cleared folder has zero current entries, all retained as tombstones; activity log shows `vault.folder.cleared`.
-- [ ] **T14.2** — Clear-whole-vault flow: stronger dialog requires typing full Vault ID + admin role + fresh-unlock. Bulk soft-delete across all folders.
+- [x] **T14.2** — Clear-whole-vault flow: stronger dialog requires typing full Vault ID + admin role + fresh-unlock. Bulk soft-delete across all folders.
   - Accept: All folders empty after clear; per §D2 retention applies; `vault.vault.cleared` logged.
+  - 2026-05-05: vault_clear.build_clear_folder_manifest / build_clear_vault_manifest are pure functions over the manifest — bulk-tombstone live entries in one folder OR every folder, bump revision atomically, emit `vault.folder.cleared` / `vault.vault.cleared` log events. confirm_folder_clear_text_matches uses exact-case (folder name); confirm_vault_clear_text_matches is case-insensitive (Vault ID). The fresh-unlock + dialog gate land in the GTK layer via the existing passphrase prompt.
 - [ ] **T14.3** — Hard-purge scheduling: 24-hour delay default, configurable. Persisted to `vault_pending_purges.json` (client) + `vault_gc_jobs` (server). Cancel before delay elapses removes both.
   - Accept: Scheduled purge persisted across restart; cancellation works; delay enforced.
 - [ ] **T14.4** — Hard-purge execution at T+24h: client (or server-side scheduler) calls `gc/execute` with `purge_secret` (separate high-entropy secret stored in recovery kit per §file 09). Server deletes chunks; updates `used_ciphertext_bytes`.
