@@ -37,6 +37,7 @@ require_once __DIR__ . '/../src/Repositories/VaultsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultManifestsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultChunksRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultGcJobsRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultMigrationIntentsRepository.php';
 
 require_once __DIR__ . '/../src/VaultStorage.php';
 require_once __DIR__ . '/../src/VaultCapabilities.php';
@@ -218,6 +219,15 @@ $router->vaultPost('/api/vaults/{vault_id}/gc/execute', function (RequestContext
 });
 $router->vaultPost('/api/vaults/{vault_id}/gc/cancel', function (RequestContext $ctx) use ($db) {
     VaultController::gcCancel($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/migration/start', function (RequestContext $ctx) use ($db) {
+    VaultController::migrationStart($db, $ctx);
+});
+$router->vaultGet('/api/vaults/{vault_id}/migration/verify-source', function (RequestContext $ctx) use ($db) {
+    VaultController::migrationVerifySource($db, $ctx);
+});
+$router->vaultPut('/api/vaults/{vault_id}/migration/commit', function (RequestContext $ctx) use ($db) {
+    VaultController::migrationCommit($db, $ctx);
 });
 
 // Dispatch

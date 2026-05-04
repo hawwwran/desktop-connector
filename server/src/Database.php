@@ -151,6 +151,12 @@ class Database
         // Idempotent: every CREATE uses IF NOT EXISTS, so re-running on an existing DB is a no-op.
         $vaultSql = file_get_contents(__DIR__ . '/../migrations/002_vault.sql');
         $this->db->exec($vaultSql);
+
+        // T9.2 — relay-migration intent table (idempotent CREATE IF NOT EXISTS).
+        $migrationSql = file_get_contents(__DIR__ . '/../migrations/003_vault_migration.sql');
+        if ($migrationSql !== false) {
+            $this->db->exec($migrationSql);
+        }
     }
 
     public function query(string $sql, array $params = []): SQLite3Result

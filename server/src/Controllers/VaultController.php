@@ -648,8 +648,202 @@ class VaultController
     }
 
     // ===================================================================
+    //  6.15  POST /api/vaults/{vault_id}/migration/start            (T9.2)
+    // ===================================================================
+
+    /**
+     * Source-side relay records the user's intent to migrate this vault
+     * to ``$body['target_relay_url']``. Returns a bearer token the
+     * initiating device hands to the target relay so the target can
+     * prove the source authorized this migration. Idempotent: a
+     * second call with the same target returns the existing record;
+     * a different target while an intent is already in flight 409s.
+     */
+    public static function migrationStart(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        self::guardReadOnly($vault);
+
+        $body = $ctx->jsonBody();
+        $target = Validators::requireNonEmptyString($body, 'target_relay_url');
+        $deviceId = (string)($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
+
+        $intentsRepo = new VaultMigrationIntentsRepository($db);
+        $now = time();
+
+        // Generate a fresh token; if the intent already exists we keep
+        // the *existing* token rather than rotating, which is what makes
+        // the endpoint idempotent for retried POST /start calls.
+        $token = self::generateMigrationToken();
+        $tokenHashRaw = hash('sha256', $token, true);
+
+        $result = $intentsRepo->recordIntent(
+            $vaultId, $tokenHashRaw, $target, $deviceId, $now,
+        );
+        $record = $result['record'];
+
+        if (!$result['created']) {
+            // Pre-existing intent. Reject if the caller asked for a
+            // different target — §H2 says a vault can only migrate to
+            // one place at a time. Reuse-with-same-target returns
+            // metadata only; the original token is *not* re-leaked
+            // (the caller already received it on the first /start).
+            if ((string)$record['target_relay_url'] !== $target) {
+                throw new VaultMigrationInProgressError(
+                    'started',
+                    (string)$record['target_relay_url'],
+                );
+            }
+            Router::json([
+                'ok' => true,
+                'data' => [
+                    'vault_id'         => self::dashedVaultId($vaultId),
+                    'target_relay_url' => (string)$record['target_relay_url'],
+                    'started_at'       => self::ts((int)$record['started_at']),
+                    'token'            => null,         // not re-emitted; idempotent
+                    'token_returned'   => false,
+                ],
+            ], 200);
+            return;
+        }
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'vault_id'         => self::dashedVaultId($vaultId),
+                'target_relay_url' => $target,
+                'started_at'       => self::ts((int)$record['started_at']),
+                'token'            => $token,
+                'token_returned'   => true,
+            ],
+        ], 201);
+    }
+
+    // ===================================================================
+    //  6.16  GET /api/vaults/{vault_id}/migration/verify-source     (T9.2)
+    // ===================================================================
+
+    /**
+     * Source returns its authoritative manifest_hash + chunk_count +
+     * used_ciphertext_bytes so the client can diff against the target
+     * relay's vault row. Read-only: a vault that's already committed
+     * (migrated_to set) is still readable for verification, so this
+     * endpoint deliberately does NOT call ``guardReadOnly``.
+     */
+    public static function migrationVerifySource(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+
+        $intentsRepo = new VaultMigrationIntentsRepository($db);
+        $intent = $intentsRepo->getIntent($vaultId);
+        if ($intent === null) {
+            throw new VaultInvalidRequestError(
+                'no migration in progress for this vault',
+                'vault_id',
+            );
+        }
+
+        $manifestHash = $vault['current_manifest_hash'] !== null
+            ? (string)$vault['current_manifest_hash'] : '';
+        $chunkCount = (int)($vault['chunk_count'] ?? 0);
+        $usedBytes  = (int)($vault['used_ciphertext_bytes'] ?? 0);
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'vault_id'                 => self::dashedVaultId($vaultId),
+                'manifest_revision'        => (int)($vault['current_manifest_revision'] ?? 0),
+                'manifest_hash'            => $manifestHash,
+                'chunk_count'              => $chunkCount,
+                'used_ciphertext_bytes'    => $usedBytes,
+                'target_relay_url'         => (string)$intent['target_relay_url'],
+                'started_at'               => self::ts((int)$intent['started_at']),
+            ],
+        ], 200);
+    }
+
+    // ===================================================================
+    //  6.17  PUT /api/vaults/{vault_id}/migration/commit            (T9.2)
+    // ===================================================================
+
+    /**
+     * Source flips the vault to read-only by stamping ``migrated_to``.
+     * Idempotent: re-committing to the same target is a no-op; trying
+     * to commit to a *different* target raises 409 (the original
+     * target wins, matching ``/start``'s semantics).
+     */
+    public static function migrationCommit(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+
+        $body = $ctx->jsonBody();
+        $target = Validators::requireNonEmptyString($body, 'target_relay_url');
+
+        $intentsRepo = new VaultMigrationIntentsRepository($db);
+        $intent = $intentsRepo->getIntent($vaultId);
+        if ($intent === null) {
+            throw new VaultInvalidRequestError(
+                'no migration in progress for this vault — call /migration/start first',
+                'vault_id',
+            );
+        }
+        if ((string)$intent['target_relay_url'] !== $target) {
+            throw new VaultMigrationInProgressError(
+                'started', (string)$intent['target_relay_url'],
+            );
+        }
+
+        $now = time();
+        $vaultsRepo = new VaultsRepository($db);
+        $stamped = $vaultsRepo->markMigratedTo($vaultId, $target, $now);
+        if (!$stamped) {
+            // Already migrated_to a different URL — surface conflict.
+            $current = $vaultsRepo->getById($vaultId);
+            $existing = $current !== null && $current['migrated_to'] !== null
+                ? (string)$current['migrated_to'] : '';
+            throw new VaultMigrationInProgressError('committed', $existing);
+        }
+        $intentsRepo->markCommitted($vaultId, $now);
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'vault_id'         => self::dashedVaultId($vaultId),
+                'target_relay_url' => $target,
+                'committed_at'     => self::ts($now),
+            ],
+        ], 200);
+    }
+
+    // ===================================================================
     //  helpers
     // ===================================================================
+
+    /**
+     * Generate the migration bearer token returned by /migration/start.
+     * 30 lowercase base32 chars (150 bits) — same alphabet as the rest
+     * of the vault id-space so the token survives any URL-safe path.
+     */
+    private static function generateMigrationToken(): string
+    {
+        $alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+        $rand = random_bytes(19); // 19 * 8 = 152 bits → 30 base32 chars
+        $out = '';
+        $bits = 0;
+        $buf = 0;
+        for ($i = 0; $i < 19; $i++) {
+            $buf = ($buf << 8) | ord($rand[$i]);
+            $bits += 8;
+            while ($bits >= 5) {
+                $bits -= 5;
+                $out .= $alphabet[($buf >> $bits) & 0x1f];
+            }
+        }
+        return 'mig_v1_' . substr($out, 0, 30);
+    }
 
     /**
      * Reject writes when the vault is read-only on this relay (post-H2 commit
