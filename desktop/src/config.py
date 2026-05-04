@@ -811,3 +811,49 @@ class Config:
             self._data["vault"] = {}
         self._data["vault"]["active"] = bool(value)
         self.save()
+
+    # T8.6 — export-reminder bookkeeping. The cadence ("off" / "weekly" /
+    # "monthly" / "quarterly" / "yearly") is dropped on disk verbatim;
+    # parsing + fallback live in :mod:`vault_export_reminder`.
+    @property
+    def vault_last_export_at(self) -> str | None:
+        return self._vault_dict_get("last_export_at")
+
+    @vault_last_export_at.setter
+    def vault_last_export_at(self, value: str | None) -> None:
+        self._vault_dict_set("last_export_at", str(value) if value else None)
+
+    @property
+    def vault_export_reminder_cadence(self) -> str:
+        return str(self._vault_dict_get("export_reminder_cadence") or "monthly")
+
+    @vault_export_reminder_cadence.setter
+    def vault_export_reminder_cadence(self, value: str) -> None:
+        self._vault_dict_set("export_reminder_cadence", str(value))
+
+    @property
+    def vault_export_reminder_last_dismissed_at(self) -> str | None:
+        return self._vault_dict_get("export_reminder_last_dismissed_at")
+
+    @vault_export_reminder_last_dismissed_at.setter
+    def vault_export_reminder_last_dismissed_at(self, value: str | None) -> None:
+        self._vault_dict_set(
+            "export_reminder_last_dismissed_at", str(value) if value else None,
+        )
+
+    def _vault_dict_get(self, key: str) -> str | None:
+        self.reload()
+        raw = self._data.get("vault", {})
+        if not isinstance(raw, dict):
+            return None
+        value = raw.get(key)
+        return str(value) if value else None
+
+    def _vault_dict_set(self, key: str, value: str | None) -> None:
+        if "vault" not in self._data or not isinstance(self._data.get("vault"), dict):
+            self._data["vault"] = {}
+        if value is None:
+            self._data["vault"].pop(key, None)
+        else:
+            self._data["vault"][key] = str(value)
+        self.save()

@@ -371,5 +371,182 @@ def _manifest_with_files(
     )
 
 
+class VaultImportRunnerTests(unittest.TestCase):
+    """T8.5 backbone: read bundle → preview → upload missing chunks → CAS publish."""
+
+    def setUp(self) -> None:
+        import tempfile, shutil
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_import_runner_"))
+        self._saved_xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+
+    def tearDown(self) -> None:
+        import shutil
+        if self._saved_xdg_cache_home is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg_cache_home
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_run_import_uploads_missing_chunks_and_publishes_merged_manifest(self) -> None:
+        from src.vault import Vault
+        from src.vault_crypto import DefaultVaultCrypto
+        from src.vault_export import write_export_bundle
+        from src.vault_import import ImportMergeResolution
+        from src.vault_import_runner import run_import
+        from src.vault_upload import upload_file
+        from tests.protocol.test_desktop_vault_manifest import (
+            AUTHOR as MASTER_AUTHOR,
+            DOCS_ID as MASTER_DOCS_ID,
+            MASTER_KEY,
+            VAULT_ID as MASTER_VAULT_ID,
+        )
+        from tests.protocol.test_desktop_vault_upload import FakeUploadRelay
+
+        # Use the master-key-bound test vault id so encrypt/decrypt match.
+        VAULT_ACCESS_SECRET = "vault-secret"
+
+        def make_vault() -> Vault:
+            return Vault(
+                vault_id=MASTER_VAULT_ID, master_key=MASTER_KEY,
+                recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
+                header_revision=1, manifest_revision=1,
+                manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+            )
+
+        empty = make_manifest(
+            vault_id=MASTER_VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=MASTER_AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=MASTER_DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-01T10:00:00.000Z",
+                    created_by_device_id=MASTER_AUTHOR,
+                    entries=[],
+                )
+            ],
+        )
+
+        # 1. Build a relay that already has one file. Export it.
+        relay_a = FakeUploadRelay(manifest=empty)
+        vault = make_vault()
+        try:
+            local_a = self.tmpdir / "exported.txt"
+            local_a.write_bytes(b"exported content for the import flow")
+            uploaded = upload_file(
+                vault=vault, relay=relay_a, manifest=empty,
+                local_path=local_a, remote_folder_id=MASTER_DOCS_ID,
+                remote_path="exported.txt", author_device_id=MASTER_AUTHOR,
+            )
+            bundle_path = self.tmpdir / "vault.dcvault"
+            write_export_bundle(
+                vault=vault, relay=relay_a,
+                manifest_envelope=relay_a.current_envelope,
+                manifest_plaintext=uploaded.manifest,
+                output_path=bundle_path,
+                passphrase="user-export-passphrase",
+                argon_memory_kib=8192,
+                argon_iterations=2,
+            )
+        finally:
+            vault.close()
+
+        # 2. Fresh empty target relay simulates "import to a different relay".
+        relay_b = FakeUploadRelay(manifest=empty)
+        active_active = empty
+        vault = make_vault()
+        try:
+            result = run_import(
+                vault=vault, relay=relay_b,
+                bundle_path=bundle_path,
+                passphrase="user-export-passphrase",
+                active_manifest=active_active,
+                resolution=ImportMergeResolution(per_folder={}),
+                author_device_id=MASTER_AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.action, "merge")
+        self.assertGreater(result.chunks_uploaded, 0)
+        self.assertEqual(result.chunks_skipped, 0)
+        # All chunks landed on relay B.
+        self.assertEqual(set(relay_b.chunks), set(relay_a.chunks))
+        # Manifest published exactly once (one CAS publish — no conflicts).
+        self.assertEqual(len(relay_b.published_manifests), 1)
+        self.assertIsNotNone(result.published_manifest)
+        # Imported file visible in the published manifest.
+        self.assertIsNotNone(
+            find_file_entry(result.published_manifest, MASTER_DOCS_ID, "exported.txt")
+        )
+
+    def test_run_import_refuses_when_vault_identity_mismatches(self) -> None:
+        from src.vault import Vault
+        from src.vault_crypto import DefaultVaultCrypto
+        from src.vault_export import write_export_bundle
+        from src.vault_import import ImportMergeResolution
+        from src.vault_import_runner import run_import
+        from tests.protocol.test_desktop_vault_manifest import (
+            AUTHOR as MASTER_AUTHOR,
+            DOCS_ID as MASTER_DOCS_ID,
+            MASTER_KEY,
+            VAULT_ID as MASTER_VAULT_ID,
+        )
+        from tests.protocol.test_desktop_vault_upload import FakeUploadRelay
+
+        VAULT_ACCESS_SECRET = "vault-secret"
+        empty = make_manifest(
+            vault_id=MASTER_VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=MASTER_AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=MASTER_DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-01T10:00:00.000Z",
+                    created_by_device_id=MASTER_AUTHOR,
+                    entries=[],
+                )
+            ],
+        )
+        relay = FakeUploadRelay(manifest=empty)
+        vault = Vault(
+            vault_id=MASTER_VAULT_ID, master_key=MASTER_KEY,
+            recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
+            header_revision=1, manifest_revision=1,
+            manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+        )
+        try:
+            bundle_path = self.tmpdir / "vault.dcvault"
+            write_export_bundle(
+                vault=vault, relay=relay,
+                manifest_envelope=relay.current_envelope or b"\x00" * 200,
+                manifest_plaintext=empty,
+                output_path=bundle_path,
+                passphrase="user-export-passphrase",
+                argon_memory_kib=8192, argon_iterations=2,
+            )
+            # Active vault claims a different genesis fingerprint —
+            # decide_import_action should return "refuse".
+            result = run_import(
+                vault=vault, relay=relay, bundle_path=bundle_path,
+                passphrase="user-export-passphrase",
+                active_manifest=empty,
+                resolution=ImportMergeResolution(per_folder={}),
+                author_device_id=MASTER_AUTHOR,
+                bundle_genesis_fingerprint="aabbccddeeff0011",
+                active_genesis_fingerprint="00000000ffffffff",
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.action, "refuse")
+        self.assertIsNone(result.published_manifest)
+
+
 if __name__ == "__main__":
     unittest.main()
