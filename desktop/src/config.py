@@ -841,6 +841,28 @@ class Config:
             "export_reminder_last_dismissed_at", str(value) if value else None,
         )
 
+    # T9.5 — relay-migration propagation. previous_relay_url is the
+    # URL of the source relay before the commit; the device retains it
+    # for the §H2 7-day grace so "Switch back to previous relay" stays
+    # available in Settings.
+    @property
+    def vault_previous_relay_url(self) -> str | None:
+        return self._vault_dict_get("previous_relay_url")
+
+    @vault_previous_relay_url.setter
+    def vault_previous_relay_url(self, value: str | None) -> None:
+        self._vault_dict_set("previous_relay_url", str(value) if value else None)
+
+    @property
+    def vault_previous_relay_expires_at(self) -> str | None:
+        return self._vault_dict_get("previous_relay_expires_at")
+
+    @vault_previous_relay_expires_at.setter
+    def vault_previous_relay_expires_at(self, value: str | None) -> None:
+        self._vault_dict_set(
+            "previous_relay_expires_at", str(value) if value else None,
+        )
+
     def _vault_dict_get(self, key: str) -> str | None:
         self.reload()
         raw = self._data.get("vault", {})
