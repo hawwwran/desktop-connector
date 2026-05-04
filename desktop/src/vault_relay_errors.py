@@ -36,8 +36,31 @@ class VaultQuotaExceededError(VaultRelayError):
 
 
 class VaultCASConflictError(VaultRelayError):
-    """Server rejected a manifest publish because the CAS revision moved (HTTP 409)."""
+    """Server rejected a manifest publish because the CAS revision moved (HTTP 409).
+
+    Per §A1, the server's 409 body returns ``current_revision``,
+    ``current_manifest_hash``, ``current_manifest_ciphertext`` (base64)
+    and ``current_manifest_size`` so the client can run §D4 merge in a
+    single round-trip without a follow-up GET.
+    """
 
     def __init__(self, error: dict[str, Any]) -> None:
         super().__init__(error, status_code=409)
-        self.current_revision = self.details.get("current_revision")
+        details = self.details
+        self.current_revision = details.get("current_revision")
+        self.current_manifest_hash = str(details.get("current_manifest_hash") or "")
+        self.current_manifest_ciphertext_b64 = str(
+            details.get("current_manifest_ciphertext") or ""
+        )
+        try:
+            self.current_manifest_size = int(details.get("current_manifest_size") or 0)
+        except (TypeError, ValueError):
+            self.current_manifest_size = 0
+
+    def current_manifest_ciphertext_bytes(self) -> bytes:
+        """Decoded server-head manifest envelope, ready for ``decrypt_manifest``."""
+        import base64
+
+        if not self.current_manifest_ciphertext_b64:
+            return b""
+        return base64.b64decode(self.current_manifest_ciphertext_b64)

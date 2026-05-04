@@ -20,7 +20,7 @@ from src.vault import Vault  # noqa: E402
 from src.vault_crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault_download import download_latest_file  # noqa: E402
 from src.vault_manifest import find_file_entry, make_manifest, make_remote_folder  # noqa: E402
-from src.vault_relay_errors import VaultQuotaExceededError  # noqa: E402
+from src.vault_relay_errors import VaultCASConflictError, VaultQuotaExceededError  # noqa: E402
 from src.vault_upload import (  # noqa: E402
     UploadConflictError,
     detect_path_conflict,
@@ -300,6 +300,196 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             "report (conflict uploaded Bad_Name_With_Chars 2026-05-04 17-30).docx",
         )
 
+    def test_two_device_concurrent_upload_merges_via_cas_retry(self) -> None:
+        """§D4 row 2 acceptance: both devices append a new version of an
+        existing file; CAS retry merges so both versions land and the
+        latest_version_id is deterministic."""
+        device_seed = "0" * 32
+        device_a = "a" * 32
+        device_b = "b" * 32
+
+        # Bootstrap: a seed device puts down v1 so both A and B see the
+        # entry on first fetch.
+        seed_local = self.tmpdir / "seed.txt"
+        seed_local.write_bytes(b"seed payload, becomes version 1")
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        seed_vault = _vault()
+        try:
+            seed_res = upload_file(
+                vault=seed_vault,
+                relay=relay,
+                manifest=manifest,
+                local_path=seed_local,
+                remote_folder_id=DOCS_ID,
+                remote_path="report.txt",
+                author_device_id=device_seed,
+                created_at="2026-05-04T09:00:00.000Z",
+            )
+        finally:
+            seed_vault.close()
+
+        # Both A and B fetch the post-seed manifest as their "parent".
+        shared_parent = seed_res.manifest
+
+        local_a = self.tmpdir / "from_a.txt"
+        local_a.write_bytes(b"alpha bytes one")
+        local_b = self.tmpdir / "from_b.txt"
+        local_b.write_bytes(
+            b"beta bytes one - distinct content so no fingerprint match"
+        )
+
+        vault_a = _vault()
+        vault_b = _vault()
+        try:
+            res_a = upload_file(
+                vault=vault_a,
+                relay=relay,
+                manifest=shared_parent,
+                local_path=local_a,
+                remote_folder_id=DOCS_ID,
+                remote_path="report.txt",
+                author_device_id=device_a,
+                created_at="2026-05-04T10:00:00.000Z",
+            )
+            self.assertEqual(relay.current_revision, 3)
+
+            res_b = upload_file(
+                vault=vault_b,
+                relay=relay,
+                manifest=shared_parent,  # pre-A view; CAS will fire
+                local_path=local_b,
+                remote_folder_id=DOCS_ID,
+                remote_path="report.txt",
+                author_device_id=device_b,
+                # Later modified_at so B wins the tie-break deterministically.
+                created_at="2026-05-04T11:00:00.000Z",
+            )
+        finally:
+            vault_a.close()
+            vault_b.close()
+
+        # Three CAS-publishes total (seed + A direct + B after retry).
+        self.assertEqual(relay.current_revision, 4)
+        self.assertEqual(len(relay.published_manifests), 3)
+
+        entry = find_file_entry(res_b.manifest, DOCS_ID, "report.txt")
+        self.assertIsNotNone(entry)
+        version_ids = {v["version_id"] for v in entry["versions"]}
+        # All three versions live in F.versions.
+        self.assertIn(seed_res.version_id, version_ids)
+        self.assertIn(res_a.version_id, version_ids)
+        self.assertIn(res_b.version_id, version_ids)
+        # B's modified_at > A's > seed's → B wins.
+        self.assertEqual(entry["latest_version_id"], res_b.version_id)
+
+    def test_two_device_concurrent_upload_tie_break_by_device_hash(self) -> None:
+        """When timestamps are equal, sha256(device_id) decides — same answer
+        from either device's vantage point."""
+        device_seed = "0" * 32
+        device_a = "00" * 16
+        device_b = "ff" * 16
+        same_ts = "2026-05-04T12:00:00.000Z"
+
+        seed_local = self.tmpdir / "seed.txt"
+        seed_local.write_bytes(b"seed for tied path")
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        seed_vault = _vault()
+        try:
+            shared_parent = upload_file(
+                vault=seed_vault,
+                relay=relay,
+                manifest=manifest,
+                local_path=seed_local,
+                remote_folder_id=DOCS_ID,
+                remote_path="tied.txt",
+                author_device_id=device_seed,
+                created_at="2026-05-04T11:00:00.000Z",
+            ).manifest
+        finally:
+            seed_vault.close()
+
+        local_a = self.tmpdir / "a.txt"
+        local_a.write_bytes(b"alpha unique payload alpha alpha")
+        local_b = self.tmpdir / "b.txt"
+        local_b.write_bytes(b"beta unique payload beta beta beta")
+
+        vault_a = _vault()
+        vault_b = _vault()
+        try:
+            res_a = upload_file(
+                vault=vault_a, relay=relay, manifest=shared_parent, local_path=local_a,
+                remote_folder_id=DOCS_ID, remote_path="tied.txt",
+                author_device_id=device_a, created_at=same_ts,
+            )
+            res_b = upload_file(
+                vault=vault_b, relay=relay, manifest=shared_parent, local_path=local_b,
+                remote_folder_id=DOCS_ID, remote_path="tied.txt",
+                author_device_id=device_b, created_at=same_ts,
+            )
+        finally:
+            vault_a.close()
+            vault_b.close()
+
+        winner = max(
+            (device_a, device_b),
+            key=lambda d: hashlib.sha256(d.encode("utf-8")).digest(),
+        )
+        expected = res_a.version_id if winner == device_a else res_b.version_id
+        entry = find_file_entry(res_b.manifest, DOCS_ID, "tied.txt")
+        self.assertEqual(entry["latest_version_id"], expected)
+
+    def test_concurrent_new_file_at_same_path_renames_imported(self) -> None:
+        """§D4 row 1: two devices create different files at the same path."""
+        local_a = self.tmpdir / "from_a.bin"
+        local_a.write_bytes(b"alpha alpha alpha alpha alpha")
+        local_b = self.tmpdir / "from_b.bin"
+        local_b.write_bytes(b"beta beta beta beta beta beta beta")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault_a = _vault()
+        vault_b = _vault()
+        try:
+            upload_file(
+                vault=vault_a, relay=relay, manifest=manifest, local_path=local_a,
+                remote_folder_id=DOCS_ID, remote_path="taken.bin",
+                author_device_id="a" * 32,
+            )
+            # Different file_id because B started from the pre-A manifest
+            # and didn't see A's entry — same path, fresh entry_id.
+            upload_file(
+                vault=vault_b, relay=relay, manifest=manifest, local_path=local_b,
+                remote_folder_id=DOCS_ID, remote_path="taken.bin",
+                author_device_id="b" * 32,
+            )
+        finally:
+            vault_a.close()
+            vault_b.close()
+
+        # Walk the final manifest: original "taken.bin" (from A) and the
+        # imported-renamed copy ("taken (imported).bin" from B) coexist.
+        folder = next(
+            f for f in relay.published_manifests[-1]["ciphertext"][:0] or []
+            if False
+        ) if False else None  # placeholder so the assertion below reads cleanly
+        from src.vault_browser_model import decrypt_manifest as _decrypt
+        published_envelope = relay.current_envelope
+        vault_observer = _vault()
+        try:
+            head = _decrypt(vault_observer, published_envelope)
+        finally:
+            vault_observer.close()
+        entry_paths = {
+            e["path"]
+            for f in head["remote_folders"]
+            if f["remote_folder_id"] == DOCS_ID
+            for e in f["entries"]
+        }
+        self.assertIn("taken.bin", entry_paths)
+        self.assertIn("taken (imported).bin", entry_paths)
+
     def test_new_file_only_refuses_existing_path(self) -> None:
         local = self.tmpdir / "first.txt"
         local.write_bytes(b"first")
@@ -332,7 +522,14 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
 
 class FakeUploadRelay:
-    """In-memory fake of the chunk + manifest relay surface."""
+    """In-memory fake of the chunk + manifest relay surface.
+
+    Implements just enough CAS to drive the §D4 retry loop in tests:
+    the latest-published envelope and revision are kept, and a stale
+    ``expected_current_revision`` raises a ``VaultCASConflictError``
+    with the freshly-published envelope embedded — same shape the real
+    server returns per §A1.
+    """
 
     def __init__(self, *, manifest: dict, quota_after_n_chunks: int | None = None) -> None:
         self.chunks: dict[str, bytes] = {}
@@ -340,6 +537,9 @@ class FakeUploadRelay:
         self.batch_head_calls: list[list[str]] = []
         self.published_manifests: list[dict] = []
         self.current_manifest = manifest
+        self.current_revision = int(manifest.get("revision", 0))
+        self.current_envelope: bytes = b""
+        self.current_hash: str = ""
         self._quota_remaining = quota_after_n_chunks
 
     # --- chunk relay ---------------------------------------------------
@@ -384,9 +584,9 @@ class FakeUploadRelay:
     # --- manifest relay ------------------------------------------------
     def get_manifest(self, vault_id, vault_access_secret):
         return {
-            "manifest_revision": int(self.current_manifest["revision"]),
-            "manifest_ciphertext": b"",
-            "manifest_hash": "",
+            "manifest_revision": self.current_revision,
+            "manifest_ciphertext": self.current_envelope,
+            "manifest_hash": self.current_hash,
         }
 
     def put_manifest(
@@ -400,14 +600,31 @@ class FakeUploadRelay:
         manifest_hash,
         manifest_ciphertext,
     ):
-        # No CAS check in the unit-test fake: T6.3 tests that flow.
+        if int(expected_current_revision) != self.current_revision:
+            import base64
+
+            raise VaultCASConflictError({
+                "code": "vault_manifest_conflict",
+                "message": "fake CAS conflict",
+                "details": {
+                    "current_revision": self.current_revision,
+                    "current_manifest_hash": self.current_hash,
+                    "current_manifest_ciphertext":
+                        base64.b64encode(self.current_envelope).decode("ascii"),
+                    "current_manifest_size": len(self.current_envelope),
+                },
+            })
+
         self.published_manifests.append({
             "expected_current_revision": expected_current_revision,
             "new_revision": new_revision,
             "parent_revision": parent_revision,
             "manifest_hash": manifest_hash,
-            "ciphertext": manifest_ciphertext,
+            "ciphertext": bytes(manifest_ciphertext),
         })
+        self.current_revision = int(new_revision)
+        self.current_envelope = bytes(manifest_ciphertext)
+        self.current_hash = manifest_hash
         return {"new_revision": new_revision}
 
 

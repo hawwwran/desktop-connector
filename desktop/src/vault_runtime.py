@@ -180,6 +180,10 @@ class VaultHttpRelay:
         )
         if resp is None:
             raise RuntimeError("Could not reach the relay while publishing the vault manifest.")
+        if resp.status_code == 409:
+            from .vault_relay_errors import VaultCASConflictError
+
+            raise VaultCASConflictError(self._extract_error(resp))
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Relay rejected vault manifest publish: HTTP {resp.status_code} "

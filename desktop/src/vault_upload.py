@@ -29,15 +29,17 @@ from .vault_crypto import (
     make_chunk_id,
     make_content_fingerprint,
 )
+from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
 from .vault_manifest import (
     add_or_append_file_version,
     find_file_entry,
     generate_file_entry_id,
     generate_file_version_id,
+    merge_with_remote_head,
     normalize_manifest_path,
     normalize_manifest_plaintext,
 )
-from .vault_relay_errors import VaultRelayError
+from .vault_relay_errors import VaultCASConflictError, VaultRelayError
 
 
 CHUNK_SIZE = 2 * 1024 * 1024  # 2 MiB; must match the download-side reader
@@ -235,21 +237,17 @@ def upload_file(
         content_fingerprint=fingerprint,
     )
 
-    parent_revision = int(manifest.get("revision", 0))
-    next_manifest = dict(normalize_manifest_plaintext(manifest))
-    next_manifest["revision"] = parent_revision + 1
-    next_manifest["parent_revision"] = parent_revision
-    next_manifest["created_at"] = version_payload["created_at"]
-    next_manifest["author_device_id"] = str(author_device_id)
-    next_manifest = add_or_append_file_version(
-        next_manifest,
+    published = _publish_with_cas_retry(
+        vault=vault,
+        relay=relay,
+        parent_manifest=manifest,
         remote_folder_id=remote_folder_id,
-        path=normalized_remote_path,
-        version=version_payload,
+        normalized_remote_path=normalized_remote_path,
+        version_payload=version_payload,
         entry_id=entry_id,
+        author_device_id=author_device_id,
+        local_index=local_index,
     )
-
-    published = vault.publish_manifest(relay, next_manifest, local_index=local_index)
     _report(progress, "done", total_chunks, total_chunks, bytes_uploaded)
 
     return UploadResult(
@@ -348,6 +346,68 @@ def _make_version_payload(
             for c in chunks_plan
         ],
     }
+
+
+CAS_MAX_RETRIES = 5
+
+
+def _publish_with_cas_retry(
+    *,
+    vault: UploadVault,
+    relay: UploadRelay,
+    parent_manifest: dict[str, Any],
+    remote_folder_id: str,
+    normalized_remote_path: str,
+    version_payload: dict[str, Any],
+    entry_id: str,
+    author_device_id: str,
+    local_index: Any,
+    max_retries: int = CAS_MAX_RETRIES,
+) -> dict[str, Any]:
+    """CAS-publish a single-version upload, retrying via §D4 on 409.
+
+    Each retry decrypts the server head from the 409 details (no follow-up
+    GET — server inlines the manifest per §A1), runs ``merge_with_remote
+    _head`` to rebuild the local change on top of the new revision, and
+    publishes again. Cap is ``max_retries`` to avoid livelocking against
+    a busy multi-device vault.
+    """
+    parent_n = normalize_manifest_plaintext(parent_manifest)
+    parent_revision = int(parent_n.get("revision", 0))
+
+    candidate = dict(parent_n)
+    candidate["revision"] = parent_revision + 1
+    candidate["parent_revision"] = parent_revision
+    candidate["created_at"] = str(version_payload.get("created_at"))
+    candidate["author_device_id"] = str(author_device_id)
+    candidate = add_or_append_file_version(
+        candidate,
+        remote_folder_id=remote_folder_id,
+        path=normalized_remote_path,
+        version=version_payload,
+        entry_id=entry_id,
+    )
+
+    rebased_parent = parent_n
+    last_attempt = candidate
+    for _ in range(max_retries):
+        try:
+            return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+        except VaultCASConflictError as exc:
+            envelope = exc.current_manifest_ciphertext_bytes()
+            if not envelope:
+                raise
+            server_head = decrypt_manifest_envelope(vault, envelope)
+            last_attempt = merge_with_remote_head(
+                parent=rebased_parent,
+                local_attempt=last_attempt,
+                server_head=server_head,
+                author_device_id=author_device_id,
+            )
+            rebased_parent = server_head
+    # One more try after the final merge — no exception means success;
+    # any 409 here propagates as the caller's terminal CAS error.
+    return vault.publish_manifest(relay, last_attempt, local_index=local_index)
 
 
 def _hash_file(local_path: Path) -> tuple[bytes, int]:

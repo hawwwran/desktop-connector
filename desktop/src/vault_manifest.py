@@ -9,10 +9,12 @@ to the manifest AEAD envelope.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import secrets
 import unicodedata
+from datetime import datetime, timezone
 from typing import Any
 
 from .vault_crypto import normalize_vault_id
@@ -364,6 +366,183 @@ def add_or_append_file_version(
         target.pop("deleted_at", None)
         target.pop("recoverable_until", None)
     return out
+
+
+def merge_with_remote_head(
+    *,
+    parent: dict[str, Any],
+    local_attempt: dict[str, Any],
+    server_head: dict[str, Any],
+    author_device_id: str,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """§D4 CAS merge: rebuild ``local_attempt`` on top of ``server_head``.
+
+    Implements the deterministic per-op rules from §D4 that T6 cares
+    about (file uploads): "new file at path P", "new version of
+    existing file F", and the latest-version tie-breaker by
+    ``(modified_at, sha256(author_device_id))`` lex order. Other op
+    types — soft-delete, restore, rename, hard-purge — are not
+    exercised by T6 and intentionally land as a passthrough copy of
+    ``local_attempt``'s entry, to be revisited when T7 layers tombstone
+    semantics on top.
+
+    The output's ``revision`` is ``server_head.revision + 1`` and
+    ``parent_revision`` is ``server_head.revision``, so the caller can
+    immediately CAS-publish without further bookkeeping.
+    """
+    parent_n = normalize_manifest_plaintext(parent)
+    local_n = normalize_manifest_plaintext(local_attempt)
+    server_n = normalize_manifest_plaintext(server_head)
+
+    server_revision = int(server_n.get("revision", 0))
+    out = copy.deepcopy(server_n)
+    out["revision"] = server_revision + 1
+    out["parent_revision"] = server_revision
+    out["created_at"] = str(now or _now_rfc3339_default())
+    out["author_device_id"] = str(author_device_id)
+
+    parent_folders = {
+        str(f.get("remote_folder_id", "")): f for f in parent_n.get("remote_folders", [])
+    }
+    local_folders = {
+        str(f.get("remote_folder_id", "")): f for f in local_n.get("remote_folders", [])
+    }
+    out_folders_by_id: dict[str, dict[str, Any]] = {
+        str(f.get("remote_folder_id", "")): f for f in out["remote_folders"]
+    }
+
+    for folder_id, local_folder in local_folders.items():
+        parent_folder = parent_folders.get(folder_id)
+        out_folder = out_folders_by_id.get(folder_id)
+        if out_folder is None:
+            out["remote_folders"].append(copy.deepcopy(local_folder))
+            out_folders_by_id[folder_id] = out["remote_folders"][-1]
+            continue
+        _merge_folder_entries(
+            local_folder=local_folder,
+            parent_folder=parent_folder,
+            out_folder=out_folder,
+        )
+
+    return out
+
+
+def _merge_folder_entries(
+    *,
+    local_folder: dict[str, Any],
+    parent_folder: dict[str, Any] | None,
+    out_folder: dict[str, Any],
+) -> None:
+    parent_entries: dict[str, dict[str, Any]] = {
+        str(e.get("entry_id", "")): e
+        for e in (parent_folder or {}).get("entries", [])
+        if isinstance(e, dict)
+    }
+    out_folder.setdefault("entries", [])
+    out_entries_by_id: dict[str, dict[str, Any]] = {
+        str(e.get("entry_id", "")): e
+        for e in out_folder["entries"]
+        if isinstance(e, dict)
+    }
+
+    local_entries = local_folder.get("entries", []) or []
+    for local_entry in local_entries:
+        if not isinstance(local_entry, dict):
+            continue
+        entry_id = str(local_entry.get("entry_id", ""))
+        if not entry_id:
+            continue
+        parent_entry = parent_entries.get(entry_id)
+        out_entry = out_entries_by_id.get(entry_id)
+
+        parent_version_ids = {
+            str(v.get("version_id", ""))
+            for v in (parent_entry or {}).get("versions", [])
+            if isinstance(v, dict)
+        }
+        local_versions_new = [
+            v for v in local_entry.get("versions", []) or []
+            if isinstance(v, dict) and str(v.get("version_id", "")) not in parent_version_ids
+        ]
+        if not local_versions_new and parent_entry is not None:
+            # Local didn't actually add anything new; ignore.
+            continue
+
+        if out_entry is None:
+            # New file from local. Check for path collision against the
+            # server head and rename per the §D4 "Upload new file at path P"
+            # row.
+            local_path = unicodedata.normalize("NFC", str(local_entry.get("path", "")))
+            existing_paths = {
+                unicodedata.normalize("NFC", str(e.get("path", "")))
+                for e in out_folder["entries"]
+                if isinstance(e, dict) and not bool(e.get("deleted"))
+            }
+            if local_path in existing_paths:
+                renamed = _imported_rename(local_path, existing_paths)
+                new_entry = copy.deepcopy(local_entry)
+                new_entry["path"] = renamed
+                out_folder["entries"].append(new_entry)
+            else:
+                out_folder["entries"].append(copy.deepcopy(local_entry))
+            continue
+
+        # Same entry exists on both sides; append the new local versions
+        # and resolve latest_version_id deterministically per §D4.
+        existing_version_ids = {
+            str(v.get("version_id", ""))
+            for v in out_entry.get("versions", [])
+            if isinstance(v, dict)
+        }
+        for v in local_versions_new:
+            if str(v.get("version_id", "")) in existing_version_ids:
+                continue
+            out_entry.setdefault("versions", []).append(copy.deepcopy(v))
+        out_entry["latest_version_id"] = _resolve_latest_version_id(
+            [v for v in out_entry.get("versions", []) if isinstance(v, dict)]
+        )
+        # If the server tombstoned this entry, the tombstone wins per §D4
+        # row 3: versions land as restorable history but `deleted` stays.
+        if not bool(out_entry.get("deleted")):
+            out_entry["deleted"] = False
+
+
+def _resolve_latest_version_id(versions: list[dict[str, Any]]) -> str:
+    """§D4 tie-breaker: latest by (modified_at, sha256(author_device_id))."""
+    if not versions:
+        return ""
+
+    def sort_key(version: dict[str, Any]) -> tuple[str, bytes]:
+        ts = str(version.get("modified_at") or version.get("created_at") or "")
+        author = str(version.get("author_device_id") or "")
+        return (ts, hashlib.sha256(author.encode("utf-8")).digest())
+
+    winner = max(versions, key=sort_key)
+    return str(winner.get("version_id", ""))
+
+
+def _imported_rename(path: str, existing_paths: set[str]) -> str:
+    """`<stem> (imported)` then `(imported N)` if the rename collides."""
+    parts = path.split("/")
+    leaf = parts[-1]
+    parent = "/".join(parts[:-1])
+    dot = leaf.rfind(".")
+    stem, ext = (leaf[:dot], leaf[dot:]) if dot > 0 else (leaf, "")
+    candidate = f"{stem} (imported){ext}"
+    full = f"{parent}/{candidate}" if parent else candidate
+    if full not in existing_paths:
+        return full
+    for n in range(2, 10_000):
+        candidate = f"{stem} (imported {n}){ext}"
+        full = f"{parent}/{candidate}" if parent else candidate
+        if full not in existing_paths:
+            return full
+    raise RuntimeError(f"could not pick an imported-rename slot for {path}")
+
+
+def _now_rfc3339_default() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _random_base32_lower(chars: int) -> str:
