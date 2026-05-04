@@ -62,6 +62,94 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             os.environ["XDG_CACHE_HOME"] = self._saved_xdg_cache_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def test_upload_file_result_manifest_surfaces_new_entry_in_browser_view(self) -> None:
+        """Boundary guard for the "upload but file doesn't show" failure mode.
+
+        Asserts the contract the vault browser leans on:
+        ``result.manifest`` returned by ``upload_file`` actually carries
+        the new file entry — both via direct lookup and via the
+        ``list_folder`` walk the file list calls. If this drifts, the
+        browser will silently fail to render new uploads no matter how
+        clean ``state["manifest"] = result.manifest`` is.
+        """
+        from src.vault_browser_model import list_folder
+
+        local = self.tmpdir / "guarded.txt"
+        local.write_bytes(b"manifest-must-reflect-this-upload")
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            result = upload_file(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                local_path=local,
+                remote_folder_id=DOCS_ID,
+                remote_path="guarded.txt",
+                author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        # 1. Direct entry lookup hits the new file with the right version_id.
+        entry = find_file_entry(result.manifest, DOCS_ID, "guarded.txt")
+        self.assertIsNotNone(entry, "result.manifest is missing the uploaded entry")
+        self.assertEqual(entry["latest_version_id"], result.version_id)
+
+        # 2. result.manifest is NOT the input dict (caller can swap it in
+        # without worrying about shared state).
+        self.assertIsNot(result.manifest, manifest)
+        # The pre-upload manifest must not be mutated under the caller's feet.
+        self.assertIsNone(find_file_entry(manifest, DOCS_ID, "guarded.txt"))
+
+        # 3. list_folder — the call the browser's render_file_list runs —
+        # surfaces the file row at the requested folder display name.
+        _folders, files = list_folder(result.manifest, "Documents")
+        names = [str(f.get("name")) for f in files]
+        self.assertIn("guarded.txt", names)
+
+    def test_upload_folder_result_manifest_surfaces_every_uploaded_file(self) -> None:
+        """Same guard for ``upload_folder`` — every walked file must land
+        in the published manifest under the configured sub-path."""
+        from src.vault_browser_model import list_folder
+
+        root = self.tmpdir / "tree"
+        (root / "sub").mkdir(parents=True)
+        (root / "top.txt").write_bytes(b"top content")
+        (root / "sub" / "leaf.txt").write_bytes(b"leaf content")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            from src.vault_upload import upload_folder
+
+            result = upload_folder(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                local_root=root,
+                remote_folder_id=DOCS_ID,
+                remote_sub_path="batch",
+                author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        for rel in ("batch/top.txt", "batch/sub/leaf.txt"):
+            self.assertIsNotNone(
+                find_file_entry(result.manifest, DOCS_ID, rel),
+                f"folder upload published manifest is missing {rel}",
+            )
+        self.assertIsNot(result.manifest, manifest)
+
+        # Browser-shaped walks at both depths see the new files.
+        _f, top_files = list_folder(result.manifest, "Documents/batch")
+        self.assertIn("top.txt", [str(f.get("name")) for f in top_files])
+        _f, leaf_files = list_folder(result.manifest, "Documents/batch/sub")
+        self.assertIn("leaf.txt", [str(f.get("name")) for f in leaf_files])
+
     def test_upload_then_download_roundtrips_bytes(self) -> None:
         payload = (b"hello vault " * 4096) + b"!! end"
         local = self.tmpdir / "report.txt"
