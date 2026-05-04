@@ -17,8 +17,9 @@ ensure_desktop_on_path()
 from src.vault_purge_schedule import (  # noqa: E402
     DEFAULT_DELAY_SECONDS, PENDING_FILE_NAME,
     PendingPurge, VaultPurgeAlreadyScheduledError, VaultPurgeError,
-    cancel_purge, clear_all_for_vault, generate_job_id,
-    get_pending_purge, list_pending_purges, pending_file_path,
+    build_execute_request_body, cancel_purge, clear_all_for_vault,
+    generate_job_id, get_pending_purge, list_due_purges,
+    list_pending_purges, mark_purge_executed, pending_file_path,
     schedule_purge,
 )
 
@@ -181,6 +182,62 @@ class CancelTests(unittest.TestCase):
         cleared = clear_all_for_vault(self.config_dir, VAULT)
         self.assertIsNotNone(cleared)
         self.assertIsNone(get_pending_purge(self.config_dir, VAULT))
+
+
+class ExecuteTests(unittest.TestCase):
+    """T14.4 — wire-body composition + post-execute cleanup."""
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_purge_exec_"))
+        self.config_dir = self.tmpdir / "config"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_build_execute_request_body_shape(self) -> None:
+        record = schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV, now=1.0,
+        )
+        body = build_execute_request_body(record, purge_secret="purge-secret-bytes")
+        self.assertEqual(body, {
+            "plan_id": record.job_id,
+            "purge_secret": "purge-secret-bytes",
+        })
+
+    def test_build_execute_rejects_empty_secret(self) -> None:
+        record = schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV, now=1.0,
+        )
+        with self.assertRaises(VaultPurgeError):
+            build_execute_request_body(record, purge_secret="")
+
+    def test_mark_purge_executed_clears_pending(self) -> None:
+        schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV, now=1.0,
+        )
+        cleared = mark_purge_executed(self.config_dir, VAULT)
+        self.assertIsNotNone(cleared)
+        self.assertIsNone(get_pending_purge(self.config_dir, VAULT))
+
+    def test_list_due_purges_filters_by_scheduled_for(self) -> None:
+        schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV,
+            delay_seconds=100, now=1_000.0,
+        )
+        # delay=100 ⇒ scheduled_for_epoch=1100; not due yet at 1050.
+        self.assertEqual(list_due_purges(self.config_dir, now=1_050), [])
+        # Due at 1100.
+        due = list_due_purges(self.config_dir, now=1_100)
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0].vault_id, VAULT)
 
 
 if __name__ == "__main__":

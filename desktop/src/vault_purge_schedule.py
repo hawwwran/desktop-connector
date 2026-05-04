@@ -166,6 +166,54 @@ def list_pending_purges(config_dir: Path) -> list[PendingPurge]:
     return [_record_from_dict(v) for v in state.values()]
 
 
+def build_execute_request_body(
+    pending: PendingPurge, *, purge_secret: str,
+) -> dict[str, Any]:
+    """Compose the wire body for ``POST /api/vaults/{id}/gc/execute`` (T14.4).
+
+    The server checks ``purge_secret`` against ``vaults.purge_token_hash``
+    (sha256-hashed at vault create time, per §file 09 of the recovery
+    kit). The plain ``purge_secret`` only ever leaves the local recovery
+    kit when the user is consciously executing a purge.
+    """
+    if not isinstance(purge_secret, str) or not purge_secret:
+        raise VaultPurgeError("purge_secret is required")
+    return {
+        "plan_id": pending.job_id,
+        "purge_secret": purge_secret,
+    }
+
+
+def mark_purge_executed(
+    config_dir: Path, vault_id_dashed: str,
+) -> PendingPurge | None:
+    """Remove the pending-purge record after a successful gc/execute.
+
+    Distinct from :func:`cancel_purge` only in intent — the on-disk
+    state change is identical, but emits a different log line so the
+    activity log can distinguish "user cancelled" from "fired and
+    cleaned up".
+    """
+    state = _read_state(config_dir)
+    raw = state.pop(vault_id_dashed, None)
+    if raw is None:
+        return None
+    _write_state(config_dir, state)
+    record = _record_from_dict(raw)
+    log.info(
+        "vault.purge.executed vault=%s job_id=%s",
+        vault_id_dashed, record.job_id,
+    )
+    return record
+
+
+def list_due_purges(
+    config_dir: Path, *, now: float | None = None,
+) -> list[PendingPurge]:
+    """Return every pending purge whose ``scheduled_for_epoch`` has elapsed."""
+    return [p for p in list_pending_purges(config_dir) if p.is_due(now=now)]
+
+
 def cancel_purge(
     config_dir: Path, vault_id_dashed: str,
 ) -> PendingPurge | None:
@@ -236,11 +284,14 @@ __all__ = [
     "PurgeScope",
     "VaultPurgeAlreadyScheduledError",
     "VaultPurgeError",
+    "build_execute_request_body",
     "cancel_purge",
     "clear_all_for_vault",
     "generate_job_id",
     "get_pending_purge",
+    "list_due_purges",
     "list_pending_purges",
+    "mark_purge_executed",
     "pending_file_path",
     "schedule_purge",
 ]
