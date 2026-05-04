@@ -25,6 +25,7 @@ from src.vault_manifest import (  # noqa: E402
 from src.vault_restore import (  # noqa: E402
     RestoreResult,
     restore_remote_folder,
+    restore_remote_folder_at_date,
 )
 from src.vault_upload import upload_file  # noqa: E402
 
@@ -296,6 +297,246 @@ class RestoreRemoteFolderTests(unittest.TestCase):
         self.assertEqual(first.written, ["alpha.txt"])
         self.assertEqual(second.written, [])
         self.assertEqual(second.skipped_identical, ["alpha.txt"])
+
+
+class RestoreAtDateTests(unittest.TestCase):
+    """T11.5 — pick a date, find latest manifest revision ≤ date,
+    materialize that snapshot at the chosen path with conflict copies.
+
+    The fixtures build a manifest with two files versioned at distinct
+    timestamps so each test can pick a cutoff and assert which version
+    landed.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_restore_at_date_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.dest = self.tmpdir / "snapshot_target"
+        self.dest.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _seed_versions(self) -> tuple[FakeUploadRelay, dict, dict[str, str]]:
+        """Build a remote with file alpha.txt at two versions + beta.txt at one.
+
+        Timeline (UTC):
+
+        - 2026-01-01: alpha v1 = b"alpha-v1"
+        - 2026-02-01: beta  v1 = b"beta-v1"
+        - 2026-03-01: alpha v2 = b"alpha-v2-current"
+        """
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-01-01T00:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-01-01T00:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            current = manifest
+            payloads = {
+                "alpha.txt-v1": b"alpha-v1",
+                "beta.txt-v1": b"beta-v1",
+                "alpha.txt-v2": b"alpha-v2-current",
+            }
+            for tag, ts, path, key in (
+                ("alpha v1", "2026-01-01T12:00:00.000Z", "alpha.txt", "alpha.txt-v1"),
+                ("beta v1", "2026-02-01T12:00:00.000Z", "beta.txt", "beta.txt-v1"),
+                ("alpha v2", "2026-03-01T12:00:00.000Z", "alpha.txt", "alpha.txt-v2"),
+            ):
+                local = self.tmpdir / "src" / f"{key}"
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_bytes(payloads[key])
+                res = upload_file(
+                    vault=vault, relay=relay, manifest=current,
+                    local_path=local, remote_folder_id=DOCS_ID,
+                    remote_path=path, author_device_id=AUTHOR,
+                    created_at=ts,
+                )
+                current = res.manifest
+        finally:
+            vault.close()
+        from src.vault_browser_model import decrypt_manifest as _decrypt
+        observer = _vault()
+        try:
+            published = _decrypt(observer, relay.current_envelope)
+        finally:
+            observer.close()
+        return relay, published, payloads
+
+    # ----------------------- Acceptance scenarios -----------------------
+
+    def test_cutoff_after_v1_before_v2_writes_v1_bytes(self) -> None:
+        """Restoring to a 2-week-old snapshot writes the snapshot bytes;
+        current state on the relay is unchanged (never published)."""
+        relay, manifest, payloads = self._seed_versions()
+        published_count = len(relay.published_manifests)
+        cutoff = datetime(2026, 2, 15, 0, 0, tzinfo=timezone.utc)
+
+        vault = _vault()
+        try:
+            result = restore_remote_folder_at_date(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, destination=self.dest,
+                device_name=DEVICE_NAME, when=WHEN, cutoff=cutoff,
+            )
+        finally:
+            vault.close()
+
+        # alpha.txt at the cutoff = v1 bytes; beta.txt = v1 bytes.
+        self.assertEqual(set(result.written), {"alpha.txt", "beta.txt"})
+        self.assertEqual(
+            (self.dest / "alpha.txt").read_bytes(), payloads["alpha.txt-v1"],
+        )
+        self.assertEqual(
+            (self.dest / "beta.txt").read_bytes(), payloads["beta.txt-v1"],
+        )
+        # Relay was never republished by the restore.
+        self.assertEqual(len(relay.published_manifests), published_count)
+
+    def test_cutoff_before_any_version_yields_empty_restore(self) -> None:
+        relay, manifest, _ = self._seed_versions()
+        cutoff = datetime(2025, 12, 1, tzinfo=timezone.utc)
+        vault = _vault()
+        try:
+            result = restore_remote_folder_at_date(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, destination=self.dest,
+                device_name=DEVICE_NAME, when=WHEN, cutoff=cutoff,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(result.written, [])
+        self.assertEqual(result.skipped_identical, [])
+        self.assertEqual(result.conflict_copies, [])
+
+    def test_cutoff_after_v2_writes_latest_version(self) -> None:
+        relay, manifest, payloads = self._seed_versions()
+        cutoff = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        vault = _vault()
+        try:
+            result = restore_remote_folder_at_date(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, destination=self.dest,
+                device_name=DEVICE_NAME, when=WHEN, cutoff=cutoff,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(
+            (self.dest / "alpha.txt").read_bytes(), payloads["alpha.txt-v2"],
+        )
+        self.assertEqual(set(result.written), {"alpha.txt", "beta.txt"})
+
+    def test_tombstoned_before_cutoff_is_skipped(self) -> None:
+        # Build a remote with alpha.txt then tombstone it.
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-01-01T00:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[make_remote_folder(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at="2026-01-01T00:00:00.000Z",
+                created_by_device_id=AUTHOR, entries=[],
+            )],
+        )
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            local = self.tmpdir / "src_alpha.txt"
+            local.write_bytes(b"alpha bytes")
+            res = upload_file(
+                vault=vault, relay=relay, manifest=manifest,
+                local_path=local, remote_folder_id=DOCS_ID,
+                remote_path="alpha.txt", author_device_id=AUTHOR,
+                created_at="2026-01-01T12:00:00.000Z",
+            )
+            current = tombstone_file_entry(
+                res.manifest, remote_folder_id=DOCS_ID, path="alpha.txt",
+                deleted_at="2026-02-01T12:00:00.000Z", author_device_id=AUTHOR,
+            )
+            current["revision"] = int(current["revision"]) + 1
+            current["parent_revision"] = current["revision"] - 1
+            vault.publish_manifest(relay, current)
+        finally:
+            vault.close()
+        from src.vault_browser_model import decrypt_manifest as _decrypt
+        observer = _vault()
+        try:
+            published = _decrypt(observer, relay.current_envelope)
+        finally:
+            observer.close()
+
+        # Cutoff after tombstone → skipped (file was deleted at that point).
+        cutoff = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        vault = _vault()
+        try:
+            result = restore_remote_folder_at_date(
+                vault=vault, relay=relay, manifest=published,
+                remote_folder_id=DOCS_ID, destination=self.dest,
+                device_name=DEVICE_NAME, when=WHEN, cutoff=cutoff,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(result.written, [])
+        self.assertFalse((self.dest / "alpha.txt").exists())
+
+        # Cutoff *before* tombstone → restore the live snapshot.
+        shutil.rmtree(self.dest); self.dest.mkdir()
+        cutoff_before = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        vault = _vault()
+        try:
+            result = restore_remote_folder_at_date(
+                vault=vault, relay=relay, manifest=published,
+                remote_folder_id=DOCS_ID, destination=self.dest,
+                device_name=DEVICE_NAME, when=WHEN, cutoff=cutoff_before,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(result.written, ["alpha.txt"])
+        self.assertEqual((self.dest / "alpha.txt").read_bytes(), b"alpha bytes")
+
+    def test_collision_in_destination_yields_a20_conflict_copy(self) -> None:
+        relay, manifest, payloads = self._seed_versions()
+        # Pre-place a file at alpha.txt so the snapshot collides.
+        (self.dest / "alpha.txt").write_bytes(b"locally-edited")
+        cutoff = datetime(2026, 2, 15, tzinfo=timezone.utc)
+        vault = _vault()
+        try:
+            result = restore_remote_folder_at_date(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, destination=self.dest,
+                device_name=DEVICE_NAME, when=WHEN, cutoff=cutoff,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(
+            (self.dest / "alpha.txt").read_bytes(), b"locally-edited",
+        )
+        self.assertEqual(len(result.conflict_copies), 1)
+        original, conflict = result.conflict_copies[0]
+        self.assertEqual(original, "alpha.txt")
+        self.assertIn("conflict restored", conflict)
+        self.assertEqual(
+            (self.dest / conflict).read_bytes(), payloads["alpha.txt-v1"],
+        )
 
 
 def _vault() -> Vault:

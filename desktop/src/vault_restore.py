@@ -32,12 +32,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
+from datetime import datetime, timezone
+
 from .vault_conflict_naming import make_conflict_path
 from .vault_download import (
     DownloadProgress,
     VaultLocalDiskFullError,
     default_vault_download_cache_dir,
     download_latest_file,
+    download_version,
 )
 
 
@@ -187,6 +190,180 @@ def restore_remote_folder(
           + len(result.conflict_copies),
           result.bytes_written, "")
     return result
+
+
+def restore_remote_folder_at_date(
+    *,
+    vault: RestoreVault,
+    relay: RestoreRelay,
+    manifest: dict[str, Any],
+    remote_folder_id: str,
+    destination: Path,
+    device_name: str,
+    cutoff: datetime,
+    chunk_cache_dir: Path | None = None,
+    progress: Callable[[RestoreProgress], None] | None = None,
+    when: Any = None,
+) -> RestoreResult:
+    """Materialize the snapshot of ``remote_folder_id`` as of ``cutoff``.
+
+    For each file entry in the folder we pick the latest version whose
+    ``created_at`` is ≤ ``cutoff`` and download that version. Entries
+    that didn't exist yet at the cutoff (their earliest version
+    post-dates it) are skipped. Entries that were already tombstoned
+    at or before the cutoff are skipped. Entries tombstoned *after*
+    the cutoff are restored from the snapshot version active at that
+    time.
+
+    The relay is read-only here — no manifest publish, no chunk
+    deletion — so the current state of the vault is unchanged.
+    """
+    if vault.master_key is None or vault.vault_access_secret is None:
+        raise ValueError("vault is closed")
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=timezone.utc)
+
+    folder = _find_folder(manifest, remote_folder_id)
+    if folder is None:
+        raise KeyError(f"remote folder not found: {remote_folder_id}")
+
+    folder_display_name = str(folder.get("display_name_enc", "")) or remote_folder_id
+    plan = _plan_restore_at_date(folder, cutoff)
+    _emit(progress, "planning", len(plan), 0, 0, "")
+
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    _preflight_disk_for_plan(destination, plan)
+
+    cache_dir = chunk_cache_dir or default_vault_download_cache_dir()
+    result = RestoreResult()
+
+    for relative_path, _entry, version in plan:
+        target = destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        display_path = f"{folder_display_name}/{relative_path}"
+        _emit(progress, "downloading", len(plan),
+              len(result.written) + len(result.skipped_identical),
+              result.bytes_written, relative_path)
+
+        existing_fingerprint = _file_sha256(target) if target.is_file() else None
+        version_size = _int(version.get("logical_size"))
+
+        if existing_fingerprint is not None:
+            try:
+                same_size = target.stat().st_size == version_size
+            except OSError:
+                same_size = False
+            if same_size and _bytes_match_remote(
+                vault=vault, relay=relay, version=version,
+                local_fingerprint=existing_fingerprint,
+            ):
+                result.skipped_identical.append(relative_path)
+                continue
+
+            conflict_path = _unique_conflict_path(
+                destination=destination,
+                relative_path=relative_path,
+                device_name=device_name,
+                when=when,
+            )
+            conflict_target = destination / conflict_path
+            conflict_target.parent.mkdir(parents=True, exist_ok=True)
+            download_version(
+                vault=vault, relay=relay, manifest=manifest,
+                path=display_path, version_id=str(version.get("version_id", "")),
+                destination=conflict_target,
+                existing_policy="overwrite",
+                chunk_cache_dir=cache_dir,
+            )
+            result.conflict_copies.append((relative_path, conflict_path))
+        else:
+            download_version(
+                vault=vault, relay=relay, manifest=manifest,
+                path=display_path, version_id=str(version.get("version_id", "")),
+                destination=target,
+                existing_policy="overwrite",
+                chunk_cache_dir=cache_dir,
+            )
+            result.written.append(relative_path)
+
+        try:
+            result.bytes_written += target.stat().st_size
+        except OSError:
+            result.bytes_written += version_size
+
+    _emit(progress, "done", len(plan),
+          len(result.written) + len(result.skipped_identical)
+          + len(result.conflict_copies),
+          result.bytes_written, "")
+    return result
+
+
+def _plan_restore_at_date(
+    folder: dict[str, Any], cutoff: datetime,
+) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Return ``(relative_path, entry, version_at_or_before_cutoff)`` triples.
+
+    Skips: entries that didn't exist yet at the cutoff, entries that
+    were tombstoned at-or-before the cutoff, entries with no
+    parseable timestamp.
+    """
+    out: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for entry in folder.get("entries", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        relative = str(entry.get("path") or "").strip()
+        if not relative:
+            continue
+        if relative.startswith("/") or ".." in relative.replace("\\", "/").split("/"):
+            log.warning("vault.restore.skip_unsafe path=%s", relative)
+            continue
+
+        # Skip entries that were tombstoned at or before the cutoff —
+        # at that snapshot point the file no longer existed.
+        if bool(entry.get("deleted")):
+            deleted_when = _parse_rfc3339(entry.get("deleted_at"))
+            if deleted_when is not None and deleted_when <= cutoff:
+                continue
+
+        version = _latest_version_at_or_before(entry, cutoff)
+        if version is None:
+            continue
+        out.append((relative.replace("\\", "/"), entry, version))
+    return out
+
+
+def _latest_version_at_or_before(
+    entry: dict[str, Any], cutoff: datetime,
+) -> dict[str, Any] | None:
+    candidates: list[tuple[datetime, dict[str, Any]]] = []
+    for version in entry.get("versions", []) or []:
+        if not isinstance(version, dict):
+            continue
+        when = _parse_rfc3339(version.get("created_at"))
+        if when is None:
+            continue
+        if when <= cutoff:
+            candidates.append((when, version))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0])
+    return candidates[-1][1]
+
+
+def _parse_rfc3339(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    raw = value.replace("Z", "+00:00") if value.endswith("Z") else value
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when
 
 
 # ---------------------------------------------------------------------------
@@ -366,4 +543,5 @@ __all__ = [
     "RestoreProgress",
     "RestoreResult",
     "restore_remote_folder",
+    "restore_remote_folder_at_date",
 ]
