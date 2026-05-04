@@ -562,27 +562,26 @@ def _merge_versions_into(
 
 
 def _conflict_imported_path(path: str, timestamp: str) -> str:
-    """A20 "import" variant: ``<stem> (conflict imported <YYYY-MM-DD HH-MM>)<ext>``."""
-    leaf = Path(path).name or "imported"
-    parent = "/".join(p for p in path.split("/")[:-1] if p)
-    suffix = Path(leaf).suffix
-    stem = leaf[: -len(suffix)] if suffix else leaf
-    short_ts = _short_timestamp(timestamp)
-    new_leaf = f"{stem} (conflict imported {short_ts}){suffix}"
-    return f"{parent}/{new_leaf}" if parent else new_leaf
+    """A20 "import" variant: ``<stem> (conflict imported <YYYY-MM-DD HH-MM>)<ext>``.
+
+    Thin wrapper over :func:`vault_conflict_naming.make_conflict_path`
+    so all three §A20 callers share one implementation.
+    """
+    from .vault_conflict_naming import make_conflict_path
+    when = _parse_rfc3339(timestamp)
+    return make_conflict_path(
+        original_path=path, kind="imported", when=when, device_name=None,
+    )
 
 
-def _short_timestamp(timestamp: str) -> str:
+def _parse_rfc3339(timestamp: str) -> datetime | None:
     try:
         normalized = (
             timestamp.replace("Z", "+00:00") if timestamp.endswith("Z") else timestamp
         )
-        when = datetime.fromisoformat(normalized)
-    except ValueError:
-        return timestamp
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return when.astimezone(timezone.utc).strftime("%Y-%m-%d %H-%M")
+        return datetime.fromisoformat(normalized)
+    except (ValueError, AttributeError):
+        return None
 
 
 def _full_path(folder: dict[str, Any], path: str) -> str:

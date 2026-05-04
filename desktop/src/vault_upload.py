@@ -1234,38 +1234,16 @@ def make_conflict_renamed_path(
 ) -> str:
     """A20-style conflict-rename for "Keep both" uploads.
 
-    Pattern: ``<stem> (conflict <kind> <device-name> <YYYY-MM-DD HH-MM>).<ext>``,
-    e.g. ``report (conflict uploaded Laptop 2026-05-04 17-30).docx``.
-    The directory portion of ``remote_path`` (everything left of the last
-    ``/``) is preserved unchanged so a conflict in
-    ``Invoices/2026/report.pdf`` lands beside the original.
-    Recursion is supported: feed an already-renamed path back through and
-    a second ``(conflict ...)`` suffix is appended (matches the §A20
-    "Recursion" example).
+    Thin wrapper over :func:`vault_conflict_naming.make_conflict_path`.
+    Kept as a stable import for the existing T6.2 callers.
     """
-    raw = str(remote_path).replace("\\", "/")
-    parts = [p for p in raw.split("/") if p]
-    if not parts:
-        raise ValueError("remote_path is empty")
-    leaf = parts[-1]
-    parent = "/".join(parts[:-1])
-
-    dot = leaf.rfind(".")
-    if dot > 0:
-        stem = leaf[:dot]
-        ext = leaf[dot:]
-    else:
-        stem = leaf
-        ext = ""
-
-    timestamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H-%M")
-    sanitized_device = "".join(
-        ch if (ch.isalnum() or ch in "._- ") else "_"
-        for ch in (device_name or "device").strip()
-    ).strip() or "device"
-    suffix = f" (conflict {kind} {sanitized_device} {timestamp})"
-    new_leaf = f"{stem}{suffix}{ext}"
-    return f"{parent}/{new_leaf}" if parent else new_leaf
+    from .vault_conflict_naming import make_conflict_path
+    return make_conflict_path(
+        original_path=remote_path,
+        kind=kind,
+        when=now,
+        device_name=device_name,
+    )
 
 
 def describe_quota_exceeded(error: VaultQuotaExceededError) -> dict[str, Any]:
