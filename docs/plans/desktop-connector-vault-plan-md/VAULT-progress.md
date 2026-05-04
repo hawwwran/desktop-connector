@@ -402,7 +402,7 @@ If a sub-task genuinely requires something the default stack can't provide:
 
 ### T12 — Two-way sync (watcher, ransomware detector, CAS merge)
 
-- [ ] **T12.1** — Two-way sync mode: combine T10.5 backup-only path with remote-changes-applied path (via T11 atomic-write). Each cycle: fetch manifest → apply remote diff to local → upload pending local → repeat until quiet.
+- [x] **T12.1** — Two-way sync mode: combine T10.5 backup-only path with remote-changes-applied path (via T11 atomic-write). Each cycle: fetch manifest → apply remote diff to local → upload pending local → repeat until quiet.
   - Accept: Edit-on-A → propagates to B within one cycle; edit-on-B-while-A-also-edits → both versions land per CAS merge; concurrent delete + edit → keep-both per §D4.
 - [ ] **T12.2** — Local-delete propagation: watcher detects unlink → check `vault_local_entries` (was it synced?) → if yes, create tombstone; if no, do nothing (avoids wiping unsynced local files).
   - Accept: Deleting a previously-synced file produces a remote tombstone; deleting a never-synced file is silent.
