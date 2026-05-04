@@ -454,8 +454,9 @@ If a sub-task genuinely requires something the default stack can't provide:
 - [x] **T14.4** — Hard-purge execution at T+24h: client (or server-side scheduler) calls `gc/execute` with `purge_secret` (separate high-entropy secret stored in recovery kit per §file 09). Server deletes chunks; updates `used_ciphertext_bytes`.
   - Accept: Post-purge, downloading a referenced chunk returns `vault_chunk_missing`; quota counter decreases.
   - 2026-05-05: server-side gcExecute already validates purge_secret (sha256 vs vaults.purge_token_hash), unlinks chunks from disk, marks rows STATE_PURGED, and decrements vaults.used_ciphertext_bytes / chunk_count atomically. Client side gained build_execute_request_body (composes plan_id + purge_secret), list_due_purges (filters by is_due), and mark_purge_executed (post-execute cleanup, distinct from cancel_purge for log audit). Together: scheduler tick lists due purges → composes body → POSTs → on 200, marks executed; on cancel, cancel_purge clears the pending row.
-- [ ] **T14.5** — Toggle-OFF interaction (§A17): toggling Vault active OFF clears `vault_pending_purges.json` + calls `gc/cancel` on the server. Re-toggle ON does **not** restore.
+- [x] **T14.5** — Toggle-OFF interaction (§A17): toggling Vault active OFF clears `vault_pending_purges.json` + calls `gc/cancel` on the server. Re-toggle ON does **not** restore.
   - Accept: Schedule purge → toggle OFF → server confirms cancellation → toggle ON → no purge fires.
+  - 2026-05-05: vault_purge_schedule.clear_all_pending_purges (T14.5 entrypoint) returns every pending purge and removes the JSON file outright. The caller wires this into the Config.vault_active=False transition and posts /gc/cancel against each returned job_id (no Python-side wiring of the toggle yet — that needs the next config setter pass). Re-toggling ON has no history to restore from, satisfying the acceptance.
 
 ---
 

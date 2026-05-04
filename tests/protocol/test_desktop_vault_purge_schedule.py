@@ -18,9 +18,9 @@ from src.vault_purge_schedule import (  # noqa: E402
     DEFAULT_DELAY_SECONDS, PENDING_FILE_NAME,
     PendingPurge, VaultPurgeAlreadyScheduledError, VaultPurgeError,
     build_execute_request_body, cancel_purge, clear_all_for_vault,
-    generate_job_id, get_pending_purge, list_due_purges,
-    list_pending_purges, mark_purge_executed, pending_file_path,
-    schedule_purge,
+    clear_all_pending_purges, generate_job_id, get_pending_purge,
+    list_due_purges, list_pending_purges, mark_purge_executed,
+    pending_file_path, schedule_purge,
 )
 
 
@@ -238,6 +238,59 @@ class ExecuteTests(unittest.TestCase):
         due = list_due_purges(self.config_dir, now=1_100)
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0].vault_id, VAULT)
+
+
+class ToggleOffTests(unittest.TestCase):
+    """T14.5 — toggle-OFF clears every pending purge and re-toggle-ON does not restore."""
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_purge_toggle_"))
+        self.config_dir = self.tmpdir / "config"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_clear_all_returns_every_pending_purge(self) -> None:
+        schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="folder", scope_target=DOCS,
+            scheduled_by_device_id=DEV, now=1.0,
+        )
+        schedule_purge(
+            self.config_dir, vault_id_dashed="OTHR-XXXX-YYYY",
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV, now=1.0,
+        )
+        cleared = clear_all_pending_purges(self.config_dir)
+        self.assertEqual(len(cleared), 2)
+        self.assertEqual(list_pending_purges(self.config_dir), [])
+
+    def test_clear_all_on_empty_state_returns_empty(self) -> None:
+        cleared = clear_all_pending_purges(self.config_dir)
+        self.assertEqual(cleared, [])
+
+    def test_re_toggle_on_does_not_restore(self) -> None:
+        schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV, now=1.0,
+        )
+        # Toggle OFF.
+        clear_all_pending_purges(self.config_dir)
+        # Simulate a re-toggle-ON by reading the state again — there's
+        # no auto-restore code that would re-add the row, so the file
+        # is genuinely empty.
+        self.assertIsNone(get_pending_purge(self.config_dir, VAULT))
+        self.assertEqual(list_pending_purges(self.config_dir), [])
+
+    def test_clear_all_removes_pending_file(self) -> None:
+        schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV, now=1.0,
+        )
+        clear_all_pending_purges(self.config_dir)
+        self.assertFalse(pending_file_path(self.config_dir).exists())
 
 
 if __name__ == "__main__":

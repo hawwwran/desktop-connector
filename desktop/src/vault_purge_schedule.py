@@ -239,6 +239,32 @@ def clear_all_for_vault(
     return cancel_purge(config_dir, vault_id_dashed)
 
 
+def clear_all_pending_purges(config_dir: Path) -> list[PendingPurge]:
+    """T14.5: handler for the §A17 toggle-OFF path.
+
+    Removes the entire ``vault_pending_purges.json`` file, returning
+    the list of purges that were cancelled. The caller is then
+    responsible for posting ``gc/cancel`` against each one's
+    ``job_id`` so the server-side row also flips to
+    ``state='cancelled'``. Re-toggling Vault active ON does NOT
+    restore — there's no history left to restore from.
+    """
+    state = _read_state(config_dir)
+    if not state:
+        return []
+    cleared = [_record_from_dict(v) for v in state.values()]
+    path = pending_file_path(config_dir)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    log.info(
+        "vault.purge.cleared_all_on_toggle_off count=%d",
+        len(cleared),
+    )
+    return cleared
+
+
 def _read_state(config_dir: Path) -> dict[str, Any]:
     path = pending_file_path(config_dir)
     if not path.is_file():
@@ -287,6 +313,7 @@ __all__ = [
     "build_execute_request_body",
     "cancel_purge",
     "clear_all_for_vault",
+    "clear_all_pending_purges",
     "generate_job_id",
     "get_pending_purge",
     "list_due_purges",
