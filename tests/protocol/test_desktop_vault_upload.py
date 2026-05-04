@@ -25,6 +25,7 @@ from src.vault_upload import (  # noqa: E402
     FileSkipped,
     UploadConflictError,
     UploadSession,
+    describe_quota_exceeded,
     detect_path_conflict,
     list_resumable_sessions,
     make_conflict_renamed_path,
@@ -304,6 +305,45 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             out,
             "report (conflict uploaded Bad_Name_With_Chars 2026-05-04 17-30).docx",
         )
+
+    def test_describe_quota_exceeded_offers_eviction_when_history_available(self) -> None:
+        """T6.6 acceptance scenario A: full-with-history-available."""
+        err = VaultQuotaExceededError({
+            "code": "vault_quota_exceeded",
+            "message": "out of room",
+            "details": {
+                "used_ciphertext_bytes": 950,
+                "quota_ciphertext_bytes": 1000,
+                "eviction_available": True,
+            },
+        })
+        info = describe_quota_exceeded(err)
+
+        self.assertTrue(info["eviction_available"])
+        self.assertEqual(info["used_bytes"], 950)
+        self.assertEqual(info["quota_bytes"], 1000)
+        self.assertEqual(info["percent"], 95)
+        self.assertIn("make space", info["heading"].lower())
+        self.assertEqual(info["primary_action_label"], "Make space")
+
+    def test_describe_quota_exceeded_terminal_when_no_history(self) -> None:
+        """T6.6 acceptance scenario B: full-with-no-history-remaining."""
+        err = VaultQuotaExceededError({
+            "code": "vault_quota_exceeded",
+            "message": "out of room",
+            "details": {
+                "used_ciphertext_bytes": 1000,
+                "quota_ciphertext_bytes": 1000,
+                "eviction_available": False,
+            },
+        })
+        info = describe_quota_exceeded(err)
+
+        self.assertFalse(info["eviction_available"])
+        self.assertEqual(info["percent"], 100)
+        self.assertIn("no backup history", info["heading"].lower())
+        self.assertIn("export", info["body"].lower())
+        self.assertIn("migrate", info["body"].lower())
 
     def test_upload_resume_after_simulated_crash_finishes_without_double_put(self) -> None:
         """T6.5 acceptance: kill mid-upload, restart, no chunk uploaded twice."""

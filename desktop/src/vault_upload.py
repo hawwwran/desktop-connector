@@ -49,7 +49,11 @@ from .vault_manifest import (
     normalize_manifest_path,
     normalize_manifest_plaintext,
 )
-from .vault_relay_errors import VaultCASConflictError, VaultRelayError
+from .vault_relay_errors import (
+    VaultCASConflictError,
+    VaultQuotaExceededError,
+    VaultRelayError,
+)
 
 
 CHUNK_SIZE = 2 * 1024 * 1024  # 2 MiB; must match the download-side reader
@@ -1264,6 +1268,47 @@ def make_conflict_renamed_path(
     return f"{parent}/{new_leaf}" if parent else new_leaf
 
 
+def describe_quota_exceeded(error: VaultQuotaExceededError) -> dict[str, Any]:
+    """Format a 507 ``vault_quota_exceeded`` for UI surfacing (T6.6).
+
+    Returns ``{eviction_available: bool, used_bytes, quota_bytes, percent,
+    heading, body, primary_action_label}``. The heading + body strings
+    come straight from §D2:
+
+    - Eviction-available variant offers to free space (the actual eviction
+      pass lands in T7 — for T6.6 the button just sets up the prompt).
+    - No-history variant is the §D2 step-4 terminal banner: sync stopped,
+      no automatic recovery, user must export or migrate.
+    """
+    used = max(0, int(error.used_bytes or 0))
+    quota = max(0, int(error.quota_bytes or 0))
+    percent = (used * 100) // quota if quota else 100
+    if error.eviction_available:
+        heading = "Vault is full — make space?"
+        body = (
+            f"This vault is at {percent}% of its quota ({used} / {quota} bytes). "
+            "Old historical versions can be purged to make room for the new upload. "
+            "Eviction lands in T7; for now the upload pauses."
+        )
+        primary_action_label = "Make space"
+    else:
+        heading = "Vault is full and no backup history remains."
+        body = (
+            "Sync is stopped. Free space by deleting files, or export and "
+            "migrate to a relay with more capacity."
+        )
+        primary_action_label = "Open vault settings"
+    return {
+        "eviction_available": bool(error.eviction_available),
+        "used_bytes": used,
+        "quota_bytes": quota,
+        "percent": percent,
+        "heading": heading,
+        "body": body,
+        "primary_action_label": primary_action_label,
+    }
+
+
 def detect_path_conflict(
     manifest: dict[str, Any],
     remote_folder_id: str,
@@ -1311,6 +1356,7 @@ __all__ = [
     "VaultRelayError",
     "clear_session",
     "default_upload_resume_dir",
+    "describe_quota_exceeded",
     "detect_path_conflict",
     "list_resumable_sessions",
     "make_conflict_renamed_path",

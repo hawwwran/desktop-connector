@@ -21,6 +21,7 @@ from .vault_download import previous_version_filename
 from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError
 from .vault_upload import (
     default_upload_resume_dir,
+    describe_quota_exceeded,
     list_resumable_sessions,
 )
 from .vault_runtime import create_vault_relay, open_local_vault_from_grant
@@ -117,6 +118,10 @@ def show_vault_browser(config_dir: Path) -> None:
         resume_banner.set_button_label("Resume")
         resume_banner.set_revealed(False)
         outer.append(resume_banner)
+
+        quota_banner = Adw.Banner.new("")
+        quota_banner.set_revealed(False)
+        outer.append(quota_banner)
 
         breadcrumb = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         breadcrumb.add_css_class("title-4")
@@ -516,6 +521,48 @@ def show_vault_browser(config_dir: Path) -> None:
                 GLib.idle_add(succeed)
 
             threading.Thread(target=worker, daemon=True).start()
+
+        def _handle_quota_exceeded(exc: VaultQuotaExceededError, *, action: str) -> None:
+            """T6.6: route a 507 into either the eviction offer or the
+            vault-full banner depending on ``eviction_available``."""
+            info = describe_quota_exceeded(exc)
+            if info["eviction_available"]:
+                quota_banner.set_revealed(False)
+                dlg = Adw.AlertDialog(
+                    heading=info["heading"],
+                    body=info["body"],
+                )
+                dlg.add_response("cancel", "Cancel")
+                dlg.add_response("evict", info["primary_action_label"])
+                dlg.set_default_response("evict")
+                dlg.set_close_response("cancel")
+                dlg.set_response_appearance("evict", Adw.ResponseAppearance.SUGGESTED)
+                # The actual eviction pass is T7's; for T6.6 the action
+                # acknowledges the prompt and surfaces a status.
+                def on_response(_dialog, response: str) -> None:
+                    if response == "evict":
+                        set_status(
+                            f"Cannot reclaim space yet — eviction lands in T7. "
+                            f"{action} paused at {info['percent']}% used.",
+                            "error",
+                        )
+                    else:
+                        set_status(
+                            f"{action} paused — vault is full ({info['percent']}%).",
+                            "error",
+                        )
+                dlg.connect("response", on_response)
+                dlg.present(win)
+                return
+
+            # No history left → terminal sync-stop banner per §D2 step 4.
+            quota_banner.set_title(info["body"])
+            quota_banner.set_button_label(info["primary_action_label"])
+            quota_banner.set_revealed(True)
+            set_status(
+                f"{action} stopped: vault full and no backup history remains.",
+                "error",
+            )
 
         def _refresh_resume_banner(vault_id: str) -> None:
             try:
@@ -997,16 +1044,11 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except VaultQuotaExceededError as exc:
-                    msg = (
-                        f"Vault is full ({exc.used_bytes}/{exc.quota_bytes} bytes). "
-                        "Eviction lands in T6.6/T7."
-                    )
-
                     def fail() -> bool:
                         progress_bar.set_visible(False)
                         upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                         refresh_btn.set_sensitive(True)
-                        set_status(msg, "error")
+                        _handle_quota_exceeded(exc, action="Upload")
                         return False
                     GLib.idle_add(fail)
                     return
@@ -1183,17 +1225,12 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except VaultQuotaExceededError as exc:
-                    msg = (
-                        f"Vault is full ({exc.used_bytes}/{exc.quota_bytes} bytes). "
-                        "Eviction lands in T6.6/T7."
-                    )
-
                     def fail() -> bool:
                         progress_bar.set_visible(False)
                         upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                         upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
                         refresh_btn.set_sensitive(True)
-                        set_status(msg, "error")
+                        _handle_quota_exceeded(exc, action="Folder upload")
                         return False
                     GLib.idle_add(fail)
                     return
