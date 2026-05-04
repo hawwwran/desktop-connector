@@ -406,7 +406,7 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: Edit-on-A → propagates to B within one cycle; edit-on-B-while-A-also-edits → both versions land per CAS merge; concurrent delete + edit → keep-both per §D4.
 - [x] **T12.2** — Local-delete propagation: watcher detects unlink → check `vault_local_entries` (was it synced?) → if yes, create tombstone; if no, do nothing (avoids wiping unsynced local files).
   - Accept: Deleting a previously-synced file produces a remote tombstone; deleting a never-synced file is silent.
-- [ ] **T12.3** — Ransomware detector per §A15: counters keyed by binding, sliding 5-minute window. On trip: `binding_state = paused`, surface banner with [Review] [Rollback] [Resume] [Keep paused]. Thresholds configurable in Vault settings → Sync safety.
+- [x] **T12.3** — Ransomware detector per §A15: counters keyed by binding, sliding 5-minute window. On trip: `binding_state = paused`, surface banner with [Review] [Rollback] [Resume] [Keep paused]. Thresholds configurable in Vault settings → Sync safety.
   - Accept: Touching 200 files in 5 minutes pauses the binding; surface text matches §gaps §6 + §A15 verbatim; user actions land their state transitions.
 - [ ] **T12.4** — Pause / Resume per binding: `state = paused` keeps `sync_mode` set so resume restores the same mode (per §A12). Pending ops preserved across pause.
   - Accept: Paused binding does no traffic; resuming flushes pending ops.
