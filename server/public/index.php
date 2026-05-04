@@ -246,6 +246,9 @@ $router->vaultPost('/api/vaults/{vault_id}/join-requests/{req_id}/claim', functi
 $router->vaultPost('/api/vaults/{vault_id}/join-requests/{req_id}/approve', function (RequestContext $ctx) use ($db) {
     VaultGrantsController::approve($db, $ctx);
 });
+$router->vaultGet('/api/vaults/{vault_id}/device-grants', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::listDeviceGrants($db, $ctx);
+});
 $router->vaultDelete('/api/vaults/{vault_id}/device-grants/{device_id}', function (RequestContext $ctx) use ($db) {
     VaultGrantsController::revokeDeviceGrant($db, $ctx);
 });

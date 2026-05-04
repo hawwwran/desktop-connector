@@ -360,6 +360,55 @@ class VaultGrantsController
     }
 
     // ===================================================================
+    //  GET /api/vaults/{vault_id}/device-grants                  (T13.5)
+    // ===================================================================
+
+    /**
+     * List every device that has been granted access to the vault — the
+     * Devices tab in Vault settings reads this. Active + revoked rows
+     * both appear so the admin can see history; the UI greys out revoked
+     * rows.
+     */
+    public static function listDeviceGrants(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        VaultAuthService::requireVaultAuth($db, $vaultId);
+        $caller = self::deviceIdHeader();
+        self::requireAdmin($db, $vaultId, $caller);
+
+        $grants = new VaultDeviceGrantsRepository($db);
+        $rows = $grants->listForVault($vaultId);
+        $payload = [];
+        foreach ($rows as $row) {
+            $payload[] = [
+                'grant_id'      => (string)$row['grant_id'],
+                'device_id'     => (string)$row['device_id'],
+                'device_name'   => $row['device_name'] !== null ? (string)$row['device_name'] : null,
+                'role'          => (string)$row['role'],
+                'granted_by'    => (string)$row['granted_by'],
+                'granted_via'   => (string)$row['granted_via'],
+                'granted_at'    => self::ts((int)$row['granted_at']),
+                'revoked_at'    => $row['revoked_at'] !== null
+                    ? self::ts((int)$row['revoked_at']) : null,
+                'revoked_by'    => $row['revoked_by'] !== null
+                    ? (string)$row['revoked_by'] : null,
+                'last_seen_at'  => $row['last_seen_at'] !== null
+                    ? self::ts((int)$row['last_seen_at']) : null,
+                'is_revoked'    => $row['revoked_at'] !== null,
+                'is_caller'     => (string)$row['device_id'] === $caller,
+            ];
+        }
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'vault_id' => self::dashedVaultId($vaultId),
+                'grants'   => $payload,
+            ],
+        ], 200);
+    }
+
+    // ===================================================================
     //  POST /api/vaults/{vault_id}/access-secret/rotate          (T13.6)
     // ===================================================================
 

@@ -324,6 +324,55 @@ final class VaultGrantsControllerTest extends TestCase
         );
     }
 
+    public function test_list_device_grants_includes_active_and_revoked(): void
+    {
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::listDeviceGrants(
+            $this->db,
+            $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        self::assertSame(200, $resp['status']);
+        self::assertSame('ABCD-2345-WXYZ', $resp['json']['data']['vault_id']);
+        $grants = $resp['json']['data']['grants'];
+        self::assertCount(2, $grants); // seeded admin + non-admin
+        $byDevice = [];
+        foreach ($grants as $g) {
+            $byDevice[$g['device_id']] = $g;
+        }
+        self::assertSame('admin', $byDevice[self::ADMIN_DEVICE]['role']);
+        self::assertTrue($byDevice[self::ADMIN_DEVICE]['is_caller']);
+        self::assertFalse($byDevice[self::ADMIN_DEVICE]['is_revoked']);
+        self::assertSame('sync', $byDevice[self::NON_ADMIN_DEVICE]['role']);
+
+        // Revoke the non-admin device, then re-list — the row stays
+        // but is_revoked flips.
+        (new VaultDeviceGrantsRepository($this->db))->revoke(
+            self::VAULT_ID, self::NON_ADMIN_DEVICE, self::ADMIN_DEVICE, time(),
+        );
+        $resp = $this->invoke(fn() => VaultGrantsController::listDeviceGrants(
+            $this->db,
+            $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        $byDevice = [];
+        foreach ($resp['json']['data']['grants'] as $g) {
+            $byDevice[$g['device_id']] = $g;
+        }
+        self::assertTrue($byDevice[self::NON_ADMIN_DEVICE]['is_revoked']);
+        self::assertNotNull($byDevice[self::NON_ADMIN_DEVICE]['revoked_at']);
+    }
+
+    public function test_list_device_grants_requires_admin(): void
+    {
+        $this->setAuth(self::NON_ADMIN_DEVICE, self::NON_ADMIN_TOKEN);
+        $this->expectVaultError(
+            fn() => VaultGrantsController::listDeviceGrants(
+                $this->db,
+                $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+            ),
+            'vault_access_denied', 403,
+        );
+    }
+
     public function test_invalid_role_rejected_by_approve(): void
     {
         // Set up a claimed jr first.
