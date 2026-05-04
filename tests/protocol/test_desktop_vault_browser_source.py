@@ -94,6 +94,23 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_upload_conflict_prompt(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            "_maybe_prompt_conflict_then_upload",
+            "detect_path_conflict",
+            "make_conflict_renamed_path",
+            "Add as new version",
+            "Keep both with rename",
+            '"new_file_only"',
+            "device_name",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
     def test_browser_window_wires_versions_panel_and_download(self) -> None:
         source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
             encoding="utf-8"

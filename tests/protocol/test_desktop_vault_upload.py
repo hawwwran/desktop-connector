@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -22,6 +23,8 @@ from src.vault_manifest import find_file_entry, make_manifest, make_remote_folde
 from src.vault_relay_errors import VaultQuotaExceededError  # noqa: E402
 from src.vault_upload import (  # noqa: E402
     UploadConflictError,
+    detect_path_conflict,
+    make_conflict_renamed_path,
     upload_file,
 )
 
@@ -159,6 +162,143 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         # Chunks accepted before the 507 are kept (idempotent retries are
         # supposed to skip them) but no new file entry exists yet.
         self.assertGreaterEqual(len(relay.chunks), 1)
+
+    def test_keep_both_rename_path_uploads_as_independent_entry(self) -> None:
+        local = self.tmpdir / "report.docx"
+        local.write_bytes(b"first content")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            first = upload_file(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                local_path=local,
+                remote_folder_id=DOCS_ID,
+                remote_path="report.docx",
+                author_device_id=AUTHOR,
+            )
+            # Different bytes for the second upload so the fingerprint
+            # short-circuit does not fire.
+            local.write_bytes(b"second content, totally different")
+            renamed_path = make_conflict_renamed_path(
+                "report.docx",
+                "Laptop",
+                now=datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc),
+            )
+            second = upload_file(
+                vault=vault,
+                relay=relay,
+                manifest=first.manifest,
+                local_path=local,
+                remote_folder_id=DOCS_ID,
+                remote_path=renamed_path,
+                author_device_id=AUTHOR,
+                mode="new_file_only",
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(
+            renamed_path,
+            "report (conflict uploaded Laptop 2026-05-04 17-30).docx",
+        )
+        self.assertNotEqual(first.entry_id, second.entry_id)
+        original = find_file_entry(second.manifest, DOCS_ID, "report.docx")
+        renamed = find_file_entry(second.manifest, DOCS_ID, renamed_path)
+        self.assertIsNotNone(original)
+        self.assertIsNotNone(renamed)
+        self.assertEqual(original["entry_id"], first.entry_id)
+        self.assertEqual(renamed["entry_id"], second.entry_id)
+
+    def test_detect_path_conflict_skips_tombstoned_entries(self) -> None:
+        manifest = _empty_manifest()
+        # Inject a tombstoned entry directly so we don't depend on T7.1 yet.
+        manifest["remote_folders"][0]["entries"].append({
+            "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+            "type": "file",
+            "path": "ghost.txt",
+            "deleted": True,
+            "latest_version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+            "versions": [{
+                "version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                "created_at": "2026-04-01T10:00:00.000Z",
+                "modified_at": "2026-04-01T10:00:00.000Z",
+                "logical_size": 1,
+                "ciphertext_size": 25,
+                "content_fingerprint": "deadbeef",
+                "chunks": [],
+                "author_device_id": AUTHOR,
+            }],
+        })
+
+        self.assertFalse(detect_path_conflict(manifest, DOCS_ID, "ghost.txt"))
+        self.assertFalse(detect_path_conflict(manifest, DOCS_ID, "absent.txt"))
+
+    def test_detect_path_conflict_finds_live_entry(self) -> None:
+        local = self.tmpdir / "live.txt"
+        local.write_bytes(b"live")
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            first = upload_file(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                local_path=local,
+                remote_folder_id=DOCS_ID,
+                remote_path="live.txt",
+                author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        self.assertTrue(detect_path_conflict(first.manifest, DOCS_ID, "live.txt"))
+
+    def test_make_conflict_renamed_path_handles_directory_and_recursion(self) -> None:
+        first = make_conflict_renamed_path(
+            "Invoices/2026/report.pdf",
+            "Workstation 7",
+            now=datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            first,
+            "Invoices/2026/report (conflict uploaded Workstation 7 2026-05-04 17-30).pdf",
+        )
+        # A20 example: chained conflicts append a second suffix instead of
+        # double-renaming.
+        second = make_conflict_renamed_path(
+            first,
+            "Laptop",
+            now=datetime(2026, 5, 4, 18, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            second,
+            "Invoices/2026/report (conflict uploaded Workstation 7 2026-05-04 17-30) "
+            "(conflict uploaded Laptop 2026-05-04 18-00).pdf",
+        )
+
+    def test_make_conflict_renamed_path_extensionless_file(self) -> None:
+        out = make_conflict_renamed_path(
+            "README",
+            "Laptop",
+            now=datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(out, "README (conflict uploaded Laptop 2026-05-04 17-30)")
+
+    def test_make_conflict_renamed_path_sanitizes_device_name(self) -> None:
+        out = make_conflict_renamed_path(
+            "report.docx",
+            "Bad/Name:With*Chars",
+            now=datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            out,
+            "report (conflict uploaded Bad_Name_With_Chars 2026-05-04 17-30).docx",
+        )
 
     def test_new_file_only_refuses_existing_path(self) -> None:
         local = self.tmpdir / "first.txt"

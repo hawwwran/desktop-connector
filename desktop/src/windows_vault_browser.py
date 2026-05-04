@@ -819,13 +819,22 @@ def show_vault_browser(config_dir: Path) -> None:
 
             file_dialog.save(parent=win, callback=on_destination_chosen)
 
-        def start_upload(local_path: Path, remote_folder_id: str, sub_path: str) -> None:
+        def start_upload(
+            local_path: Path,
+            remote_folder_id: str,
+            sub_path: str,
+            *,
+            override_remote_path: str | None = None,
+            upload_mode: str = "new_file_or_version",
+        ) -> None:
             vault_id = local_vault_id()
             if not vault_id:
                 set_status("No local vault is connected.", "error")
                 return
 
-            remote_path = sub_path + "/" + local_path.name if sub_path else local_path.name
+            remote_path = override_remote_path or (
+                sub_path + "/" + local_path.name if sub_path else local_path.name
+            )
             upload_btn.set_sensitive(False)
             refresh_btn.set_sensitive(False)
             progress_bar.set_visible(True)
@@ -862,6 +871,7 @@ def show_vault_browser(config_dir: Path) -> None:
                             remote_folder_id=remote_folder_id,
                             remote_path=remote_path,
                             author_device_id=device_id,
+                            mode=upload_mode,
                             progress=report_progress,
                             local_index=local_index,
                         )
@@ -940,9 +950,65 @@ def show_vault_browser(config_dir: Path) -> None:
                 if not local_path.is_file():
                     set_status("Selected entry is not a file.", "error")
                     return
-                start_upload(local_path, remote_folder_id, sub_path)
+                _maybe_prompt_conflict_then_upload(local_path, remote_folder_id, sub_path)
 
             file_dialog.open(parent=win, callback=on_source_chosen)
+
+        def _maybe_prompt_conflict_then_upload(
+            local_path: Path,
+            remote_folder_id: str,
+            sub_path: str,
+        ) -> None:
+            from .vault_upload import detect_path_conflict, make_conflict_renamed_path
+
+            remote_path = (
+                sub_path + "/" + local_path.name if sub_path else local_path.name
+            )
+            manifest = state.get("manifest")
+            if manifest is None or not detect_path_conflict(
+                manifest, remote_folder_id, remote_path
+            ):
+                start_upload(local_path, remote_folder_id, sub_path)
+                return
+
+            dlg = Adw.AlertDialog(
+                heading=f"{remote_path} already exists",
+                body=(
+                    "A file with this name is already in the remote folder. "
+                    "Choose what to do — identical content is detected automatically "
+                    "and skipped, so this prompt only appears for new bytes."
+                ),
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("skip", "Skip")
+            dlg.add_response("keep_both", "Keep both with rename")
+            dlg.add_response("new_version", "Add as new version")
+            dlg.set_default_response("new_version")
+            dlg.set_close_response("cancel")
+            dlg.set_response_appearance("new_version", Adw.ResponseAppearance.SUGGESTED)
+
+            def on_response(_dialog, response: str) -> None:
+                if response == "new_version":
+                    start_upload(local_path, remote_folder_id, sub_path)
+                elif response == "keep_both":
+                    config.reload()
+                    device_name = str(getattr(config, "device_name", "") or "device")
+                    renamed = make_conflict_renamed_path(remote_path, device_name)
+                    new_sub_parts = [p for p in renamed.split("/") if p][:-1]
+                    new_sub_path = "/".join(new_sub_parts)
+                    start_upload(
+                        local_path,
+                        remote_folder_id,
+                        new_sub_path,
+                        override_remote_path=renamed,
+                        upload_mode="new_file_only",
+                    )
+                elif response == "skip":
+                    set_status(f"Skipped uploading {local_path.name}.", "dim-label")
+                # "cancel" → fall through and do nothing.
+
+            dlg.connect("response", on_response)
+            dlg.present(win)
 
         back_btn.connect("clicked", go_back)
         forward_btn.connect("clicked", go_forward)

@@ -368,6 +368,66 @@ def _now_rfc3339() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def make_conflict_renamed_path(
+    remote_path: str,
+    device_name: str,
+    *,
+    kind: str = "uploaded",
+    now: datetime | None = None,
+) -> str:
+    """A20-style conflict-rename for "Keep both" uploads.
+
+    Pattern: ``<stem> (conflict <kind> <device-name> <YYYY-MM-DD HH-MM>).<ext>``,
+    e.g. ``report (conflict uploaded Laptop 2026-05-04 17-30).docx``.
+    The directory portion of ``remote_path`` (everything left of the last
+    ``/``) is preserved unchanged so a conflict in
+    ``Invoices/2026/report.pdf`` lands beside the original.
+    Recursion is supported: feed an already-renamed path back through and
+    a second ``(conflict ...)`` suffix is appended (matches the §A20
+    "Recursion" example).
+    """
+    raw = str(remote_path).replace("\\", "/")
+    parts = [p for p in raw.split("/") if p]
+    if not parts:
+        raise ValueError("remote_path is empty")
+    leaf = parts[-1]
+    parent = "/".join(parts[:-1])
+
+    dot = leaf.rfind(".")
+    if dot > 0:
+        stem = leaf[:dot]
+        ext = leaf[dot:]
+    else:
+        stem = leaf
+        ext = ""
+
+    timestamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H-%M")
+    sanitized_device = "".join(
+        ch if (ch.isalnum() or ch in "._- ") else "_"
+        for ch in (device_name or "device").strip()
+    ).strip() or "device"
+    suffix = f" (conflict {kind} {sanitized_device} {timestamp})"
+    new_leaf = f"{stem}{suffix}{ext}"
+    return f"{parent}/{new_leaf}" if parent else new_leaf
+
+
+def detect_path_conflict(
+    manifest: dict[str, Any],
+    remote_folder_id: str,
+    remote_path: str,
+) -> bool:
+    """Return True if ``remote_path`` already has a non-deleted file entry.
+
+    Uses ``find_file_entry`` (which returns deleted entries too) so the
+    UI's conflict prompt fires only for live entries — re-uploading over
+    a tombstone implicitly restores the file in T6.1.
+    """
+    entry = find_file_entry(manifest, remote_folder_id, remote_path)
+    if entry is None:
+        return False
+    return not bool(entry.get("deleted"))
+
+
 def _report(
     callback: Callable[[UploadProgress], None] | None,
     phase: str,
@@ -391,5 +451,7 @@ __all__ = [
     "UploadProgress",
     "UploadResult",
     "VaultRelayError",
+    "detect_path_conflict",
+    "make_conflict_renamed_path",
     "upload_file",
 ]
