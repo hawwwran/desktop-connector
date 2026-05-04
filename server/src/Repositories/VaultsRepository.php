@@ -283,4 +283,29 @@ class VaultsRepository
         );
         return $row !== null;
     }
+
+    /**
+     * Replace the stored ``vault_access_token_hash`` with a freshly-rotated
+     * one (T13.6 / §A5). The new hash MUST already be SHA-256 of the new
+     * vault_access_secret (32 raw bytes); the relay never sees the
+     * plaintext. Returns true iff exactly one row updated.
+     */
+    public function rotateAccessTokenHash(
+        string $vaultId,
+        string $newAccessTokenHashBinary,
+        int $now
+    ): bool {
+        $this->db->execute(
+            'UPDATE vaults
+                SET vault_access_token_hash = :hash,
+                    updated_at = :now
+              WHERE vault_id = :id',
+            [
+                ':id'   => $vaultId,
+                ':hash' => new Blob($newAccessTokenHashBinary),
+                ':now'  => $now,
+            ]
+        );
+        return $this->db->changes() === 1;
+    }
 }

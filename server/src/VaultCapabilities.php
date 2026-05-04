@@ -46,7 +46,9 @@ class VaultCapabilities
      *   T13 → 'vault_grant_qr_v1'
      *   T14 → 'vault_purge_v1'
      */
-    private const POST_T1_BITS = [];
+    private const POST_T1_BITS = [
+        'vault_grant_qr_v1',
+    ];
 
     /**
      * Test-only override. Lists bits that are "missing" — VaultCapabilities

@@ -83,6 +83,11 @@ class Router
         $this->add('HEAD', $pattern, $handler, requiresAuth: false);
     }
 
+    public function vaultDelete(string $pattern, callable $handler): void
+    {
+        $this->add('DELETE', $pattern, $handler, requiresAuth: false);
+    }
+
     public function dispatch(string $method, string $uri): void
     {
         try {

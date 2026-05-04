@@ -249,3 +249,46 @@ class VaultStorageUnavailableError extends VaultApiError
         );
     }
 }
+
+/**
+ * 403 vault_access_denied (T13). The caller authenticated successfully,
+ * but the device is no longer permitted to act on the vault — the grant
+ * has been revoked, the role doesn't allow the requested operation, or
+ * the join-request lifecycle says the row isn't in a state the caller
+ * can manipulate.
+ */
+class VaultAccessDeniedError extends VaultApiError
+{
+    public function __construct(string $reason, ?string $field = null)
+    {
+        $details = ['reason' => $reason];
+        if ($field !== null) {
+            $details['field'] = $field;
+        }
+        parent::__construct(
+            status: 403,
+            errorCode: 'vault_access_denied',
+            message: $reason,
+            details: $details,
+        );
+    }
+}
+
+/**
+ * 404 vault_join_request_not_found / state-conflict. The join-request id
+ * doesn't exist, or the row is in a state the operation can't act on
+ * (e.g. claim on already-claimed). Distinct from 403 so a stale QR's
+ * code is detectable without ambiguity.
+ */
+class VaultJoinRequestStateError extends VaultApiError
+{
+    public function __construct(string $reason, int $status = 404)
+    {
+        parent::__construct(
+            status: $status,
+            errorCode: 'vault_join_request_state',
+            message: $reason,
+            details: ['reason' => $reason],
+        );
+    }
+}

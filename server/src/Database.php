@@ -157,6 +157,12 @@ class Database
         if ($migrationSql !== false) {
             $this->db->exec($migrationSql);
         }
+
+        // T13 — device grants + access-secret rotation audit.
+        $grantsSql = file_get_contents(__DIR__ . '/../migrations/004_vault_device_grants.sql');
+        if ($grantsSql !== false) {
+            $this->db->exec($grantsSql);
+        }
     }
 
     public function query(string $sql, array $params = []): SQLite3Result

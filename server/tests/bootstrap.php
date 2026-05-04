@@ -32,6 +32,8 @@ require_once $root . '/src/Repositories/VaultsRepository.php';
 require_once $root . '/src/Repositories/VaultManifestsRepository.php';
 require_once $root . '/src/Repositories/VaultChunksRepository.php';
 require_once $root . '/src/Repositories/VaultGcJobsRepository.php';
+require_once $root . '/src/Repositories/VaultJoinRequestsRepository.php';
+require_once $root . '/src/Repositories/VaultDeviceGrantsRepository.php';
 
 // Storage helper + capability advertising.
 require_once $root . '/src/VaultStorage.php';
@@ -44,4 +46,5 @@ require_once $root . '/src/Crypto/VaultCrypto.php';
 require_once $root . '/src/Router.php';
 require_once $root . '/src/Http/Validators.php';
 require_once $root . '/src/Controllers/VaultController.php';
+require_once $root . '/src/Controllers/VaultGrantsController.php';
 require_once $root . '/src/Controllers/DeviceController.php';

@@ -38,6 +38,8 @@ require_once __DIR__ . '/../src/Repositories/VaultManifestsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultChunksRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultGcJobsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultMigrationIntentsRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultJoinRequestsRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultDeviceGrantsRepository.php';
 
 require_once __DIR__ . '/../src/VaultStorage.php';
 require_once __DIR__ . '/../src/VaultCapabilities.php';
@@ -51,6 +53,7 @@ require_once __DIR__ . '/../src/Controllers/DashboardController.php';
 require_once __DIR__ . '/../src/Controllers/FcmController.php';
 require_once __DIR__ . '/../src/Controllers/FasttrackController.php';
 require_once __DIR__ . '/../src/Controllers/VaultController.php';
+require_once __DIR__ . '/../src/Controllers/VaultGrantsController.php';
 
 require_once __DIR__ . '/../src/FcmSender.php';
 require_once __DIR__ . '/../src/AppLog.php';
@@ -228,6 +231,26 @@ $router->vaultGet('/api/vaults/{vault_id}/migration/verify-source', function (Re
 });
 $router->vaultPut('/api/vaults/{vault_id}/migration/commit', function (RequestContext $ctx) use ($db) {
     VaultController::migrationCommit($db, $ctx);
+});
+
+// T13 — QR-assisted device grants + revoke + access-secret rotation
+$router->vaultPost('/api/vaults/{vault_id}/join-requests', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::createJoinRequest($db, $ctx);
+});
+$router->vaultGet('/api/vaults/{vault_id}/join-requests/{req_id}', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::getJoinRequest($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/join-requests/{req_id}/claim', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::claim($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/join-requests/{req_id}/approve', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::approve($db, $ctx);
+});
+$router->vaultDelete('/api/vaults/{vault_id}/device-grants/{device_id}', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::revokeDeviceGrant($db, $ctx);
+});
+$router->vaultPost('/api/vaults/{vault_id}/access-secret/rotate', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::rotateAccessSecret($db, $ctx);
 });
 
 // Dispatch

@@ -89,6 +89,7 @@ final class VaultCapabilitiesTest extends TestCase
             'vault_manifest_cas_v1',
             'vault_chunk_v1',
             'vault_gc_v1',
+            'vault_grant_qr_v1',
         ]);
 
         $bits = VaultCapabilities::current();

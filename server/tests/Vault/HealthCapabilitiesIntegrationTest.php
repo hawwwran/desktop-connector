@@ -82,6 +82,7 @@ final class HealthCapabilitiesIntegrationTest extends TestCase
             'vault_manifest_cas_v1',
             'vault_chunk_v1',
             'vault_gc_v1',
+            'vault_grant_qr_v1',
         ]);
 
         $resp = $this->invoke(fn() => DeviceController::health(
