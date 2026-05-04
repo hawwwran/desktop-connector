@@ -58,6 +58,8 @@ carefully.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import unicodedata
 from typing import Protocol, runtime_checkable
 
@@ -405,6 +407,84 @@ def build_chunk_envelope(*, nonce: bytes, aead_ciphertext_and_tag: bytes) -> byt
     if len(nonce) != XCHACHA20_NONCE_BYTES:
         raise ValueError(f"nonce must be {XCHACHA20_NONCE_BYTES} bytes; got {len(nonce)}")
     return nonce + aead_ciphertext_and_tag
+
+
+_BASE32_LOWER = "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def _base32_lower_encode_15_bytes(raw: bytes) -> str:
+    """Encode 15 bytes as 24 base32 lowercase chars (matching A19 / file/folder ids)."""
+    if len(raw) != 15:
+        raise ValueError(f"expected 15 bytes; got {len(raw)}")
+    out = []
+    bits = 0
+    buf = 0
+    for byte in raw:
+        buf = (buf << 8) | byte
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.append(_BASE32_LOWER[(buf >> bits) & 0x1f])
+    return "".join(out[:24])
+
+
+def derive_chunk_id_key(master_key: bytes) -> bytes:
+    """Per-vault HMAC key for keyed chunk-id derivation."""
+    return derive_subkey("dc-vault-v1/chunk-id", bytes(master_key))
+
+
+def derive_content_fingerprint_key(master_key: bytes) -> bytes:
+    """Per-vault HMAC key for keyed file content fingerprints (§04 §A7).
+
+    Used to detect "this upload's bytes match an existing version" so the
+    upload pipeline can short-circuit and PUT zero new chunks. Different
+    vaults produce different fingerprints for identical bytes — the
+    fingerprint never leaks plaintext-level identity outside the vault.
+    """
+    return derive_subkey("dc-vault-v1/content-fp", bytes(master_key))
+
+
+def make_chunk_id(
+    chunk_id_key: bytes,
+    plaintext: bytes,
+    file_version_id: str,
+    chunk_index: int,
+) -> str:
+    """Per-(version, position) chunk id: ``ch_v1_<24 lowercase base32>``.
+
+    Includes ``file_version_id`` and ``chunk_index`` in the HMAC input so
+    the chunk_id uniquely identifies the (version, position) pair —
+    chunks at different positions in the same file get distinct ids,
+    and re-encryption under a fresh ``file_version_id`` produces fresh
+    ids (matching what ``build_chunk_aad`` binds in the AEAD AAD).
+    """
+    if not isinstance(file_version_id, str) or len(file_version_id) != 30:
+        raise ValueError("file_version_id must be a 30-char string")
+    digest = hmac.new(
+        bytes(chunk_id_key),
+        hashlib.sha256(plaintext).digest()
+        + file_version_id.encode("ascii")
+        + int(chunk_index).to_bytes(8, "big"),
+        hashlib.sha256,
+    ).digest()
+    return "ch_v1_" + _base32_lower_encode_15_bytes(digest[:15])
+
+
+def make_content_fingerprint(content_fp_key: bytes, plaintext_sha256: bytes) -> str:
+    """Keyed file fingerprint, hex string. ``plaintext_sha256`` is the
+    SHA-256 digest of the full file plaintext.
+
+    Compared via ``==`` against the fingerprint stored on existing
+    versions to short-circuit a redundant upload of identical bytes.
+    """
+    if len(plaintext_sha256) != 32:
+        raise ValueError("plaintext_sha256 must be 32 bytes")
+    digest = hmac.new(
+        bytes(content_fp_key),
+        plaintext_sha256,
+        hashlib.sha256,
+    ).digest()
+    return digest.hex()
 
 
 # ---------------------------------------------------------------- Header AAD + envelope (formats §6.3, §9)

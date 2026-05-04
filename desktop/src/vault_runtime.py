@@ -233,6 +233,48 @@ class VaultHttpRelay:
             )
         return resp.content
 
+    def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):
+        from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError
+
+        resp = self._conn.request(
+            "PUT",
+            f"/api/vaults/{vault_id}/chunks/{chunk_id}",
+            headers={
+                "X-Vault-Authorization": f"Bearer {vault_access_secret}",
+                "Content-Type": "application/octet-stream",
+            },
+            data=bytes(body),
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while uploading a vault chunk.")
+        if resp.status_code == 201:
+            return {"created": True, "stored_size": len(body)}
+        if resp.status_code == 200:
+            return {"created": False, "stored_size": len(body)}
+        if resp.status_code == 507:
+            raise VaultQuotaExceededError(self._extract_error(resp))
+        raise VaultRelayError(
+            self._extract_error(resp),
+            status_code=resp.status_code,
+        )
+
+    @staticmethod
+    def _extract_error(resp) -> dict:
+        try:
+            body = resp.json()
+        except ValueError:
+            return {"code": "", "message": resp.text.strip()[:200], "details": {}}
+        if not isinstance(body, dict):
+            return {"code": "", "message": "", "details": {}}
+        error = body.get("error")
+        if not isinstance(error, dict):
+            return {"code": "", "message": str(error or ""), "details": {}}
+        return {
+            "code": str(error.get("code") or ""),
+            "message": str(error.get("message") or ""),
+            "details": error.get("details") if isinstance(error.get("details"), dict) else {},
+        }
+
     @staticmethod
     def _error_message(resp) -> str:
         try:
@@ -278,3 +320,6 @@ class VaultLocalDevelopmentRelay:
 
     def get_chunk(self, vault_id, vault_access_secret, chunk_id):
         raise NotImplementedError("local development relay does not support chunk download")
+
+    def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):
+        raise NotImplementedError("local development relay does not support chunk upload")

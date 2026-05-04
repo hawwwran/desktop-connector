@@ -79,6 +79,21 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_single_file_upload(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            "from .vault_upload import upload_file",
+            "_resolve_upload_destination",
+            "Upload file to vault",
+            "VaultQuotaExceededError",
+            "result.skipped_identical",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
     def test_browser_window_wires_versions_panel_and_download(self) -> None:
         source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
             encoding="utf-8"

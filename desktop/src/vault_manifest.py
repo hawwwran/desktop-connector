@@ -236,6 +236,152 @@ def canonical_manifest_json(manifest: dict[str, Any]) -> bytes:
     return json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+_FILE_ENTRY_ID_RE = re.compile(r"^fe_v1_[a-z2-7]{24}$")
+_FILE_VERSION_ID_RE = re.compile(r"^fv_v1_[a-z2-7]{24}$")
+
+
+def generate_file_entry_id() -> str:
+    """Generate ``fe_v1_<24 lowercase base32>`` per A19."""
+    return "fe_v1_" + _random_base32_lower(24)
+
+
+def generate_file_version_id() -> str:
+    """Generate ``fv_v1_<24 lowercase base32>`` per A19."""
+    return "fv_v1_" + _random_base32_lower(24)
+
+
+def normalize_manifest_path(path: str) -> str:
+    """Return a NFC-normalized, forward-slash, no-leading/trailing-slash path.
+
+    Manifest entries use ``/``-separated paths relative to the remote
+    folder root. Empty path components and ``..`` are rejected so a
+    crafted manifest can't smuggle a traversal that lands a real
+    download outside its target directory.
+    """
+    raw = unicodedata.normalize("NFC", str(path)).replace("\\", "/")
+    parts = [p for p in raw.split("/") if p]
+    for part in parts:
+        if part in ("", ".", ".."):
+            raise ValueError(f"unsafe manifest path: {path!r}")
+    if not parts:
+        raise ValueError("manifest path is empty")
+    return "/".join(parts)
+
+
+def find_file_entry(
+    manifest: dict[str, Any],
+    remote_folder_id: str,
+    path: str,
+) -> dict[str, Any] | None:
+    """Return the file entry at ``path`` inside ``remote_folder_id``, or None.
+
+    Match is on the normalized path. Deleted entries are returned too —
+    callers wanting to ignore tombstones should check ``entry["deleted"]``
+    themselves; T7 needs to find tombstones to restore.
+    """
+    normalized_path = normalize_manifest_path(path)
+    for folder in manifest.get("remote_folders", []) or []:
+        if not isinstance(folder, dict):
+            continue
+        if folder.get("remote_folder_id") != remote_folder_id:
+            continue
+        for entry in folder.get("entries", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("type", "file")) != "file":
+                continue
+            entry_path = unicodedata.normalize("NFC", str(entry.get("path", "")))
+            if entry_path == normalized_path:
+                return entry
+    return None
+
+
+def add_or_append_file_version(
+    manifest: dict[str, Any],
+    *,
+    remote_folder_id: str,
+    path: str,
+    version: dict[str, Any],
+    entry_id: str | None = None,
+) -> dict[str, Any]:
+    """Mutate ``manifest`` so ``path`` has ``version`` as its latest version.
+
+    If no entry exists at ``path``, a new file entry is created with a
+    fresh ``entry_id`` (or the caller-provided one). If an entry exists,
+    ``version`` is appended and ``latest_version_id`` flips to point at
+    it. The entry's ``deleted`` flag is cleared on append — re-uploading
+    over a tombstone restores the file (matches §D5 / T7.4 semantics).
+
+    Returns a new normalized manifest dict; callers own revision +
+    parent_revision bookkeeping.
+    """
+    if not _FILE_VERSION_ID_RE.match(str(version.get("version_id", ""))):
+        raise ValueError("version.version_id must match ^fv_v1_[a-z2-7]{24}$")
+
+    out = normalize_manifest_plaintext(manifest)
+    normalized_path = normalize_manifest_path(path)
+
+    folder = None
+    for candidate in out["remote_folders"]:
+        if candidate.get("remote_folder_id") == remote_folder_id:
+            folder = candidate
+            break
+    if folder is None:
+        raise ValueError(f"remote folder not found: {remote_folder_id}")
+
+    folder.setdefault("entries", [])
+    target = None
+    for entry in folder["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
+            target = entry
+            break
+
+    new_version = copy.deepcopy(version)
+    if target is None:
+        new_entry_id = entry_id or generate_file_entry_id()
+        if not _FILE_ENTRY_ID_RE.match(new_entry_id):
+            raise ValueError("entry_id must match ^fe_v1_[a-z2-7]{24}$")
+        target = {
+            "entry_id": new_entry_id,
+            "type": "file",
+            "path": normalized_path,
+            "deleted": False,
+            "latest_version_id": new_version["version_id"],
+            "versions": [new_version],
+        }
+        folder["entries"].append(target)
+    else:
+        target["versions"] = [
+            v for v in target.get("versions", []) if isinstance(v, dict)
+        ]
+        target["versions"].append(new_version)
+        target["latest_version_id"] = new_version["version_id"]
+        target["deleted"] = False
+        target.pop("deleted_at", None)
+        target.pop("recoverable_until", None)
+    return out
+
+
+def _random_base32_lower(chars: int) -> str:
+    """Generate ``chars`` lowercase base32 characters from secure random bytes."""
+    needed_bytes = (chars * 5 + 7) // 8
+    raw = secrets.token_bytes(needed_bytes)
+    out = []
+    bits = 0
+    buf = 0
+    for byte in raw:
+        buf = (buf << 8) | byte
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.append(_BASE32_LOWER[(buf >> bits) & 0x1f])
+    return "".join(out[:chars])
+
+
 def _validate_remote_folder(folder: dict[str, Any]) -> None:
     required = (
         "remote_folder_id",
