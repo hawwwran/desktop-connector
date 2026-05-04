@@ -424,7 +424,7 @@ If a sub-task genuinely requires something the default stack can't provide:
 - [x] **T13.1** — Server endpoints: `POST /api/vaults/{id}/join-requests`, `GET /api/vaults/{id}/join-requests/{req_id}`, `POST .../claim`, `DELETE .../device-grants/{device_id}`, `POST .../access-secret/rotate`. Capability bit `vault_grant_qr_v1`.
   - Accept: Each endpoint integration-tested; expired/revoked join requests rejected.
   - 2026-05-05: VaultGrantsController owns six methods (added `/approve` separately so the wire surface mirrors the spec — claim and approve are distinct steps). Migration 004 adds `vault_device_grants` + `vault_access_secret_rotations`. Capability bit advertises in /api/health.capabilities. Per-role write gates beyond admin/non-admin are deferred to T13.4+ controller wiring.
-- [ ] **T13.2** — Generate join QR on existing admin device. Format: `vault://<relay>/<vault_id>/<join_request_id>/<ephemeral_pubkey_b64>?expires=<ts>`. 15-min expiry default.
+- [x] **T13.2** — Generate join QR on existing admin device. Format: `vault://<relay>/<vault_id>/<join_request_id>/<ephemeral_pubkey_b64>?expires=<ts>`. 15-min expiry default.
   - Accept: QR encodes parseable URL; expired QR rejected on claim.
 - [ ] **T13.3** — Receive join QR (desktop scan via secondary file picker or paste — Android does the camera scan in its own plan). Generate ephemeral keypair, post claim, derive 6-digit verification code.
   - Accept: Two desktops successfully complete a grant exchange; verification codes match on both sides.
