@@ -1,4 +1,4 @@
-"""T12.4 — Pause / Resume per binding."""
+"""T12.4 — Pause / Resume per binding. T12.5 — Disconnect."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault_binding_lifecycle import (  # noqa: E402
-    PauseResult, ResumeResult,
-    pause_binding, resume_binding,
+    DisconnectResult, PauseResult, ResumeResult,
+    disconnect_binding, pause_binding, resume_binding,
 )
-from src.vault_bindings import VaultBindingsStore  # noqa: E402
+from src.vault_bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
 from src.vault_cache import VaultLocalIndex  # noqa: E402
 
 
@@ -199,6 +199,116 @@ class PauseResumeTests(unittest.TestCase):
         self.store.update_binding_state(bid, state="paused", sync_mode="paused")
         with self.assertRaises(ValueError):
             resume_binding(self.store, bid)
+
+
+class DisconnectTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_disconnect_test_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.index = VaultLocalIndex(self.tmpdir / "config")
+        self.store = VaultBindingsStore(self.index.db_path)
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_bound_with_state(self) -> str:
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id, state="bound", sync_mode="two-way",
+            last_synced_revision=42,
+        )
+        # Seed some local entries + pending ops + a real local file.
+        for i in range(3):
+            (self.local_root / f"file{i}.txt").write_bytes(b"x" * 16)
+            self.store.upsert_local_entry(VaultLocalEntry(
+                binding_id=binding.binding_id,
+                relative_path=f"file{i}.txt",
+                content_fingerprint="fp" * 8,
+                size_bytes=16, mtime_ns=1_000_000_000,
+                last_synced_revision=42,
+            ))
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="upload", relative_path="pending.txt",
+        )
+        return binding.binding_id
+
+    def test_disconnect_marks_unbound_preserves_local_entries(self) -> None:
+        bid = self._make_bound_with_state()
+        result = disconnect_binding(self.store, bid)
+
+        self.assertIsInstance(result, DisconnectResult)
+        self.assertEqual(result.binding_id, bid)
+        self.assertEqual(result.local_entries_preserved, 3)
+        self.assertEqual(result.pending_ops_dropped, 1)
+
+        # Binding row still present, but flipped to unbound.
+        binding = self.store.get_binding(bid)
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.state, "unbound")
+
+        # Local entries survive (browse-mode reuse, fast preflight on reconnect).
+        self.assertEqual(len(self.store.list_local_entries(bid)), 3)
+
+        # Pending ops cleared so a stale watcher can't replay them.
+        self.assertEqual(self.store.list_pending_ops(bid), [])
+
+    def test_disconnect_leaves_local_filesystem_untouched(self) -> None:
+        bid = self._make_bound_with_state()
+        before = sorted(p.name for p in self.local_root.iterdir())
+        disconnect_binding(self.store, bid)
+        after = sorted(p.name for p in self.local_root.iterdir())
+        self.assertEqual(before, after)
+
+    def test_disconnect_disables_traffic(self) -> None:
+        from src.vault_binding_twoway import run_two_way_cycle
+
+        bid = self._make_bound_with_state()
+        disconnect_binding(self.store, bid)
+        binding = self.store.get_binding(bid)
+        with self.assertRaises(ValueError):
+            run_two_way_cycle(
+                vault=_FakeVault(), relay=_FakeRelay(),
+                store=self.store, binding=binding,
+                author_device_id="0" * 32,
+                device_name="Test",
+            )
+
+    def test_disconnect_idempotent_on_already_unbound(self) -> None:
+        bid = self._make_bound_with_state()
+        disconnect_binding(self.store, bid)
+        result = disconnect_binding(self.store, bid)
+        self.assertEqual(result.pending_ops_dropped, 0)
+        # Local-entries count unchanged from the second pass.
+        self.assertEqual(result.local_entries_preserved, 3)
+
+    def test_disconnect_unknown_binding_raises(self) -> None:
+        with self.assertRaises(KeyError):
+            disconnect_binding(self.store, "rb_v1_nope")
+
+    def test_disconnect_then_reconnect_blocked_by_unique_constraint(self) -> None:
+        """A stale unbound row blocks a fresh binding to the same path —
+        callers must reuse the existing row (re-preflight) rather than
+        racing a duplicate.
+        """
+        import sqlite3
+        bid = self._make_bound_with_state()
+        disconnect_binding(self.store, bid)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.create_binding(
+                vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+                local_path=str(self.local_root),
+            )
 
 
 # ---------------------------------------------------------------------------

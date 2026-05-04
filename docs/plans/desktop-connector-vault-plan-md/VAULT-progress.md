@@ -410,8 +410,9 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: Touching 200 files in 5 minutes pauses the binding; surface text matches §gaps §6 + §A15 verbatim; user actions land their state transitions.
 - [x] **T12.4** — Pause / Resume per binding: `state = paused` keeps `sync_mode` set so resume restores the same mode (per §A12). Pending ops preserved across pause.
   - Accept: Paused binding does no traffic; resuming flushes pending ops.
-- [ ] **T12.5** — Disconnect: state → `unbound`, drop `vault_bindings` row but keep `vault_local_entries` until garbage-collected by user. Local files untouched, remote untouched.
+- [x] **T12.5** — Disconnect: state → `unbound`, drop `vault_bindings` row but keep `vault_local_entries` until garbage-collected by user. Local files untouched, remote untouched.
   - Accept: Disconnected folder still browses via Browser mode; reconnecting starts a fresh preflight.
+  - Implementation note: vault_local_entries has FK ON DELETE CASCADE to vault_bindings, so a hard-delete would wipe the local index. disconnect_binding marks state=unbound and keeps the row; the user-GC step (a future "Forget local index" button) is what physically removes it. Pending ops drop at disconnect so a stale watcher can't replay them.
 - [ ] **T12.6** — Multi-device concurrent ops integration test (per H7): two desktop instances pointed at same relay + same vault, scripted operations: simultaneous upload, delete-vs-edit race, three-device merge. CI-runnable.
   - Accept: All scripted scenarios produce final state matching expected (no data loss, deterministic `latest_version_id`).
 

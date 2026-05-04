@@ -1,4 +1,4 @@
-"""Pause / Resume transitions for a binding (T12.4).
+"""Pause / Resume / Disconnect transitions for a binding (T12.4 + T12.5).
 
 A binding's *state* and *sync mode* are independent axes (§A12):
 
@@ -13,6 +13,12 @@ preserving ``sync_mode`` and the pending-ops queue. The watcher should
 keep accumulating ops while paused so resume picks up where the user
 left off. :func:`resume_binding` flips back to ``bound`` and
 delegates the actual flush to the configured cycle runner.
+
+T12.5 — :func:`disconnect_binding` drops the ``vault_bindings`` row
+but **leaves ``vault_local_entries`` intact** so subsequent restore /
+re-connect can use those rows for fast change detection. The local
+filesystem is left untouched; the remote vault is left untouched.
+The folder remains browsable via the Browser mode.
 """
 
 from __future__ import annotations
@@ -37,6 +43,13 @@ class PauseResult:
 class ResumeResult:
     binding: VaultBinding
     flushed: Any  # SyncCycleResult | None — the cycle's own summary
+
+
+@dataclass
+class DisconnectResult:
+    binding_id: str
+    local_entries_preserved: int
+    pending_ops_dropped: int
 
 
 def pause_binding(
@@ -121,6 +134,53 @@ def resume_binding(
     return ResumeResult(binding=bound, flushed=flushed)
 
 
+def disconnect_binding(
+    store: VaultBindingsStore, binding_id: str,
+) -> DisconnectResult:
+    """Flip ``state="unbound"``; preserve ``vault_local_entries`` (T12.5).
+
+    Per §gaps §20 disconnect leaves the local filesystem untouched and
+    the remote vault untouched — the user may re-connect later, and
+    the preserved ``vault_local_entries`` rows speed up the next
+    preflight. The schema's ON DELETE CASCADE would wipe local_entries
+    if the binding row was hard-deleted, so we keep the row and just
+    mark it ``unbound``. Subsequent sync cycles refuse (state != bound),
+    so no traffic leaves the device. Pending ops are dropped — without
+    an active binding nothing will flush them, and stale entries would
+    re-fire on a future re-connect.
+
+    The user GC path (a future "Forget local index" button, §gaps §20)
+    is what physically removes the row; until then the local_entries
+    rows survive for fast change detection on reconnect.
+    """
+    binding = _require_binding(store, binding_id)
+    if binding.state == "unbound":
+        log.info(
+            "vault.sync.binding_disconnect_noop binding=%s already_unbound",
+            binding_id,
+        )
+        return DisconnectResult(
+            binding_id=binding_id,
+            local_entries_preserved=len(store.list_local_entries(binding_id)),
+            pending_ops_dropped=0,
+        )
+    local_count = len(store.list_local_entries(binding_id))
+    pending = store.list_pending_ops(binding_id)
+    for op in pending:
+        store.delete_pending_op(op.op_id)
+    store.update_binding_state(binding_id, state="unbound")
+    log.info(
+        "vault.sync.binding_disconnected binding=%s sync_mode=%s "
+        "local_entries_preserved=%d pending_ops_dropped=%d",
+        binding_id, binding.sync_mode, local_count, len(pending),
+    )
+    return DisconnectResult(
+        binding_id=binding_id,
+        local_entries_preserved=local_count,
+        pending_ops_dropped=len(pending),
+    )
+
+
 def _require_binding(
     store: VaultBindingsStore, binding_id: str,
 ) -> VaultBinding:
@@ -131,8 +191,10 @@ def _require_binding(
 
 
 __all__ = [
+    "DisconnectResult",
     "PauseResult",
     "ResumeResult",
+    "disconnect_binding",
     "pause_binding",
     "resume_binding",
 ]
