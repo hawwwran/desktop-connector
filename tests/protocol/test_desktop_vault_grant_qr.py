@@ -14,6 +14,7 @@ ensure_desktop_on_path()
 
 from src.vault_grant_qr import (  # noqa: E402
     DEFAULT_TTL_SECONDS, SCHEME, VaultGrantQRError, VaultJoinUrl,
+    derive_verification_code,
     make_join_url, parse_join_url,
 )
 
@@ -152,6 +153,82 @@ class ParseJoinUrlTests(unittest.TestCase):
         # http in production. Tests that need http can keep using the
         # original relay_url they passed to make_join_url.
         self.assertEqual(parsed.relay_url, "https://localhost:4441")
+
+
+class VerificationCodeTests(unittest.TestCase):
+    """T13.3 — both sides derive the same 6-digit code from both pubkeys."""
+
+    def test_returns_six_digit_string(self) -> None:
+        code = derive_verification_code(b"\x01" * 32, b"\x02" * 32)
+        self.assertRegex(code, r"^\d{6}$")
+        self.assertEqual(len(code), 6)
+
+    def test_order_independence(self) -> None:
+        a, b = bytes(range(32)), bytes(range(31, -1, -1))
+        self.assertEqual(
+            derive_verification_code(a, b),
+            derive_verification_code(b, a),
+            "verification code must not depend on argument order",
+        )
+
+    def test_different_pubkeys_produce_different_codes(self) -> None:
+        c1 = derive_verification_code(b"\x00" * 32, b"\x01" * 32)
+        c2 = derive_verification_code(b"\x00" * 32, b"\x02" * 32)
+        self.assertNotEqual(c1, c2)
+
+    def test_identical_pubkeys_produce_stable_code(self) -> None:
+        c1 = derive_verification_code(b"\x05" * 32, b"\x09" * 32)
+        c2 = derive_verification_code(b"\x05" * 32, b"\x09" * 32)
+        self.assertEqual(c1, c2)
+
+    def test_invalid_pubkey_length_raises(self) -> None:
+        with self.assertRaises(VaultGrantQRError):
+            derive_verification_code(b"\x00" * 31, b"\x00" * 32)
+        with self.assertRaises(VaultGrantQRError):
+            derive_verification_code(b"\x00" * 32, b"\x00" * 33)
+
+
+class GrantExchangeIntegrationTests(unittest.TestCase):
+    """T13.3 acceptance: the QR + claim cycle ends with matching codes."""
+
+    def test_admin_and_claimant_compute_matching_code(self) -> None:
+        """Simulates the two halves of the grant exchange.
+
+        Admin generates a join request with its ephemeral pubkey,
+        encodes it in a QR, and shows the resulting verification code
+        on screen. Claimant scans the QR, generates its own ephemeral
+        pubkey, posts a claim, and shows the same verification code.
+        Both sides must match — that's the whole point of the manual
+        confirmation step.
+        """
+        try:
+            from nacl.public import PrivateKey
+        except ImportError:
+            self.skipTest("PyNaCl not available")
+
+        admin_priv = PrivateKey.generate()
+        admin_pk = bytes(admin_priv.public_key)
+        url = make_join_url(
+            relay_url=RELAY,
+            vault_id=VAULT_ID_DASHED,
+            join_request_id=JR_ID,
+            ephemeral_pubkey=admin_pk,
+            expires_at=2_000_000_000,
+        )
+
+        # Claimant side: parse, generate keypair, derive code.
+        parsed = parse_join_url(url)
+        claimant_priv = PrivateKey.generate()
+        claimant_pk = bytes(claimant_priv.public_key)
+        claimant_code = derive_verification_code(
+            parsed.ephemeral_pubkey, claimant_pk,
+        )
+
+        # Admin side: receives claimant_pk via the relay's poll
+        # response, derives the same code.
+        admin_code = derive_verification_code(admin_pk, claimant_pk)
+
+        self.assertEqual(claimant_code, admin_code)
 
 
 if __name__ == "__main__":

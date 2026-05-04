@@ -193,11 +193,44 @@ def _decode_pubkey_b64(b64: str) -> bytes:
     return raw
 
 
+def derive_verification_code(
+    admin_pubkey: bytes, claimant_pubkey: bytes,
+) -> str:
+    """Derive the 6-digit verification code from both pubkeys (T13.3).
+
+    Both sides of the grant exchange MUST compute the same code, so we
+    sort the two pubkeys lexicographically before hashing — order
+    independence is the entire point. The HMAC label binds the
+    derivation to vault_v1 so a future scheme change is observable.
+
+    Returns a zero-padded 6-digit string ``"NNNNNN"``. The user reads
+    the code on both screens and confirms they match before approving.
+    """
+    if not isinstance(admin_pubkey, (bytes, bytearray)) or len(admin_pubkey) != 32:
+        raise VaultGrantQRError("admin_pubkey must be 32 bytes")
+    if not isinstance(claimant_pubkey, (bytes, bytearray)) or len(claimant_pubkey) != 32:
+        raise VaultGrantQRError("claimant_pubkey must be 32 bytes")
+    import hashlib
+    import hmac
+    a, b = bytes(admin_pubkey), bytes(claimant_pubkey)
+    if a > b:
+        a, b = b, a
+    digest = hmac.new(
+        key=b"dc-vault-v1/verification-code",
+        msg=a + b,
+        digestmod=hashlib.sha256,
+    ).digest()
+    # Take the first 4 bytes as a big-endian unsigned int, mod 10^6.
+    code_int = int.from_bytes(digest[:4], "big") % 1_000_000
+    return f"{code_int:06d}"
+
+
 __all__ = [
     "DEFAULT_TTL_SECONDS",
     "SCHEME",
     "VaultGrantQRError",
     "VaultJoinUrl",
+    "derive_verification_code",
     "make_join_url",
     "parse_join_url",
 ]
