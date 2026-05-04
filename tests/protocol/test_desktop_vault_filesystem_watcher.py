@@ -21,6 +21,7 @@ from src.vault_filesystem_watcher import (  # noqa: E402
     EventDebouncer,
     StabilityGate,
     WatcherCoordinator,
+    make_previously_synced_predicate,
 )
 
 
@@ -201,6 +202,72 @@ class WatcherCoordinatorTests(unittest.TestCase):
         clock.advance(5.0)
         self.assertEqual(coord.tick(), 1)
         self.assertEqual(store.enqueued, [("upload", "smb.txt")])
+
+    def test_delete_of_never_synced_file_is_silent_t12_2(self) -> None:
+        """T12.2 acceptance: deleting a never-synced file enqueues nothing."""
+        clock = FakeClock(0.0)
+        store = FakeStore(binding_id="rb_v1_t122a")
+        coord = WatcherCoordinator(
+            binding_id="rb_v1_t122a",
+            local_root=Path("/tmp/dummy"),
+            store=store, clock=clock,
+            stat_provider=lambda p: None,
+            previously_synced=lambda p: False,
+        )
+        coord.observe("draft.txt", kind="deleted")
+        self.assertEqual(store.enqueued, [])
+
+    def test_delete_of_synced_file_tombstones_t12_2(self) -> None:
+        """T12.2 acceptance: deleting a previously-synced file tombstones."""
+        clock = FakeClock(0.0)
+        store = FakeStore(binding_id="rb_v1_t122b")
+        synced_paths = {"keepme.txt"}
+        coord = WatcherCoordinator(
+            binding_id="rb_v1_t122b",
+            local_root=Path("/tmp/dummy"),
+            store=store, clock=clock,
+            stat_provider=lambda p: None,
+            previously_synced=lambda p: p in synced_paths,
+        )
+        coord.observe("keepme.txt", kind="deleted")
+        self.assertEqual(store.enqueued, [("delete", "keepme.txt")])
+
+    def test_vanished_during_tick_also_gated_t12_2(self) -> None:
+        """T12.2: the stat-returns-None path through tick() also gates."""
+        clock = FakeClock(0.0)
+        store = FakeStore(binding_id="rb_v1_t122c")
+        coord = WatcherCoordinator(
+            binding_id="rb_v1_t122c",
+            local_root=Path("/tmp/dummy"),
+            store=store, clock=clock,
+            stat_provider=lambda p: None,
+            previously_synced=lambda p: False,  # never synced
+        )
+        coord.observe("ghost.txt", kind="modified")
+        clock.advance(3.5)
+        coord.tick()
+        self.assertEqual(store.enqueued, [])
+
+    def test_make_previously_synced_predicate_uses_fingerprint_presence(self) -> None:
+        """Helper returns True only for entries with non-empty fingerprint."""
+        @dataclass
+        class FakeEntry:
+            content_fingerprint: str
+
+        class FakeBindingsStore:
+            def __init__(self) -> None:
+                self.rows: dict[str, FakeEntry] = {}
+
+            def get_local_entry(self, binding_id: str, relative_path: str):
+                return self.rows.get(relative_path)
+
+        s = FakeBindingsStore()
+        s.rows["fresh.txt"] = FakeEntry(content_fingerprint="abc123")
+        s.rows["extra.txt"] = FakeEntry(content_fingerprint="")
+        check = make_previously_synced_predicate(s, "rb_v1_x")
+        self.assertTrue(check("fresh.txt"))
+        self.assertFalse(check("extra.txt"))
+        self.assertFalse(check("never-seen.txt"))
 
     def test_hung_file_is_dropped_after_5_minute_cap(self) -> None:
         clock = FakeClock(0.0)

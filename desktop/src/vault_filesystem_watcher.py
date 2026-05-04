@@ -36,7 +36,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Literal
+from typing import Any, Callable, Iterable, Literal
 
 
 log = logging.getLogger(__name__)
@@ -154,6 +154,13 @@ class WatcherCoordinator:
     Tests inject a fake clock (``clock`` callable) and a fake
     ``stat_provider(path) -> (size, mtime_ns) | None`` so they can
     drive the whole state machine without any real I/O.
+
+    ``previously_synced`` (T12.2) is the per-path predicate the
+    coordinator consults on a delete: only paths that were *previously
+    uploaded successfully* may produce a tombstone. Files the user
+    deletes before they ever flowed up (or "extra" files seeded by
+    baseline with an empty fingerprint) flow silently. Default: always
+    True, preserving the T10.4 acceptance shape.
     """
 
     def __init__(
@@ -165,12 +172,14 @@ class WatcherCoordinator:
         is_network_share: bool = False,
         clock: Callable[[], float] | None = None,
         stat_provider: Callable[[str], tuple[int, int] | None] | None = None,
+        previously_synced: Callable[[str], bool] | None = None,
     ) -> None:
         self.binding_id = binding_id
         self.local_root = Path(local_root)
         self.store = store
         self._clock = clock or time.monotonic
         self._stat_provider = stat_provider or self._real_stat
+        self._previously_synced = previously_synced
         self._debouncer = EventDebouncer()
         window = (
             STABILITY_WINDOW_NETWORK_S
@@ -195,15 +204,10 @@ class WatcherCoordinator:
             return
 
         if kind == "deleted":
-            existing = self._pending.pop(path, None)
+            self._pending.pop(path, None)
             self._debouncer.forget(path)
             self._gate.forget(path)
-            self.store.coalesce_op(
-                binding_id=self.binding_id,
-                op_type="delete",
-                relative_path=path,
-                now=int(now_t),
-            )
+            self._enqueue_delete_if_synced(path, now=int(now_t))
             return
 
         # Always update debouncer + pending-path bookkeeping; tick()
@@ -238,17 +242,13 @@ class WatcherCoordinator:
             stat = self._stat_provider(path)
             if stat is None:
                 # Path vanished without us seeing a "deleted" event
-                # (e.g. atomic rename overwrite). Treat as deletion.
+                # (e.g. atomic rename overwrite). Treat as deletion,
+                # gated on the §T12.2 "was previously synced" rule.
                 self._pending.pop(path, None)
                 self._debouncer.forget(path)
                 self._gate.forget(path)
-                self.store.coalesce_op(
-                    binding_id=self.binding_id,
-                    op_type="delete",
-                    relative_path=path,
-                    now=int(now_t),
-                )
-                enqueued += 1
+                if self._enqueue_delete_if_synced(path, now=int(now_t)):
+                    enqueued += 1
                 continue
             size, mtime_ns = stat
             verdict = self._gate.check(
@@ -284,6 +284,37 @@ class WatcherCoordinator:
         return list(self._pending.keys())
 
     # --- helpers -------------------------------------------------------
+
+    def _enqueue_delete_if_synced(self, path: str, *, now: int) -> bool:
+        """Enqueue a tombstone op only when the path was previously synced.
+
+        Returns ``True`` iff the op was enqueued. T12.2: silent on
+        never-synced paths so the user deleting a file before its first
+        upload, or removing a baseline-extra file, never produces a
+        remote tombstone.
+        """
+        if self._previously_synced is not None:
+            try:
+                synced = bool(self._previously_synced(path))
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "vault.sync.previously_synced_check_failed binding=%s path=%s",
+                    self.binding_id, path,
+                )
+                synced = False
+            if not synced:
+                log.info(
+                    "vault.sync.local_delete_unsynced_silent binding=%s path=%s",
+                    self.binding_id, path,
+                )
+                return False
+        self.store.coalesce_op(
+            binding_id=self.binding_id,
+            op_type="delete",
+            relative_path=path,
+            now=now,
+        )
+        return True
 
     def _real_stat(self, relative_path: str) -> tuple[int, int] | None:
         target = self.local_root / relative_path
@@ -365,6 +396,26 @@ class _WatchdogHandle:
             pass
 
 
+def make_previously_synced_predicate(
+    store: Any, binding_id: str,
+) -> Callable[[str], bool]:
+    """Build the ``previously_synced`` callable for a real bindings store.
+
+    The predicate returns ``True`` iff there is a ``vault_local_entries``
+    row for ``(binding_id, relative_path)`` *and* its ``content_fingerprint``
+    is non-empty — i.e. the file was actually uploaded at some point. Rows
+    seeded as "extras" by baseline (fingerprint = "") count as not-yet-
+    synced and the watcher should silently ignore their deletion (T12.2).
+    """
+    def check(relative_path: str) -> bool:
+        entry = store.get_local_entry(binding_id, relative_path)
+        if entry is None:
+            return False
+        fingerprint = getattr(entry, "content_fingerprint", "") or ""
+        return bool(fingerprint)
+    return check
+
+
 __all__ = [
     "DEBOUNCE_WINDOW_S",
     "EventDebouncer",
@@ -375,5 +426,6 @@ __all__ = [
     "StabilityGate",
     "StabilityVerdict",
     "WatcherCoordinator",
+    "make_previously_synced_predicate",
     "start_watchdog_observer",
 ]
