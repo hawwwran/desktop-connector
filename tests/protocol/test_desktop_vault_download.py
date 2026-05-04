@@ -8,6 +8,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -26,7 +28,10 @@ from src.vault_crypto import (  # noqa: E402
 from src.vault_download import (  # noqa: E402
     DownloadCancelled,
     VaultChunkMissingError,
+    VaultLocalDiskFullError,
+    download_folder,
     download_latest_file,
+    resolve_folder_destination,
     resolve_download_destination,
     vault_chunk_cache_path,
 )
@@ -172,6 +177,127 @@ class VaultDownloadTests(unittest.TestCase):
         self.assertFalse((self.tmpdir / "report.txt").exists())
         self.assertFalse(vault_chunk_cache_path(cache_dir, VAULT_ID, CHUNK_A).exists())
 
+    def test_download_folder_recursively_materializes_current_tree(self) -> None:
+        files = {
+            f"batch/file-{index}.txt": f"payload {index}".encode("utf-8")
+            for index in range(10)
+        }
+        manifest, chunks = _folder_manifest_and_chunks(files)
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        progress = []
+        try:
+            out = download_folder(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                path="Documents",
+                destination=self.tmpdir / "Documents",
+                progress=progress.append,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(out, self.tmpdir / "Documents")
+        for relative_path, expected in files.items():
+            self.assertEqual((out / relative_path).read_bytes(), expected)
+        self.assertEqual(len(relay.downloaded), 10)
+        self.assertEqual(progress[-1].phase, "done")
+        self.assertFalse(list(out.rglob("*.dc-temp-*")))
+
+    def test_download_nested_folder_uses_nested_path_as_destination_root(self) -> None:
+        manifest, chunks = _folder_manifest_and_chunks({
+            "batch/a.txt": b"a",
+            "batch/nested/b.txt": b"b",
+            "outside.txt": b"outside",
+        })
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        try:
+            out = download_folder(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                path="Documents/batch",
+                destination=self.tmpdir / "Batch",
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual((out / "a.txt").read_bytes(), b"a")
+        self.assertEqual((out / "nested" / "b.txt").read_bytes(), b"b")
+        self.assertFalse((out / "outside.txt").exists())
+
+    def test_download_folder_preflight_aborts_before_writes(self) -> None:
+        manifest, chunks = _folder_manifest_and_chunks({"large.bin": b"x" * 1024})
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        destination = self.tmpdir / "Documents"
+        try:
+            with mock.patch(
+                "src.vault_download.shutil.disk_usage",
+                return_value=SimpleNamespace(free=10),
+            ):
+                with self.assertRaises(VaultLocalDiskFullError):
+                    download_folder(
+                        vault=vault,
+                        relay=relay,
+                        manifest=manifest,
+                        path="Documents",
+                        destination=destination,
+                    )
+        finally:
+            vault.close()
+
+        self.assertFalse(destination.exists())
+        self.assertEqual(relay.batch_head_calls, [])
+        self.assertEqual(relay.downloaded, [])
+
+    def test_download_folder_missing_chunk_fails_before_creating_destination(self) -> None:
+        manifest, chunks = _folder_manifest_and_chunks({"a.txt": b"a"})
+        relay = FakeChunkRelay({})
+        vault = _vault()
+        destination = self.tmpdir / "Documents"
+        try:
+            with self.assertRaises(VaultChunkMissingError):
+                download_folder(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    path="Documents",
+                    destination=destination,
+                )
+        finally:
+            vault.close()
+
+        self.assertFalse(destination.exists())
+        self.assertEqual(relay.downloaded, [])
+
+    def test_download_folder_rejects_unsafe_manifest_paths(self) -> None:
+        manifest, chunks = _folder_manifest_and_chunks({"../evil.txt": b"bad"})
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        try:
+            with self.assertRaisesRegex(ValueError, "unsafe vault path"):
+                download_folder(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    path="Documents",
+                    destination=self.tmpdir / "Documents",
+                )
+        finally:
+            vault.close()
+
+        self.assertFalse((self.tmpdir / "evil.txt").exists())
+
+    def test_keep_both_folder_policy_preserves_existing_destination(self) -> None:
+        destination = self.tmpdir / "Documents"
+        destination.mkdir()
+        out = resolve_folder_destination(destination, "keep_both")
+
+        self.assertEqual(out.name, "Documents (downloaded 1)")
+
 
 class FakeChunkRelay:
     def __init__(self, chunks: dict[str, bytes]) -> None:
@@ -265,13 +391,74 @@ def _manifest_and_chunks(parts: list[bytes]) -> tuple[dict, dict[str, bytes]]:
 
 
 def _encrypt_chunk(plaintext: bytes, index: int) -> bytes:
+    return _encrypt_chunk_for(plaintext, index, FILE_ID, VERSION_ID)
+
+
+def _folder_manifest_and_chunks(files: dict[str, bytes]) -> tuple[dict, dict[str, bytes]]:
+    chunks = {}
+    entries = []
+    alphabet = "abcdefghijklmnopqrstuvwx"
+    for index, (relative_path, plaintext) in enumerate(files.items()):
+        letter = alphabet[index % len(alphabet)]
+        file_id = f"fe_v1_{letter * 24}"
+        version_id = f"fv_v1_{letter * 24}"
+        chunk_id = f"ch_v1_{letter * 24}"
+        chunk_entries = []
+        if plaintext:
+            encrypted = _encrypt_chunk_for(plaintext, 0, file_id, version_id)
+            chunks[chunk_id] = encrypted
+            chunk_entries.append({
+                "chunk_id": chunk_id,
+                "index": 0,
+                "plaintext_size": len(plaintext),
+                "ciphertext_size": len(encrypted),
+            })
+        version = {
+            "version_id": version_id,
+            "created_at": "2026-05-04T12:00:00.000Z",
+            "modified_at": "2026-05-04T11:59:00.000Z",
+            "logical_size": len(plaintext),
+            "ciphertext_size": sum(chunk["ciphertext_size"] for chunk in chunk_entries),
+            "content_fingerprint": "unused",
+            "chunks": chunk_entries,
+            "author_device_id": AUTHOR,
+        }
+        entries.append({
+            "entry_id": file_id,
+            "type": "file",
+            "path": relative_path,
+            "latest_version_id": version_id,
+            "deleted": False,
+            "versions": [version],
+        })
+
+    manifest = make_manifest(
+        vault_id=VAULT_ID,
+        revision=20,
+        parent_revision=19,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        remote_folders=[
+            make_remote_folder(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at="2026-05-04T12:00:00.000Z",
+                created_by_device_id=AUTHOR,
+                entries=entries,
+            )
+        ],
+    )
+    return manifest, chunks
+
+
+def _encrypt_chunk_for(plaintext: bytes, index: int, file_id: str, version_id: str) -> bytes:
     nonce = bytes([index + 1]) * 24
     subkey = derive_subkey("dc-vault-v1/chunk", MASTER_KEY)
     aad = build_chunk_aad(
         VAULT_ID,
         DOCS_ID,
-        FILE_ID,
-        VERSION_ID,
+        file_id,
+        version_id,
         index,
         len(plaintext),
     )

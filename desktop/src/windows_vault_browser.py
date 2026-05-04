@@ -101,7 +101,7 @@ def show_vault_browser(config_dir: Path) -> None:
         upload_btn.set_tooltip_text("Upload lands in T6")
         delete_btn.set_tooltip_text("Delete lands in T7")
         versions_btn.set_tooltip_text("Version download lands in T5.5")
-        download_btn.set_tooltip_text("Download selected file")
+        download_btn.set_tooltip_text("Download selected file or current folder")
 
         breadcrumb = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         breadcrumb.add_css_class("title-4")
@@ -190,7 +190,27 @@ def show_vault_browser(config_dir: Path) -> None:
             clear_box(detail_box)
             detail_box.append(Gtk.Label(label="Details", xalign=0, css_classes=["title-3"]))
             if not file_row:
-                download_btn.set_sensitive(False)
+                current_path = str(state["path"])
+                download_btn.set_sensitive(bool(current_path))
+                if current_path:
+                    detail_box.append(Gtk.Label(
+                        label="Current folder",
+                        xalign=0,
+                        wrap=True,
+                        css_classes=["dim-label"],
+                    ))
+                    detail_box.append(Gtk.Label(
+                        label=current_path,
+                        xalign=0,
+                        wrap=True,
+                    ))
+                    detail_box.append(Gtk.Label(
+                        label="Download saves this folder recursively.",
+                        xalign=0,
+                        wrap=True,
+                        css_classes=["dim-label"],
+                    ))
+                    return
                 detail_box.append(Gtk.Label(
                     label="No file selected.",
                     xalign=0,
@@ -397,20 +417,23 @@ def show_vault_browser(config_dir: Path) -> None:
 
         def start_download(destination: Path, existing_policy: str) -> None:
             file_row = state.get("selected_file")
-            if not file_row:
-                set_status("Select a file before downloading.", "error")
+            folder_path = str(state["path"])
+            is_folder_download = file_row is None
+            if is_folder_download and not folder_path:
+                set_status("Open a remote folder before downloading a folder.", "error")
                 return
             vault_id = local_vault_id()
             if not vault_id:
                 set_status("No local vault is connected.", "error")
                 return
 
-            selected_path = str(file_row.get("path", ""))
+            selected_path = folder_path if is_folder_download else str(file_row.get("path", ""))
+            download_label = "folder" if is_folder_download else selected_path
             download_btn.set_sensitive(False)
             progress_bar.set_visible(True)
             progress_bar.set_fraction(0.0)
             progress_bar.set_text("Preparing download...")
-            set_status(f"Downloading {selected_path}...")
+            set_status(f"Downloading {download_label}...")
 
             def report_progress(progress) -> None:
                 def update_progress() -> bool:
@@ -428,6 +451,7 @@ def show_vault_browser(config_dir: Path) -> None:
                 try:
                     from .vault_download import (
                         default_vault_download_cache_dir,
+                        download_folder,
                         download_latest_file,
                     )
 
@@ -436,16 +460,28 @@ def show_vault_browser(config_dir: Path) -> None:
                     vault = open_local_vault_from_grant(config_dir, config, vault_id)
                     try:
                         current_manifest = vault.fetch_manifest(relay, local_index=local_index)
-                        final_path = download_latest_file(
-                            vault=vault,
-                            relay=relay,
-                            manifest=current_manifest,
-                            path=selected_path,
-                            destination=destination,
-                            existing_policy=existing_policy,
-                            chunk_cache_dir=default_vault_download_cache_dir(),
-                            progress=report_progress,
-                        )
+                        if is_folder_download:
+                            final_path = download_folder(
+                                vault=vault,
+                                relay=relay,
+                                manifest=current_manifest,
+                                path=selected_path,
+                                destination=destination,
+                                existing_policy=existing_policy,
+                                chunk_cache_dir=default_vault_download_cache_dir(),
+                                progress=report_progress,
+                            )
+                        else:
+                            final_path = download_latest_file(
+                                vault=vault,
+                                relay=relay,
+                                manifest=current_manifest,
+                                path=selected_path,
+                                destination=destination,
+                                existing_policy=existing_policy,
+                                chunk_cache_dir=default_vault_download_cache_dir(),
+                                progress=report_progress,
+                            )
                     finally:
                         vault.close()
                 except Exception as exc:
@@ -453,7 +489,7 @@ def show_vault_browser(config_dir: Path) -> None:
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
-                        download_btn.set_sensitive(bool(state.get("selected_file")))
+                        download_btn.set_sensitive(bool(state.get("selected_file")) or bool(state["path"]))
                         set_status(f"Download failed: {error_message}", "error")
                         return False
 
@@ -463,22 +499,28 @@ def show_vault_browser(config_dir: Path) -> None:
                 def succeed() -> bool:
                     state["manifest"] = current_manifest
                     progress_bar.set_visible(False)
-                    download_btn.set_sensitive(bool(state.get("selected_file")))
-                    set_status(f"Downloaded to {final_path}.", "success")
+                    download_btn.set_sensitive(bool(state.get("selected_file")) or bool(state["path"]))
+                    noun = "folder" if is_folder_download else "file"
+                    set_status(f"Downloaded {noun} to {final_path}.", "success")
                     return False
 
                 GLib.idle_add(succeed)
 
             threading.Thread(target=worker, daemon=True).start()
 
-        def prompt_existing_destination(destination: Path) -> None:
+        def prompt_existing_destination(destination: Path, *, is_folder: bool = False) -> None:
             dlg = Adw.AlertDialog(
-                heading="File exists",
-                body="Choose how to handle the selected destination.",
+                heading="Folder exists" if is_folder else "File exists",
+                body=(
+                    "A folder with this name already exists. Overwrite replaces matching "
+                    "files but keeps unrelated local files."
+                    if is_folder
+                    else "Choose how to handle the selected destination."
+                ),
             )
             dlg.add_response("cancel", "Cancel")
             dlg.add_response("keep_both", "Keep both")
-            dlg.add_response("overwrite", "Overwrite")
+            dlg.add_response("overwrite", "Overwrite matching files" if is_folder else "Overwrite")
             dlg.set_default_response("keep_both")
             dlg.set_close_response("cancel")
             dlg.set_response_appearance("overwrite", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -494,9 +536,33 @@ def show_vault_browser(config_dir: Path) -> None:
 
         def choose_download_destination(_btn) -> None:
             file_row = state.get("selected_file")
-            if not file_row:
-                set_status("Select a file before downloading.", "error")
+            if not file_row and not state["path"]:
+                set_status("Open a remote folder before downloading a folder.", "error")
                 return
+            if not file_row:
+                file_dialog = Gtk.FileDialog()
+                file_dialog.set_title("Download folder")
+
+                def on_folder_chosen(file_dialog, result) -> None:
+                    try:
+                        gio_file = file_dialog.select_folder_finish(result)
+                    except GLib.Error:
+                        return
+                    if gio_file is None:
+                        return
+                    path = gio_file.get_path()
+                    if not path:
+                        set_status("Choose a local folder destination.", "error")
+                        return
+                    destination = Path(path) / _download_folder_name(str(state["path"]))
+                    if destination.exists():
+                        prompt_existing_destination(destination, is_folder=True)
+                    else:
+                        start_download(destination, "fail")
+
+                file_dialog.select_folder(parent=win, callback=on_folder_chosen)
+                return
+
             file_dialog = Gtk.FileDialog()
             file_dialog.set_title("Download file")
             file_dialog.set_initial_name(str(file_row.get("name") or "vault-download"))
@@ -546,3 +612,11 @@ def _format_bytes(value: int) -> str:
     if unit == "B":
         return f"{int(amount)} B"
     return f"{amount:.1f} {unit}"
+
+
+def _download_folder_name(path: str) -> str:
+    parts = [
+        part for part in str(path).replace("\\", "/").split("/")
+        if part and part != "."
+    ]
+    return parts[-1] if parts else "Vault"

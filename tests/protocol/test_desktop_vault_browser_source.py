@@ -64,6 +64,21 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_recursive_folder_download(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            "download_folder",
+            "select_folder",
+            "Folder exists",
+            "Overwrite matching files",
+            "Download saves this folder recursively.",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
 
 if __name__ == "__main__":
     unittest.main()
