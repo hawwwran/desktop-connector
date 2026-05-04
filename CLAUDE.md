@@ -51,6 +51,12 @@ cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-de
 ./test_loop.sh
 ```
 
+## Testing the desktop GTK app (AT-SPI)
+
+The host has `python3-dogtail` + `accerciser` + `at-spi2-core` installed so Claude can drive the running GTK4/libadwaita windows via the GNOME accessibility bus instead of fragile keystroke injection (xdotool/ydotool). `dogtail` walks the widget tree from Python, invokes named buttons / menu items, and reads visible text; `accerciser` is the GUI inspector for one-off exploration of a live window. Works on both X11 and Wayland under GNOME.
+
+Intended use: confirm a window/dialog rendered, click "Send" / "Cancel" / "Pair" without a real pointer, read pairing codes and progress bars, regression-check after edits to `windows*.py` or `dialogs.py`. Pair with `gnome-screenshot -w` for visual evidence. Tray icon (`pystray`) is **not** AT-SPI-exposed — drive its menu via the underlying subprocess windows or by invoking `python3 -m src.windows {…}` directly. Setup script: `~/temp-scripts/048-install-at-spi-tooling.sh`.
+
 ## Installation (desktop)
 
 The release shape is a **signed AppImage** fetched from GitHub Releases — single self-contained file, no host apt/pip touched, in-app updates via the tray menu. The dev-tree apt+pip path stays available as `install-from-source.sh` for contributors.
