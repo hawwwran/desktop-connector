@@ -16,7 +16,10 @@ ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
 from src.vault_binding_sync import (  # noqa: E402
+    SyncCycleResult,
     SyncOpOutcome,
+    flush_and_sync_binding,
+    format_sync_outcome_toast,
     run_backup_only_cycle,
 )
 from src.vault_bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
@@ -420,6 +423,230 @@ class BackupOnlySyncTests(unittest.TestCase):
         self.assertEqual(len(ops), 1)
         self.assertEqual(ops[0].attempts, 1)
         self.assertIsNotNone(ops[0].last_error)
+
+
+class SyncNowToastTests(unittest.TestCase):
+    """T10.6: format_sync_outcome_toast → user-facing one-liner."""
+
+    def _make(self, outcomes: list[SyncOpOutcome], *, started: int = 5, ended: int = 5) -> SyncCycleResult:
+        return SyncCycleResult(
+            binding_id="rb_v1_x",
+            started_at_revision=started,
+            ended_at_revision=ended,
+            outcomes=outcomes,
+        )
+
+    def test_empty_queue_already_caught_up(self) -> None:
+        toast = format_sync_outcome_toast(self._make([], started=7, ended=7))
+        self.assertEqual(toast, "Sync now: nothing to do.")
+
+    def test_empty_queue_but_remote_advanced(self) -> None:
+        toast = format_sync_outcome_toast(self._make([], started=7, ended=9))
+        self.assertIn("caught up at revision 9", toast)
+
+    def test_mixed_outcomes_render_in_order(self) -> None:
+        outcomes = [
+            SyncOpOutcome(op_id=1, op_type="upload", relative_path="a", status="uploaded"),
+            SyncOpOutcome(op_id=2, op_type="upload", relative_path="b", status="uploaded"),
+            SyncOpOutcome(op_id=3, op_type="delete", relative_path="c", status="deleted"),
+            SyncOpOutcome(op_id=4, op_type="upload", relative_path="d", status="skipped"),
+            SyncOpOutcome(op_id=5, op_type="upload", relative_path="e", status="failed", error="boom"),
+        ]
+        toast = format_sync_outcome_toast(self._make(outcomes))
+        self.assertIn("2 uploaded", toast)
+        self.assertIn("1 deleted", toast)
+        self.assertIn("1 skipped", toast)
+        self.assertIn("1 failed", toast)
+
+
+class FlushAndSyncTests(unittest.TestCase):
+    """T10.6: manual "Sync now" button entrypoint."""
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_flushsync_test_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.config_dir = self.tmpdir / "config"
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+        self.index = VaultLocalIndex(self.config_dir)
+        self.store = VaultBindingsStore(self.index.db_path)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_flush_calls_watcher_tick_then_runs_cycle(self) -> None:
+        # Build empty remote + bound binding.
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-04T12:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
+        vault = _vault()
+        try:
+            vault.publish_manifest(relay, manifest)
+        finally:
+            vault.close()
+
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id, state="bound",
+            last_synced_revision=int(manifest["revision"]),
+        )
+        binding = self.store.get_binding(binding.binding_id)
+
+        # Stubbed watcher whose tick() flushes a pending event into the
+        # store — exactly what the real coordinator does.
+        local_path = self.local_root / "fresh.txt"
+        local_path.write_bytes(b"freshly observed local edit")
+
+        store = self.store
+        binding_id = binding.binding_id
+        ticks: list[int] = []
+
+        class FakeCoordinator:
+            def tick(self_inner) -> int:
+                ticks.append(1)
+                store.coalesce_op(
+                    binding_id=binding_id, op_type="upload",
+                    relative_path="fresh.txt",
+                )
+                return 1
+
+        vault = _vault()
+        try:
+            result = flush_and_sync_binding(
+                vault=vault, relay=relay,
+                store=self.store, binding=binding,
+                author_device_id=OTHER_DEVICE,
+                watcher_coordinator=FakeCoordinator(),
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(ticks, [1])           # watcher.tick() ran
+        self.assertEqual(result.succeeded_count, 1)  # cycle drained the op
+        self.assertEqual(result.outcomes[0].status, "uploaded")
+        self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
+
+    def test_flush_swallows_watcher_errors(self) -> None:
+        """A broken watcher must not block the manual sync."""
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[make_remote_folder(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at="2026-05-04T12:00:00.000Z",
+                created_by_device_id=AUTHOR, entries=[],
+            )],
+        )
+        relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
+        vault = _vault()
+        try:
+            vault.publish_manifest(relay, manifest)
+        finally:
+            vault.close()
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id, state="bound",
+            last_synced_revision=int(manifest["revision"]),
+        )
+        binding = self.store.get_binding(binding.binding_id)
+
+        class BrokenCoordinator:
+            def tick(self) -> int:
+                raise RuntimeError("watchdog crashed")
+
+        vault = _vault()
+        try:
+            result = flush_and_sync_binding(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                watcher_coordinator=BrokenCoordinator(),
+            )
+        finally:
+            vault.close()
+
+        # Cycle still ran; nothing in queue → outcomes empty.
+        self.assertEqual(result.outcomes, [])
+
+    def test_flush_without_watcher_runs_cycle_directly(self) -> None:
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[make_remote_folder(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at="2026-05-04T12:00:00.000Z",
+                created_by_device_id=AUTHOR, entries=[],
+            )],
+        )
+        relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
+        vault = _vault()
+        try:
+            vault.publish_manifest(relay, manifest)
+        finally:
+            vault.close()
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id, state="bound",
+            last_synced_revision=int(manifest["revision"]),
+        )
+        binding = self.store.get_binding(binding.binding_id)
+
+        # Op already enqueued externally (watcher off).
+        (self.local_root / "manual.txt").write_bytes(b"queued by user")
+        self.store.coalesce_op(
+            binding_id=binding.binding_id, op_type="upload",
+            relative_path="manual.txt",
+        )
+
+        vault = _vault()
+        try:
+            result = flush_and_sync_binding(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.succeeded_count, 1)
+        self.assertIn("uploaded", format_sync_outcome_toast(result))
 
 
 def _vault() -> Vault:

@@ -87,6 +87,64 @@ class SyncVault(Protocol):
     ) -> dict[str, Any]: ...
 
 
+def flush_and_sync_binding(
+    *,
+    vault: SyncVault,
+    relay: Any,
+    store: VaultBindingsStore,
+    binding: VaultBinding,
+    author_device_id: str,
+    watcher_coordinator: Any = None,
+    chunk_cache_dir: Path | None = None,
+    progress: Callable[["SyncOpOutcome"], None] | None = None,
+) -> "SyncCycleResult":
+    """Manual "Sync now" entrypoint (T10.6).
+
+    Drains any in-flight watcher events into the pending-ops queue,
+    then runs one backup-only cycle. Used by the per-binding "Sync
+    now" button so the UI doesn't need to wait for the next watcher
+    tick before pushing a fresh batch of edits.
+    """
+    if watcher_coordinator is not None:
+        try:
+            watcher_coordinator.tick()
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "vault.sync.watcher_flush_failed binding=%s",
+                binding.binding_id,
+            )
+    return run_backup_only_cycle(
+        vault=vault, relay=relay, store=store,
+        binding=binding, author_device_id=author_device_id,
+        chunk_cache_dir=chunk_cache_dir, progress=progress,
+    )
+
+
+def format_sync_outcome_toast(result: "SyncCycleResult") -> str:
+    """Render a one-line user-facing summary of a sync cycle result."""
+    if not result.outcomes:
+        if result.ended_at_revision == result.started_at_revision:
+            return "Sync now: nothing to do."
+        return (
+            f"Sync now: caught up at revision {result.ended_at_revision}."
+        )
+    uploaded = sum(1 for o in result.outcomes if o.status == "uploaded")
+    deleted = sum(1 for o in result.outcomes if o.status == "deleted")
+    skipped = sum(1 for o in result.outcomes if o.status == "skipped")
+    failed = result.failed_count
+    parts: list[str] = []
+    if uploaded:
+        parts.append(f"{uploaded} uploaded")
+    if deleted:
+        parts.append(f"{deleted} deleted")
+    if skipped:
+        parts.append(f"{skipped} skipped")
+    if failed:
+        parts.append(f"{failed} failed")
+    summary = ", ".join(parts) if parts else "no changes"
+    return f"Sync now: {summary}."
+
+
 def run_backup_only_cycle(
     *,
     vault: SyncVault,
@@ -400,5 +458,7 @@ def _promote_to_delete(
 __all__ = [
     "SyncCycleResult",
     "SyncOpOutcome",
+    "flush_and_sync_binding",
+    "format_sync_outcome_toast",
     "run_backup_only_cycle",
 ]

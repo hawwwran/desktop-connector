@@ -10,11 +10,17 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Pango
 
+from .vault_binding_sync import (
+    flush_and_sync_binding,
+    format_sync_outcome_toast,
+)
 from .vault_bindings import VaultBindingsStore
 from .vault_cache import VaultLocalIndex
 from .vault_connect_folder_dialog import present_connect_folder_dialog
 from .vault_folder_ui_state import (
+    BINDING_COLUMNS,
     FOLDER_COLUMNS,
+    binding_rows_for_render,
     default_ignore_patterns_text,
     folder_rows_from_cache,
     parse_ignore_patterns_text,
@@ -65,6 +71,15 @@ def build_vault_folders_tab(
 
     folders_grid = Gtk.Grid(column_spacing=16, row_spacing=8, hexpand=True)
     folders.append(folders_grid)
+
+    folders.append(Gtk.Label(
+        label="Local bindings", xalign=0, css_classes=["title-3"],
+        margin_top=12,
+    ))
+    bindings_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+    folders.append(bindings_status)
+    bindings_grid = Gtk.Grid(column_spacing=16, row_spacing=8, hexpand=True)
+    folders.append(bindings_grid)
 
     def clear_folders_grid() -> None:
         child = folders_grid.get_first_child()
@@ -485,6 +500,145 @@ def build_vault_folders_tab(
     connect_local_btn.set_sensitive(bool(vault_id))
     connect_local_btn.connect("clicked", open_connect_local_dialog)
 
+    # ----------------------- Bindings panel (T10.6) -----------------------
+
+    sync_in_flight: dict[str, bool] = {}
+
+    def clear_bindings_grid() -> None:
+        child = bindings_grid.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            bindings_grid.remove(child)
+            child = next_child
+
+    def attach_binding_cell(text: str, col: int, row: int, *, header: bool = False) -> Gtk.Label:
+        label = Gtk.Label(label=text, xalign=0, hexpand=(col == 0))
+        label.set_wrap(True)
+        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        if header:
+            label.add_css_class("dim-label")
+        bindings_grid.attach(label, col, row, 1, 1)
+        return label
+
+    def run_sync_now(binding_id: str, button: Gtk.Button) -> None:
+        if sync_in_flight.get(binding_id):
+            return
+        sync_in_flight[binding_id] = True
+        button.set_sensitive(False)
+        bindings_status.set_label("Sync now: running…")
+
+        def worker() -> None:
+            try:
+                config.reload()
+                relay = create_vault_relay(config)
+                vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                store = VaultBindingsStore(local_index.db_path)
+                binding = store.get_binding(binding_id)
+                if binding is None:
+                    raise RuntimeError(f"binding not found: {binding_id}")
+                author_device_id = config.device_id or ("0" * 32)
+                try:
+                    result = flush_and_sync_binding(
+                        vault=vault, relay=relay, store=store,
+                        binding=binding, author_device_id=author_device_id,
+                    )
+                finally:
+                    vault.close()
+                toast_text = format_sync_outcome_toast(result)
+            except Exception as exc:  # noqa: BLE001
+                error_message = str(exc)
+
+                def fail() -> bool:
+                    sync_in_flight[binding_id] = False
+                    button.set_sensitive(True)
+                    bindings_status.set_label(
+                        f"Sync now failed: {error_message}"
+                    )
+                    return False
+
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                sync_in_flight[binding_id] = False
+                button.set_sensitive(True)
+                bindings_status.set_label(toast_text)
+                refresh_bindings_table(toast_text)
+                return False
+
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_bindings_table(message: str | None = None) -> None:
+        clear_bindings_grid()
+        # Header row + Action column
+        for col, title in enumerate(BINDING_COLUMNS):
+            attach_binding_cell(title, col, 0, header=True)
+        attach_binding_cell("Action", len(BINDING_COLUMNS), 0, header=True)
+
+        store = VaultBindingsStore(local_index.db_path)
+        try:
+            binding_records = (
+                store.list_bindings(vault_id=vault_id) if vault_id else []
+            )
+        except Exception as exc:  # noqa: BLE001
+            bindings_status.set_label(f"Could not load bindings: {exc}")
+            binding_records = []
+
+        try:
+            cached_folders = (
+                local_index.list_remote_folders(vault_id) if vault_id else []
+            )
+        except Exception:
+            cached_folders = []
+        folder_names = {
+            str(f.get("remote_folder_id", "")): str(f.get("display_name_enc") or "")
+            for f in cached_folders
+        }
+
+        rows = binding_rows_for_render(
+            binding_records, folder_names_by_id=folder_names,
+        )
+
+        if not rows:
+            empty = (
+                "No local bindings yet. Use 'Connect local folder…' above."
+                if vault_id else
+                "Open a vault before connecting bindings."
+            )
+            attach_binding_cell(empty, 0, 1)
+        else:
+            for row_index, row in enumerate(rows, start=1):
+                attach_binding_cell(row["local_path"], 0, row_index)
+                attach_binding_cell(row["remote_folder"], 1, row_index)
+                attach_binding_cell(row["state"], 2, row_index)
+                attach_binding_cell(row["sync_mode"], 3, row_index)
+                attach_binding_cell(row["last_synced_revision"], 4, row_index)
+                action_btn = Gtk.Button(label="Sync now", css_classes=["pill"])
+                action_btn.set_tooltip_text(
+                    "Drain pending local changes and push them to the vault now."
+                )
+                action_btn.set_sensitive(row["state"] == "bound")
+                bid = row["binding_id"]
+                action_btn.connect(
+                    "clicked",
+                    lambda _btn, bid=bid, btn=action_btn: run_sync_now(bid, btn),
+                )
+                bindings_grid.attach(
+                    action_btn, len(BINDING_COLUMNS), row_index, 1, 1,
+                )
+
+        if message is not None:
+            bindings_status.set_label(message)
+        elif rows:
+            bindings_status.set_label(f"{len(rows)} binding(s).")
+        elif vault_id:
+            bindings_status.set_label("No bindings yet.")
+        else:
+            bindings_status.set_label("")
+
     refresh_folders_table()
     refresh_folders_usage_async()
+    refresh_bindings_table()
     return folders
