@@ -48,8 +48,18 @@ VAULT_ACCESS_SECRET = "vault-secret"
 class VaultUploadRoundTripTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_upload_test_"))
+        # Redirect XDG_CACHE_HOME so default_upload_resume_dir() lands
+        # inside the per-test tmpdir — otherwise the upload_file()
+        # session-state writes leak into the real
+        # ~/.cache/desktop-connector/vault/uploads/ dir on every run.
+        self._saved_xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
 
     def tearDown(self) -> None:
+        if self._saved_xdg_cache_home is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg_cache_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_upload_then_download_roundtrips_bytes(self) -> None:

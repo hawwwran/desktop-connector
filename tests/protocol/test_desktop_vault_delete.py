@@ -218,8 +218,14 @@ class VaultRetentionDisplayTests(unittest.TestCase):
 class VaultDeleteOrchestrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_delete_test_"))
+        self._saved_xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
 
     def tearDown(self) -> None:
+        if self._saved_xdg_cache_home is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg_cache_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_delete_file_publishes_one_revision_and_hides_in_browser(self) -> None:
