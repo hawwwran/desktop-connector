@@ -22,10 +22,12 @@ from src.vault_download import download_latest_file  # noqa: E402
 from src.vault_manifest import find_file_entry, make_manifest, make_remote_folder  # noqa: E402
 from src.vault_relay_errors import VaultCASConflictError, VaultQuotaExceededError  # noqa: E402
 from src.vault_upload import (  # noqa: E402
+    FileSkipped,
     UploadConflictError,
     detect_path_conflict,
     make_conflict_renamed_path,
     upload_file,
+    upload_folder,
 )
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
@@ -299,6 +301,193 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             out,
             "report (conflict uploaded Bad_Name_With_Chars 2026-05-04 17-30).docx",
         )
+
+    def test_upload_folder_walks_recursively_and_lands_one_publish(self) -> None:
+        root = self.tmpdir / "src"
+        (root / "docs").mkdir(parents=True)
+        (root / "src" / "lib").mkdir(parents=True)
+        (root / "src" / "main.py").write_bytes(b"print('hi')\n")
+        (root / "src" / "lib" / "util.py").write_bytes(b"def util(): pass\n")
+        (root / "docs" / "README.md").write_bytes(b"# Project\n")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        progress: list = []
+        try:
+            result = upload_folder(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                local_root=root,
+                remote_folder_id=DOCS_ID,
+                remote_sub_path="batch",
+                author_device_id=AUTHOR,
+                chunk_size=8 * 1024,
+                progress=progress.append,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(len(result.uploaded), 3)
+        self.assertEqual(len(result.skipped), 0)
+        # All three additions land in a single CAS-publish — atomic batch.
+        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(relay.current_revision, 2)
+
+        # Final manifest holds all three entries under the requested sub-path.
+        for rel in ("batch/src/main.py", "batch/src/lib/util.py", "batch/docs/README.md"):
+            entry = find_file_entry(result.manifest, DOCS_ID, rel)
+            self.assertIsNotNone(entry, f"missing manifest entry for {rel}")
+
+        self.assertEqual(progress[-1].phase, "done")
+        self.assertEqual(progress[-1].files_completed, 3)
+
+    def test_upload_folder_applies_default_ignore_patterns(self) -> None:
+        root = self.tmpdir / "with_junk"
+        (root / "src").mkdir(parents=True)
+        (root / ".git").mkdir(parents=True)
+        (root / "node_modules" / "leftpad").mkdir(parents=True)
+        (root / "src" / "main.py").write_bytes(b"import sys\n")
+        (root / "src" / "main.pyc").write_bytes(b"\x00\x01\x02bytecode")
+        (root / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main")
+        (root / "node_modules" / "leftpad" / "package.json").write_bytes(b"{}")
+
+        # Use a remote folder with the §gaps §7 default ignore subset.
+        ignore = [".git/", "node_modules/", "*.pyc"]
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1,
+            parent_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-04T12:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    ignore_patterns=ignore,
+                    entries=[],
+                )
+            ],
+        )
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            result = upload_folder(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                local_root=root,
+                remote_folder_id=DOCS_ID,
+                remote_sub_path="",
+                author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        uploaded_paths = sorted(r.path for r in result.uploaded)
+        self.assertEqual(uploaded_paths, ["src/main.py"])
+
+        skip_reasons = {(s.relative_path.rstrip("/"), s.reason) for s in result.skipped}
+        self.assertIn((".git", "ignored"), skip_reasons)
+        self.assertIn(("node_modules", "ignored"), skip_reasons)
+        self.assertIn(("src/main.pyc", "ignored"), skip_reasons)
+        # The walker prunes dir subtrees, so .git/HEAD doesn't appear.
+        self.assertNotIn((".git/HEAD", "ignored"), skip_reasons)
+
+    def test_upload_folder_size_cap_skips_oversize_with_logged_event(self) -> None:
+        root = self.tmpdir / "big"
+        root.mkdir()
+        (root / "tiny.txt").write_bytes(b"OK")
+        (root / "huge.bin").write_bytes(b"x" * 10 * 1024)
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            with self.assertLogs("src.vault_upload", level="INFO") as captured:
+                result = upload_folder(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    local_root=root,
+                    remote_folder_id=DOCS_ID,
+                    remote_sub_path="",
+                    author_device_id=AUTHOR,
+                    max_file_bytes=4 * 1024,
+                )
+        finally:
+            vault.close()
+
+        self.assertEqual([r.path for r in result.uploaded], ["tiny.txt"])
+        self.assertEqual([s.relative_path for s in result.skipped], ["huge.bin"])
+        self.assertTrue(any(
+            "vault.sync.file_skipped_too_large" in line for line in captured.output
+        ))
+
+    def test_upload_folder_skips_special_files(self) -> None:
+        root = self.tmpdir / "linky"
+        root.mkdir()
+        (root / "real.txt").write_bytes(b"contents")
+        (root / "alias.txt").symlink_to(root / "real.txt")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            with self.assertLogs("src.vault_upload", level="INFO") as captured:
+                result = upload_folder(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    local_root=root,
+                    remote_folder_id=DOCS_ID,
+                    remote_sub_path="",
+                    author_device_id=AUTHOR,
+                )
+        finally:
+            vault.close()
+
+        self.assertEqual([r.path for r in result.uploaded], ["real.txt"])
+        self.assertIn(
+            FileSkipped(relative_path="alias.txt", reason="special", size_bytes=0),
+            result.skipped,
+        )
+        self.assertTrue(any(
+            "vault.sync.special_file_skipped" in line for line in captured.output
+        ))
+
+    def test_upload_folder_idempotent_re_upload_zero_publishes(self) -> None:
+        root = self.tmpdir / "stable"
+        root.mkdir()
+        (root / "alpha.txt").write_bytes(b"alpha contents")
+        (root / "beta.txt").write_bytes(b"beta contents")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            first = upload_folder(
+                vault=vault, relay=relay, manifest=manifest, local_root=root,
+                remote_folder_id=DOCS_ID, remote_sub_path="batch",
+                author_device_id=AUTHOR,
+            )
+            self.assertEqual(len(relay.published_manifests), 1)
+            second = upload_folder(
+                vault=vault, relay=relay, manifest=first.manifest, local_root=root,
+                remote_folder_id=DOCS_ID, remote_sub_path="batch",
+                author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        # Identical contents: zero new chunk PUTs and zero new manifest
+        # publishes the second time around.
+        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(second.bytes_uploaded, 0)
+        self.assertTrue(all(r.skipped_identical for r in second.uploaded))
 
     def test_two_device_concurrent_upload_merges_via_cas_retry(self) -> None:
         """§D4 row 2 acceptance: both devices append a new version of an

@@ -83,6 +83,7 @@ def show_vault_browser(config_dir: Path) -> None:
         forward_btn = Gtk.Button(label="Forward", css_classes=["pill"])
         refresh_btn = Gtk.Button(label="Refresh", css_classes=["pill"])
         upload_btn = Gtk.Button(label="Upload", css_classes=["pill"])
+        upload_folder_btn = Gtk.Button(label="Upload folder", css_classes=["pill"])
         delete_btn = Gtk.Button(label="Delete", css_classes=["pill", "destructive-action"])
         versions_btn = Gtk.Button(label="Versions", css_classes=["pill"])
         download_btn = Gtk.Button(label="Download", css_classes=["pill", "suggested-action"])
@@ -91,16 +92,19 @@ def show_vault_browser(config_dir: Path) -> None:
             forward_btn,
             refresh_btn,
             upload_btn,
+            upload_folder_btn,
             delete_btn,
             versions_btn,
             download_btn,
         ):
             action_bar.append(button)
         upload_btn.set_sensitive(False)
+        upload_folder_btn.set_sensitive(False)
         delete_btn.set_sensitive(False)
         versions_btn.set_sensitive(False)
         download_btn.set_sensitive(False)
         upload_btn.set_tooltip_text("Open a remote folder, then click Upload to add a file")
+        upload_folder_btn.set_tooltip_text("Open a remote folder, then click to upload a local folder recursively")
         delete_btn.set_tooltip_text("Delete lands in T7")
         versions_btn.set_tooltip_text("Choose a version below to download")
         download_btn.set_tooltip_text("Download selected file or current folder")
@@ -401,7 +405,9 @@ def show_vault_browser(config_dir: Path) -> None:
             render_tree()
             render_file_list()
             render_detail(state.get("selected_file"))
-            upload_btn.set_sensitive(_resolve_upload_destination() is not None)
+            upload_destination = _resolve_upload_destination()
+            upload_btn.set_sensitive(upload_destination is not None)
+            upload_folder_btn.set_sensitive(upload_destination is not None)
             if message is not None:
                 set_status(message, css_class)
 
@@ -1010,10 +1016,138 @@ def show_vault_browser(config_dir: Path) -> None:
             dlg.connect("response", on_response)
             dlg.present(win)
 
+        def start_folder_upload(local_root: Path, remote_folder_id: str, sub_path: str) -> None:
+            vault_id = local_vault_id()
+            if not vault_id:
+                set_status("No local vault is connected.", "error")
+                return
+
+            upload_btn.set_sensitive(False)
+            upload_folder_btn.set_sensitive(False)
+            refresh_btn.set_sensitive(False)
+            progress_bar.set_visible(True)
+            progress_bar.set_fraction(0.0)
+            progress_bar.set_text("Walking folder...")
+            set_status(f"Uploading folder {local_root.name}...")
+
+            def report_progress(folder_progress) -> None:
+                def update() -> bool:
+                    if folder_progress.bytes_total > 0:
+                        fraction = folder_progress.bytes_completed / folder_progress.bytes_total
+                    elif folder_progress.files_total > 0:
+                        fraction = folder_progress.files_completed / max(1, folder_progress.files_total)
+                    else:
+                        fraction = 1.0
+                    progress_bar.set_fraction(max(0.0, min(1.0, fraction)))
+                    progress_bar.set_text(
+                        f"{folder_progress.phase}: "
+                        f"{folder_progress.files_completed}/{folder_progress.files_total} files"
+                    )
+                    return False
+                GLib.idle_add(update)
+
+            def worker() -> None:
+                try:
+                    from .vault_upload import upload_folder
+
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                    try:
+                        current_manifest = vault.fetch_manifest(relay, local_index=local_index)
+                        device_id = str(getattr(config, "device_id", "") or "0" * 32)
+                        result = upload_folder(
+                            vault=vault,
+                            relay=relay,
+                            manifest=current_manifest,
+                            local_root=local_root,
+                            remote_folder_id=remote_folder_id,
+                            remote_sub_path=sub_path,
+                            author_device_id=device_id,
+                            progress=report_progress,
+                            local_index=local_index,
+                        )
+                    finally:
+                        vault.close()
+                except VaultQuotaExceededError as exc:
+                    msg = (
+                        f"Vault is full ({exc.used_bytes}/{exc.quota_bytes} bytes). "
+                        "Eviction lands in T6.6/T7."
+                    )
+
+                    def fail() -> bool:
+                        progress_bar.set_visible(False)
+                        upload_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        refresh_btn.set_sensitive(True)
+                        set_status(msg, "error")
+                        return False
+                    GLib.idle_add(fail)
+                    return
+                except Exception as exc:
+                    error_message = str(exc)
+
+                    def fail() -> bool:
+                        progress_bar.set_visible(False)
+                        upload_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        refresh_btn.set_sensitive(True)
+                        set_status(f"Folder upload failed: {error_message}", "error")
+                        return False
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    state["manifest"] = result.manifest
+                    progress_bar.set_visible(False)
+                    refresh_btn.set_sensitive(True)
+                    state["selected_file"] = None
+                    render_all()
+                    skipped = len(result.skipped)
+                    set_status(
+                        f"Uploaded {len(result.uploaded)} files "
+                        f"({result.bytes_uploaded} bytes); skipped {skipped}.",
+                        "success",
+                    )
+                    return False
+                GLib.idle_add(succeed)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def choose_upload_folder_source(_btn) -> None:
+            destination = _resolve_upload_destination()
+            if destination is None:
+                set_status("Open a remote folder before uploading.", "error")
+                return
+            remote_folder_id, sub_path = destination
+
+            file_dialog = Gtk.FileDialog()
+            file_dialog.set_title("Upload folder to vault")
+
+            def on_source_chosen(file_dialog, result) -> None:
+                try:
+                    gio_file = file_dialog.select_folder_finish(result)
+                except GLib.Error:
+                    return
+                if gio_file is None:
+                    return
+                path = gio_file.get_path()
+                if not path:
+                    set_status("Choose a local folder to upload.", "error")
+                    return
+                local_root = Path(path)
+                if not local_root.is_dir():
+                    set_status("Selected entry is not a folder.", "error")
+                    return
+                start_folder_upload(local_root, remote_folder_id, sub_path)
+
+            file_dialog.select_folder(parent=win, callback=on_source_chosen)
+
         back_btn.connect("clicked", go_back)
         forward_btn.connect("clicked", go_forward)
         refresh_btn.connect("clicked", refresh_manifest_async)
         upload_btn.connect("clicked", choose_upload_source)
+        upload_folder_btn.connect("clicked", choose_upload_folder_source)
         download_btn.connect("clicked", choose_download_destination)
 
         render_all("Open or refresh a vault to browse files.")

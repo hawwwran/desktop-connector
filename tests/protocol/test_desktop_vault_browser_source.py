@@ -94,6 +94,21 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_recursive_folder_upload(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            'Gtk.Button(label="Upload folder"',
+            "from .vault_upload import upload_folder",
+            "select_folder_finish",
+            "Upload folder to vault",
+            "start_folder_upload",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
     def test_browser_window_wires_upload_conflict_prompt(self) -> None:
         source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
             encoding="utf-8"
