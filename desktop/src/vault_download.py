@@ -376,32 +376,21 @@ def resolve_folder_destination(destination: Path, policy: ExistingFilePolicy) ->
     raise ExistingDestinationError(f"destination already exists: {destination}")
 
 
+from .vault_atomic import (
+    atomic_write_chunks as _atomic_write_chunks,
+    atomic_write_file as _atomic_write_file,
+    fsync_dir as _fsync_dir_helper,
+)
+
+
 def atomic_write_file(destination: Path, data: bytes) -> None:
-    """Power-loss-safe write using the T0 §gaps §11 temp-file pattern."""
-    atomic_write_chunks(destination, (data,))
+    """Re-export from :mod:`vault_atomic` for back-compat callers."""
+    _atomic_write_file(destination, data)
 
 
 def atomic_write_chunks(destination: Path, chunks: Iterable[bytes]) -> int:
-    """Power-loss-safe streaming write using an adjacent temp file."""
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    tmp = destination.with_name(f"{destination.name}.dc-temp-{uuid.uuid4().hex}")
-    written = 0
-    try:
-        with open(tmp, "wb") as fh:
-            for chunk in chunks:
-                fh.write(chunk)
-                written += len(chunk)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, destination)
-        _fsync_dir(destination.parent)
-        return written
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    """Re-export from :mod:`vault_atomic` for back-compat callers."""
+    return _atomic_write_chunks(destination, chunks)
 
 
 def vault_chunk_cache_path(cache_dir: Path, vault_id: str, chunk_id: str) -> Path:
@@ -686,14 +675,8 @@ def _unique_chunk_ids(chunk_lists: Iterable[list[dict[str, Any]]]) -> list[str]:
 
 
 def _fsync_dir(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Backwards-compat wrapper around :func:`vault_atomic.fsync_dir`."""
+    _fsync_dir_helper(path)
 
 
 def _report(
