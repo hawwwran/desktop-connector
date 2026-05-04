@@ -875,6 +875,41 @@ class FakeUploadRelay:
     def get_chunk(self, vault_id, vault_access_secret, chunk_id):
         return self.chunks[chunk_id]
 
+    # --- gc relay (T7.5) -----------------------------------------------
+    def gc_plan(self, vault_id, vault_access_secret, *, manifest_revision, candidate_chunk_ids):
+        plan_id = f"pl_{len(getattr(self, 'gc_plans', {}))}"
+        if not hasattr(self, "gc_plans"):
+            self.gc_plans = {}
+        safe = [c for c in candidate_chunk_ids if c in self.chunks]
+        self.gc_plans[plan_id] = {
+            "manifest_revision": manifest_revision,
+            "safe_to_delete": safe,
+        }
+        return {
+            "plan_id": plan_id,
+            "safe_to_delete": list(safe),
+            "still_referenced": [],
+            "expires_at": "2099-01-01T00:00:00.000Z",
+        }
+
+    def gc_execute(self, vault_id, vault_access_secret, *, plan_id, purge_secret=None):
+        plan = getattr(self, "gc_plans", {}).get(plan_id)
+        if plan is None:
+            raise RuntimeError(f"unknown gc plan: {plan_id}")
+        deleted = 0
+        freed_bytes = 0
+        for cid in plan["safe_to_delete"]:
+            envelope = self.chunks.pop(cid, None)
+            if envelope is not None:
+                deleted += 1
+                freed_bytes += len(envelope)
+        return {
+            "plan_id": plan_id,
+            "deleted_count": deleted,
+            "skipped_count": len(plan["safe_to_delete"]) - deleted,
+            "freed_ciphertext_bytes": freed_bytes,
+        }
+
     def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):
         self.put_calls.append(chunk_id)
         if chunk_id in self.chunks:

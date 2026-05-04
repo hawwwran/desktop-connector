@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import Callable
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -110,7 +111,12 @@ def show_vault_browser(config_dir: Path) -> None:
         download_btn.set_sensitive(False)
         upload_btn.set_tooltip_text("Open a remote folder, then click Upload to add a file")
         upload_folder_btn.set_tooltip_text("Open a remote folder, then click to upload a local folder recursively")
-        delete_btn.set_tooltip_text("Delete lands in T7")
+        delete_btn.set_tooltip_text("Soft-delete the selected file or current folder")
+        show_deleted_toggle = Gtk.CheckButton(label="Show deleted")
+        show_deleted_toggle.set_tooltip_text(
+            "Reveal soft-deleted files; they stay until eviction or retention claims them."
+        )
+        action_bar.append(show_deleted_toggle)
         versions_btn.set_tooltip_text("Choose a version below to download")
         download_btn.set_tooltip_text("Download selected file or current folder")
 
@@ -267,7 +273,11 @@ def show_vault_browser(config_dir: Path) -> None:
             if not manifest:
                 return
             try:
-                versions = list_versions(manifest, str(file_row.get("path", "")))
+                versions = list_versions(
+                    manifest,
+                    str(file_row.get("path", "")),
+                    include_deleted=bool(file_row.get("deleted")),
+                )
             except Exception:
                 versions = []
 
@@ -276,6 +286,20 @@ def show_vault_browser(config_dir: Path) -> None:
                 xalign=0,
                 css_classes=["title-3"],
             ))
+            if bool(file_row.get("deleted")):
+                tombstone_label = Gtk.Label(
+                    label=(
+                        f"Deleted {file_row.get('deleted_at') or ''}".strip()
+                        + (
+                            f" — recoverable until {file_row.get('recoverable_until')}"
+                            if file_row.get("recoverable_until") else ""
+                        )
+                    ),
+                    xalign=0,
+                    wrap=True,
+                    css_classes=["dim-label"],
+                )
+                detail_box.append(tombstone_label)
             if not versions:
                 detail_box.append(Gtk.Label(
                     label="No version history yet.",
@@ -289,12 +313,15 @@ def show_vault_browser(config_dir: Path) -> None:
 
             grid = Gtk.Grid(column_spacing=12, row_spacing=6)
             detail_box.append(grid)
-            for col, header in enumerate(("Modified", "Device", "Size", "Status", "")):
+            for col, header in enumerate(
+                ("Modified", "Device", "Size", "Status", "", "")
+            ):
                 grid.attach(
                     Gtk.Label(label=header, xalign=0, css_classes=["dim-label"]),
                     col, 0, 1, 1,
                 )
 
+            entry_deleted = bool(file_row.get("deleted"))
             for row_index, version in enumerate(versions, start=1):
                 modified = str(version.get("modified") or "-")
                 grid.attach(Gtk.Label(label=modified, xalign=0), 0, row_index, 1, 1)
@@ -305,23 +332,45 @@ def show_vault_browser(config_dir: Path) -> None:
                 )
                 size_label = _format_bytes(int(version.get("size", 0) or 0))
                 grid.attach(Gtk.Label(label=size_label, xalign=0), 2, row_index, 1, 1)
-                status_label = "Current" if version.get("is_current") else "Previous"
+                if entry_deleted and version.get("is_current"):
+                    status_label = "Latest (deleted)"
+                elif version.get("is_current"):
+                    status_label = "Current"
+                else:
+                    status_label = "Previous"
                 grid.attach(Gtk.Label(label=status_label, xalign=0), 3, row_index, 1, 1)
 
-                if version.get("is_current"):
-                    placeholder = Gtk.Label(label="Latest", xalign=0, css_classes=["dim-label"])
-                    grid.attach(placeholder, 4, row_index, 1, 1)
-                    continue
-
-                btn = Gtk.Button(label="Download…", css_classes=["pill"])
-                btn.set_tooltip_text(
+                download_btn_inline = Gtk.Button(label="Download…", css_classes=["pill"])
+                download_btn_inline.set_tooltip_text(
                     "Save this version to a side path — the current file is never overwritten."
                 )
-                btn.connect(
+                download_btn_inline.connect(
                     "clicked",
                     lambda _b, v=dict(version), f=dict(file_row): choose_version_destination(f, v),
                 )
-                grid.attach(btn, 4, row_index, 1, 1)
+                if version.get("is_current") and not entry_deleted:
+                    download_btn_inline.set_sensitive(False)
+                grid.attach(download_btn_inline, 4, row_index, 1, 1)
+
+                # Restore makes sense for any non-current version, plus
+                # the latest version of a tombstoned entry (T7.4 shortcut).
+                show_restore = (not version.get("is_current")) or entry_deleted
+                if show_restore:
+                    restore_btn = Gtk.Button(
+                        label="Restore as current",
+                        css_classes=["pill", "suggested-action"],
+                    )
+                    restore_btn.set_tooltip_text(
+                        "Promote this version to the current one. Tombstone is lifted."
+                        if entry_deleted else
+                        "Promote this version to the current one. The previous "
+                        "current becomes restorable history."
+                    )
+                    restore_btn.connect(
+                        "clicked",
+                        lambda _b, v=dict(version), f=dict(file_row): _confirm_restore_version(f, v),
+                    )
+                    grid.attach(restore_btn, 5, row_index, 1, 1)
 
         def select_file(file_row: dict) -> None:
             state["selected_file"] = file_row
@@ -348,8 +397,11 @@ def show_vault_browser(config_dir: Path) -> None:
                 attach_label("Open or refresh a vault to browse files.", 0, 1)
                 return
 
+            include_deleted = bool(state.get("show_deleted"))
             try:
-                folders, files = list_folder(manifest, str(state["path"]))
+                folders, files = list_folder(
+                    manifest, str(state["path"]), include_deleted=include_deleted,
+                )
             except Exception as exc:
                 attach_label(f"Could not list this folder: {exc}", 0, 1)
                 return
@@ -367,14 +419,23 @@ def show_vault_browser(config_dir: Path) -> None:
                 row += 1
 
             for file_row in files:
+                deleted = str(file_row.get("status", "")) == "Deleted"
                 button = Gtk.Button(label=str(file_row["name"]), halign=Gtk.Align.START)
                 button.add_css_class("flat")
+                if deleted:
+                    button.add_css_class("dim-label")
                 button.connect("clicked", lambda _btn, f=file_row: select_file(dict(f)))
                 attach_cell(button, 0, row)
-                attach_label(_format_bytes(int(file_row.get("size", 0))), 1, row)
+                size_label = _format_bytes(int(file_row.get("size", 0)))
+                attach_label(size_label, 1, row)
                 attach_label(str(file_row.get("modified", "")) or "-", 2, row)
                 attach_label(str(file_row.get("versions", 0)), 3, row)
-                attach_label(str(file_row.get("status", "")), 4, row)
+                status_label = str(file_row.get("status", ""))
+                if deleted:
+                    recoverable = str(file_row.get("recoverable_until") or "").strip()
+                    if recoverable:
+                        status_label = f"Deleted — recoverable until {recoverable}"
+                attach_label(status_label, 4, row)
                 row += 1
 
             if row == 1:
@@ -422,6 +483,15 @@ def show_vault_browser(config_dir: Path) -> None:
             upload_destination = _resolve_upload_destination()
             upload_btn.set_sensitive(upload_destination is not None)
             upload_folder_btn.set_sensitive(upload_destination is not None)
+            # Delete is enabled for a selected (non-deleted) file or for an
+            # open remote-folder path (bulk soft-delete of its contents).
+            selected_file = state.get("selected_file") or {}
+            can_delete_file = (
+                bool(selected_file)
+                and not bool(selected_file.get("deleted"))
+            )
+            can_delete_folder = upload_destination is not None
+            delete_btn.set_sensitive(can_delete_file or can_delete_folder)
             if message is not None:
                 set_status(message, css_class)
 
@@ -523,7 +593,7 @@ def show_vault_browser(config_dir: Path) -> None:
             threading.Thread(target=worker, daemon=True).start()
 
         def _handle_quota_exceeded(exc: VaultQuotaExceededError, *, action: str) -> None:
-            """T6.6: route a 507 into either the eviction offer or the
+            """T6.6 + T7.5: route a 507 into either the eviction prompt or the
             vault-full banner depending on ``eviction_available``."""
             info = describe_quota_exceeded(exc)
             if info["eviction_available"]:
@@ -537,15 +607,11 @@ def show_vault_browser(config_dir: Path) -> None:
                 dlg.set_default_response("evict")
                 dlg.set_close_response("cancel")
                 dlg.set_response_appearance("evict", Adw.ResponseAppearance.SUGGESTED)
-                # The actual eviction pass is T7's; for T6.6 the action
-                # acknowledges the prompt and surfaces a status.
+
                 def on_response(_dialog, response: str) -> None:
                     if response == "evict":
-                        set_status(
-                            f"Cannot reclaim space yet — eviction lands in T7. "
-                            f"{action} paused at {info['percent']}% used.",
-                            "error",
-                        )
+                        delta = max(1, exc.used_bytes - exc.quota_bytes + 1)
+                        _run_eviction_pass(action=action, target_bytes=delta)
                     else:
                         set_status(
                             f"{action} paused — vault is full ({info['percent']}%).",
@@ -563,6 +629,78 @@ def show_vault_browser(config_dir: Path) -> None:
                 f"{action} stopped: vault full and no backup history remains.",
                 "error",
             )
+
+        def _run_eviction_pass(*, action: str, target_bytes: int) -> None:
+            """T7.5: run the §D2 eviction pipeline in a worker thread."""
+            vault_id = local_vault_id()
+            if not vault_id:
+                set_status("No local vault is connected.", "error")
+                return
+
+            refresh_btn.set_sensitive(False)
+            progress_bar.set_visible(True)
+            progress_bar.set_fraction(0.0)
+            progress_bar.set_text("Reclaiming space...")
+            set_status(f"{action}: running eviction to free {target_bytes} bytes...")
+
+            def worker() -> None:
+                try:
+                    from .vault_eviction import eviction_pass
+
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                    try:
+                        current_manifest = vault.fetch_manifest(relay, local_index=local_index)
+                        device_id = str(getattr(config, "device_id", "") or "0" * 32)
+                        result = eviction_pass(
+                            vault=vault, relay=relay,
+                            manifest=current_manifest,
+                            author_device_id=device_id,
+                            target_bytes_to_free=target_bytes,
+                            local_index=local_index,
+                        )
+                    finally:
+                        vault.close()
+                except Exception as exc:
+                    error_message = str(exc)
+
+                    def fail() -> bool:
+                        progress_bar.set_visible(False)
+                        refresh_btn.set_sensitive(True)
+                        set_status(f"Eviction failed: {error_message}", "error")
+                        return False
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    state["manifest"] = result.manifest
+                    state["selected_file"] = None
+                    progress_bar.set_visible(False)
+                    refresh_btn.set_sensitive(True)
+                    if result.no_more_candidates:
+                        quota_banner.set_title(
+                            "Vault is full and no backup history remains. Sync is "
+                            "stopped. Free space by deleting files, or export and "
+                            "migrate to a relay with more capacity."
+                        )
+                        quota_banner.set_button_label("Open vault settings")
+                        quota_banner.set_revealed(True)
+                        render_all(
+                            f"Eviction stopped — no more candidates. Freed {result.bytes_freed} bytes.",
+                            "error",
+                        )
+                    else:
+                        render_all(
+                            f"Eviction freed {result.bytes_freed} bytes "
+                            f"({result.chunks_freed} chunks). "
+                            f"Try {action.lower()} again.",
+                            "success",
+                        )
+                    return False
+                GLib.idle_add(succeed)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def _refresh_resume_banner(vault_id: str) -> None:
             try:
@@ -1293,12 +1431,233 @@ def show_vault_browser(config_dir: Path) -> None:
 
             file_dialog.select_folder(parent=win, callback=on_source_chosen)
 
+        def _run_delete_worker(
+            *,
+            label: str,
+            mutate: Callable[[dict], dict],
+        ) -> None:
+            """Execute ``mutate(current_manifest)`` in a worker thread.
+
+            ``mutate`` is expected to fetch the latest manifest, call into
+            :mod:`vault_delete`, and return the published manifest.
+            Thread-safe UI updates land via ``GLib.idle_add``.
+            """
+            vault_id = local_vault_id()
+            if not vault_id:
+                set_status("No local vault is connected.", "error")
+                return
+
+            delete_btn.set_sensitive(False)
+            refresh_btn.set_sensitive(False)
+            progress_bar.set_visible(True)
+            progress_bar.set_fraction(0.0)
+            progress_bar.set_text(label)
+            set_status(f"{label}...")
+
+            def worker() -> None:
+                try:
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                    try:
+                        current_manifest = vault.fetch_manifest(relay, local_index=local_index)
+                        published = mutate({
+                            "vault": vault,
+                            "relay": relay,
+                            "manifest": current_manifest,
+                        })
+                    finally:
+                        vault.close()
+                except Exception as exc:
+                    error_message = str(exc)
+
+                    def fail() -> bool:
+                        progress_bar.set_visible(False)
+                        refresh_btn.set_sensitive(True)
+                        render_all(f"{label} failed: {error_message}", "error")
+                        return False
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    state["manifest"] = published
+                    state["selected_file"] = None
+                    progress_bar.set_visible(False)
+                    refresh_btn.set_sensitive(True)
+                    render_all(f"{label} succeeded.", "success")
+                    return False
+                GLib.idle_add(succeed)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def _confirm_delete_file(file_row: dict) -> None:
+            from .vault_delete import delete_file
+
+            remote_folder_id = str(file_row.get("remote_folder_id") or "")
+            relative_path = str(file_row.get("relative_path") or "")
+            if not remote_folder_id or not relative_path:
+                set_status("Cannot delete: missing folder/path metadata.", "error")
+                return
+
+            display_path = str(file_row.get("path") or relative_path)
+            dlg = Adw.AlertDialog(
+                heading=f"Delete {display_path}?",
+                body=(
+                    "This removes the file from the current remote view. Previous "
+                    "versions are kept for the retention period and can be restored."
+                ),
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("delete", "Delete")
+            dlg.set_default_response("cancel")
+            dlg.set_close_response("cancel")
+            dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def on_response(_dialog, response: str) -> None:
+                if response != "delete":
+                    return
+                config.reload()
+                device_id = str(getattr(config, "device_id", "") or "0" * 32)
+
+                def mutate(ctx: dict) -> dict:
+                    return delete_file(
+                        vault=ctx["vault"], relay=ctx["relay"],
+                        manifest=ctx["manifest"],
+                        remote_folder_id=remote_folder_id,
+                        remote_path=relative_path,
+                        author_device_id=device_id,
+                        local_index=local_index,
+                    )
+                _run_delete_worker(
+                    label=f"Deleting {display_path}",
+                    mutate=mutate,
+                )
+
+            dlg.connect("response", on_response)
+            dlg.present(win)
+
+        def _confirm_delete_folder(remote_folder_id: str, sub_path: str) -> None:
+            from .vault_delete import delete_folder_contents
+
+            target_label = sub_path or "this remote folder's contents"
+            dlg = Adw.AlertDialog(
+                heading=f"Delete contents of {target_label}?",
+                body=(
+                    "Every file under this path becomes a tombstone. Previous "
+                    "versions stay until eviction or retention claims them."
+                ),
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("delete", "Delete folder contents")
+            dlg.set_default_response("cancel")
+            dlg.set_close_response("cancel")
+            dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def on_response(_dialog, response: str) -> None:
+                if response != "delete":
+                    return
+                config.reload()
+                device_id = str(getattr(config, "device_id", "") or "0" * 32)
+
+                def mutate(ctx: dict) -> dict:
+                    published, _tombstoned = delete_folder_contents(
+                        vault=ctx["vault"], relay=ctx["relay"],
+                        manifest=ctx["manifest"],
+                        remote_folder_id=remote_folder_id,
+                        path_prefix=sub_path,
+                        author_device_id=device_id,
+                        local_index=local_index,
+                    )
+                    return published
+                _run_delete_worker(
+                    label=f"Deleting contents of {target_label}",
+                    mutate=mutate,
+                )
+
+            dlg.connect("response", on_response)
+            dlg.present(win)
+
+        def _confirm_restore_version(file_row: dict, version: dict) -> None:
+            from .vault_delete import restore_version_to_current
+
+            remote_folder_id = str(file_row.get("remote_folder_id") or "")
+            relative_path = str(file_row.get("relative_path") or "")
+            source_version_id = str(version.get("version_id") or "")
+            if not remote_folder_id or not relative_path or not source_version_id:
+                set_status("Cannot restore: missing metadata.", "error")
+                return
+
+            display_path = str(file_row.get("path") or relative_path)
+            modified = str(version.get("modified") or "?")
+            heading = f"Restore {display_path} to {modified}?"
+            body = (
+                "A new version will be added on top, pointing at this version's "
+                "stored chunks. The previous current version stays in history."
+            )
+            if bool(file_row.get("deleted")):
+                body = (
+                    "This file is currently deleted. Restoring lifts the tombstone "
+                    "and adds a new version on top of the chosen one."
+                )
+            dlg = Adw.AlertDialog(heading=heading, body=body)
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("restore", "Restore")
+            dlg.set_default_response("restore")
+            dlg.set_close_response("cancel")
+            dlg.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+
+            def on_response(_dialog, response: str) -> None:
+                if response != "restore":
+                    return
+                config.reload()
+                device_id = str(getattr(config, "device_id", "") or "0" * 32)
+
+                def mutate(ctx: dict) -> dict:
+                    return restore_version_to_current(
+                        vault=ctx["vault"], relay=ctx["relay"],
+                        manifest=ctx["manifest"],
+                        remote_folder_id=remote_folder_id,
+                        remote_path=relative_path,
+                        source_version_id=source_version_id,
+                        author_device_id=device_id,
+                        local_index=local_index,
+                    )
+                _run_delete_worker(
+                    label=f"Restoring {display_path}",
+                    mutate=mutate,
+                )
+
+            dlg.connect("response", on_response)
+            dlg.present(win)
+
+        def on_show_deleted_toggled(_btn) -> None:
+            state["show_deleted"] = bool(show_deleted_toggle.get_active())
+            state["selected_file"] = None
+            render_all()
+
+        def confirm_and_delete(_btn) -> None:
+            file_row = state.get("selected_file")
+            destination = _resolve_upload_destination()
+            if file_row and not bool(file_row.get("deleted")):
+                _confirm_delete_file(dict(file_row))
+                return
+            if destination is None:
+                set_status(
+                    "Open a remote folder or select a file before deleting.",
+                    "error",
+                )
+                return
+            remote_folder_id, sub_path = destination
+            _confirm_delete_folder(remote_folder_id, sub_path)
+
         back_btn.connect("clicked", go_back)
         forward_btn.connect("clicked", go_forward)
         refresh_btn.connect("clicked", refresh_manifest_async)
         upload_btn.connect("clicked", choose_upload_source)
         upload_folder_btn.connect("clicked", choose_upload_folder_source)
+        delete_btn.connect("clicked", confirm_and_delete)
         download_btn.connect("clicked", choose_download_destination)
+        show_deleted_toggle.connect("toggled", on_show_deleted_toggled)
 
         render_all("Open or refresh a vault to browse files.")
         refresh_manifest_async()

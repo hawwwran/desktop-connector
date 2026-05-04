@@ -257,6 +257,9 @@ def _file_row(
         "versions": len(_versions(entry)),
         "status": "Deleted" if bool(entry.get("deleted")) else "Current",
         "latest_version_id": str(entry.get("latest_version_id") or ""),
+        "deleted": bool(entry.get("deleted")),
+        "deleted_at": str(entry.get("deleted_at") or ""),
+        "recoverable_until": str(entry.get("recoverable_until") or ""),
     }
 
 

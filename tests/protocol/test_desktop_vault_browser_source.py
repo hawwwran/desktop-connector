@@ -94,6 +94,25 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_soft_delete_and_show_deleted_toggle(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            'Gtk.CheckButton(label="Show deleted")',
+            "from .vault_delete import delete_file",
+            "from .vault_delete import delete_folder_contents",
+            "from .vault_delete import restore_version_to_current",
+            "_confirm_delete_file",
+            "_confirm_delete_folder",
+            "_confirm_restore_version",
+            "Restore as current",
+            'include_deleted = bool(state.get("show_deleted"))',
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
     def test_browser_window_routes_507_through_quota_helper(self) -> None:
         source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
             encoding="utf-8"
@@ -105,6 +124,21 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             "quota_banner",
             'action="Upload"',
             'action="Folder upload"',
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
+    def test_browser_window_make_space_runs_eviction_pass(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            "from .vault_eviction import eviction_pass",
+            "_run_eviction_pass",
+            "no_more_candidates",
+            "Open vault settings",
+            "Reclaiming space",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, source)

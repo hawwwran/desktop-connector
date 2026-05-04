@@ -237,6 +237,50 @@ class VaultHttpRelay:
             )
         return resp.content
 
+    def gc_plan(self, vault_id, vault_access_secret, *, manifest_revision, candidate_chunk_ids):
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/gc/plan",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json={
+                "manifest_revision": int(manifest_revision),
+                "candidate_chunk_ids": list(candidate_chunk_ids),
+            },
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while planning vault GC.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault GC plan: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid GC plan response.") from exc
+
+    def gc_execute(self, vault_id, vault_access_secret, *, plan_id, purge_secret=None):
+        body = {"plan_id": str(plan_id)}
+        if purge_secret is not None:
+            body["purge_secret"] = str(purge_secret)
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/gc/execute",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=body,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while executing vault GC.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault GC execute: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid GC execute response.") from exc
+
     def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):
         from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError
 

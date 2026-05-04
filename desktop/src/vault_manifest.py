@@ -14,7 +14,7 @@ import json
 import re
 import secrets
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .vault_crypto import normalize_vault_id
@@ -365,6 +365,203 @@ def add_or_append_file_version(
         target["deleted"] = False
         target.pop("deleted_at", None)
         target.pop("recoverable_until", None)
+    return out
+
+
+def compute_recoverable_until(deleted_at: str, keep_deleted_days: int) -> str:
+    """T7.6: ``deleted_at + keep_deleted_days * 86400`` formatted as RFC 3339.
+
+    Per §D5/§A8 the *authoritative* recoverable_until check is performed
+    server-side at GC plan time (server clock). This helper is for
+    display-only — same formula, applied to the manifest's
+    client-supplied ``deleted_at``. A clock-skewed client cannot
+    accelerate or delay purge with it because the server ignores the
+    field when deciding what to evict.
+
+    Returns ``""`` if ``deleted_at`` is missing or unparseable so the
+    UI can fall back to "no deadline shown" gracefully.
+    """
+    raw = str(deleted_at or "").strip()
+    if not raw:
+        return ""
+    try:
+        normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        when = datetime.fromisoformat(normalized)
+    except ValueError:
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    when = when.astimezone(timezone.utc)
+    horizon = when + timedelta(days=max(0, int(keep_deleted_days)))
+    return horizon.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def tombstone_file_entry(
+    manifest: dict[str, Any],
+    *,
+    remote_folder_id: str,
+    path: str,
+    deleted_at: str,
+    author_device_id: str,
+) -> dict[str, Any]:
+    """Mark the file entry at ``(remote_folder_id, path)`` as soft-deleted.
+
+    Per §D5/§A8 the manifest carries a client-supplied ``deleted_at`` for
+    display only; the server computes ``recoverable_until`` from its own
+    clock at GC plan time so a clock-skewed client cannot accelerate or
+    delay purge. Versions and chunks stay in place — the tombstone just
+    flips ``deleted=True`` and stamps the deletion's authoring device.
+
+    Raises ``KeyError`` if the entry doesn't exist; tombstoning an
+    already-deleted entry refreshes ``deleted_at`` (re-deleting is a
+    no-op semantically but updates the audit fields).
+    """
+    out = normalize_manifest_plaintext(manifest)
+    normalized_path = normalize_manifest_path(path)
+    folder = None
+    for candidate in out["remote_folders"]:
+        if candidate.get("remote_folder_id") == remote_folder_id:
+            folder = candidate
+            break
+    if folder is None:
+        raise KeyError(f"remote folder not found: {remote_folder_id}")
+
+    target = None
+    for entry in folder.get("entries", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
+            target = entry
+            break
+    if target is None:
+        raise KeyError(f"file not found: {path}")
+
+    target["deleted"] = True
+    target["deleted_at"] = str(deleted_at)
+    target["deleted_by_device_id"] = str(author_device_id)
+    keep_days = _retention_keep_days(folder)
+    horizon = compute_recoverable_until(str(deleted_at), keep_days)
+    if horizon:
+        target["recoverable_until"] = horizon
+    return out
+
+
+def _retention_keep_days(folder: dict[str, Any]) -> int:
+    policy = folder.get("retention_policy")
+    if not isinstance(policy, dict):
+        return int(DEFAULT_RETENTION_POLICY["keep_deleted_days"])
+    try:
+        return int(policy.get("keep_deleted_days", DEFAULT_RETENTION_POLICY["keep_deleted_days"]))
+    except (TypeError, ValueError):
+        return int(DEFAULT_RETENTION_POLICY["keep_deleted_days"])
+
+
+def tombstone_files_under(
+    manifest: dict[str, Any],
+    *,
+    remote_folder_id: str,
+    path_prefix: str,
+    deleted_at: str,
+    author_device_id: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Bulk soft-delete (T7.2): tombstone every file at-or-under ``path_prefix``.
+
+    ``path_prefix == ""`` means "the entire remote folder root". Already-
+    deleted entries are left untouched (we don't overwrite their
+    original ``deleted_at``). Returns ``(manifest, paths_tombstoned)``
+    so the UI can report exactly what changed.
+    """
+    out = normalize_manifest_plaintext(manifest)
+    folder = None
+    for candidate in out["remote_folders"]:
+        if candidate.get("remote_folder_id") == remote_folder_id:
+            folder = candidate
+            break
+    if folder is None:
+        raise KeyError(f"remote folder not found: {remote_folder_id}")
+
+    if path_prefix:
+        prefix = normalize_manifest_path(path_prefix)
+        prefix_with_slash = prefix + "/"
+    else:
+        prefix = ""
+        prefix_with_slash = ""
+
+    keep_days = _retention_keep_days(folder)
+    horizon = compute_recoverable_until(str(deleted_at), keep_days)
+    tombstoned: list[str] = []
+    for entry in folder.get("entries", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if bool(entry.get("deleted")):
+            continue
+        entry_path = unicodedata.normalize("NFC", str(entry.get("path", "")))
+        if prefix and entry_path != prefix and not entry_path.startswith(prefix_with_slash):
+            continue
+        entry["deleted"] = True
+        entry["deleted_at"] = str(deleted_at)
+        entry["deleted_by_device_id"] = str(author_device_id)
+        if horizon:
+            entry["recoverable_until"] = horizon
+        tombstoned.append(entry_path)
+    return out, tombstoned
+
+
+def restore_file_entry(
+    manifest: dict[str, Any],
+    *,
+    remote_folder_id: str,
+    path: str,
+    new_version: dict[str, Any],
+    author_device_id: str,
+) -> dict[str, Any]:
+    """T7.4: Restore a tombstoned file *or* promote a previous version.
+
+    ``new_version`` is a freshly-built version dict whose ``chunks``
+    list references existing chunk_ids (no new ciphertext required).
+    Caller picks ``new_version["version_id"]`` and the chunk references
+    from any historical version; this helper just wires it as the
+    latest version, clears the tombstone, and records the restorer's
+    device_id for the audit trail.
+    """
+    if not _FILE_VERSION_ID_RE.match(str(new_version.get("version_id", ""))):
+        raise ValueError("new_version.version_id must match ^fv_v1_[a-z2-7]{24}$")
+
+    out = normalize_manifest_plaintext(manifest)
+    normalized_path = normalize_manifest_path(path)
+    folder = None
+    for candidate in out["remote_folders"]:
+        if candidate.get("remote_folder_id") == remote_folder_id:
+            folder = candidate
+            break
+    if folder is None:
+        raise KeyError(f"remote folder not found: {remote_folder_id}")
+
+    target = None
+    for entry in folder.get("entries", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
+            target = entry
+            break
+    if target is None:
+        raise KeyError(f"file not found: {path}")
+
+    versions = [v for v in target.get("versions", []) if isinstance(v, dict)]
+    versions.append(copy.deepcopy(new_version))
+    target["versions"] = versions
+    target["latest_version_id"] = str(new_version["version_id"])
+    target["deleted"] = False
+    target.pop("deleted_at", None)
+    target.pop("deleted_by_device_id", None)
+    target.pop("recoverable_until", None)
+    target["restored_by_device_id"] = str(author_device_id)
     return out
 
 
