@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import logging
+import os
 import secrets
 import stat
 from dataclasses import dataclass, field
@@ -30,9 +32,11 @@ from .vault_crypto import (
     build_chunk_aad,
     build_chunk_envelope,
     derive_chunk_id_key,
+    derive_chunk_nonce_key,
     derive_content_fingerprint_key,
     derive_subkey,
     make_chunk_id,
+    make_chunk_nonce,
     make_content_fingerprint,
 )
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
@@ -80,6 +84,120 @@ class FolderUploadResult:
     @property
     def bytes_uploaded(self) -> int:
         return sum(r.bytes_uploaded for r in self.uploaded)
+
+
+@dataclass
+class UploadSession:
+    """Persisted across-process upload plan (T6.5).
+
+    Lives at ``<cache_dir>/<session_id>.json`` and is rewritten in place
+    after every chunk PUT success. Holds enough information to resume a
+    killed mid-upload without re-deriving anything from the manifest.
+    """
+    session_id: str
+    vault_id: str
+    remote_folder_id: str
+    remote_path: str
+    entry_id: str
+    version_id: str
+    author_device_id: str
+    content_fingerprint: str
+    logical_size: int
+    local_path: str
+    chunk_size: int
+    created_at: str
+    chunks: list[dict[str, Any]]
+    phase: Literal["uploading", "ready_to_publish", "complete"] = "uploading"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "vault_id": self.vault_id,
+            "remote_folder_id": self.remote_folder_id,
+            "remote_path": self.remote_path,
+            "entry_id": self.entry_id,
+            "version_id": self.version_id,
+            "author_device_id": self.author_device_id,
+            "content_fingerprint": self.content_fingerprint,
+            "logical_size": self.logical_size,
+            "local_path": self.local_path,
+            "chunk_size": self.chunk_size,
+            "created_at": self.created_at,
+            "chunks": list(self.chunks),
+            "phase": self.phase,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "UploadSession":
+        return cls(
+            session_id=str(data["session_id"]),
+            vault_id=str(data["vault_id"]),
+            remote_folder_id=str(data["remote_folder_id"]),
+            remote_path=str(data["remote_path"]),
+            entry_id=str(data["entry_id"]),
+            version_id=str(data["version_id"]),
+            author_device_id=str(data["author_device_id"]),
+            content_fingerprint=str(data.get("content_fingerprint", "")),
+            logical_size=int(data["logical_size"]),
+            local_path=str(data["local_path"]),
+            chunk_size=int(data["chunk_size"]),
+            created_at=str(data["created_at"]),
+            chunks=list(data.get("chunks", [])),
+            phase=data.get("phase", "uploading"),
+        )
+
+
+def default_upload_resume_dir() -> Path:
+    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    return base / "desktop-connector" / "vault" / "uploads"
+
+
+def save_session(session: UploadSession, cache_dir: Path) -> Path:
+    """Atomically write the session JSON to ``<cache_dir>/<session_id>.json``."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{session.session_id}.json"
+    tmp = target.with_suffix(target.suffix + ".dc-temp")
+    payload = json.dumps(session.to_json(), separators=(",", ":")).encode("utf-8")
+    with open(tmp, "wb") as fh:
+        fh.write(payload)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, target)
+    return target
+
+
+def clear_session(session_id: str, cache_dir: Path) -> None:
+    cache_dir = Path(cache_dir)
+    target = cache_dir / f"{session_id}.json"
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
+
+
+def list_resumable_sessions(vault_id: str, cache_dir: Path) -> list[UploadSession]:
+    """Return every saved session that targets ``vault_id`` and is unfinished."""
+    cache_dir = Path(cache_dir)
+    if not cache_dir.exists():
+        return []
+    out: list[UploadSession] = []
+    for path in sorted(cache_dir.glob("*.json")):
+        try:
+            with open(path, "rb") as fh:
+                data = json.loads(fh.read().decode("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            session = UploadSession.from_json(data)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if session.vault_id != vault_id:
+            continue
+        if session.phase == "complete":
+            continue
+        out.append(session)
+    return out
 
 
 @dataclass(frozen=True)
@@ -167,6 +285,7 @@ def upload_file(
     created_at: str | None = None,
     progress: Callable[[UploadProgress], None] | None = None,
     local_index: Any = None,
+    resume_cache_dir: Path | None = None,
 ) -> UploadResult:
     """Encrypt + upload ``local_path`` and CAS-publish a new manifest revision.
 
@@ -242,6 +361,35 @@ def upload_file(
     )
     total_chunks = len(chunks_plan)
 
+    timestamp = created_at or _now_rfc3339()
+    cache_dir = resume_cache_dir or default_upload_resume_dir()
+    session = UploadSession(
+        session_id=secrets.token_hex(8),
+        vault_id=vault.vault_id,
+        remote_folder_id=remote_folder_id,
+        remote_path=normalized_remote_path,
+        entry_id=entry_id,
+        version_id=version_id,
+        author_device_id=str(author_device_id),
+        content_fingerprint=fingerprint,
+        logical_size=total_logical_size,
+        local_path=str(local_path.resolve()),
+        chunk_size=chunk_size,
+        created_at=timestamp,
+        chunks=[
+            {
+                "chunk_id": c["chunk_id"],
+                "index": c["index"],
+                "plaintext_size": c["plaintext_size"],
+                "ciphertext_size": c["ciphertext_size"],
+                "done": False,
+            }
+            for c in chunks_plan
+        ],
+        phase="uploading",
+    )
+    save_session(session, cache_dir)
+
     # batch-HEAD to learn which chunks the relay already has.
     chunk_ids = [chunk["chunk_id"] for chunk in chunks_plan]
     _report(progress, "checking", 0, total_chunks)
@@ -256,7 +404,7 @@ def upload_file(
     chunks_skipped = 0
     bytes_uploaded = 0
     completed = 0
-    for chunk in chunks_plan:
+    for index, chunk in enumerate(chunks_plan):
         head = heads.get(chunk["chunk_id"]) if isinstance(heads, dict) else None
         if isinstance(head, dict) and head.get("present"):
             chunks_skipped += 1
@@ -269,6 +417,8 @@ def upload_file(
             )
             chunks_uploaded += 1
             bytes_uploaded += chunk["ciphertext_size"]
+        session.chunks[index]["done"] = True
+        save_session(session, cache_dir)
         completed += 1
         _report(progress, "uploading", completed, total_chunks, bytes_uploaded)
 
@@ -277,10 +427,13 @@ def upload_file(
         version_id=version_id,
         chunks_plan=chunks_plan,
         author_device_id=author_device_id,
-        created_at=created_at or _now_rfc3339(),
+        created_at=timestamp,
         logical_size=total_logical_size,
         content_fingerprint=fingerprint,
     )
+
+    session.phase = "ready_to_publish"
+    save_session(session, cache_dir)
 
     published = _publish_with_cas_retry(
         vault=vault,
@@ -293,6 +446,7 @@ def upload_file(
         author_device_id=author_device_id,
         local_index=local_index,
     )
+    clear_session(session.session_id, cache_dir)
     _report(progress, "done", total_chunks, total_chunks, bytes_uploaded)
 
     return UploadResult(
@@ -306,6 +460,155 @@ def upload_file(
         bytes_uploaded=bytes_uploaded,
         logical_size=total_logical_size,
         content_fingerprint=fingerprint,
+        skipped_identical=False,
+    )
+
+
+def resume_upload(
+    *,
+    vault: UploadVault,
+    relay: UploadRelay,
+    manifest: dict[str, Any],
+    session: UploadSession,
+    progress: Callable[[UploadProgress], None] | None = None,
+    local_index: Any = None,
+    resume_cache_dir: Path | None = None,
+) -> UploadResult:
+    """Pick up a partially-completed ``upload_file`` from disk (T6.5).
+
+    Walks the saved session, batch-HEADs the chunk_ids to learn what
+    the relay already has, re-encrypts and re-PUTs anything still
+    missing (deterministic-nonce crypto means the envelope bytes are
+    byte-identical to the pre-crash run, so the relay's hash-equality
+    idempotency turns retries into 200 OKs), then runs the normal CAS
+    publish.
+    """
+    if vault.master_key is None or vault.vault_access_secret is None:
+        raise ValueError("vault is closed")
+    if session.vault_id != vault.vault_id:
+        raise ValueError(
+            f"session is for vault {session.vault_id!r}, got {vault.vault_id!r}"
+        )
+
+    cache_dir = resume_cache_dir or default_upload_resume_dir()
+    local_path = Path(session.local_path)
+    if not local_path.is_file():
+        raise FileNotFoundError(f"local file no longer present: {local_path}")
+
+    chunk_ids = [str(c["chunk_id"]) for c in session.chunks]
+    _report(progress, "checking", 0, len(chunk_ids))
+    heads = (
+        relay.batch_head_chunks(vault.vault_id, vault.vault_access_secret, chunk_ids)
+        if chunk_ids
+        else {}
+    )
+
+    chunks_uploaded = 0
+    chunks_skipped = 0
+    bytes_uploaded = 0
+    plaintext_chunks: list[dict[str, Any]] = []
+    chunk_id_key = derive_chunk_id_key(vault.master_key)
+    chunk_nonce_key = derive_chunk_nonce_key(vault.master_key)
+    chunk_subkey = derive_subkey("dc-vault-v1/chunk", bytes(vault.master_key))
+
+    completed = 0
+    with open(local_path, "rb") as fh:
+        for index, record in enumerate(session.chunks):
+            plaintext = fh.read(int(session.chunk_size))
+            chunk_id = str(record["chunk_id"])
+            head = heads.get(chunk_id) if isinstance(heads, dict) else None
+            already_done = bool(record.get("done"))
+            if (already_done or (isinstance(head, dict) and head.get("present"))):
+                chunks_skipped += 1
+                # Even if the local session said done=False, a present
+                # chunk on the relay means the PUT landed before the
+                # crash — flush the flag.
+                session.chunks[index]["done"] = True
+                save_session(session, cache_dir)
+            else:
+                # Re-encrypt deterministically so the envelope bytes match
+                # whatever was stored before (or what would have been). The
+                # T6.1 chunk_id derivation already binds plaintext + version
+                # + index, so we re-derive it for cross-check.
+                derived_id = make_chunk_id(
+                    chunk_id_key, plaintext, session.version_id, index,
+                )
+                if derived_id != chunk_id:
+                    raise RuntimeError(
+                        f"resume mismatch: session expects {chunk_id!r} but "
+                        f"local bytes hash to {derived_id!r} — file changed "
+                        "since the original upload"
+                    )
+                nonce = make_chunk_nonce(
+                    chunk_nonce_key, plaintext, session.version_id, index,
+                )
+                aad = build_chunk_aad(
+                    vault.vault_id,
+                    session.remote_folder_id,
+                    session.entry_id,
+                    session.version_id,
+                    index,
+                    len(plaintext),
+                )
+                ciphertext = aead_encrypt(plaintext, chunk_subkey, nonce, aad)
+                envelope = build_chunk_envelope(
+                    nonce=nonce, aead_ciphertext_and_tag=ciphertext,
+                )
+                relay.put_chunk(
+                    vault.vault_id, vault.vault_access_secret, chunk_id, envelope,
+                )
+                chunks_uploaded += 1
+                bytes_uploaded += len(envelope)
+                session.chunks[index]["done"] = True
+                save_session(session, cache_dir)
+            plaintext_chunks.append({
+                "chunk_id": chunk_id,
+                "index": index,
+                "plaintext_size": int(record["plaintext_size"]),
+                "ciphertext_size": int(record["ciphertext_size"]),
+            })
+            completed += 1
+            _report(progress, "uploading", completed, len(chunk_ids), bytes_uploaded)
+
+    version_payload = {
+        "version_id": session.version_id,
+        "created_at": session.created_at,
+        "modified_at": session.created_at,
+        "logical_size": int(session.logical_size),
+        "ciphertext_size": int(sum(c["ciphertext_size"] for c in plaintext_chunks)),
+        "content_fingerprint": session.content_fingerprint,
+        "author_device_id": session.author_device_id,
+        "chunks": plaintext_chunks,
+    }
+
+    session.phase = "ready_to_publish"
+    save_session(session, cache_dir)
+
+    published = _publish_with_cas_retry(
+        vault=vault,
+        relay=relay,
+        parent_manifest=manifest,
+        remote_folder_id=session.remote_folder_id,
+        normalized_remote_path=session.remote_path,
+        version_payload=version_payload,
+        entry_id=session.entry_id,
+        author_device_id=session.author_device_id,
+        local_index=local_index,
+    )
+    clear_session(session.session_id, cache_dir)
+    _report(progress, "done", len(chunk_ids), len(chunk_ids), bytes_uploaded)
+
+    return UploadResult(
+        manifest=published,
+        entry_id=session.entry_id,
+        version_id=session.version_id,
+        path=session.remote_path,
+        remote_folder_id=session.remote_folder_id,
+        chunks_uploaded=chunks_uploaded,
+        chunks_skipped=chunks_skipped,
+        bytes_uploaded=bytes_uploaded,
+        logical_size=int(session.logical_size),
+        content_fingerprint=session.content_fingerprint,
         skipped_identical=False,
     )
 
@@ -770,6 +1073,7 @@ def _build_chunk_plan(
     if chunk_size < 1:
         raise ValueError("chunk_size must be >= 1")
     chunk_id_key = derive_chunk_id_key(vault.master_key)
+    chunk_nonce_key = derive_chunk_nonce_key(vault.master_key)
     chunk_subkey = derive_subkey("dc-vault-v1/chunk", bytes(vault.master_key))
 
     plan: list[dict[str, Any]] = []
@@ -781,7 +1085,7 @@ def _build_chunk_plan(
             if not plaintext and index > 0:
                 break
             chunk_id = make_chunk_id(chunk_id_key, plaintext, version_id, index)
-            nonce = secrets.token_bytes(24)
+            nonce = make_chunk_nonce(chunk_nonce_key, plaintext, version_id, index)
             aad = build_chunk_aad(
                 vault.vault_id,
                 remote_folder_id,
@@ -1003,9 +1307,15 @@ __all__ = [
     "UploadConflictError",
     "UploadProgress",
     "UploadResult",
+    "UploadSession",
     "VaultRelayError",
+    "clear_session",
+    "default_upload_resume_dir",
     "detect_path_conflict",
+    "list_resumable_sessions",
     "make_conflict_renamed_path",
+    "resume_upload",
+    "save_session",
     "upload_file",
     "upload_folder",
 ]

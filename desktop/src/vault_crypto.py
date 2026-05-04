@@ -470,6 +470,40 @@ def make_chunk_id(
     return "ch_v1_" + _base32_lower_encode_15_bytes(digest[:15])
 
 
+def derive_chunk_nonce_key(master_key: bytes) -> bytes:
+    """Per-vault HMAC key for deterministic chunk-nonce derivation (T6.5)."""
+    return derive_subkey("dc-vault-v1/chunk-nonce", bytes(master_key))
+
+
+def make_chunk_nonce(
+    nonce_key: bytes,
+    plaintext: bytes,
+    file_version_id: str,
+    chunk_index: int,
+) -> bytes:
+    """24-byte deterministic XChaCha20-Poly1305 nonce.
+
+    Re-encrypting the same chunk on the same vault produces a
+    byte-identical envelope, which is what makes T6.5 resume "no chunk
+    uploaded twice" land cleanly: the relay's per-chunk PUT is
+    idempotent on hash match, so a re-encrypt + retry hits 200 OK.
+    Different vaults derive different nonce keys via the master key,
+    and different ``(file_version_id, chunk_index)`` tuples already
+    produce different chunk_ids — so the deterministic nonce never
+    collides within a single chunk_id slot.
+    """
+    if not isinstance(file_version_id, str) or len(file_version_id) != 30:
+        raise ValueError("file_version_id must be a 30-char string")
+    digest = hmac.new(
+        bytes(nonce_key),
+        hashlib.sha256(plaintext).digest()
+        + file_version_id.encode("ascii")
+        + int(chunk_index).to_bytes(8, "big"),
+        hashlib.sha256,
+    ).digest()
+    return digest[:XCHACHA20_NONCE_BYTES]
+
+
 def make_content_fingerprint(content_fp_key: bytes, plaintext_sha256: bytes) -> str:
     """Keyed file fingerprint, hex string. ``plaintext_sha256`` is the
     SHA-256 digest of the full file plaintext.

@@ -94,6 +94,21 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_upload_resume_banner(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            "list_resumable_sessions",
+            "default_upload_resume_dir",
+            "start_resume_pending",
+            "from .vault_upload import resume_upload",
+            "uploads were interrupted",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
     def test_browser_window_wires_recursive_folder_upload(self) -> None:
         source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
             encoding="utf-8"

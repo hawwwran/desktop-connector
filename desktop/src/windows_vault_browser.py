@@ -19,6 +19,10 @@ from .vault_browser_model import list_folder, list_versions
 from .vault_cache import VaultLocalIndex
 from .vault_download import previous_version_filename
 from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError
+from .vault_upload import (
+    default_upload_resume_dir,
+    list_resumable_sessions,
+)
 from .vault_runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
 
@@ -108,6 +112,11 @@ def show_vault_browser(config_dir: Path) -> None:
         delete_btn.set_tooltip_text("Delete lands in T7")
         versions_btn.set_tooltip_text("Choose a version below to download")
         download_btn.set_tooltip_text("Download selected file or current folder")
+
+        resume_banner = Adw.Banner.new("")
+        resume_banner.set_button_label("Resume")
+        resume_banner.set_revealed(False)
+        outer.append(resume_banner)
 
         breadcrumb = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         breadcrumb.add_css_class("title-4")
@@ -501,11 +510,115 @@ def show_vault_browser(config_dir: Path) -> None:
                         state["forward"] = []
                     state["selected_file"] = None
                     render_all("Vault browser refreshed.", "success")
+                    _refresh_resume_banner(vault_id)
                     return False
 
                 GLib.idle_add(succeed)
 
             threading.Thread(target=worker, daemon=True).start()
+
+        def _refresh_resume_banner(vault_id: str) -> None:
+            try:
+                sessions = list_resumable_sessions(vault_id, default_upload_resume_dir())
+            except Exception:
+                sessions = []
+            state["resume_sessions"] = sessions
+            if not sessions:
+                resume_banner.set_revealed(False)
+                return
+            count = len(sessions)
+            label = (
+                "1 upload was interrupted — click Resume to finish it."
+                if count == 1
+                else f"{count} uploads were interrupted — click Resume to finish them."
+            )
+            resume_banner.set_title(label)
+            resume_banner.set_revealed(True)
+
+        def start_resume_pending(_btn=None) -> None:
+            sessions = list(state.get("resume_sessions") or [])
+            if not sessions:
+                return
+            vault_id = local_vault_id()
+            if not vault_id:
+                set_status("No local vault is connected.", "error")
+                return
+
+            refresh_btn.set_sensitive(False)
+            upload_btn.set_sensitive(False)
+            upload_folder_btn.set_sensitive(False)
+            resume_banner.set_revealed(False)
+            progress_bar.set_visible(True)
+            progress_bar.set_fraction(0.0)
+            progress_bar.set_text("Resuming uploads...")
+            set_status(f"Resuming {len(sessions)} interrupted upload(s)...")
+
+            def worker() -> None:
+                from .vault_upload import resume_upload
+
+                completed = 0
+                failed = 0
+                last_manifest = state.get("manifest")
+                try:
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                    try:
+                        for session in sessions:
+                            try:
+                                current_manifest = vault.fetch_manifest(relay, local_index=local_index)
+                                result = resume_upload(
+                                    vault=vault,
+                                    relay=relay,
+                                    manifest=current_manifest,
+                                    session=session,
+                                    local_index=local_index,
+                                )
+                                last_manifest = result.manifest
+                                completed += 1
+                            except Exception:
+                                failed += 1
+                    finally:
+                        vault.close()
+                except Exception as exc:
+                    error_message = str(exc)
+
+                    def fail() -> bool:
+                        progress_bar.set_visible(False)
+                        refresh_btn.set_sensitive(True)
+                        upload_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        set_status(f"Resume failed: {error_message}", "error")
+                        _refresh_resume_banner(vault_id)
+                        return False
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    progress_bar.set_visible(False)
+                    refresh_btn.set_sensitive(True)
+                    upload_btn.set_sensitive(_resolve_upload_destination() is not None)
+                    upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
+                    if last_manifest is not None:
+                        state["manifest"] = last_manifest
+                    state["selected_file"] = None
+                    render_all()
+                    if failed == 0:
+                        set_status(
+                            f"Resumed {completed} upload(s).", "success",
+                        )
+                    else:
+                        set_status(
+                            f"Resumed {completed} upload(s); {failed} failed (will retry next time).",
+                            "error",
+                        )
+                    _refresh_resume_banner(vault_id)
+                    return False
+                GLib.idle_add(succeed)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        resume_banner.connect("button-clicked", start_resume_pending)
 
         def start_download(destination: Path, existing_policy: str) -> None:
             file_row = state.get("selected_file")

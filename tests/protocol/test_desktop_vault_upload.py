@@ -24,8 +24,11 @@ from src.vault_relay_errors import VaultCASConflictError, VaultQuotaExceededErro
 from src.vault_upload import (  # noqa: E402
     FileSkipped,
     UploadConflictError,
+    UploadSession,
     detect_path_conflict,
+    list_resumable_sessions,
     make_conflict_renamed_path,
+    resume_upload,
     upload_file,
     upload_folder,
 )
@@ -301,6 +304,84 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             out,
             "report (conflict uploaded Bad_Name_With_Chars 2026-05-04 17-30).docx",
         )
+
+    def test_upload_resume_after_simulated_crash_finishes_without_double_put(self) -> None:
+        """T6.5 acceptance: kill mid-upload, restart, no chunk uploaded twice."""
+        local = self.tmpdir / "resume.bin"
+        local.write_bytes(b"resume-test " * 4096)  # 49152 bytes → 6 chunks @ 8 KiB
+
+        manifest = _empty_manifest()
+        relay = CrashingRelay(manifest=manifest, fail_after_n_puts=3)
+        cache_dir = self.tmpdir / "resume_cache"
+        vault = _vault()
+        try:
+            with self.assertRaises(SimulatedCrashError):
+                upload_file(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    local_path=local,
+                    remote_folder_id=DOCS_ID,
+                    remote_path="resume.bin",
+                    author_device_id=AUTHOR,
+                    chunk_size=8 * 1024,
+                    resume_cache_dir=cache_dir,
+                )
+
+            # State on disk must reflect the partial progress. The crash
+            # fires *after* the 3rd PUT lands on the relay but *before*
+            # ``upload_file`` flips that chunk's session flag — so the
+            # session shows 2 done while the relay has 3 stored.
+            sessions = list_resumable_sessions(VAULT_ID, cache_dir)
+            self.assertEqual(len(sessions), 1)
+            session = sessions[0]
+            self.assertEqual(session.phase, "uploading")
+            done = sum(1 for c in session.chunks if c["done"])
+            self.assertEqual(done, 2)
+            self.assertEqual(len(relay.chunks), 3)
+            self.assertEqual(len(relay.published_manifests), 0)
+
+            # Resume on a fresh non-crashing relay that *retains* the chunks
+            # already stored. Acceptance: only the missing chunks are PUT.
+            puts_before_resume = list(relay.put_calls)
+            relay.fail_after_n_puts = None
+            result = resume_upload(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                session=session,
+                resume_cache_dir=cache_dir,
+            )
+        finally:
+            vault.close()
+
+        new_puts = relay.put_calls[len(puts_before_resume):]
+        self.assertEqual(len(new_puts), 3)  # exactly the 3 still-pending chunks
+        self.assertEqual(len(relay.chunks), 6)
+        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(result.chunks_uploaded, 3)
+        self.assertEqual(result.chunks_skipped, 3)
+        self.assertEqual(list_resumable_sessions(VAULT_ID, cache_dir), [])
+
+    def test_upload_session_cleared_after_successful_publish(self) -> None:
+        local = self.tmpdir / "tidy.txt"
+        local.write_bytes(b"clean session contents")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        cache_dir = self.tmpdir / "resume_cache"
+        vault = _vault()
+        try:
+            upload_file(
+                vault=vault, relay=relay, manifest=manifest, local_path=local,
+                remote_folder_id=DOCS_ID, remote_path="tidy.txt",
+                author_device_id=AUTHOR, resume_cache_dir=cache_dir,
+            )
+        finally:
+            vault.close()
+
+        # No leftover sessions for this vault.
+        self.assertEqual(list_resumable_sessions(VAULT_ID, cache_dir), [])
 
     def test_upload_folder_walks_recursively_and_lands_one_publish(self) -> None:
         root = self.tmpdir / "src"
@@ -710,6 +791,10 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             vault.close()
 
 
+class SimulatedCrashError(RuntimeError):
+    """Raised by ``CrashingRelay`` to model a process death mid-upload."""
+
+
 class FakeUploadRelay:
     """In-memory fake of the chunk + manifest relay surface.
 
@@ -815,6 +900,26 @@ class FakeUploadRelay:
         self.current_envelope = bytes(manifest_ciphertext)
         self.current_hash = manifest_hash
         return {"new_revision": new_revision}
+
+
+class CrashingRelay(FakeUploadRelay):
+    """Variant that raises ``SimulatedCrashError`` after N PUTs.
+
+    Mirrors a process death right after the Nth chunk PUT — the data
+    landed on the server but the client never got the chance to record
+    "done" or move on to chunk N+1.
+    """
+
+    def __init__(self, *, manifest, fail_after_n_puts):
+        super().__init__(manifest=manifest)
+        self.fail_after_n_puts = fail_after_n_puts
+
+    def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):
+        result = super().put_chunk(vault_id, vault_access_secret, chunk_id, body)
+        if self.fail_after_n_puts is not None and len(self.put_calls) >= self.fail_after_n_puts:
+            self.fail_after_n_puts = None  # only crash once
+            raise SimulatedCrashError("simulated kill mid-upload")
+        return result
 
 
 def _vault() -> Vault:
