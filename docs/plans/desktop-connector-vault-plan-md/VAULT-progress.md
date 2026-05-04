@@ -413,8 +413,9 @@ If a sub-task genuinely requires something the default stack can't provide:
 - [x] **T12.5** — Disconnect: state → `unbound`, drop `vault_bindings` row but keep `vault_local_entries` until garbage-collected by user. Local files untouched, remote untouched.
   - Accept: Disconnected folder still browses via Browser mode; reconnecting starts a fresh preflight.
   - Implementation note: vault_local_entries has FK ON DELETE CASCADE to vault_bindings, so a hard-delete would wipe the local index. disconnect_binding marks state=unbound and keeps the row; the user-GC step (a future "Forget local index" button) is what physically removes it. Pending ops drop at disconnect so a stale watcher can't replay them.
-- [ ] **T12.6** — Multi-device concurrent ops integration test (per H7): two desktop instances pointed at same relay + same vault, scripted operations: simultaneous upload, delete-vs-edit race, three-device merge. CI-runnable.
+- [x] **T12.6** — Multi-device concurrent ops integration test (per H7): two desktop instances pointed at same relay + same vault, scripted operations: simultaneous upload, delete-vs-edit race, three-device merge. CI-runnable.
   - Accept: All scripted scenarios produce final state matching expected (no data loss, deterministic `latest_version_id`).
+  - Implementation note: convergence needs two cycles per device — first pass pushes local work, second pass observes the others' published revisions and stamps last_synced_revision. Matches the real-world poll loop where each desktop's `Sync now` button or 30 s tick pulls the head once per pass.
 
 ---
 
