@@ -408,7 +408,7 @@ If a sub-task genuinely requires something the default stack can't provide:
   - Accept: Deleting a previously-synced file produces a remote tombstone; deleting a never-synced file is silent.
 - [x] **T12.3** — Ransomware detector per §A15: counters keyed by binding, sliding 5-minute window. On trip: `binding_state = paused`, surface banner with [Review] [Rollback] [Resume] [Keep paused]. Thresholds configurable in Vault settings → Sync safety.
   - Accept: Touching 200 files in 5 minutes pauses the binding; surface text matches §gaps §6 + §A15 verbatim; user actions land their state transitions.
-- [ ] **T12.4** — Pause / Resume per binding: `state = paused` keeps `sync_mode` set so resume restores the same mode (per §A12). Pending ops preserved across pause.
+- [x] **T12.4** — Pause / Resume per binding: `state = paused` keeps `sync_mode` set so resume restores the same mode (per §A12). Pending ops preserved across pause.
   - Accept: Paused binding does no traffic; resuming flushes pending ops.
 - [ ] **T12.5** — Disconnect: state → `unbound`, drop `vault_bindings` row but keep `vault_local_entries` until garbage-collected by user. Local files untouched, remote untouched.
   - Accept: Disconnected folder still browses via Browser mode; reconnecting starts a fresh preflight.
