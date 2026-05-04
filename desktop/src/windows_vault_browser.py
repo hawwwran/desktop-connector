@@ -154,9 +154,14 @@ def show_vault_browser(config_dir: Path) -> None:
         )
         tree_scroller.set_child(tree_box)
         paned.set_start_child(tree_scroller)
+        paned.set_resize_start_child(False)
+        paned.set_shrink_start_child(False)
 
         right = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         paned.set_end_child(right)
+        paned.set_resize_end_child(True)
+        paned.set_shrink_end_child(False)
+        paned.set_position(220)
 
         list_scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         list_grid = Gtk.Grid(
@@ -171,6 +176,8 @@ def show_vault_browser(config_dir: Path) -> None:
         )
         list_scroller.set_child(list_grid)
         right.set_start_child(list_scroller)
+        right.set_resize_start_child(True)
+        right.set_shrink_start_child(False)
 
         detail_scroller = Gtk.ScrolledWindow(min_content_width=280)
         detail_box = Gtk.Box(
@@ -183,6 +190,9 @@ def show_vault_browser(config_dir: Path) -> None:
         )
         detail_scroller.set_child(detail_box)
         right.set_end_child(detail_scroller)
+        right.set_resize_end_child(False)
+        right.set_shrink_end_child(False)
+        right.set_position(540)
 
         def set_status(message: str, css_class: str = "dim-label") -> None:
             for klass in ("dim-label", "error", "success"):
