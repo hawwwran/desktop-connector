@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import uuid
 from dataclasses import dataclass
@@ -157,6 +158,111 @@ def download_latest_file(
     atomic_write_file(final_path, data)
     _report(progress, "done", len(chunks), len(chunks), len(data))
     return final_path
+
+
+def download_version(
+    *,
+    vault: DownloadVault,
+    relay: ChunkRelay,
+    manifest: dict[str, Any],
+    path: str,
+    version_id: str,
+    destination: Path,
+    existing_policy: ExistingFilePolicy = "fail",
+    chunk_cache_dir: Path | None = None,
+    progress: Callable[[DownloadProgress], None] | None = None,
+) -> Path:
+    """Download a specific historical version to a side path.
+
+    Per A20, downloading a previous version must never overwrite the
+    file's current/latest bytes. Callers compose ``destination`` from
+    :func:`previous_version_filename` so the leaf name carries a
+    version timestamp and cannot collide with the latest file's name.
+    The ``existing_policy`` is honoured if even that side-path already
+    exists (e.g. the same version was downloaded twice).
+    """
+    if vault.master_key is None or vault.vault_access_secret is None:
+        raise ValueError("vault is closed")
+    if not version_id:
+        raise ValueError("version_id is required")
+
+    normalized = normalize_manifest_plaintext(manifest)
+    folder = _folder_for_display_path(normalized, path)
+    entry = get_file(normalized, path, include_deleted=True)
+
+    version = _find_version(entry, version_id)
+    if version is None:
+        raise KeyError(f"version not found: {version_id}")
+
+    chunks = _version_chunks(version)
+    final_path = resolve_download_destination(Path(destination), existing_policy)
+    _preflight_disk_space(final_path, _int_value(version.get("logical_size")))
+
+    chunk_ids = [chunk["chunk_id"] for chunk in chunks]
+    _report(progress, "checking", 0, len(chunks))
+    heads = (
+        relay.batch_head_chunks(vault.vault_id, vault.vault_access_secret, chunk_ids)
+        if chunk_ids
+        else {}
+    )
+    for chunk in chunks:
+        info = heads.get(chunk["chunk_id"])
+        if not isinstance(info, dict) or not info.get("present"):
+            raise VaultChunkMissingError(f"vault chunk missing: {chunk['chunk_id']}")
+
+    plaintext_parts: list[bytes] = []
+    completed = 0
+    bytes_written = 0
+    for chunk in chunks:
+        encrypted = _load_cached_chunk(
+            chunk_cache_dir=chunk_cache_dir,
+            vault_id=vault.vault_id,
+            chunk_id=chunk["chunk_id"],
+            head=heads[chunk["chunk_id"]],
+        )
+        if encrypted is None:
+            encrypted = relay.get_chunk(
+                vault.vault_id, vault.vault_access_secret, chunk["chunk_id"]
+            )
+
+        plaintext = _decrypt_chunk(
+            vault=vault,
+            remote_folder_id=str(folder["remote_folder_id"]),
+            file_id=str(entry.get("entry_id", "")),
+            version_id=str(version.get("version_id", "")),
+            chunk=chunk,
+            encrypted=encrypted,
+        )
+        _store_cached_chunk(chunk_cache_dir, vault.vault_id, chunk["chunk_id"], encrypted)
+        plaintext_parts.append(plaintext)
+        completed += 1
+        bytes_written += len(plaintext)
+        _report(progress, "downloading", completed, len(chunks), bytes_written)
+
+    data = b"".join(plaintext_parts)
+    expected_size = _int_value(version.get("logical_size"))
+    if expected_size and len(data) != expected_size:
+        raise ValueError(
+            f"downloaded size mismatch: expected {expected_size}, got {len(data)}"
+        )
+
+    atomic_write_file(final_path, data)
+    _report(progress, "done", len(chunks), len(chunks), len(data))
+    return final_path
+
+
+def previous_version_filename(name: str, version: dict[str, Any]) -> str:
+    """Return the A20-style side-path filename for a historical version.
+
+    Pattern: ``<stem> (version <YYYY-MM-DD HH-MM>).<ext>``. Falls back to
+    ``(version <version_id_prefix>)`` when the manifest lacks a usable
+    timestamp so the leaf name is still unique against the current file.
+    """
+    base = Path(str(name)).name or "version"
+    suffix = Path(base).suffix
+    stem = base[: -len(suffix)] if suffix else base
+    tag = _version_tag(version)
+    return f"{stem} (version {tag}){suffix}"
 
 
 def download_folder(
@@ -435,6 +541,34 @@ def _folder_file_plans(manifest: dict[str, Any], path: str) -> list[_FolderFileP
         ))
 
     return sorted(plans, key=lambda plan: str(plan.relative_path).casefold())
+
+
+def _find_version(entry: dict[str, Any], version_id: str) -> dict[str, Any] | None:
+    for version in entry.get("versions", []) or []:
+        if not isinstance(version, dict):
+            continue
+        if str(version.get("version_id", "")) == version_id:
+            return version
+    return None
+
+
+_VERSION_TAG_RE = re.compile(
+    r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})[T ](?P<h>\d{2}):(?P<mi>\d{2})"
+)
+
+
+def _version_tag(version: dict[str, Any]) -> str:
+    raw = str(
+        version.get("modified_at") or version.get("created_at") or ""
+    )
+    match = _VERSION_TAG_RE.match(raw)
+    if match:
+        return (
+            f"{match['y']}-{match['m']}-{match['d']} "
+            f"{match['h']}-{match['mi']}"
+        )
+    version_id = str(version.get("version_id") or "")
+    return version_id[:12] or "unknown"
 
 
 def _latest_version(entry: dict[str, Any]) -> dict[str, Any] | None:

@@ -79,6 +79,23 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_versions_panel_and_download(self) -> None:
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_browser.py").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            "list_versions",
+            "previous_version_filename",
+            "download_version",
+            "render_versions_section",
+            "Download previous version",
+            "side path",
+            "Version file exists",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, source)
+
 
 if __name__ == "__main__":
     unittest.main()

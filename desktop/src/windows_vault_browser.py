@@ -15,8 +15,9 @@ from .brand import (
     apply_pointer_cursors,
     apply_theme_mode_from_config_dir,
 )
-from .vault_browser_model import list_folder
+from .vault_browser_model import list_folder, list_versions
 from .vault_cache import VaultLocalIndex
+from .vault_download import previous_version_filename
 from .vault_runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
 
@@ -100,7 +101,7 @@ def show_vault_browser(config_dir: Path) -> None:
         download_btn.set_sensitive(False)
         upload_btn.set_tooltip_text("Upload lands in T6")
         delete_btn.set_tooltip_text("Delete lands in T7")
-        versions_btn.set_tooltip_text("Version download lands in T5.5")
+        versions_btn.set_tooltip_text("Choose a version below to download")
         download_btn.set_tooltip_text("Download selected file or current folder")
 
         breadcrumb = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
@@ -188,6 +189,7 @@ def show_vault_browser(config_dir: Path) -> None:
 
         def render_detail(file_row: dict | None) -> None:
             clear_box(detail_box)
+            versions_btn.set_sensitive(False)
             detail_box.append(Gtk.Label(label="Details", xalign=0, css_classes=["title-3"]))
             if not file_row:
                 current_path = str(state["path"])
@@ -238,6 +240,69 @@ def show_vault_browser(config_dir: Path) -> None:
                 val.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
                 grid.attach(key, 0, row_index, 1, 1)
                 grid.attach(val, 1, row_index, 1, 1)
+
+            render_versions_section(file_row)
+
+        def render_versions_section(file_row: dict) -> None:
+            manifest = state["manifest"]
+            if not manifest:
+                return
+            try:
+                versions = list_versions(manifest, str(file_row.get("path", "")))
+            except Exception:
+                versions = []
+
+            detail_box.append(Gtk.Label(
+                label="Versions",
+                xalign=0,
+                css_classes=["title-3"],
+            ))
+            if not versions:
+                detail_box.append(Gtk.Label(
+                    label="No version history yet.",
+                    xalign=0,
+                    wrap=True,
+                    css_classes=["dim-label"],
+                ))
+                return
+
+            versions_btn.set_sensitive(True)
+
+            grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+            detail_box.append(grid)
+            for col, header in enumerate(("Modified", "Device", "Size", "Status", "")):
+                grid.attach(
+                    Gtk.Label(label=header, xalign=0, css_classes=["dim-label"]),
+                    col, 0, 1, 1,
+                )
+
+            for row_index, version in enumerate(versions, start=1):
+                modified = str(version.get("modified") or "-")
+                grid.attach(Gtk.Label(label=modified, xalign=0), 0, row_index, 1, 1)
+                device = str(version.get("author_device_id") or "")
+                grid.attach(
+                    Gtk.Label(label=device[:12] if device else "-", xalign=0),
+                    1, row_index, 1, 1,
+                )
+                size_label = _format_bytes(int(version.get("size", 0) or 0))
+                grid.attach(Gtk.Label(label=size_label, xalign=0), 2, row_index, 1, 1)
+                status_label = "Current" if version.get("is_current") else "Previous"
+                grid.attach(Gtk.Label(label=status_label, xalign=0), 3, row_index, 1, 1)
+
+                if version.get("is_current"):
+                    placeholder = Gtk.Label(label="Latest", xalign=0, css_classes=["dim-label"])
+                    grid.attach(placeholder, 4, row_index, 1, 1)
+                    continue
+
+                btn = Gtk.Button(label="Download…", css_classes=["pill"])
+                btn.set_tooltip_text(
+                    "Save this version to a side path — the current file is never overwritten."
+                )
+                btn.connect(
+                    "clicked",
+                    lambda _b, v=dict(version), f=dict(file_row): choose_version_destination(f, v),
+                )
+                grid.attach(btn, 4, row_index, 1, 1)
 
         def select_file(file_row: dict) -> None:
             state["selected_file"] = file_row
@@ -533,6 +598,153 @@ def show_vault_browser(config_dir: Path) -> None:
 
             dlg.connect("response", on_response)
             dlg.present(win)
+
+        def start_version_download(
+            file_row: dict,
+            version: dict,
+            destination: Path,
+            existing_policy: str,
+        ) -> None:
+            vault_id = local_vault_id()
+            if not vault_id:
+                set_status("No local vault is connected.", "error")
+                return
+
+            file_path = str(file_row.get("path") or "")
+            version_id = str(version.get("version_id") or "")
+            if not file_path or not version_id:
+                set_status("Cannot download this version.", "error")
+                return
+
+            label = file_row.get("name") or file_path
+            modified = str(version.get("modified") or "?")
+            download_btn.set_sensitive(False)
+            versions_btn.set_sensitive(False)
+            progress_bar.set_visible(True)
+            progress_bar.set_fraction(0.0)
+            progress_bar.set_text("Preparing version download...")
+            set_status(f"Downloading {label} (version {modified})...")
+
+            def report_progress(progress) -> None:
+                def update_progress() -> bool:
+                    total = max(1, int(progress.total_chunks))
+                    fraction = 1.0 if progress.phase == "done" else progress.completed_chunks / total
+                    progress_bar.set_fraction(max(0.0, min(1.0, fraction)))
+                    progress_bar.set_text(
+                        f"{progress.completed_chunks}/{progress.total_chunks} chunks"
+                    )
+                    return False
+
+                GLib.idle_add(update_progress)
+
+            def worker() -> None:
+                try:
+                    from .vault_download import (
+                        default_vault_download_cache_dir,
+                        download_version,
+                    )
+
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                    try:
+                        current_manifest = vault.fetch_manifest(relay, local_index=local_index)
+                        final_path = download_version(
+                            vault=vault,
+                            relay=relay,
+                            manifest=current_manifest,
+                            path=file_path,
+                            version_id=version_id,
+                            destination=destination,
+                            existing_policy=existing_policy,
+                            chunk_cache_dir=default_vault_download_cache_dir(),
+                            progress=report_progress,
+                        )
+                    finally:
+                        vault.close()
+                except Exception as exc:
+                    error_message = str(exc)
+
+                    def fail() -> bool:
+                        progress_bar.set_visible(False)
+                        download_btn.set_sensitive(
+                            bool(state.get("selected_file")) or bool(state["path"])
+                        )
+                        versions_btn.set_sensitive(bool(state.get("selected_file")))
+                        set_status(f"Version download failed: {error_message}", "error")
+                        return False
+
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    state["manifest"] = current_manifest
+                    progress_bar.set_visible(False)
+                    download_btn.set_sensitive(
+                        bool(state.get("selected_file")) or bool(state["path"])
+                    )
+                    versions_btn.set_sensitive(bool(state.get("selected_file")))
+                    set_status(f"Downloaded version to {final_path}.", "success")
+                    return False
+
+                GLib.idle_add(succeed)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def prompt_existing_version_destination(
+            file_row: dict,
+            version: dict,
+            destination: Path,
+        ) -> None:
+            dlg = Adw.AlertDialog(
+                heading="Version file exists",
+                body=(
+                    "A file with this version's side-path name already exists. "
+                    "Choose how to handle it — the current file is never overwritten."
+                ),
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("keep_both", "Keep both")
+            dlg.add_response("overwrite", "Overwrite")
+            dlg.set_default_response("keep_both")
+            dlg.set_close_response("cancel")
+            dlg.set_response_appearance("overwrite", Adw.ResponseAppearance.DESTRUCTIVE)
+
+            def on_response(_dialog, response: str) -> None:
+                if response == "overwrite":
+                    start_version_download(file_row, version, destination, "overwrite")
+                elif response == "keep_both":
+                    start_version_download(file_row, version, destination, "keep_both")
+
+            dlg.connect("response", on_response)
+            dlg.present(win)
+
+        def choose_version_destination(file_row: dict, version: dict) -> None:
+            base_name = str(file_row.get("name") or "vault-download")
+            initial_name = previous_version_filename(base_name, version)
+
+            file_dialog = Gtk.FileDialog()
+            file_dialog.set_title("Download previous version")
+            file_dialog.set_initial_name(initial_name)
+
+            def on_destination_chosen(file_dialog, result) -> None:
+                try:
+                    gio_file = file_dialog.save_finish(result)
+                except GLib.Error:
+                    return
+                if gio_file is None:
+                    return
+                path = gio_file.get_path()
+                if not path:
+                    set_status("Choose a local file destination.", "error")
+                    return
+                destination = Path(path)
+                if destination.exists():
+                    prompt_existing_version_destination(file_row, version, destination)
+                else:
+                    start_version_download(file_row, version, destination, "fail")
+
+            file_dialog.save(parent=win, callback=on_destination_chosen)
 
         def choose_download_destination(_btn) -> None:
             file_row = state.get("selected_file")

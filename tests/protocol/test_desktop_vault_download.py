@@ -31,6 +31,8 @@ from src.vault_download import (  # noqa: E402
     VaultLocalDiskFullError,
     download_folder,
     download_latest_file,
+    download_version,
+    previous_version_filename,
     resolve_folder_destination,
     resolve_download_destination,
     vault_chunk_cache_path,
@@ -298,6 +300,108 @@ class VaultDownloadTests(unittest.TestCase):
 
         self.assertEqual(out.name, "Documents (downloaded 1)")
 
+    def test_download_version_writes_side_path_matching_chosen_bytes(self) -> None:
+        manifest, chunks, versions = _multi_version_manifest_and_chunks([
+            (b"v1-bytes", "2026-04-01T10:00:00.000Z"),
+            (b"v2-bytes-payload", "2026-04-15T11:00:00.000Z"),
+            (b"v3-bytes-final-cut", "2026-05-01T12:00:00.000Z"),
+        ])
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+
+        latest = self.tmpdir / "report.txt"
+        latest.write_bytes(b"v3-bytes-final-cut")
+
+        v2 = versions[1]
+        target_name = previous_version_filename("report.txt", v2)
+        destination = self.tmpdir / target_name
+
+        try:
+            out = download_version(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                path="Documents/report.txt",
+                version_id=v2["version_id"],
+                destination=destination,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(out, destination)
+        self.assertNotEqual(out.name, "report.txt")
+        self.assertIn("(version ", out.name)
+        self.assertEqual(out.read_bytes(), b"v2-bytes-payload")
+        self.assertEqual(latest.read_bytes(), b"v3-bytes-final-cut")
+
+    def test_download_version_keep_both_when_side_path_exists(self) -> None:
+        manifest, chunks, versions = _multi_version_manifest_and_chunks([
+            (b"first", "2026-04-01T10:00:00.000Z"),
+            (b"second", "2026-04-15T11:00:00.000Z"),
+        ])
+        relay = FakeChunkRelay(chunks)
+        v1 = versions[0]
+        suggested = previous_version_filename("report.txt", v1)
+        existing = self.tmpdir / suggested
+        existing.write_bytes(b"older")
+
+        vault = _vault()
+        try:
+            out = download_version(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                path="Documents/report.txt",
+                version_id=v1["version_id"],
+                destination=existing,
+                existing_policy="keep_both",
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(existing.read_bytes(), b"older")
+        self.assertNotEqual(out, existing)
+        self.assertEqual(out.read_bytes(), b"first")
+
+    def test_download_version_unknown_version_raises(self) -> None:
+        manifest, chunks, _versions = _multi_version_manifest_and_chunks([
+            (b"only", "2026-04-01T10:00:00.000Z"),
+        ])
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        try:
+            with self.assertRaisesRegex(KeyError, "version not found"):
+                download_version(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    path="Documents/report.txt",
+                    version_id="fv_v1_zzzzzzzzzzzzzzzzzzzzzzzz",
+                    destination=self.tmpdir / "report (version 2026-04-01 10-00).txt",
+                )
+        finally:
+            vault.close()
+
+    def test_previous_version_filename_uses_a20_style_timestamp(self) -> None:
+        version = {
+            "modified_at": "2026-05-02T17:30:00.000Z",
+            "version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+        }
+        self.assertEqual(
+            previous_version_filename("report.docx", version),
+            "report (version 2026-05-02 17-30).docx",
+        )
+        self.assertEqual(
+            previous_version_filename("README", version),
+            "README (version 2026-05-02 17-30)",
+        )
+
+    def test_previous_version_filename_falls_back_to_version_id(self) -> None:
+        version = {"version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa"}
+        out = previous_version_filename("report.txt", version)
+        self.assertTrue(out.startswith("report (version fv_v1"))
+        self.assertTrue(out.endswith(").txt"))
+
 
 class FakeChunkRelay:
     def __init__(self, chunks: dict[str, bytes]) -> None:
@@ -449,6 +553,61 @@ def _folder_manifest_and_chunks(files: dict[str, bytes]) -> tuple[dict, dict[str
         ],
     )
     return manifest, chunks
+
+
+def _multi_version_manifest_and_chunks(
+    versions: list[tuple[bytes, str]],
+) -> tuple[dict, dict[str, bytes], list[dict]]:
+    chunks: dict[str, bytes] = {}
+    version_records: list[dict] = []
+    alphabet = "abcdefghijklmnopqrstuvwx"
+    for index, (plaintext, modified_at) in enumerate(versions):
+        letter = alphabet[index % len(alphabet)]
+        version_id = f"fv_v1_{letter * 24}"
+        chunk_id = f"ch_v1_{letter * 24}"
+        encrypted = _encrypt_chunk_for(plaintext, 0, FILE_ID, version_id)
+        chunks[chunk_id] = encrypted
+        version_records.append({
+            "version_id": version_id,
+            "created_at": modified_at,
+            "modified_at": modified_at,
+            "logical_size": len(plaintext),
+            "ciphertext_size": len(encrypted),
+            "content_fingerprint": "unused",
+            "chunks": [{
+                "chunk_id": chunk_id,
+                "index": 0,
+                "plaintext_size": len(plaintext),
+                "ciphertext_size": len(encrypted),
+            }],
+            "author_device_id": AUTHOR,
+        })
+
+    entry = {
+        "entry_id": FILE_ID,
+        "type": "file",
+        "path": "report.txt",
+        "latest_version_id": version_records[-1]["version_id"],
+        "deleted": False,
+        "versions": version_records,
+    }
+    manifest = make_manifest(
+        vault_id=VAULT_ID,
+        revision=20,
+        parent_revision=19,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        remote_folders=[
+            make_remote_folder(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at="2026-05-04T12:00:00.000Z",
+                created_by_device_id=AUTHOR,
+                entries=[entry],
+            )
+        ],
+    )
+    return manifest, chunks, version_records
 
 
 def _encrypt_chunk_for(plaintext: bytes, index: int, file_id: str, version_id: str) -> bytes:

@@ -14,7 +14,12 @@ from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_browser_model import decrypt_manifest, get_file, list_folder  # noqa: E402
+from src.vault_browser_model import (  # noqa: E402
+    decrypt_manifest,
+    get_file,
+    list_folder,
+    list_versions,
+)
 from src.vault_crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault_manifest import make_manifest, make_remote_folder  # noqa: E402
 
@@ -121,6 +126,33 @@ class VaultBrowserTreeWalkTests(unittest.TestCase):
             list_folder(_nested_manifest(), "Missing")
 
 
+class VaultBrowserListVersionsTests(unittest.TestCase):
+    def test_three_versions_render_three_rows_newest_first(self) -> None:
+        rows = list_versions(_versioned_manifest(), "Documents/report.pdf")
+
+        self.assertEqual([row["version_id"] for row in rows], [
+            "fv_v1_cccccccccccccccccccccccc",
+            "fv_v1_bbbbbbbbbbbbbbbbbbbbbbbb",
+            "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        self.assertEqual([row["is_current"] for row in rows], [True, False, False])
+        self.assertEqual([row["size"] for row in rows], [3 * 1024, 2 * 1024, 1024])
+        self.assertEqual(rows[1]["author_device_id"], AUTHOR)
+
+    def test_deleted_file_versions_are_hidden_by_default(self) -> None:
+        with self.assertRaises(KeyError):
+            list_versions(_versioned_manifest(), "Documents/Invoices/2025/old.pdf")
+
+    def test_deleted_file_versions_visible_when_requested(self) -> None:
+        rows = list_versions(
+            _versioned_manifest(),
+            "Documents/Invoices/2025/old.pdf",
+            include_deleted=True,
+        )
+        self.assertTrue(rows)
+        self.assertTrue(rows[0]["is_deleted"])
+
+
 def _nested_manifest() -> dict:
     return make_manifest(
         vault_id=VAULT_ID,
@@ -183,6 +215,79 @@ def _version(version_id: str, logical_size: int) -> dict:
         "chunks": [],
         "author_device_id": AUTHOR,
     }
+
+
+def _versioned_manifest() -> dict:
+    versions = [
+        {
+            "version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+            "created_at": "2026-04-01T10:00:00.000Z",
+            "modified_at": "2026-04-01T09:58:00.000Z",
+            "logical_size": 1024,
+            "ciphertext_size": 1048,
+            "chunks": [],
+            "author_device_id": AUTHOR,
+        },
+        {
+            "version_id": "fv_v1_bbbbbbbbbbbbbbbbbbbbbbbb",
+            "created_at": "2026-04-15T11:00:00.000Z",
+            "modified_at": "2026-04-15T10:58:00.000Z",
+            "logical_size": 2 * 1024,
+            "ciphertext_size": 2 * 1024 + 24,
+            "chunks": [],
+            "author_device_id": AUTHOR,
+        },
+        {
+            "version_id": "fv_v1_cccccccccccccccccccccccc",
+            "created_at": "2026-05-01T12:00:00.000Z",
+            "modified_at": "2026-05-01T11:58:00.000Z",
+            "logical_size": 3 * 1024,
+            "ciphertext_size": 3 * 1024 + 24,
+            "chunks": [],
+            "author_device_id": AUTHOR,
+        },
+    ]
+    return make_manifest(
+        vault_id=VAULT_ID,
+        revision=12,
+        parent_revision=11,
+        created_at="2026-05-04T10:00:00.000Z",
+        author_device_id=AUTHOR,
+        remote_folders=[
+            make_remote_folder(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at="2026-05-04T10:00:00.000Z",
+                created_by_device_id=AUTHOR,
+                entries=[
+                    {
+                        "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                        "path": "report.pdf",
+                        "type": "file",
+                        "deleted": False,
+                        "latest_version_id": "fv_v1_cccccccccccccccccccccccc",
+                        "versions": versions,
+                    },
+                    {
+                        "entry_id": "fe_v1_bbbbbbbbbbbbbbbbbbbbbbbb",
+                        "path": "Invoices/2025/old.pdf",
+                        "type": "file",
+                        "deleted": True,
+                        "latest_version_id": "fv_v1_dddddddddddddddddddddddd",
+                        "versions": [{
+                            "version_id": "fv_v1_dddddddddddddddddddddddd",
+                            "created_at": "2025-12-01T08:00:00.000Z",
+                            "modified_at": "2025-12-01T07:58:00.000Z",
+                            "logical_size": 64,
+                            "ciphertext_size": 88,
+                            "chunks": [],
+                            "author_device_id": AUTHOR,
+                        }],
+                    },
+                ],
+            ),
+        ],
+    )
 
 
 if __name__ == "__main__":

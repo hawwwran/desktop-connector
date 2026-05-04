@@ -148,6 +148,53 @@ def get_file(
     raise KeyError(f"file not found: {path}")
 
 
+def list_versions(
+    manifest: dict[str, Any],
+    path: str,
+    *,
+    include_deleted: bool = False,
+) -> list[dict[str, Any]]:
+    """Return one row per stored version of the file at ``path``.
+
+    Rows are ordered newest-first by ``(modified_at, version_id)`` so the
+    current/latest version is row 0. The latest version (the one
+    referenced by ``latest_version_id``) is flagged ``is_current``;
+    every other row is a previous version. Deleted-file entries are
+    hidden by default; with ``include_deleted=True`` the version list is
+    returned with the entry's ``deleted`` flag surfaced as ``is_deleted``
+    on every row.
+    """
+    entry = get_file(manifest, path, include_deleted=include_deleted)
+    versions = _versions(entry)
+    latest_id = str(entry.get("latest_version_id") or "")
+    name = _split_path(str(entry.get("path", "")))[-1] if entry.get("path") else ""
+
+    rows: list[dict[str, Any]] = []
+    for version in versions:
+        version_id = str(version.get("version_id") or "")
+        modified = str(
+            version.get("modified_at") or version.get("created_at") or ""
+        )
+        rows.append({
+            "version_id": version_id,
+            "is_current": bool(version_id) and version_id == latest_id,
+            "is_deleted": bool(entry.get("deleted")),
+            "modified": modified,
+            "created": str(version.get("created_at") or ""),
+            "size": _int_value(version.get("logical_size")),
+            "stored_size": _int_value(version.get("ciphertext_size")),
+            "author_device_id": str(version.get("author_device_id") or ""),
+            "name": name,
+            "entry_id": str(entry.get("entry_id") or ""),
+        })
+
+    rows.sort(
+        key=lambda row: (str(row["modified"]), str(row["version_id"])),
+        reverse=True,
+    )
+    return rows
+
+
 def _active_remote_folders(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     folders = manifest.get("remote_folders", [])
     if not isinstance(folders, list):
