@@ -113,5 +113,31 @@
     "expected": {
       "expected_error": "vault_device_grant_tampered"
     }
+  },
+  {
+    "name": "device-grant-v1-format-version-bumped",
+    "description": "Device-grant envelope byte 0 (format_version) is XOR'd with 0x01. The reader must stop before AEAD and surface vault_format_version_unsupported (formats \u00a77).",
+    "inputs": {
+      "vault_id": "ABCD2345WXYZ",
+      "grant_id": "gr_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+      "claimant_device_id": "ffeeddccbbaa99887766554433221100",
+      "approved_role": "read-only",
+      "admin_priv_seed": "1111111111111111111111111111111111111111111111111111111111111111",
+      "claimant_priv_seed": "2222222222222222222222222222222222222222222222222222222222222222",
+      "admin_pubkey": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
+      "claimant_pubkey": "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20",
+      "shared_secret": "9e004098efc091d4ec2663b4e9f5cfd4d7064571690b4bea97ab146ab9f35056",
+      "grant_plaintext": "eyJhcHByb3ZlZF9yb2xlIjoicmVhZC1vbmx5IiwiY2xhaW1hbnRfZGV2aWNlX2lkIjoiZmZlZWRkY2NiYmFhOTk4ODc3NjY1NTQ0MzMyMjExMDAiLCJncmFudF9pZCI6ImdyX3YxX2FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImdyYW50ZWRfYXQiOiIyMDI2LTA1LTAzVDEyOjAwOjAwLjAwMFoiLCJncmFudGVkX2J5X2RldmljZV9pZCI6ImExYjJjM2Q0ZTVmNmE3YjhjOWQwZTFmMmEzYjRjNWQ2Iiwic2NoZW1hIjoiZGMtdmF1bHQtZGV2aWNlLWdyYW50LXYxIiwidmF1bHRfaWQiOiJBQkNEMjM0NVdYWVoiLCJ2YXVsdF9tYXN0ZXJfa2V5IjoiQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0ifQ==",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627"
+    },
+    "tamper": {
+      "envelope_byte_xor": {
+        "offset": 0,
+        "xor": "01"
+      }
+    },
+    "expected": {
+      "expected_error": "vault_format_version_unsupported"
+    }
   }
 ]

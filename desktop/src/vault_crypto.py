@@ -84,6 +84,63 @@ POLY1305_TAG_BYTES = 16
 
 MASTER_KEY_BYTES = 32
 
+# Single byte at the head of each versioned envelope (manifest, header,
+# recovery, device grant, export outer). Per T0 §A3 / formats §7 it is
+# plaintext (NOT in AAD) so a reader can refuse a future version before
+# attempting AEAD. Chunk envelopes intentionally omit this byte — chunk
+# format is pinned by the ``ch_v1_…`` chunk_id namespace (formats §11.1).
+SUPPORTED_FORMAT_VERSION = 1
+
+
+class VaultFormatVersionUnsupported(ValueError):
+    """Raised by ``assert_supported_format_version`` when the leading
+    plaintext format-version byte of an envelope is not in the supported
+    set. Mirrors the relay's 422 ``vault_format_version_unsupported``
+    error code (server: ``VaultFormatVersionUnsupportedError``)."""
+
+    def __init__(self, envelope_kind: str, observed_version: int) -> None:
+        self.envelope_kind = envelope_kind
+        self.observed_version = observed_version
+        super().__init__(
+            f"vault_format_version_unsupported: {envelope_kind} "
+            f"format_version={observed_version} (supported={SUPPORTED_FORMAT_VERSION})"
+        )
+
+
+def assert_supported_format_version(
+    envelope_bytes: bytes,
+    *,
+    kind: str,
+    offset: int = 0,
+) -> None:
+    """Stop before AEAD when the format-version byte is unknown.
+
+    The leading byte of every versioned envelope is plaintext per T0
+    §A3 — a reader must check it before computing AAD or attempting
+    decryption so a v2 envelope surfaces as an upgrade prompt rather
+    than an opaque crypto failure.
+
+    Args:
+        envelope_bytes: full envelope wire bytes.
+        kind: short label used in the error and the relay error code
+            (``"manifest"``, ``"header"``, ``"recovery"``,
+            ``"device_grant"``, ``"export_outer"``).
+        offset: byte offset of the format-version byte. Defaults to 0;
+            the export bundle outer header has it at offset 4 (after
+            the ``DCVE`` magic).
+
+    Raises:
+        VaultFormatVersionUnsupported: byte at ``offset`` is not 0x01.
+        ValueError: envelope is shorter than ``offset + 1``.
+    """
+    if len(envelope_bytes) <= offset:
+        raise ValueError(
+            f"{kind} envelope too short for format-version byte at offset {offset}"
+        )
+    observed = envelope_bytes[offset]
+    if observed != SUPPORTED_FORMAT_VERSION:
+        raise VaultFormatVersionUnsupported(kind, observed)
+
 
 # ---------------------------------------------------------------- HKDF
 
@@ -879,12 +936,15 @@ __all__ = [
     "DefaultVaultCrypto",
     "MASTER_KEY_BYTES",
     "POLY1305_TAG_BYTES",
+    "SUPPORTED_FORMAT_VERSION",
     "VaultCrypto",
+    "VaultFormatVersionUnsupported",
     "XCHACHA20_KEY_BYTES",
     "XCHACHA20_NONCE_BYTES",
     "aead_decrypt",
     "aead_encrypt",
     "argon2id_kdf",
+    "assert_supported_format_version",
     "build_chunk_aad",
     "build_chunk_envelope",
     "build_device_grant_aad",

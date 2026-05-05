@@ -49,5 +49,25 @@
     "expected": {
       "expected_error": "vault_header_tampered"
     }
+  },
+  {
+    "name": "header-v1-format-version-bumped",
+    "description": "Header envelope byte 0 (format_version) is XOR'd with 0x01. The reader must stop before AEAD and surface vault_format_version_unsupported (formats \u00a77).",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "vault_id": "ABCD2345WXYZ",
+      "header_revision": 1,
+      "nonce": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7",
+      "header_plaintext": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wNS0wM1QxMDowMDowMC4wMDBaIiwiZ2VuZXNpc19maW5nZXJwcmludCI6ImFhYmJjY2RkMTEyMjMzNDRhYWJiY2NkZDExMjIzMzQ0IiwiaGVhZGVyX2Zvcm1hdF92ZXJzaW9uIjoxLCJrZGZfcHJvZmlsZXMiOnsiZXhwb3J0IjoiYXJnb24yaWQtdjEiLCJyZWNvdmVyeSI6ImFyZ29uMmlkLXYxIn0sIm1hbmlmZXN0X2Zvcm1hdF92ZXJzaW9uIjoxLCJyZWNvdmVyeV9lbnZlbG9wZXMiOlt7ImFlYWRfY2lwaGVydGV4dF9hbmRfdGFnIjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsImFyZ29uX3BhcmFtcyI6eyJpdGVyYXRpb25zIjo0LCJtZW1vcnlfa2liIjoxMzEwNzIsInBhcmFsbGVsaXNtIjoxfSwiYXJnb25fc2FsdCI6IkFBQUFBQUFBQUFBQUFBQUFBQUFBQUE9PSIsImVudmVsb3BlX2lkIjoicmtfdjFfZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlIiwibm9uY2UiOiJBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsInR5cGUiOiJyZWNvdmVyeS1raXQtcGFzc3BocmFzZSJ9XSwic2NoZW1hIjoiZGMtdmF1bHQtaGVhZGVyLXYxIiwidmF1bHRfaWQiOiJBQkNEMjM0NVdYWVoifQ=="
+    },
+    "tamper": {
+      "envelope_byte_xor": {
+        "offset": 0,
+        "xor": "01"
+      }
+    },
+    "expected": {
+      "expected_error": "vault_format_version_unsupported"
+    }
   }
 ]

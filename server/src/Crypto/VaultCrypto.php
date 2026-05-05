@@ -30,6 +30,16 @@ class VaultCrypto
 
     public const MASTER_KEY_BYTES = 32;
 
+    /**
+     * Plaintext format-version byte at the head of each versioned
+     * envelope (manifest, header, recovery, device grant, export
+     * outer). Per T0 §A3 / formats §7 it is plaintext (NOT in AAD) so
+     * a reader can refuse a future version before AEAD. Chunk envelopes
+     * intentionally omit this byte — chunk format is pinned by the
+     * ``ch_v1_…`` chunk_id namespace (formats §11.1).
+     */
+    public const SUPPORTED_FORMAT_VERSION = 1;
+
     private const RECOVERY_WRAP_LABEL = 'dc-vault-v1/recovery-wrap';
     private const DEVICE_GRANT_WRAP_LABEL = 'dc-vault-v1/device-grant-wrap';
 
@@ -176,6 +186,33 @@ class VaultCrypto
     public static function normalizeVaultId(string $vaultId): string
     {
         return strtoupper(str_replace('-', '', $vaultId));
+    }
+
+    // ---------------------------------------------------------------- Format-version guard
+
+    /**
+     * Stop before AEAD when the format-version byte of an envelope is
+     * unknown. Mirrors ``vault_crypto.assert_supported_format_version``.
+     *
+     * @throws VaultFormatVersionUnsupportedError 422 envelope when the
+     *     byte at ``$offset`` is not 0x01.
+     * @throws InvalidArgumentException when ``$envelope`` is too short
+     *     to hold the format-version byte at the requested offset.
+     */
+    public static function assertSupportedFormatVersion(
+        string $envelope,
+        string $kind,
+        int $offset = 0,
+    ): void {
+        if (strlen($envelope) <= $offset) {
+            throw new InvalidArgumentException(
+                "{$kind} envelope too short for format-version byte at offset {$offset}"
+            );
+        }
+        $observed = ord($envelope[$offset]);
+        if ($observed !== self::SUPPORTED_FORMAT_VERSION) {
+            throw new VaultFormatVersionUnsupportedError($kind, $observed);
+        }
     }
 
     // ---------------------------------------------------------------- Manifest AAD + envelope

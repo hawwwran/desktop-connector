@@ -86,17 +86,24 @@ final class VaultCryptoVectorsTest extends TestCase
         if (isset($expected['expected_error'])) {
             $tamper = $case['tamper'] ?? [];
             $decryptAad = $aad;
+            $decryptEnvelope = $envelope;
             $decryptCt = $ct;
             if (isset($tamper['envelope_byte_xor'])) {
                 $spec = $tamper['envelope_byte_xor'];
                 $buf = $envelope;
                 $buf[$spec['offset']] = chr(ord($buf[$spec['offset']]) ^ hexdec($spec['xor']));
+                $decryptEnvelope = $buf;
                 // Manifest envelope plaintext header already includes the
                 // nonce; byte 85 is the AEAD ciphertext start.
                 $decryptCt = substr($buf, 85);
             }
             if (isset($tamper['aad_override'])) {
                 $decryptAad = hex2bin($tamper['aad_override']);
+            }
+            if ($expected['expected_error'] === 'vault_format_version_unsupported') {
+                $this->expectException(VaultFormatVersionUnsupportedError::class);
+                VaultCrypto::assertSupportedFormatVersion($decryptEnvelope, 'manifest');
+                return;
             }
             $this->expectException(SodiumException::class);
             VaultCrypto::aeadDecrypt($decryptCt, $subkey, $nonce, $decryptAad);
@@ -184,16 +191,23 @@ final class VaultCryptoVectorsTest extends TestCase
         if (isset($expected['expected_error'])) {
             $tamper = $case['tamper'] ?? [];
             $decryptAad = $aad;
+            $decryptEnvelope = $envelope;
             $decryptCt = $ct;
             if (isset($tamper['envelope_byte_xor'])) {
                 $spec = $tamper['envelope_byte_xor'];
                 $buf = $envelope;
                 $buf[$spec['offset']] = chr(ord($buf[$spec['offset']]) ^ hexdec($spec['xor']));
+                $decryptEnvelope = $buf;
                 // Header envelope: 1+12+8 = 21 bytes plaintext header, +24 nonce.
                 $decryptCt = substr($buf, 21 + 24);
             }
             if (isset($tamper['aad_override'])) {
                 $decryptAad = hex2bin($tamper['aad_override']);
+            }
+            if ($expected['expected_error'] === 'vault_format_version_unsupported') {
+                $this->expectException(VaultFormatVersionUnsupportedError::class);
+                VaultCrypto::assertSupportedFormatVersion($decryptEnvelope, 'header');
+                return;
             }
             $this->expectException(SodiumException::class);
             VaultCrypto::aeadDecrypt($decryptCt, $subkey, $nonce, $decryptAad);
@@ -235,6 +249,7 @@ final class VaultCryptoVectorsTest extends TestCase
 
         if (isset($expected['expected_error'])) {
             $decryptWrapKey = $wrapKey;
+            $decryptEnvelope = $envelope;
             $decryptCt = $ct;
             if (isset($inputs['decrypt_passphrase_override'])) {
                 $decryptWrapKey = VaultCrypto::deriveRecoveryWrapKey(
@@ -246,8 +261,14 @@ final class VaultCryptoVectorsTest extends TestCase
                 $spec = $tamper['envelope_byte_xor'];
                 $buf = $envelope;
                 $buf[$spec['offset']] = chr(ord($buf[$spec['offset']]) ^ hexdec($spec['xor']));
+                $decryptEnvelope = $buf;
                 // Recovery envelope plaintext header = 1+12+30+16+24 = 83 bytes.
                 $decryptCt = substr($buf, 83);
+            }
+            if ($expected['expected_error'] === 'vault_format_version_unsupported') {
+                $this->expectException(VaultFormatVersionUnsupportedError::class);
+                VaultCrypto::assertSupportedFormatVersion($decryptEnvelope, 'recovery');
+                return;
             }
             $this->expectException(SodiumException::class);
             VaultCrypto::aeadDecrypt($decryptCt, $decryptWrapKey, $nonce, $aad);
@@ -291,16 +312,23 @@ final class VaultCryptoVectorsTest extends TestCase
         if (isset($expected['expected_error'])) {
             $tamper = $case['tamper'] ?? [];
             $decryptAad = $aad;
+            $decryptEnvelope = $envelope;
             $decryptCt = $ct;
             if (isset($tamper['envelope_byte_xor'])) {
                 $spec = $tamper['envelope_byte_xor'];
                 $buf = $envelope;
                 $buf[$spec['offset']] = chr(ord($buf[$spec['offset']]) ^ hexdec($spec['xor']));
+                $decryptEnvelope = $buf;
                 // Device grant: 1+12+30+32 = 75 bytes header + 24 nonce.
                 $decryptCt = substr($buf, 75 + 24);
             }
             if (isset($tamper['aad_override'])) {
                 $decryptAad = hex2bin($tamper['aad_override']);
+            }
+            if ($expected['expected_error'] === 'vault_format_version_unsupported') {
+                $this->expectException(VaultFormatVersionUnsupportedError::class);
+                VaultCrypto::assertSupportedFormatVersion($decryptEnvelope, 'device_grant');
+                return;
             }
             $this->expectException(SodiumException::class);
             VaultCrypto::aeadDecrypt($decryptCt, $wrapKey, $nonce, $decryptAad);
@@ -340,6 +368,7 @@ final class VaultCryptoVectorsTest extends TestCase
         if (isset($expected['expected_error'])) {
             $decryptWrapKey = $wrapKey;
             $decryptEnvelope = $wrappedKeyEnvelope;
+            $decryptOuter = $outerHeader;
             if (isset($inputs['decrypt_passphrase_override'])) {
                 $decryptWrapKey = VaultCrypto::deriveExportWrapKey(
                     $inputs['decrypt_passphrase_override'], $salt, $memKib, $iters
@@ -351,6 +380,19 @@ final class VaultCryptoVectorsTest extends TestCase
                 $decryptEnvelope[$spec['offset']] = chr(
                     ord($decryptEnvelope[$spec['offset']]) ^ hexdec($spec['xor'])
                 );
+            }
+            if (isset($tamper['envelope_byte_xor'])) {
+                // Format-version tamper targets the outer header (after
+                // the 4-byte ``DCVE`` magic, byte 4 is format_version).
+                $spec = $tamper['envelope_byte_xor'];
+                $decryptOuter[$spec['offset']] = chr(
+                    ord($decryptOuter[$spec['offset']]) ^ hexdec($spec['xor'])
+                );
+            }
+            if ($expected['expected_error'] === 'vault_format_version_unsupported') {
+                $this->expectException(VaultFormatVersionUnsupportedError::class);
+                VaultCrypto::assertSupportedFormatVersion($decryptOuter, 'export_outer', 4);
+                return;
             }
             $this->expectException(SodiumException::class);
             VaultCrypto::aeadDecrypt($decryptEnvelope, $decryptWrapKey, $outerNonce, $wrapAad);

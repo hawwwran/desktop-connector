@@ -220,21 +220,12 @@ final class VaultControllerTest extends TestCase
                 $this->ctx(
                     'PUT',
                     ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId],
-                    self::chunkBody($bytes),
+                    $bytes,
                 )
             );
         } finally {
             ob_end_clean();
         }
-    }
-
-    /** Prepend the v1 format-version byte (formats §11.3) to a chunk body. */
-    private static function chunkBody(string $bytes): string
-    {
-        if ($bytes !== '' && $bytes[0] === "\x01") {
-            return $bytes;
-        }
-        return "\x01" . $bytes;
     }
 
     // ===================================================================
@@ -513,7 +504,7 @@ final class VaultControllerTest extends TestCase
     public function test_putChunk_happy_path_creates_blob_and_bumps_quota(): void
     {
         $chunkId = 'ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa';
-        $bytes = self::chunkBody(str_repeat('x', 4096));
+        $bytes = str_repeat('x', 4096);
 
         $res = $this->invoke(fn() => VaultController::putChunk(
             $this->db, $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], $bytes)
@@ -539,12 +530,12 @@ final class VaultControllerTest extends TestCase
         $this->uploadChunk($chunkId, $bytes);
 
         $res = $this->invoke(fn() => VaultController::putChunk(
-            $this->db, $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], self::chunkBody($bytes))
+            $this->db, $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], $bytes)
         ));
         self::assertSame(200, $res['status']);
 
         $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
-        self::assertSame(strlen(self::chunkBody($bytes)), (int)$vault['used_ciphertext_bytes']);
+        self::assertSame(strlen($bytes), (int)$vault['used_ciphertext_bytes']);
         self::assertSame(1, (int)$vault['chunk_count']);
     }
 
@@ -556,7 +547,7 @@ final class VaultControllerTest extends TestCase
         try {
             VaultController::putChunk(
                 $this->db,
-                $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], self::chunkBody('second-with-different-size'))
+                $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], 'second-with-different-size')
             );
             self::fail('expected VaultChunkSizeMismatchError');
         } catch (VaultChunkSizeMismatchError $e) {
@@ -574,7 +565,7 @@ final class VaultControllerTest extends TestCase
             $this->ctx('PUT', [
                 'vault_id' => self::VAULT_ID,
                 'chunk_id' => 'ch_v2_aaaaaaaaaaaaaaaaaaaaaaaa',
-            ], self::chunkBody('whatever'))
+            ], 'whatever')
         );
     }
 
@@ -593,7 +584,7 @@ final class VaultControllerTest extends TestCase
         ));
 
         self::assertSame(200, $res['status']);
-        self::assertSame(self::chunkBody($bytes), $res['raw']);
+        self::assertSame($bytes, $res['raw']);
     }
 
     public function test_getChunk_404_vault_chunk_missing(): void
@@ -651,8 +642,7 @@ final class VaultControllerTest extends TestCase
 
         self::assertSame(200, $res['status']);
         self::assertTrue($res['json']['data']['chunks'][$idA]['present']);
-        // Stored body has the +1 prefix byte.
-        self::assertSame(strlen(self::chunkBody('A')), $res['json']['data']['chunks'][$idA]['size']);
+        self::assertSame(1, $res['json']['data']['chunks'][$idA]['size']);
         self::assertFalse($res['json']['data']['chunks'][$idB]['present']);
     }
 
@@ -726,7 +716,7 @@ final class VaultControllerTest extends TestCase
 
         self::assertSame(200, $res['status']);
         self::assertSame(1, $res['json']['data']['deleted_count']);
-        self::assertSame(strlen(self::chunkBody($bytes)), $res['json']['data']['freed_ciphertext_bytes']);
+        self::assertSame(strlen($bytes), $res['json']['data']['freed_ciphertext_bytes']);
 
         self::assertFileDoesNotExist(VaultStorage::chunkAbsolutePath(self::VAULT_ID, $cid));
         $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);

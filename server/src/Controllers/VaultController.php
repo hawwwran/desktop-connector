@@ -493,13 +493,9 @@ class VaultController
             throw new VaultInvalidRequestError('chunk body is empty', 'body');
         }
         self::guardEnvelopeSize('chunk', $size, self::MAX_CHUNK_BYTES);
-        // Reject unknown format-version bytes before any storage work
-        // (formats §7 / §11.3): byte 0 of a chunk envelope is the
-        // version. We can't fully parse the body — only the desktop has
-        // the master key — but the format-version byte is plaintext.
-        if (ord($bytes[0]) !== self::SUPPORTED_FORMAT_VERSION) {
-            throw new VaultFormatVersionUnsupportedError('chunk', ord($bytes[0]));
-        }
+        // Chunk envelopes have no format-version byte — chunk format is
+        // pinned by the ``ch_v1_…`` chunk_id namespace (formats §11.1);
+        // a v2 chunk uses ``ch_v2_…`` and is rejected at routing.
         $hash = hash('sha256', $bytes);
 
         $chunksRepo = new VaultChunksRepository($db);

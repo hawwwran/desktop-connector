@@ -59,5 +59,28 @@
     "expected": {
       "expected_error": "vault_export_tampered"
     }
+  },
+  {
+    "name": "export-v1-format-version-bumped",
+    "description": "Export-bundle outer header byte 4 (format_version, immediately after the DCVE magic) is XOR'd with 0x01. The reader must stop before deriving the wrap key and surface vault_format_version_unsupported (formats \u00a716).",
+    "inputs": {
+      "vault_id": "ABCD2345WXYZ",
+      "passphrase": "user-export-passphrase",
+      "argon_salt": "a1a2a3a4a5a6a7a8a9aaabacadaeafb0",
+      "argon_memory_kib": 8192,
+      "argon_iterations": 2,
+      "argon_parallelism": 1,
+      "outer_nonce": "505152535455565758595a5b5c5d5e5f6061626364656667",
+      "export_file_key": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "tamper": {
+      "envelope_byte_xor": {
+        "offset": 4,
+        "xor": "01"
+      }
+    },
+    "expected": {
+      "expected_error": "vault_format_version_unsupported"
+    }
   }
 ]

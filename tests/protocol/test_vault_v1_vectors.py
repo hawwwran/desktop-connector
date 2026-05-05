@@ -31,8 +31,10 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault_crypto import (  # noqa: E402
+    VaultFormatVersionUnsupported,
     aead_decrypt,
     aead_encrypt,
+    assert_supported_format_version,
     build_chunk_aad,
     build_chunk_envelope,
     build_device_grant_aad,
@@ -150,6 +152,14 @@ def _run_manifest_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
         if "aad_override" in tamper:
             decrypt_aad = bytes.fromhex(tamper["aad_override"])
 
+        if expected["expected_error"] == "vault_format_version_unsupported":
+            # F-T02: format-version byte is plaintext (not in AAD), so
+            # bumping it would NOT cause AEAD to fail. Readers MUST stop
+            # before AEAD via the format-version guard.
+            with test.assertRaises(VaultFormatVersionUnsupported):
+                assert_supported_format_version(decrypt_envelope, kind="manifest")
+            return
+
         with test.assertRaises(nacl.exceptions.CryptoError):
             aead_decrypt(decrypt_ct, subkey, nonce, decrypt_aad)
         return
@@ -204,7 +214,9 @@ def _run_chunk_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
             decrypt_envelope = bytes(buf)
         if "aad_override" in tamper:
             decrypt_aad = bytes.fromhex(tamper["aad_override"])
-        # Chunk envelope = nonce(24) || ciphertext_and_tag.
+        # Chunk envelope = nonce(24) || ciphertext_and_tag — no
+        # format-version byte (formats §11.1; chunk format is pinned by
+        # the ``ch_v1_…`` chunk_id namespace).
         decrypt_ct = decrypt_envelope[24:]
         with test.assertRaises(nacl.exceptions.CryptoError):
             aead_decrypt(decrypt_ct, subkey, nonce, decrypt_aad)
@@ -237,14 +249,20 @@ def _run_header_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
     if "expected_error" in expected:
         tamper = case.get("tamper", {})
         decrypt_aad = aad
+        decrypt_envelope = envelope
         decrypt_ct = ciphertext
         if "envelope_byte_xor" in tamper:
             spec = tamper["envelope_byte_xor"]
             buf = bytearray(envelope)
             buf[int(spec["offset"])] ^= int(spec["xor"], 16)
-            decrypt_ct = bytes(buf)[1 + 12 + 8 + 24:]   # skip plaintext header + nonce
+            decrypt_envelope = bytes(buf)
+            decrypt_ct = decrypt_envelope[1 + 12 + 8 + 24:]   # skip plaintext header + nonce
         if "aad_override" in tamper:
             decrypt_aad = bytes.fromhex(tamper["aad_override"])
+        if expected["expected_error"] == "vault_format_version_unsupported":
+            with test.assertRaises(VaultFormatVersionUnsupported):
+                assert_supported_format_version(decrypt_envelope, kind="header")
+            return
         with test.assertRaises(nacl.exceptions.CryptoError):
             aead_decrypt(decrypt_ct, subkey, nonce, decrypt_aad)
         return
@@ -285,6 +303,7 @@ def _run_recovery_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
         # Negative paths: re-derive wrap key with overridden passphrase, OR
         # tamper the envelope byte-by-byte before decrypting.
         decrypt_wrap_key = wrap_key
+        decrypt_envelope = envelope
         decrypt_ct = ciphertext
         if "decrypt_passphrase_override" in inputs:
             decrypt_wrap_key = derive_recovery_wrap_key(
@@ -297,9 +316,14 @@ def _run_recovery_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
             spec = tamper["envelope_byte_xor"]
             buf = bytearray(envelope)
             buf[int(spec["offset"])] ^= int(spec["xor"], 16)
+            decrypt_envelope = bytes(buf)
             # Recovery envelope: 1+12+30+16+24 = 83 bytes plaintext header,
             # then ciphertext_and_tag.
-            decrypt_ct = bytes(buf)[83:]
+            decrypt_ct = decrypt_envelope[83:]
+        if expected["expected_error"] == "vault_format_version_unsupported":
+            with test.assertRaises(VaultFormatVersionUnsupported):
+                assert_supported_format_version(decrypt_envelope, kind="recovery")
+            return
         with test.assertRaises(nacl.exceptions.CryptoError):
             aead_decrypt(decrypt_ct, decrypt_wrap_key, nonce, aad)
         return
@@ -338,15 +362,21 @@ def _run_device_grant_case(test: unittest.TestCase, case: dict[str, Any]) -> Non
     if "expected_error" in expected:
         tamper = case.get("tamper", {})
         decrypt_aad = aad
+        decrypt_envelope = envelope
         decrypt_ct = ciphertext
         if "envelope_byte_xor" in tamper:
             spec = tamper["envelope_byte_xor"]
             buf = bytearray(envelope)
             buf[int(spec["offset"])] ^= int(spec["xor"], 16)
+            decrypt_envelope = bytes(buf)
             # Plaintext header: 1 + 12 + 30 + 32 = 75 bytes; nonce: 24
-            decrypt_ct = bytes(buf)[75 + 24:]
+            decrypt_ct = decrypt_envelope[75 + 24:]
         if "aad_override" in tamper:
             decrypt_aad = bytes.fromhex(tamper["aad_override"])
+        if expected["expected_error"] == "vault_format_version_unsupported":
+            with test.assertRaises(VaultFormatVersionUnsupported):
+                assert_supported_format_version(decrypt_envelope, kind="device_grant")
+            return
         with test.assertRaises(nacl.exceptions.CryptoError):
             aead_decrypt(decrypt_ct, wrap_key, nonce, decrypt_aad)
         return
@@ -383,6 +413,7 @@ def _run_export_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
     if "expected_error" in expected:
         decrypt_wrap_key = wrap_key
         decrypt_envelope = wrapped_key_envelope
+        decrypt_outer = outer_header
         if "decrypt_passphrase_override" in inputs:
             decrypt_wrap_key = derive_export_wrap_key(
                 passphrase=inputs["decrypt_passphrase_override"],
@@ -394,6 +425,19 @@ def _run_export_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
             buf = bytearray(wrapped_key_envelope)
             buf[int(spec["offset"])] ^= int(spec["xor"], 16)
             decrypt_envelope = bytes(buf)
+        if "envelope_byte_xor" in tamper:
+            # Format-version tamper targets the outer header (after the
+            # 4-byte ``DCVE`` magic, byte 4 is format_version).
+            spec = tamper["envelope_byte_xor"]
+            buf = bytearray(outer_header)
+            buf[int(spec["offset"])] ^= int(spec["xor"], 16)
+            decrypt_outer = bytes(buf)
+        if expected["expected_error"] == "vault_format_version_unsupported":
+            with test.assertRaises(VaultFormatVersionUnsupported):
+                assert_supported_format_version(
+                    decrypt_outer, kind="export_outer", offset=4,
+                )
+            return
         with test.assertRaises(nacl.exceptions.CryptoError):
             aead_decrypt(decrypt_envelope, decrypt_wrap_key, outer_nonce, wrap_aad)
         return

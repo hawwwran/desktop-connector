@@ -153,5 +153,27 @@
     "tamper": {
       "aad_override": "64632d7661756c742d6d616e69666573742d763141424344323334355758595a00000000000003e700000000000000006131623263336434653566366137623863396430653166326133623463356436"
     }
+  },
+  {
+    "name": "manifest-v1-format-version-bumped",
+    "description": "Same envelope as the genesis happy path but envelope byte 0 (format_version, plaintext per T0 \u00a7A3) is XOR'd with 0x01 so the byte becomes 0x00. Readers MUST stop before AEAD and surface vault_format_version_unsupported (formats \u00a77).",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "vault_id": "ABCD2345WXYZ",
+      "revision": 1,
+      "parent_revision": 0,
+      "author_device_id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+      "nonce": "aabbccddeeff00112233001122330011223300112233aabb",
+      "manifest_plaintext": "eyJhcmNoaXZlZF9vcF9zZWdtZW50cyI6W10sImF1dGhvcl9kZXZpY2VfaWQiOiJhMWIyYzNkNGU1ZjZhN2I4YzlkMGUxZjJhM2I0YzVkNiIsImNyZWF0ZWRfYXQiOiIyMDI2LTA1LTAzVDEwOjAwOjAwLjAwMFoiLCJtYW5pZmVzdF9mb3JtYXRfdmVyc2lvbiI6MSwib3BlcmF0aW9uX2xvZ190YWlsIjpbXSwicGFyZW50X3JldmlzaW9uIjowLCJyZW1vdGVfZm9sZGVycyI6W3siY3JlYXRlZF9hdCI6IjIwMjYtMDUtMDNUMTA6MDA6MDAuMDAwWiIsImNyZWF0ZWRfYnlfZGV2aWNlX2lkIjoiYTFiMmMzZDRlNWY2YTdiOGM5ZDBlMWYyYTNiNGM1ZDYiLCJkaXNwbGF5X25hbWVfZW5jIjoiRG9jdW1lbnRzIiwiZW50cmllcyI6W3siZGVsZXRlZCI6ZmFsc2UsImVudHJ5X2lkIjoiZmVfdjFfYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwibGF0ZXN0X3ZlcnNpb25faWQiOiJmdl92MV9jY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJwYXRoIjoicmVwb3J0LnBkZiIsInR5cGUiOiJmaWxlIiwidmVyc2lvbnMiOlt7ImF1dGhvcl9kZXZpY2VfaWQiOiJhMWIyYzNkNGU1ZjZhN2I4YzlkMGUxZjJhM2I0YzVkNiIsImNodW5rcyI6W3siY2h1bmtfaWQiOiJjaF92MV9kZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQiLCJjaXBoZXJ0ZXh0X3NpemUiOjEyMzY5LCJpbmRleCI6MCwicGxhaW50ZXh0X3NpemUiOjEyMzQ1fV0sImNpcGhlcnRleHRfc2l6ZSI6MTIzOTMsImNvbnRlbnRfZmluZ2VycHJpbnQiOiJabTl2IiwiY3JlYXRlZF9hdCI6IjIwMjYtMDUtMDNUMDk6NTU6MDAuMDAwWiIsImxvZ2ljYWxfc2l6ZSI6MTIzNDUsIm1vZGlmaWVkX2F0IjoiMjAyNi0wNS0wM1QwOTo1NTowMC4wMDBaIiwidmVyc2lvbl9pZCI6ImZ2X3YxX2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYyJ9XX1dLCJpZ25vcmVfcGF0dGVybnMiOlsiLmdpdC8iXSwicmVtb3RlX2ZvbGRlcl9pZCI6InJmX3YxX2FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsInJldGVudGlvbl9wb2xpY3kiOnsia2VlcF9kZWxldGVkX2RheXMiOjMwLCJrZWVwX3ZlcnNpb25zIjoxMH0sInN0YXRlIjoiYWN0aXZlIn1dLCJyZXZpc2lvbiI6MSwic2NoZW1hIjoiZGMtdmF1bHQtbWFuaWZlc3QtdjEiLCJ2YXVsdF9pZCI6IkFCQ0QyMzQ1V1hZWiJ9"
+    },
+    "tamper": {
+      "envelope_byte_xor": {
+        "offset": 0,
+        "xor": "01"
+      }
+    },
+    "expected": {
+      "expected_error": "vault_format_version_unsupported"
+    }
   }
 ]
