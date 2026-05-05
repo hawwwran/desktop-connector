@@ -20,6 +20,11 @@ from .vault_bindings import VaultBindingsStore
 from .vault_cache import VaultLocalIndex
 from .vault_connect_folder_dialog import present_connect_folder_dialog
 from .vault_error_messages import humanize
+from .vault_folder_actions import (
+    dispatch_disconnect,
+    dispatch_pause,
+    dispatch_resume,
+)
 from .vault_folder_ui_state import (
     BINDING_COLUMNS,
     FOLDER_COLUMNS,
@@ -644,6 +649,139 @@ def build_vault_folders_tab(
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ----------------------- F-Y15: Pause / Resume / Disconnect ------
+
+    action_in_flight: dict[str, bool] = {}
+
+    def _set_inflight(binding_id: str, value: bool) -> None:
+        action_in_flight[binding_id] = value
+
+    def _idle_finish(
+        toast: str | None,
+        error: str | None,
+        binding_id: str,
+        prefix: str,
+    ) -> None:
+        def apply() -> bool:
+            _set_inflight(binding_id, False)
+            if error:
+                bindings_status.set_label(error)
+                refresh_bindings_table(error)
+            else:
+                bindings_status.set_label(toast or f"{prefix} done.")
+                refresh_bindings_table(toast)
+            return False
+        GLib.idle_add(apply)
+
+    def run_pause(binding_id: str) -> None:
+        if action_in_flight.get(binding_id):
+            return
+        _set_inflight(binding_id, True)
+        bindings_status.set_label("Pause: running…")
+
+        def worker() -> None:
+            store = VaultBindingsStore(local_index.db_path)
+            toast, error = dispatch_pause(
+                store=store, binding_id=binding_id,
+                cancellation=cancellation_registry,
+            )
+            _idle_finish(toast, error, binding_id, "Pause")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_resume(binding_id: str) -> None:
+        if action_in_flight.get(binding_id):
+            return
+        _set_inflight(binding_id, True)
+        bindings_status.set_label("Resume: running…")
+
+        def worker() -> None:
+            store = VaultBindingsStore(local_index.db_path)
+
+            def flush(binding) -> object:
+                # Resume reuses the Sync-now plumbing — same vault open,
+                # same registry registration, same should_continue gate
+                # so a fresh Pause arriving during the post-resume flush
+                # still aborts within ~1 chunk.
+                config.reload()
+                relay = create_vault_relay(config)
+                vault = open_local_vault_from_grant(config_dir, config, vault_id)
+                event = cancellation_registry.register(binding_id)
+                try:
+                    return flush_and_sync_binding(
+                        vault=vault, relay=relay, store=store,
+                        binding=binding,
+                        author_device_id=config.device_id or ("0" * 32),
+                        device_name=(
+                            str(config.device_name or "").strip()
+                            or "this device"
+                        ),
+                        should_continue=lambda: not event.is_set(),
+                    )
+                finally:
+                    vault.close()
+                    cancellation_registry.clear(binding_id)
+
+            toast, error = dispatch_resume(
+                store=store, binding_id=binding_id, flush=flush,
+            )
+            _idle_finish(toast, error, binding_id, "Resume")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_disconnect(binding_id: str) -> None:
+        if action_in_flight.get(binding_id):
+            return
+        _set_inflight(binding_id, True)
+        bindings_status.set_label("Disconnect: confirming…")
+
+        # Dialog runs on GTK main thread; worker waits via Condition.
+        decision: dict[str, bool] = {}
+        cv = threading.Condition()
+
+        def show_dialog() -> bool:
+            dialog = Adw.AlertDialog(
+                heading="Disconnect this folder?",
+                body=(
+                    "Pending sync operations for this binding will be "
+                    "dropped. Local files and the remote vault are not "
+                    "touched. You can re-connect the folder later."
+                ),
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("disconnect", "Disconnect")
+            dialog.set_response_appearance(
+                "disconnect", Adw.ResponseAppearance.DESTRUCTIVE,
+            )
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+
+            def on_response(_d, response: str) -> None:
+                with cv:
+                    decision["confirmed"] = (response == "disconnect")
+                    cv.notify_all()
+
+            dialog.connect("response", on_response)
+            dialog.present(parent_window)
+            return False
+
+        GLib.idle_add(show_dialog)
+
+        def worker() -> None:
+            with cv:
+                while "confirmed" not in decision:
+                    cv.wait()
+            confirmed = decision["confirmed"]
+            store = VaultBindingsStore(local_index.db_path)
+            toast, error = dispatch_disconnect(
+                store=store, binding_id=binding_id,
+                confirm=lambda: confirmed,
+                cancellation=cancellation_registry,
+            )
+            _idle_finish(toast, error, binding_id, "Disconnect")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def refresh_bindings_table(message: str | None = None) -> None:
         clear_bindings_grid()
         # Header row + Action column
@@ -689,18 +827,80 @@ def build_vault_folders_tab(
                 attach_binding_cell(row["state"], 2, row_index)
                 attach_binding_cell(row["sync_mode"], 3, row_index)
                 attach_binding_cell(row["last_synced_revision"], 4, row_index)
-                action_btn = Gtk.Button(label="Sync now", css_classes=["pill"])
-                action_btn.set_tooltip_text(
-                    "Drain pending local changes and push them to the vault now."
+                # F-Y15: action cluster keyed on state. ``bound`` shows
+                # Sync now / Pause / Disconnect; ``paused`` swaps Sync
+                # now → Resume; ``unbound`` is read-only.
+                action_box = Gtk.Box(
+                    orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
                 )
-                action_btn.set_sensitive(row["state"] == "bound")
                 bid = row["binding_id"]
-                action_btn.connect(
-                    "clicked",
-                    lambda _btn, bid=bid, btn=action_btn: run_sync_now(bid, btn),
-                )
+                state = row["state"]
+
+                if state == "bound":
+                    sync_btn = Gtk.Button(label="Sync now", css_classes=["pill"])
+                    sync_btn.set_tooltip_text(
+                        "Drain pending local changes and push them to the vault now."
+                    )
+                    sync_btn.connect(
+                        "clicked",
+                        lambda _b, bid=bid, btn=sync_btn: run_sync_now(bid, btn),
+                    )
+                    action_box.append(sync_btn)
+
+                    pause_btn = Gtk.Button(label="Pause", css_classes=["pill"])
+                    pause_btn.set_tooltip_text(
+                        "Pause syncing. The watcher keeps queuing ops; "
+                        "Resume picks up where you left off."
+                    )
+                    pause_btn.connect(
+                        "clicked", lambda _b, bid=bid: run_pause(bid),
+                    )
+                    action_box.append(pause_btn)
+
+                    disconnect_btn = Gtk.Button(
+                        label="Disconnect",
+                        css_classes=["pill", "destructive-action"],
+                    )
+                    disconnect_btn.set_tooltip_text(
+                        "Stop syncing this folder. Pending ops are dropped; "
+                        "local files and the remote vault are not touched."
+                    )
+                    disconnect_btn.connect(
+                        "clicked", lambda _b, bid=bid: run_disconnect(bid),
+                    )
+                    action_box.append(disconnect_btn)
+                elif state == "paused":
+                    resume_btn = Gtk.Button(
+                        label="Resume",
+                        css_classes=["pill", "suggested-action"],
+                    )
+                    resume_btn.set_tooltip_text(
+                        "Resume syncing and drain anything the watcher queued."
+                    )
+                    resume_btn.connect(
+                        "clicked", lambda _b, bid=bid: run_resume(bid),
+                    )
+                    action_box.append(resume_btn)
+
+                    disconnect_btn = Gtk.Button(
+                        label="Disconnect",
+                        css_classes=["pill", "destructive-action"],
+                    )
+                    disconnect_btn.set_tooltip_text(
+                        "Stop syncing this folder. Pending ops are dropped; "
+                        "local files and the remote vault are not touched."
+                    )
+                    disconnect_btn.connect(
+                        "clicked", lambda _b, bid=bid: run_disconnect(bid),
+                    )
+                    action_box.append(disconnect_btn)
+                else:
+                    # ``unbound`` / ``needs-preflight`` etc. — render an
+                    # empty cell so the column width stays stable.
+                    pass
+
                 bindings_grid.attach(
-                    action_btn, len(BINDING_COLUMNS), row_index, 1, 1,
+                    action_box, len(BINDING_COLUMNS), row_index, 1, 1,
                 )
 
         if message is not None:
