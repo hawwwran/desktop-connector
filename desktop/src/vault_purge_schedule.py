@@ -39,6 +39,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from .vault_atomic import atomic_write_file
+
 
 log = logging.getLogger(__name__)
 
@@ -284,10 +286,8 @@ def _read_state(config_dir: Path) -> dict[str, Any]:
 
 def _write_state(config_dir: Path, state: dict[str, Any]) -> None:
     path = pending_file_path(config_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, separators=(",", ":"), sort_keys=True))
-    tmp.replace(path)
+    payload = json.dumps(state, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    atomic_write_file(path, payload)
 
 
 def _record_from_dict(raw: dict[str, Any]) -> PendingPurge:

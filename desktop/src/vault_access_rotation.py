@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .vault_atomic import atomic_write_file
+
 
 log = logging.getLogger(__name__)
 
@@ -116,15 +118,13 @@ def write_reminder(
     config_dir: Path, vault_id: str, state: ReminderState,
 ) -> Path:
     path = reminder_path(config_dir, vault_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "rotated_at_epoch": int(state.rotated_at_epoch),
         "paired_device_ids": list(state.paired_device_ids),
         "acknowledged_device_ids": list(state.acknowledged_device_ids),
     }
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True))
-    tmp.replace(path)
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    atomic_write_file(path, encoded)
     return path
 
 

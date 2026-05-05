@@ -225,6 +225,75 @@ class VaultCrypto
             . $aeadCiphertextAndTag;
     }
 
+    /**
+     * Parse the first 61 bytes of a manifest envelope (formats §10.1).
+     * The relay uses this to authoritatively read revision / parent_revision
+     * / author_device_id from the envelope-internal AAD source rather than
+     * trusting the JSON body — a buggy or malicious caller whose envelope
+     * disagrees with body fields would otherwise poison the manifest chain.
+     *
+     * Returns ['format_version', 'vault_id', 'revision', 'parent_revision',
+     * 'author_device_id'] on success. Throws InvalidArgumentException for
+     * any malformed prefix (too short, vault_id not base32, device id not
+     * hex). Does NOT verify the AEAD; that's the receiver's job.
+     */
+    public static function parseManifestEnvelopeHeader(string $envelope): array
+    {
+        if (strlen($envelope) < 61) {
+            throw new InvalidArgumentException(
+                'manifest envelope is shorter than the 61-byte deterministic prefix'
+            );
+        }
+        $formatVersion = ord($envelope[0]);
+        $vaultIdBytes = substr($envelope, 1, 12);
+        if (!preg_match('/^[A-Z2-7]{12}$/', $vaultIdBytes)) {
+            throw new InvalidArgumentException('manifest envelope vault_id is not base32');
+        }
+        $revisionRaw = substr($envelope, 13, 8);
+        $parentRaw   = substr($envelope, 21, 8);
+        $authorRaw   = substr($envelope, 29, 32);
+        if (!preg_match('/^[a-f0-9]{32}$/', $authorRaw)) {
+            throw new InvalidArgumentException(
+                'manifest envelope author_device_id is not 32 lowercase hex chars'
+            );
+        }
+        $unpackedRev    = unpack('J', $revisionRaw);
+        $unpackedParent = unpack('J', $parentRaw);
+        return [
+            'format_version'   => $formatVersion,
+            'vault_id'         => $vaultIdBytes,
+            'revision'         => (int)$unpackedRev[1],
+            'parent_revision'  => (int)$unpackedParent[1],
+            'author_device_id' => $authorRaw,
+        ];
+    }
+
+    /**
+     * Parse the first 21 bytes of a header envelope (formats §9.1):
+     * format_version(1) + vault_id(12) + header_revision_be64(8). Same
+     * idea as ``parseManifestEnvelopeHeader`` — the relay sources
+     * (header_revision, vault_id) from the envelope rather than the body.
+     */
+    public static function parseHeaderEnvelopeHeader(string $envelope): array
+    {
+        if (strlen($envelope) < 21) {
+            throw new InvalidArgumentException(
+                'header envelope is shorter than the 21-byte deterministic prefix'
+            );
+        }
+        $formatVersion = ord($envelope[0]);
+        $vaultIdBytes = substr($envelope, 1, 12);
+        if (!preg_match('/^[A-Z2-7]{12}$/', $vaultIdBytes)) {
+            throw new InvalidArgumentException('header envelope vault_id is not base32');
+        }
+        $unpackedRev = unpack('J', substr($envelope, 13, 8));
+        return [
+            'format_version'  => $formatVersion,
+            'vault_id'        => $vaultIdBytes,
+            'header_revision' => (int)$unpackedRev[1],
+        ];
+    }
+
     // ---------------------------------------------------------------- Chunk AAD + envelope
 
     public static function buildChunkAad(

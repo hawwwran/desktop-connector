@@ -80,7 +80,7 @@ final class VaultCapabilitiesTest extends TestCase
     {
         // Regression: a deployment that intentionally hasn't wired any
         // vault endpoints (transfer/fasttrack only) emits zero vault bits.
-        // We model this by disabling the full T1 surface; the production
+        // We model this by disabling every advertised bit; the production
         // equivalent is a relay whose code lacks the vault routes entirely
         // — same observable output.
         VaultCapabilities::setDisabled([
@@ -89,11 +89,31 @@ final class VaultCapabilitiesTest extends TestCase
             'vault_manifest_cas_v1',
             'vault_chunk_v1',
             'vault_gc_v1',
+            'vault_soft_delete_v1',
+            'vault_export_v1',
+            'vault_migration_v1',
             'vault_grant_qr_v1',
+            'vault_purge_v1',
         ]);
 
         $bits = VaultCapabilities::current();
         self::assertSame([], $bits);
+    }
+
+    public function test_post_t1_bits_are_advertised(): void
+    {
+        // T7 / T8 / T9 / T13 / T14 have all landed; clients gate
+        // per-feature on their respective bit so they're listed
+        // alongside the T1 sub-bits. The aggregate `vault_v1` is
+        // unrelated (T1-only).
+        VaultCapabilities::clearOverride();
+        $bits = VaultCapabilities::current();
+
+        self::assertContains('vault_soft_delete_v1', $bits);
+        self::assertContains('vault_export_v1', $bits);
+        self::assertContains('vault_migration_v1', $bits);
+        self::assertContains('vault_grant_qr_v1', $bits);
+        self::assertContains('vault_purge_v1', $bits);
     }
 
     public function test_clearOverride_restores_default_state(): void

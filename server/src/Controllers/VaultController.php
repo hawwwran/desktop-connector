@@ -114,6 +114,23 @@ class VaultController
             $now
         );
 
+        // §D11: the creating device is the genesis admin. Insert the grant
+        // here so subsequent role-gated writes from this device pass without
+        // a separate provisioning step.
+        $grants = new VaultDeviceGrantsRepository($db);
+        if ($grants->getByDevice($vaultId, $deviceId) === null) {
+            $grants->insertGrant(
+                self::generateGrantId(),
+                $vaultId,
+                $deviceId,
+                null,
+                'admin',
+                $deviceId,
+                'create',
+                $now,
+            );
+        }
+
         Router::json([
             'ok' => true,
             'data' => [
@@ -158,6 +175,7 @@ class VaultController
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -171,6 +189,32 @@ class VaultController
         }
         $encHeader  = self::decodeBase64Field($body, 'encrypted_header');
         $headerHash = Validators::requireNonEmptyString($body, 'header_hash');
+
+        // Authoritatively read (vault_id, header_revision) from the
+        // envelope's deterministic prefix and reject if it disagrees with
+        // the path / body. Forces the body's claims to match the envelope's
+        // sealed AAD — without this, a buggy admin client whose envelope
+        // and body diverge would silently poison the chain.
+        try {
+            $envHeader = VaultCrypto::parseHeaderEnvelopeHeader($encHeader);
+        } catch (InvalidArgumentException $e) {
+            throw new VaultInvalidRequestError(
+                $e->getMessage(),
+                'encrypted_header'
+            );
+        }
+        if ($envHeader['vault_id'] !== $vaultId) {
+            throw new VaultInvalidRequestError(
+                'encrypted_header envelope vault_id does not match path vault_id',
+                'encrypted_header'
+            );
+        }
+        if ($envHeader['header_revision'] !== $newRev) {
+            throw new VaultInvalidRequestError(
+                'encrypted_header envelope header_revision does not match new_header_revision',
+                'encrypted_header'
+            );
+        }
 
         $vaultsRepo = new VaultsRepository($db);
         $now = time();
@@ -230,6 +274,7 @@ class VaultController
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'browse-upload');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -257,7 +302,42 @@ class VaultController
         // requireVaultAuth doesn't populate $ctx->deviceId (Router only does
         // that for routes flagged requiresAuth=true). Recover via _SERVER.
         if ($authorDeviceId === '') {
-            $authorDeviceId = (string)($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
+            $authorDeviceId = VaultAuthService::callerDeviceId();
+        }
+
+        // Authoritatively read (vault_id, revision, parent_revision,
+        // author_device_id) from the envelope's deterministic 61-byte
+        // prefix (formats §10.1). The relay decides CAS off these bytes
+        // rather than the JSON body, turning a class of envelope/body
+        // drift bugs into 400s instead of a poisoned manifest chain.
+        try {
+            $envManifest = VaultCrypto::parseManifestEnvelopeHeader($manifestCipher);
+        } catch (InvalidArgumentException $e) {
+            throw new VaultInvalidRequestError($e->getMessage(), 'manifest_ciphertext');
+        }
+        if ($envManifest['vault_id'] !== $vaultId) {
+            throw new VaultInvalidRequestError(
+                'manifest envelope vault_id does not match path vault_id',
+                'manifest_ciphertext'
+            );
+        }
+        if ($envManifest['revision'] !== $newRev) {
+            throw new VaultInvalidRequestError(
+                'manifest envelope revision does not match new_revision',
+                'manifest_ciphertext'
+            );
+        }
+        if ($envManifest['parent_revision'] !== $parentRev) {
+            throw new VaultInvalidRequestError(
+                'manifest envelope parent_revision does not match body parent_revision',
+                'manifest_ciphertext'
+            );
+        }
+        if ($authorDeviceId !== '' && $envManifest['author_device_id'] !== $authorDeviceId) {
+            throw new VaultInvalidRequestError(
+                'manifest envelope author_device_id does not match X-Device-ID',
+                'manifest_ciphertext'
+            );
         }
 
         $now = time();
@@ -302,6 +382,7 @@ class VaultController
             throw new VaultInvalidRequestError("chunk_id '{$chunkId}' fails ^ch_v1_[a-z2-7]{24}\$", 'chunk_id');
         }
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'browse-upload');
         self::guardReadOnly($vault);
 
         $bytes = $ctx->rawBody();
@@ -314,40 +395,56 @@ class VaultController
         $chunksRepo = new VaultChunksRepository($db);
         $vaultsRepo = new VaultsRepository($db);
 
-        // Quota preflight against the global counter (T0 §A21). The
-        // idempotent re-upload path doesn't hit this — we re-check after
-        // the repo's no-op response.
-        $existing = $chunksRepo->head($vaultId, $chunkId);
-        if ($existing === null) {
-            $remaining = $vaultsRepo->getQuotaRemaining($vaultId);
-            if ($remaining === null || $remaining < $size) {
-                throw new VaultQuotaExceededError(
-                    (int)$vault['used_ciphertext_bytes'],
-                    (int)$vault['quota_ciphertext_bytes'],
-                    false
-                );
-            }
-        }
-
         $relativePath = VaultChunksRepository::storagePath($vaultId, $chunkId);
         $now = time();
 
+        // Atomic head + quota-reserve + insert. SQLite serializes via
+        // BEGIN IMMEDIATE so two parallel uploads can't each pass a
+        // preflight check and over-allocate the cap (TOCTOU fix). The
+        // disk-write happens AFTER commit so a long fsync doesn't hold
+        // the writer slot; failure backs out the reservation below.
+        $db->execute('BEGIN IMMEDIATE');
+        $result = null;
         try {
-            $result = $chunksRepo->put($vaultId, $chunkId, $hash, $size, $relativePath, $now);
-        } catch (VaultChunkSizeMismatchException $e) {
-            $existing = $chunksRepo->head($vaultId, $chunkId);
-            throw new VaultChunkSizeMismatchError(
-                $chunkId,
-                $existing !== null ? (int)$existing['ciphertext_size'] : 0,
-                $size
-            );
-        } catch (VaultChunkTamperedException $e) {
-            $existing = $chunksRepo->head($vaultId, $chunkId);
-            throw new VaultChunkTamperedError(
-                $chunkId,
-                $existing !== null ? (string)$existing['chunk_hash'] : '',
-                $hash
-            );
+            if ($chunksRepo->head($vaultId, $chunkId) === null) {
+                if (!$vaultsRepo->reserveCiphertextBytes($vaultId, $size, $now)) {
+                    $db->execute('ROLLBACK');
+                    $vault = $vaultsRepo->getById($vaultId);
+                    throw new VaultQuotaExceededError(
+                        (int)($vault['used_ciphertext_bytes'] ?? 0),
+                        (int)($vault['quota_ciphertext_bytes'] ?? 0),
+                        false
+                    );
+                }
+            }
+            try {
+                $result = $chunksRepo->put($vaultId, $chunkId, $hash, $size, $relativePath, $now);
+            } catch (VaultChunkSizeMismatchException $e) {
+                $db->execute('ROLLBACK');
+                $existing = $chunksRepo->head($vaultId, $chunkId);
+                throw new VaultChunkSizeMismatchError(
+                    $chunkId,
+                    $existing !== null ? (int)$existing['ciphertext_size'] : 0,
+                    $size
+                );
+            } catch (VaultChunkTamperedException $e) {
+                $db->execute('ROLLBACK');
+                $existing = $chunksRepo->head($vaultId, $chunkId);
+                throw new VaultChunkTamperedError(
+                    $chunkId,
+                    $existing !== null ? (string)$existing['chunk_hash'] : '',
+                    $hash
+                );
+            }
+            $db->execute('COMMIT');
+        } catch (VaultApiError $e) {
+            // Already-formatted error — rollback (if not already done) and
+            // re-throw. Repeated rollback on a closed tx is a no-op.
+            try { $db->execute('ROLLBACK'); } catch (\Throwable $ignored) {}
+            throw $e;
+        } catch (\Throwable $e) {
+            $db->execute('ROLLBACK');
+            throw $e;
         }
 
         $statusCode = 201;
@@ -355,9 +452,13 @@ class VaultController
             $absPath = VaultStorage::chunkAbsolutePath($vaultId, $chunkId);
             VaultStorage::ensureDir($absPath);
             if (file_put_contents($absPath, $bytes) === false) {
+                // Compensating undo: release the bytes we just reserved.
+                // The chunk row stays — a subsequent re-upload of the same
+                // bytes is idempotent (`already_exists`); a re-upload with
+                // different bytes hits the size/tamper guard.
+                $vaultsRepo->incUsedBytes($vaultId, -$size, -1, $now);
                 throw new VaultStorageUnavailableError("Failed to write chunk to {$relativePath}");
             }
-            $vaultsRepo->incUsedBytes($vaultId, $size, 1, $now);
         } else {
             // Idempotent no-op: row already there + last_referenced_at bumped.
             $statusCode = 200;
@@ -487,6 +588,7 @@ class VaultController
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'sync');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -582,19 +684,30 @@ class VaultController
             throw new VaultNotFoundError($planId);
         }
 
-        // T14 hard-purge guard: scheduled_purge requires purge_secret.
-        // T1.6 ships sync_plan only — purge_secret is left for T14.
+        // §6.13: sync GC requires role=sync; scheduled_purge requires
+        // role=admin AND a valid purge_secret (vault_purge_not_allowed
+        // covers both the role gap and a wrong-secret).
+        $callerDevice = VaultAuthService::callerDeviceId();
         if ($job['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE) {
+            try {
+                VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
+            } catch (VaultAccessDeniedError $e) {
+                throw new VaultPurgeNotAllowedError(
+                    'hard-purge requires role=admin'
+                );
+            }
             $purgeSecret = $body['purge_secret'] ?? null;
             if (!is_string($purgeSecret) || $purgeSecret === '') {
-                throw new VaultAuthFailedError('vault');
+                throw new VaultPurgeNotAllowedError('purge_secret required for scheduled_purge');
             }
             if (!hash_equals(
                 (string)$vault['purge_token_hash'],
                 hash('sha256', $purgeSecret, true)
             )) {
-                throw new VaultAuthFailedError('vault');
+                throw new VaultPurgeNotAllowedError('purge_secret does not match');
             }
+        } else {
+            VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'sync');
         }
 
         $chunksRepo = new VaultChunksRepository($db);
@@ -651,15 +764,32 @@ class VaultController
             throw new VaultInvalidRequestError('plan_id or job_id required', 'plan_id');
         }
 
+        // §6.14: sync_plan jobs need role=sync; scheduled_purge jobs need
+        // role=admin. Per-job lookup so a sync-role caller cancelling a
+        // mix of sync_plan + scheduled_purge ids fails on the purge ids
+        // rather than silently downgrading.
+        $callerDevice = VaultAuthService::callerDeviceId();
         $jobsRepo = new VaultGcJobsRepository($db);
         $now = time();
         foreach (array_filter([$planId, $jobId]) as $id) {
             $row = $jobsRepo->getById((string)$id);
-            if ($row !== null && $row['vault_id'] === $vaultId) {
-                $jobsRepo->markCancelled((string)$id, $now);
+            if ($row === null || $row['vault_id'] !== $vaultId) {
+                // Idempotent: unknown / wrong-vault ids silently no-op so
+                // toggle-OFF retries (§A17) don't error.
+                continue;
             }
-            // Idempotent: unknown / already-cancelled / wrong-vault ids
-            // silently no-op so toggle-OFF retries (§A17) don't error.
+            if ($row['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE) {
+                try {
+                    VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
+                } catch (VaultAccessDeniedError $e) {
+                    throw new VaultPurgeNotAllowedError(
+                        'cancelling a scheduled_purge requires role=admin'
+                    );
+                }
+            } else {
+                VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'sync');
+            }
+            $jobsRepo->markCancelled((string)$id, $now);
         }
 
         http_response_code(204);
@@ -681,6 +811,7 @@ class VaultController
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -753,6 +884,7 @@ class VaultController
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
 
         $intentsRepo = new VaultMigrationIntentsRepository($db);
         $intent = $intentsRepo->getIntent($vaultId);
@@ -796,6 +928,7 @@ class VaultController
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
 
         $body = $ctx->jsonBody();
         $target = Validators::requireNonEmptyString($body, 'target_relay_url');
@@ -898,5 +1031,11 @@ class VaultController
             }
         }
         return $prefix . '_v1_' . $out;
+    }
+
+    /** Spec §3.3 grant id: `gr_v1_<24base32>`. */
+    private static function generateGrantId(): string
+    {
+        return self::generateId('gr');
     }
 }

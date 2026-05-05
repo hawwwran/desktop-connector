@@ -255,21 +255,45 @@ class VaultStorageUnavailableError extends VaultApiError
  * but the device is no longer permitted to act on the vault — the grant
  * has been revoked, the role doesn't allow the requested operation, or
  * the join-request lifecycle says the row isn't in a state the caller
- * can manipulate.
+ * can manipulate. ``required_role`` carries the minimum role the endpoint
+ * needs so the UI can render "needs role <X>" feedback.
  */
 class VaultAccessDeniedError extends VaultApiError
 {
-    public function __construct(string $reason, ?string $field = null)
+    public function __construct(string $reason, ?string $field = null, ?string $requiredRole = null)
     {
         $details = ['reason' => $reason];
         if ($field !== null) {
             $details['field'] = $field;
+        }
+        if ($requiredRole !== null) {
+            $details['required_role'] = $requiredRole;
         }
         parent::__construct(
             status: 403,
             errorCode: 'vault_access_denied',
             message: $reason,
             details: $details,
+        );
+    }
+}
+
+/**
+ * 403 vault_purge_not_allowed (T14). Hard-purge variant of access denied:
+ * the gc/execute or gc/cancel target is a scheduled_purge job and the
+ * caller's role isn't ``admin`` (or the supplied ``purge_secret`` doesn't
+ * match the recovery-derived hash). The UI surfaces "ask an admin device
+ * to purge" rather than the generic "access denied".
+ */
+class VaultPurgeNotAllowedError extends VaultApiError
+{
+    public function __construct(string $reason)
+    {
+        parent::__construct(
+            status: 403,
+            errorCode: 'vault_purge_not_allowed',
+            message: $reason,
+            details: ['reason' => $reason],
         );
     }
 }

@@ -33,6 +33,8 @@ from typing import Protocol
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .vault_atomic import atomic_write_file
+
 from .vault_crypto import (
     XCHACHA20_KEY_BYTES,
     XCHACHA20_NONCE_BYTES,
@@ -228,11 +230,8 @@ class FileGrantStore:
             "ciphertext_b64": base64.b64encode(ct).decode("ascii"),
         }
         path = self._path(grant.vault_id)
-        tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(envelope, f, separators=(",", ":"))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+        payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        atomic_write_file(path, payload, mode=0o600)
 
     def load(self, vault_id: str) -> VaultGrant | None:
         path = self._path(vault_id)

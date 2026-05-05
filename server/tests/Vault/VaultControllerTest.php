@@ -82,6 +82,21 @@ final class VaultControllerTest extends TestCase
             self::NOW
         );
 
+        // The role-matrix gate (§D11) requires every authenticated write to
+        // come from a device that holds an active grant. VaultController::create
+        // auto-inserts the creator's admin grant; this fixture seeds the vault
+        // directly via the repo so the equivalent grant is added by hand.
+        (new VaultDeviceGrantsRepository($this->db))->insertGrant(
+            'gr_v1_seedadmin000000000000aa',
+            self::VAULT_ID,
+            self::DEVICE_ID,
+            'Test Admin Desktop',
+            'admin',
+            self::DEVICE_ID,
+            'create',
+            self::NOW,
+        );
+
         $this->setAuth();
     }
 
@@ -153,6 +168,42 @@ final class VaultControllerTest extends TestCase
     private function jctx(string $method, array $params, array $body): RequestContext
     {
         return $this->ctx($method, $params, json_encode($body));
+    }
+
+    /**
+     * Build a syntactically-correct manifest envelope (formats §10.1).
+     * The relay parses the first 61 bytes for CAS, so tests need a real
+     * envelope shape — the AEAD bytes themselves don't have to verify.
+     */
+    private function manifestEnvelope(
+        int $revision,
+        int $parentRevision,
+        string $authorDeviceId = self::DEVICE_ID,
+        string $vaultId = self::VAULT_ID,
+        string $aeadCiphertextAndTag = "stub-ciphertext"
+    ): string {
+        return VaultCrypto::buildManifestEnvelope(
+            $vaultId,
+            $revision,
+            $parentRevision,
+            $authorDeviceId,
+            str_repeat("\0", 24),
+            $aeadCiphertextAndTag,
+        );
+    }
+
+    /** Build a syntactically-correct header envelope (formats §9.1). */
+    private function headerEnvelope(
+        int $headerRevision,
+        string $vaultId = self::VAULT_ID,
+        string $aeadCiphertextAndTag = "stub-ciphertext"
+    ): string {
+        return VaultCrypto::buildHeaderEnvelope(
+            $vaultId,
+            $headerRevision,
+            str_repeat("\0", 24),
+            $aeadCiphertextAndTag,
+        );
     }
 
     /**
@@ -270,12 +321,11 @@ final class VaultControllerTest extends TestCase
 
     public function test_putHeader_happy_path_bumps_revision(): void
     {
-        $newEnc = "\xaa\xbbnew-header-bytes";
         $newHash = str_repeat('a', 64);
         $body = [
             'expected_header_revision' => 1,
             'new_header_revision'      => 2,
-            'encrypted_header'         => base64_encode($newEnc),
+            'encrypted_header'         => base64_encode($this->headerEnvelope(2)),
             'header_hash'              => $newHash,
         ];
 
@@ -293,7 +343,7 @@ final class VaultControllerTest extends TestCase
         $body = [
             'expected_header_revision' => 99,
             'new_header_revision'      => 100,
-            'encrypted_header'         => base64_encode('new'),
+            'encrypted_header'         => base64_encode($this->headerEnvelope(100)),
             'header_hash'              => str_repeat('b', 64),
         ];
 
@@ -305,6 +355,24 @@ final class VaultControllerTest extends TestCase
             self::assertSame('vault_manifest_conflict', $e->errorCode);
             self::assertSame(1, $e->details['current_revision']);
             self::assertSame(99, $e->details['expected_revision']);
+        }
+    }
+
+    public function test_putHeader_400_when_envelope_revision_disagrees(): void
+    {
+        // Body says revision=2 but envelope says revision=99.
+        $body = [
+            'expected_header_revision' => 1,
+            'new_header_revision'      => 2,
+            'encrypted_header'         => base64_encode($this->headerEnvelope(99)),
+            'header_hash'              => str_repeat('a', 64),
+        ];
+        try {
+            VaultController::putHeader($this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body));
+            self::fail('expected VaultInvalidRequestError');
+        } catch (VaultInvalidRequestError $e) {
+            self::assertSame(400, $e->status);
+            self::assertSame('encrypted_header', $e->details['field']);
         }
     }
 
@@ -338,14 +406,13 @@ final class VaultControllerTest extends TestCase
 
     public function test_putManifest_happy_path_advances_head(): void
     {
-        $cipher = "\xff\xfeNEW-MANIFEST";
         $newHash = str_repeat('1', 64);
         $body = [
             'expected_current_revision' => 1,
             'new_revision'              => 2,
             'parent_revision'           => 1,
             'manifest_hash'             => $newHash,
-            'manifest_ciphertext'       => base64_encode($cipher),
+            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
         ];
 
         $res = $this->invoke(fn() => VaultController::putManifest(
@@ -357,6 +424,52 @@ final class VaultControllerTest extends TestCase
         self::assertSame($newHash, $res['json']['data']['manifest_hash']);
     }
 
+    public function test_putManifest_400_when_envelope_revision_disagrees(): void
+    {
+        // Body says revision=2 / parent=1; envelope says revision=99 / parent=98.
+        $body = [
+            'expected_current_revision' => 1,
+            'new_revision'              => 2,
+            'parent_revision'           => 1,
+            'manifest_hash'             => str_repeat('1', 64),
+            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(99, 98)),
+        ];
+        try {
+            VaultController::putManifest(
+                $this->db,
+                $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+            );
+            self::fail('expected VaultInvalidRequestError');
+        } catch (VaultInvalidRequestError $e) {
+            self::assertSame(400, $e->status);
+            self::assertSame('manifest_ciphertext', $e->details['field']);
+        }
+    }
+
+    public function test_putManifest_400_when_envelope_author_disagrees(): void
+    {
+        // Envelope's author_device_id differs from the X-Device-ID header.
+        $body = [
+            'expected_current_revision' => 1,
+            'new_revision'              => 2,
+            'parent_revision'           => 1,
+            'manifest_hash'             => str_repeat('1', 64),
+            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(
+                2, 1, str_repeat('f', 32)
+            )),
+        ];
+        try {
+            VaultController::putManifest(
+                $this->db,
+                $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+            );
+            self::fail('expected VaultInvalidRequestError');
+        } catch (VaultInvalidRequestError $e) {
+            self::assertSame(400, $e->status);
+            self::assertStringContainsString('author_device_id', $e->details['reason']);
+        }
+    }
+
     public function test_putManifest_409_a1_conflict_payload(): void
     {
         $body = [
@@ -364,7 +477,7 @@ final class VaultControllerTest extends TestCase
             'new_revision'              => 100,
             'parent_revision'           => 99,
             'manifest_hash'             => str_repeat('2', 64),
-            'manifest_ciphertext'       => base64_encode('late'),
+            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(100, 99)),
         ];
 
         try {
@@ -654,5 +767,174 @@ final class VaultControllerTest extends TestCase
     {
         $this->expectException(VaultInvalidRequestError::class);
         VaultController::gcCancel($this->db, $this->jctx('POST', ['vault_id' => self::VAULT_ID], []));
+    }
+
+    // ===================================================================
+    //  Role enforcement (§D11) — read-only / browse-upload / sync caps
+    // ===================================================================
+
+    /**
+     * Demote the seeded admin grant to ``$role`` (and replace any existing
+     * grant for DEVICE_ID). Lets per-test cases pretend the caller is a
+     * lesser-privileged device without spinning up a second device record.
+     */
+    private function demoteCaller(string $role): void
+    {
+        $this->db->execute(
+            'UPDATE vault_device_grants SET role = :role
+              WHERE vault_id = :vault AND device_id = :device',
+            [
+                ':role' => $role,
+                ':vault' => self::VAULT_ID,
+                ':device' => self::DEVICE_ID,
+            ]
+        );
+    }
+
+    public function test_putHeader_forbidden_for_non_admin(): void
+    {
+        $this->demoteCaller('sync');
+        $body = [
+            'expected_header_revision' => 1,
+            'new_header_revision'      => 2,
+            'encrypted_header'         => base64_encode($this->headerEnvelope(2)),
+            'header_hash'              => str_repeat('a', 64),
+        ];
+        try {
+            VaultController::putHeader(
+                $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertSame('vault_access_denied', $e->errorCode);
+            self::assertSame('admin', $e->details['required_role']);
+        }
+    }
+
+    public function test_putManifest_forbidden_for_read_only(): void
+    {
+        $this->demoteCaller('read-only');
+        $body = [
+            'expected_current_revision' => 1,
+            'new_revision'              => 2,
+            'parent_revision'           => 1,
+            'manifest_hash'             => str_repeat('1', 64),
+            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
+        ];
+        try {
+            VaultController::putManifest(
+                $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame('browse-upload', $e->details['required_role']);
+        }
+    }
+
+    public function test_putChunk_forbidden_for_read_only(): void
+    {
+        $this->demoteCaller('read-only');
+        try {
+            VaultController::putChunk(
+                $this->db,
+                $this->ctx('PUT', [
+                    'vault_id' => self::VAULT_ID,
+                    'chunk_id' => 'ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa',
+                ], 'small-bytes')
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame('browse-upload', $e->details['required_role']);
+        }
+    }
+
+    public function test_putManifest_works_for_browse_upload_role(): void
+    {
+        $this->demoteCaller('browse-upload');
+        $body = [
+            'expected_current_revision' => 1,
+            'new_revision'              => 2,
+            'parent_revision'           => 1,
+            'manifest_hash'             => str_repeat('1', 64),
+            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
+        ];
+        $res = $this->invoke(fn() => VaultController::putManifest(
+            $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+        ));
+        self::assertSame(200, $res['status']);
+    }
+
+    public function test_gcPlan_forbidden_for_browse_upload_role(): void
+    {
+        $this->demoteCaller('browse-upload');
+        try {
+            VaultController::gcPlan(
+                $this->db,
+                $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                    'manifest_revision'   => 1,
+                    'candidate_chunk_ids' => [],
+                ])
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame('sync', $e->details['required_role']);
+        }
+    }
+
+    public function test_revoked_grant_blocks_writes(): void
+    {
+        $this->db->execute(
+            'UPDATE vault_device_grants SET revoked_at = :now, revoked_by = :by
+              WHERE vault_id = :vault AND device_id = :device',
+            [
+                ':now' => self::NOW + 1,
+                ':by' => self::DEVICE_ID,
+                ':vault' => self::VAULT_ID,
+                ':device' => self::DEVICE_ID,
+            ]
+        );
+        $body = [
+            'expected_current_revision' => 1,
+            'new_revision'              => 2,
+            'parent_revision'           => 1,
+            'manifest_hash'             => str_repeat('1', 64),
+            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
+        ];
+        try {
+            VaultController::putManifest(
+                $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertStringContainsString('revoked', $e->details['reason']);
+        }
+    }
+
+    public function test_create_auto_inserts_admin_grant_for_creator(): void
+    {
+        $this->db->execute('DELETE FROM vault_manifests');
+        $this->db->execute('DELETE FROM vault_device_grants');
+        $this->db->execute('DELETE FROM vaults');
+
+        $body = [
+            'vault_id'                    => self::VAULT_ID_DASHED,
+            'vault_access_token_hash'     => base64_encode(hash('sha256', 'fresh-secret', true)),
+            'encrypted_header'            => base64_encode('header'),
+            'header_hash'                 => self::HEADER_HASH,
+            'initial_manifest_ciphertext' => base64_encode('manifest'),
+            'initial_manifest_hash'       => self::MFST_HASH,
+        ];
+        $this->invoke(fn() => VaultController::create(
+            $this->db, $this->jctx('POST', [], $body)
+        ));
+
+        $grant = (new VaultDeviceGrantsRepository($this->db))
+            ->getByDevice(self::VAULT_ID, self::DEVICE_ID);
+        self::assertNotNull($grant);
+        self::assertSame('admin', (string)$grant['role']);
+        self::assertSame('create', (string)$grant['granted_via']);
+        self::assertMatchesRegularExpression('/^gr_v1_[a-z2-7]{24}$/', (string)$grant['grant_id']);
     }
 }

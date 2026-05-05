@@ -1,6 +1,11 @@
 """Vault export bundle writer + reader (T8.1, T8.2).
 
-Bundle layout per §A10:
+Bundle layout matches ``docs/protocol/vault-v1-formats.md`` §16. T0 §A10
+was authored with CBOR Core Deterministic Encoding in mind, but v1 ships
+a stdlib-only fixed-width framing — no `cbor2` dependency for a single-
+purpose write/read path. The framing is byte-deterministic and AEAD-
+bound just as a CBOR-framed alternative would be; a v1.5 spec bump can
+swap to CBOR through ``format_version`` if a real interop case appears.
 
     [outer_header   :  57 bytes]    DCVE magic + Argon2 params + outer nonce
     [wrapped_key    :  48 bytes]    AEAD(export_file_key, k_export_wrap, outer_nonce, vault-bound AAD)
@@ -20,12 +25,6 @@ Plaintext framing inside the AEAD payload:
     [record_type : u8]
     [inner_len   : u32 BE]
     [inner       : variable]
-
-The "CBOR-framed" reference in §A10 is satisfied via this fixed,
-unambiguous, big-endian length-prefixed framing — a future swap to
-real CBOR is a wire-format upgrade, not a contract change. (cbor2
-isn't on the desktop's dependency list and we don't want to add a
-runtime requirement just for export.)
 
 Hash chain is a rolling SHA-256 over each record's on-disk bytes
 (``len_prefix || nonce || ciphertext``) up to but not including the

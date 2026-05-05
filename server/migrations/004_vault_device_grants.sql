@@ -14,7 +14,7 @@
 -- secret last changed.
 
 CREATE TABLE IF NOT EXISTS vault_device_grants (
-    grant_id           TEXT PRIMARY KEY,                  -- dg_v1_<24base32>
+    grant_id           TEXT PRIMARY KEY,                  -- gr_v1_<24base32> (spec §3.3)
     vault_id           TEXT NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
     device_id          TEXT NOT NULL,                     -- 32-hex-char per protocol
     device_name        TEXT,                               -- claimant-supplied label

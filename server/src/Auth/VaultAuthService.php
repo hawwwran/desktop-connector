@@ -22,6 +22,18 @@
 class VaultAuthService
 {
     /**
+     * Role rank table (T0 §D11). Higher rank == strictly more privileges.
+     * Vault endpoints use ``requireRole`` to gate writes by minimum role;
+     * a caller with a higher rank automatically passes a lower-rank check.
+     */
+    private const ROLE_RANK = [
+        'read-only'      => 1,
+        'browse-upload'  => 2,
+        'sync'           => 3,
+        'admin'          => 4,
+    ];
+
+    /**
      * Validate device + vault auth and confirm the vault exists. Returns
      * the matched vault row on success so the caller doesn't need a
      * second SELECT. Throws on every failure so callers stay linear:
@@ -98,5 +110,60 @@ class VaultAuthService
             throw new VaultAuthFailedError('device');
         }
         return $identity->deviceId;
+    }
+
+    /**
+     * Enforce the §D11 role matrix on a vault endpoint. Call this AFTER
+     * ``requireVaultAuth`` so device + vault credentials are already
+     * validated. Throws ``VaultAccessDeniedError(required_role=$minRole)``
+     * if the caller has no grant, has a revoked grant, or has a grant
+     * with role rank below ``$minRole``. Returns the matched grant row.
+     *
+     * @return array vault_device_grants row (per ::getByDevice).
+     */
+    public static function requireRole(
+        Database $db,
+        string $vaultId,
+        string $deviceId,
+        string $minRole
+    ): array {
+        $required = self::ROLE_RANK[$minRole] ?? null;
+        if ($required === null) {
+            throw new InvalidArgumentException("unknown role: {$minRole}");
+        }
+        $grants = new VaultDeviceGrantsRepository($db);
+        $grant = $grants->getByDevice($vaultId, $deviceId);
+        if ($grant === null) {
+            throw new VaultAccessDeniedError(
+                'caller is not a granted device on this vault',
+                requiredRole: $minRole,
+            );
+        }
+        if ($grant['revoked_at'] !== null) {
+            throw new VaultAccessDeniedError(
+                'grant has been revoked',
+                requiredRole: $minRole,
+            );
+        }
+        $callerRole = (string)$grant['role'];
+        $have = self::ROLE_RANK[$callerRole] ?? 0;
+        if ($have < $required) {
+            throw new VaultAccessDeniedError(
+                "operation requires role={$minRole}, caller has role={$callerRole}",
+                requiredRole: $minRole,
+            );
+        }
+        return $grant;
+    }
+
+    /**
+     * Resolve the caller's device id from the X-Device-ID header. Vault
+     * endpoints already validated the credentials in ``requireVaultAuth``;
+     * this is the small helper that lets controllers pass the id into
+     * ``requireRole`` without repeating the $_SERVER lookup.
+     */
+    public static function callerDeviceId(): string
+    {
+        return (string)($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
     }
 }

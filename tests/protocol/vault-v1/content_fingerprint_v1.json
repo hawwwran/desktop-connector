@@ -1,0 +1,26 @@
+[
+  {
+    "name": "content-fingerprint-v1-happy-path",
+    "description": "Per-vault keyed file fingerprint (formats §10.2). HKDF info `dc-vault-v1/content-fingerprint`; fingerprint is base64 of HMAC-SHA256(subkey, plaintext_sha256).",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "plaintext_sha256": "a7d9485441fe31a3290992bbf439f4735c65b08904379bc0c490d6cb8758e9b4"
+    },
+    "expected": {
+      "subkey": "515d3191fa21e9539a5966a9da97f7af73e73e904858271119b974927809dffd",
+      "fingerprint_b64": "EpEQtDHap4nA5WvCIORKXDHC3n9YnjQ1Okm+pojAFOM="
+    }
+  },
+  {
+    "name": "content-fingerprint-v1-empty-plaintext",
+    "description": "Empty-file plaintext_sha256 (e3b0c4...) still produces a stable fingerprint that's recognisable across implementations.",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "plaintext_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "expected": {
+      "subkey": "515d3191fa21e9539a5966a9da97f7af73e73e904858271119b974927809dffd",
+      "fingerprint_b64": "YCmW8gBSat09KRJNevcslA6KqDL+sXUc0ZtRI0CuzZc="
+    }
+  }
+]

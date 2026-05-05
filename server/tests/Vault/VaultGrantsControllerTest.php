@@ -69,16 +69,17 @@ final class VaultGrantsControllerTest extends TestCase
             self::ADMIN_DEVICE, self::NOW,
         );
 
-        // Seed an admin grant for ADMIN_DEVICE — the create call doesn't
-        // do this implicitly today, but T13's flow needs it before any
-        // grant endpoint will accept calls.
+        // Seed an admin grant for ADMIN_DEVICE and a sync grant for the
+        // non-admin device — VaultController::create auto-inserts the
+        // creator's admin grant in production, but this fixture seeds
+        // the vault directly via the repo so it has to do the same.
         (new VaultDeviceGrantsRepository($this->db))->insertGrant(
-            'dg_v1_seed_admin0000000000000',
+            'gr_v1_seedadmin000000000000aa',
             self::VAULT_ID, self::ADMIN_DEVICE, 'Admin Desktop', 'admin',
             self::ADMIN_DEVICE, 'create', self::NOW,
         );
         (new VaultDeviceGrantsRepository($this->db))->insertGrant(
-            'dg_v1_seed_nonadmin000000000000',
+            'gr_v1_seedsync0000000000000bb',
             self::VAULT_ID, self::NON_ADMIN_DEVICE, 'Sync Desktop', 'sync',
             self::ADMIN_DEVICE, 'create', self::NOW,
         );
@@ -368,6 +369,104 @@ final class VaultGrantsControllerTest extends TestCase
             fn() => VaultGrantsController::listDeviceGrants(
                 $this->db,
                 $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+            ),
+            'vault_access_denied', 403,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Auth shape — claim/poll-as-claimant DO NOT require vault auth (§8.2/§8.3)
+    // ------------------------------------------------------------------
+
+    public function test_claim_works_without_vault_auth(): void
+    {
+        // Admin creates the join request.
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        // Claimant device with no vault-auth header — still claims successfully.
+        $_SERVER['HTTP_X_DEVICE_ID'] = self::CLAIMANT_DEVICE;
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . self::CLAIMANT_TOKEN;
+        unset($_SERVER['HTTP_X_VAULT_AUTHORIZATION']);
+
+        $resp = $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'claimant_pubkey' => base64_encode(random_bytes(32)),
+                    'device_name' => 'Fresh Claimant',
+                ])),
+        ));
+        self::assertSame(200, $resp['status']);
+        self::assertSame('claimed', $resp['json']['data']['state']);
+        self::assertSame(self::CLAIMANT_DEVICE, $resp['json']['data']['claimant_device_id']);
+    }
+
+    public function test_claimant_polls_without_vault_auth(): void
+    {
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        $this->setAuth(self::CLAIMANT_DEVICE, self::CLAIMANT_TOKEN);
+        $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'claimant_pubkey' => base64_encode(random_bytes(32)),
+                    'device_name' => 'Fresh Claimant',
+                ])),
+        ));
+
+        // Drop the vault-auth header — claimant device polls and still succeeds.
+        unset($_SERVER['HTTP_X_VAULT_AUTHORIZATION']);
+        $resp = $this->invoke(fn() => VaultGrantsController::getJoinRequest(
+            $this->db,
+            $this->ctx('GET', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId]),
+        ));
+        self::assertSame(200, $resp['status']);
+        self::assertSame('claimed', $resp['json']['data']['state']);
+        self::assertSame(self::CLAIMANT_DEVICE, $resp['json']['data']['claimant_device_id']);
+    }
+
+    public function test_non_claimant_non_admin_cannot_poll(): void
+    {
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        $this->setAuth(self::CLAIMANT_DEVICE, self::CLAIMANT_TOKEN);
+        $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'claimant_pubkey' => base64_encode(random_bytes(32)),
+                    'device_name' => 'Fresh Claimant',
+                ])),
+        ));
+
+        // A non-admin device that's not the claimant — even with vault auth — gets 403.
+        $this->setAuth(self::NON_ADMIN_DEVICE, self::NON_ADMIN_TOKEN);
+        $this->expectVaultError(
+            fn() => VaultGrantsController::getJoinRequest(
+                $this->db,
+                $this->ctx('GET', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId]),
             ),
             'vault_access_denied', 403,
         );

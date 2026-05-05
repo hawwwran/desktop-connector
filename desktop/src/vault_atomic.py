@@ -43,16 +43,23 @@ DEFAULT_MAX_AGE_S = 24 * 60 * 60  # §gaps §11
 _TEMP_FILENAME_RE = re.compile(r"\.dc-temp-[0-9a-f]{1,64}$")
 
 
-def atomic_write_file(destination: Path, data: bytes) -> int:
+def atomic_write_file(destination: Path, data: bytes, *, mode: int | None = None) -> int:
     """Power-loss-safe write of ``data`` to ``destination``.
 
     Returns the byte count actually written (always ``len(data)`` on
-    success).
+    success). When ``mode`` is provided it's chmod'd onto the temp file
+    BEFORE the atomic rename so callers don't see a brief 0o644 window
+    on secret material.
     """
-    return atomic_write_chunks(destination, (data,))
+    return atomic_write_chunks(destination, (data,), mode=mode)
 
 
-def atomic_write_chunks(destination: Path, chunks: Iterable[bytes]) -> int:
+def atomic_write_chunks(
+    destination: Path,
+    chunks: Iterable[bytes],
+    *,
+    mode: int | None = None,
+) -> int:
     """Stream ``chunks`` into ``destination`` via a sibling temp file.
 
     Sequence:
@@ -60,8 +67,10 @@ def atomic_write_chunks(destination: Path, chunks: Iterable[bytes]) -> int:
     1. ``mkdir -p`` the parent directory.
     2. Open ``<dest>.dc-temp-<uuid>`` exclusively.
     3. Write each chunk, ``flush()`` + ``fsync()`` so the bytes hit disk.
-    4. ``os.replace(tmp, dest)`` (atomic rename even if ``dest`` exists).
-    5. ``fsync()`` the parent directory so the rename itself is durable.
+    4. (optional) ``chmod`` the temp file to ``mode`` so the eventual
+       rename target carries the requested permissions atomically.
+    5. ``os.replace(tmp, dest)`` (atomic rename even if ``dest`` exists).
+    6. ``fsync()`` the parent directory so the rename itself is durable.
 
     On any error the temp file is unlinked.
     """
@@ -78,6 +87,8 @@ def atomic_write_chunks(destination: Path, chunks: Iterable[bytes]) -> int:
                 written += len(chunk)
             fh.flush()
             os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, destination)
         fsync_dir(destination.parent)
         return written

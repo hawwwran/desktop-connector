@@ -785,9 +785,11 @@ def _genesis_fingerprint_hex(master_key: bytes) -> str:
 
 
 def _canonical_json(obj: dict) -> bytes:
-    """RFC 8785-ish canonical JSON. Good enough for the test stack —
-    real RFC 8785 lib is added when an actual cross-platform JSON
-    interop case lands."""
+    """v1 stdlib-canonical JSON (formats §17): sorted keys, `(,:)`
+    separators, default ASCII-only `\\uXXXX` escaping for non-ASCII.
+    Strict subset of RFC 8785; chosen so the desktop and a PHP/etc.
+    re-implementer can round-trip without an external library. v1
+    plaintext uses no floats — see formats §17."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 

@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Protocol
 
 log = logging.getLogger(__name__)
 
+from .vault_atomic import atomic_write_file
 from .vault_crypto import (
     aead_encrypt,
     build_chunk_aad,
@@ -159,15 +160,9 @@ def default_upload_resume_dir() -> Path:
 def save_session(session: UploadSession, cache_dir: Path) -> Path:
     """Atomically write the session JSON to ``<cache_dir>/<session_id>.json``."""
     cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     target = cache_dir / f"{session.session_id}.json"
-    tmp = target.with_suffix(target.suffix + ".dc-temp")
     payload = json.dumps(session.to_json(), separators=(",", ":")).encode("utf-8")
-    with open(tmp, "wb") as fh:
-        fh.write(payload)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, target)
+    atomic_write_file(target, payload)
     return target
 
 

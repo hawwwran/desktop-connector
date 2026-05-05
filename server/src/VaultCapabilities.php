@@ -39,15 +39,15 @@ class VaultCapabilities
 
     /**
      * Bits that don't gate the aggregate but should appear in the list
-     * when their backing phase has landed. Future T-phases append here:
-     *   T7  → 'vault_soft_delete_v1'
-     *   T8  → 'vault_export_v1'
-     *   T9  → 'vault_migration_v1'
-     *   T13 → 'vault_grant_qr_v1'
-     *   T14 → 'vault_purge_v1'
+     * when their backing phase has landed. Order matches the spec
+     * (`docs/protocol/vault-v1.md` §1) for stable wire output.
      */
     private const POST_T1_BITS = [
-        'vault_grant_qr_v1',
+        'vault_soft_delete_v1', // T7
+        'vault_export_v1',      // T8
+        'vault_migration_v1',   // T9
+        'vault_grant_qr_v1',    // T13
+        'vault_purge_v1',       // T14
     ];
 
     /**

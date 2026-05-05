@@ -58,6 +58,7 @@ carefully.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import unicodedata
@@ -440,8 +441,10 @@ def derive_content_fingerprint_key(master_key: bytes) -> bytes:
     upload pipeline can short-circuit and PUT zero new chunks. Different
     vaults produce different fingerprints for identical bytes — the
     fingerprint never leaks plaintext-level identity outside the vault.
+
+    HKDF info matches formats §10.2 / §4.2 (``dc-vault-v1/content-fingerprint``).
     """
-    return derive_subkey("dc-vault-v1/content-fp", bytes(master_key))
+    return derive_subkey("dc-vault-v1/content-fingerprint", bytes(master_key))
 
 
 def make_chunk_id(
@@ -505,11 +508,13 @@ def make_chunk_nonce(
 
 
 def make_content_fingerprint(content_fp_key: bytes, plaintext_sha256: bytes) -> str:
-    """Keyed file fingerprint, hex string. ``plaintext_sha256`` is the
+    """Keyed file fingerprint, base64 string. ``plaintext_sha256`` is the
     SHA-256 digest of the full file plaintext.
 
     Compared via ``==`` against the fingerprint stored on existing
     versions to short-circuit a redundant upload of identical bytes.
+    Encoding is base64 per formats §10.2 (was hex pre-v1; v1 hasn't
+    shipped, so the change is safe).
     """
     if len(plaintext_sha256) != 32:
         raise ValueError("plaintext_sha256 must be 32 bytes")
@@ -518,7 +523,7 @@ def make_content_fingerprint(content_fp_key: bytes, plaintext_sha256: bytes) -> 
         plaintext_sha256,
         hashlib.sha256,
     ).digest()
-    return digest.hex()
+    return base64.b64encode(digest).decode("ascii")
 
 
 # ---------------------------------------------------------------- Header AAD + envelope (formats §6.3, §9)

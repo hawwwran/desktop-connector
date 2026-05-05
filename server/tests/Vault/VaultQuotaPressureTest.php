@@ -60,6 +60,15 @@ final class VaultQuotaPressureTest extends TestCase
             self::DEVICE_ID, self::NOW
         );
 
+        // §D11 role gate — the test seeds the vault directly, so add the
+        // matching admin grant by hand (production goes through
+        // VaultController::create which auto-inserts it).
+        (new VaultDeviceGrantsRepository($this->db))->insertGrant(
+            'gr_v1_quotaadmin0000000000000a',
+            self::VAULT_ID, self::DEVICE_ID, 'Quota Test Admin', 'admin',
+            self::DEVICE_ID, 'create', self::NOW,
+        );
+
         // Tighten the quota for this test only.
         $this->db->execute(
             'UPDATE vaults SET quota_ciphertext_bytes = :q WHERE vault_id = :id',

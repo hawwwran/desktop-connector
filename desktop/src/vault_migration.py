@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from .vault_atomic import atomic_write_file
+
 
 MigrationState = Literal[
     "idle",
@@ -122,14 +124,8 @@ def save_state(record: MigrationRecord, config_dir: Path) -> None:
     "state persisted before every transition").
     """
     path = default_state_path(config_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".dc-temp")
     payload = json.dumps(record.to_json(), separators=(",", ":")).encode("utf-8")
-    with open(tmp, "wb") as fh:
-        fh.write(payload)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    atomic_write_file(path, payload)
 
 
 def clear_state(config_dir: Path) -> None:

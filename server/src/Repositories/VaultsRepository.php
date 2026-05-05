@@ -217,6 +217,36 @@ class VaultsRepository
     }
 
     /**
+     * Atomic quota reservation. Combines the size check + counter bump into
+     * a single conditional UPDATE so concurrent chunk uploads can't each
+     * pass a TOCTOU preflight and overrun the cap. Returns true when the
+     * reservation succeeded (used + chunk_count both bumped); false when
+     * the new total would exceed `quota_ciphertext_bytes` and nothing was
+     * written. Caller must already be inside a writer transaction so the
+     * disk-write/rollback flow stays consistent with the row state.
+     */
+    public function reserveCiphertextBytes(
+        string $vaultId,
+        int $size,
+        int $now
+    ): bool {
+        $this->db->execute(
+            'UPDATE vaults
+                SET used_ciphertext_bytes = used_ciphertext_bytes + :size,
+                    chunk_count           = chunk_count + 1,
+                    updated_at            = :now
+              WHERE vault_id = :id
+                AND used_ciphertext_bytes + :size <= quota_ciphertext_bytes',
+            [
+                ':size' => $size,
+                ':now'  => $now,
+                ':id'   => $vaultId,
+            ]
+        );
+        return $this->db->changes() === 1;
+    }
+
+    /**
      * Stamp the vault as migrated to a new relay (T0 §H2). After this
      * returns true, the vault is read-only on this relay — every subsequent
      * write should be rejected with 409 vault_migration_in_progress

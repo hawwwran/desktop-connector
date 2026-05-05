@@ -19,7 +19,7 @@ When this document disagrees with [T0 §"Implementation clarifications"](../plan
 | Base32 alphabet | **RFC 4648** standard alphabet (A–Z, 2–7), padding **stripped**. Lowercase for chunk and other random IDs; uppercase for human-displayed Vault IDs. Decoders accept both cases case-insensitively. |
 | Base64 alphabet | **RFC 4648 §4** (with `+`/`/`), padding **kept**. Used in JSON wire payloads. |
 | Hex | Lowercase, no separators. SHA-256 → 64 hex chars. Device IDs → 32 hex chars (per `protocol.md` §3.4). |
-| JSON canonical form | **RFC 8785 (JCS)** — sorted keys, no insignificant whitespace, fixed number formatting. Required wherever JSON is hashed or AEAD-encrypted, so identical inputs produce bit-identical ciphertexts across implementations. |
+| JSON canonical form | v1 **stdlib-canonical JSON** — sorted keys, `(,:)` separators, ASCII-only `\uXXXX` escaping for non-ASCII, no float fields. Strict subset of RFC 8785; see §17 for the rationale. |
 | CBOR canonical form | **RFC 8949 §4.2.1** ("Core Deterministic Encoding"). Required for the export bundle (§16). |
 | Timestamps in plaintext | RFC 3339 with millisecond precision, UTC (e.g. `2026-05-02T10:30:00.000Z`). The `created_at` int form (Unix epoch seconds) is **not** used in v1 vault structures; we use RFC 3339 strings everywhere except the existing transfer pipeline. |
 
@@ -158,6 +158,9 @@ All labels are the literal UTF-8 string. Never trim, never re-case.
 | `k_device_grant_wrap` | `dc-vault-v1/device-grant-wrap` | Wrap key for device-grant material (§14). Derived from the QR X25519 shared secret. |
 | `k_recovery_wrap` | `dc-vault-v1/recovery-wrap` | Wrap key for the recovery envelope (§12). Derived from Argon2id output + recovery secret. |
 | `k_export_wrap` | `dc-vault-v1/export-wrap` | Wrap key for the export bundle's wrapped key envelope (§16). Derived from Argon2id output of the export passphrase. |
+| `k_chunk_id` | `dc-vault-v1/chunk-id` | HMAC key for keyed chunk-id derivation (T6.5 idempotent resume). Per-vault, derived from `vault_master_key`. |
+| `k_chunk_nonce` | `dc-vault-v1/chunk-nonce` | HMAC key for deterministic chunk-nonce derivation (T6.5). Re-encrypting the same plaintext under the same `(file_version_id, chunk_index)` produces a byte-identical envelope. |
+| `k_content_fp` | `dc-vault-v1/content-fingerprint` | HMAC key for keyed file content fingerprints (§10.2, §A7). Used to detect "this upload's bytes match an existing version" without round-tripping plaintext outside the vault. |
 
 Future versions add labels under the same `dc-vault-v1/...` namespace; renaming or repurposing existing labels is forbidden.
 
@@ -374,6 +377,7 @@ Notes:
 
 - `vault_id` here is the wire form (no dashes, uppercase) so it round-trips cleanly through canonical JSON.
 - `recovery_envelopes` is a list because v1 may carry multiple envelopes if the user re-runs recovery setup (e.g., after a passphrase change in v1.5+). v1 always writes exactly one entry on `POST /api/vaults` and never mutates this list — passphrase rotation is v1.5.
+- `recovery_envelopes` here is an **informational duplicate**; the authoritative copy lives in the recovery kit file (§12.5). Cold recovery on a fresh device needs the kit-side copy because reading this list requires the master key, and the master key is only obtainable by unwrapping a recovery envelope. Paired devices already hold the master key and use either source interchangeably.
 - `manifest_format_version` is **echoed** here for fast-failure on opening — clients can refuse the vault before any manifest fetch if they don't support the version. The authoritative copy lives in each manifest envelope's plaintext header (§10.1).
 
 ### 9.3 AEAD parameters
@@ -657,6 +661,12 @@ created_at: 2026-05-02T10:00:00.000Z
 recovery_secret: <base32, 56 chars without padding>
 vault_access_secret: <URL-safe base64; the X-Vault-Authorization bearer>
 argon_params: argon2id-v1
+recovery_envelope_id: <30-byte ASCII ID, rk_v1_…>
+recovery_argon_salt: <base64, 16 bytes>
+recovery_argon_memory_kib: 131072
+recovery_argon_iterations: 4
+recovery_envelope_nonce: <base64, 24 bytes>
+recovery_envelope_ciphertext: <base64, 48 bytes (master key + tag)>
 ```
 
 Format: UTF-8, LF line endings, key/value pairs after a `# …` comment block. The lines starting with `#` are required for human readability and are skipped by parsers.
@@ -667,8 +677,9 @@ Field summary:
 - `recovery_secret` — 32 bytes encoded as 56 base32 chars (RFC 4648, lowercase, no padding). Decoders accept upper- or lowercase, with or without spacing. Mixed with the user's passphrase via Argon2id + HKDF (§12.3) to derive the master-key wrap key.
 - `vault_access_secret` — bearer for `X-Vault-Authorization` (§2). A new device cannot fetch the encrypted header from the relay without it. Stored URL-safe-base64 as written by `secrets.token_urlsafe(32)` on the desktop; the relay only sees `SHA-256(vault_access_secret)` (§2 / §15).
 - `argon_params` — version tag for the Argon2id parameter set; `argon2id-v1` resolves to (m=131 072 KiB, t=4, p=1).
+- `recovery_envelope_id`, `recovery_argon_salt`, `recovery_argon_memory_kib`, `recovery_argon_iterations`, `recovery_envelope_nonce`, `recovery_envelope_ciphertext` — the recovery envelope (§12.4) and the Argon2id parameters that derived `k_recovery_wrap` (§12.3). These let a fresh device unwrap the master key purely from the kit + passphrase, without first needing the encrypted header. Without them the kit + passphrase alone can't open the vault: the encrypted header carries the same envelope (§9.2 `recovery_envelopes`) but a new device needs the master key to decrypt the header — a chicken-and-egg the kit-side copy resolves. Older kits without these fields are still usable for **opening** on a paired device (master key already in the keyring) but not for **cold recovery** on a fresh device.
 
-Why the kit must contain both `recovery_secret` AND `vault_access_secret`: recovery on a fresh device needs (a) the relay-fetch capability (the access secret) and (b) the second-factor for unwrapping the master key (the recovery secret). Without the access secret, the new device can't reach the encrypted header at all; without the recovery secret, even with the header in hand, the master key stays sealed. **Stealing the kit alone doesn't yield the master key — Argon2id makes brute-forcing the passphrase expensive even when the kit is in the attacker's hands** (§12.3). Stealing the relay's bytes alone yields nothing; the relay never sees a kit file.
+Why the kit must contain `recovery_secret`, `vault_access_secret`, AND the envelope copy: recovery on a fresh device needs (a) the relay-fetch capability (the access secret) and (b) the master key, which requires unwrapping the recovery envelope under `k_recovery_wrap`. The kit's envelope copy makes that unwrap possible offline; if the relay header were the only source, you'd need master-key access to read the recovery envelope that yields the master key. Without the access secret a recovered device can't fetch chunks; without the recovery secret + passphrase the envelope stays sealed. **Stealing the kit alone doesn't yield the master key — Argon2id makes brute-forcing the passphrase expensive even when the kit is in the attacker's hands** (§12.3). Stealing the relay's bytes alone yields nothing; the relay never sees a kit file.
 
 The QR-render of the kit (post-v1.5) encodes the same fields as the file. The passphrase is **never** in the file or the QR.
 
@@ -768,9 +779,12 @@ device_grant_envelope := format_version_u8        # 1 byte (0x01)
   "approved_role": "sync",
   "granted_by_device_id": "<32 hex>",
   "granted_at": "2026-05-02T10:05:00.000Z",
-  "vault_master_key": "<base64, 32 bytes>"
+  "vault_master_key": "<base64, 32 bytes>",
+  "vault_access_secret": "<URL-safe base64 — v1 extension>"
 }
 ```
+
+`vault_access_secret` is a **v1 extension** over the formats spec's original 8 fields. Recovery on a fresh device needs both the master key (for AEAD operations) and the access secret (for `X-Vault-Authorization`); transferring both inside the wrapped grant lets the claimant write to the vault immediately after `/approve` returns. The relay never sees this field — it stays AEAD-sealed end-to-end.
 
 ### 14.3 AEAD parameters
 
@@ -807,7 +821,9 @@ Created at `POST /api/vaults`. Rotation in T13 (§8.7 of vault-v1.md): atomic si
 
 ## 16. Export bundle
 
-Streamable, self-contained protected backup of a vault. Per T0 §A10: outer envelope + AEAD-streamed body of CBOR records + footer.
+Streamable, self-contained protected backup of a vault. Per T0 §A10: outer envelope + AEAD-streamed body of records + footer.
+
+> **v1 framing note.** T0 §A10 was authored with CBOR Core Deterministic Encoding in mind. The v1 desktop ships with a stdlib-only fixed-width framing instead so we don't pull in `cbor2` for a single-purpose write/read path. The framing is byte-deterministic and AEAD-bound just as a CBOR-framed alternative would be. v1.5 may upgrade to CBOR per the original §A10 once a real cross-implementer interop case appears; the upgrade flips a `format_version` bump so v1 bundles still round-trip on the older reader.
 
 ### 16.1 Outer envelope
 
@@ -864,19 +880,24 @@ Failure to decrypt → `vault_export_passphrase_invalid` (per T0 error table).
 After the wrapped key, the file contains a sequence of records, in order, ending with a footer:
 
 ```text
-record_on_disk := ciphertext_length_be32                  # 4 bytes
-               ‖ record_aead_ciphertext_and_tag           # ciphertext_length bytes
+record_on_disk := record_byte_length_be32                # 4 bytes — total length of (nonce + ciphertext+tag)
+               ‖ record_nonce                             # 24 bytes (per-record random nonce, stored)
+               ‖ record_aead_ciphertext_and_tag           # variable
 ```
 
-The reader reads 4 bytes, then `length` bytes, AEAD-decrypts, parses the resulting CBOR, repeats until the parsed record has `record_type == 6` (footer).
+The reader reads 4 bytes, then `record_byte_length` more bytes (split as 24-byte nonce + variable ciphertext+tag), AEAD-decrypts, walks the inner plaintext frame, and repeats until the parsed record has `record_type == 6` (footer).
+
+Inner plaintext frame:
+
+```text
+record_inner := record_type_u8                          # 1 byte
+             ‖ inner_payload_length_be32                # 4 bytes
+             ‖ inner_payload                             # inner_payload_length bytes
+```
 
 Per-record AEAD parameters:
 
 ```text
-record_index         := 0-based record sequence number; index 0 is the first record AFTER the wrapped key
-record_nonce_i       := outer_nonce XOR le_uint64_padded(record_index + 1)
-                        # XOR'd into the low 8 bytes of the 24-byte nonce; high 16 bytes unchanged
-
 aad_export_record_i  := utf8("dc-vault-export-record-v1")    # 25 bytes
                       ‖ vault_id_bytes                         # 12 bytes
                       ‖ record_index_be32                      # 4 bytes
@@ -885,103 +906,80 @@ aad_export_record_i  := utf8("dc-vault-export-record-v1")    # 25 bytes
 
 ciphertext_i         := AEAD-XChaCha20-Poly1305(
                           key = export_file_key,
-                          nonce = record_nonce_i,
-                          plaintext = canonical_cbor(record_payload),
+                          nonce = record_nonce,                # stored, not derived
+                          plaintext = record_inner,
                           aad = aad_export_record_i
                         )
 ```
 
-Where `record_payload` is a 3-element CBOR array per T0 §A10:
-
-```cbor
-[record_type: uint, payload_length: uint, payload: bytes]
-```
+`record_index` is the 0-based record sequence number; index 0 is the first record AFTER the wrapped key. The AAD binds the record to its position so a reader cannot reorder records without breaking AEAD verification.
 
 `record_type` values:
 
 | value | name | payload structure |
 |:---:|---|---|
-| `1` | `export_header` | CBOR map (§16.4) |
-| `2` | `bundle_index` | CBOR map (§16.5) |
+| `1` | `export_header` | UTF-8 JSON (§16.4) — canonical per §17. |
+| `2` | `bundle_index` | reserved for v1.5; v1 writers do not emit it, v1 readers ignore it if encountered. |
 | `3` | `manifest` | bytes — exact manifest envelope from §10.1 |
-| `4` | `op_log_segment` | bytes — exact op-log-segment envelope from §10.4 |
-| `5` | `chunk` | CBOR map (§16.6) |
-| `6` | `footer` | CBOR map (§16.7) — closes the stream |
+| `4` | `op_log_segment` | reserved for v1.5; v1 writers do not emit it (op-log archives ship in-manifest). |
+| `5` | `chunk` | bytes — `chunk_id_ascii(30)` followed by exact chunk envelope from §11.1. |
+| `6` | `footer` | bytes — see §16.7 |
 
-`payload_length` MUST equal the length of `payload` bytes (used as a redundant sanity check by readers).
+`inner_payload_length` MUST equal the length of `inner_payload` bytes (used as a redundant sanity check by readers).
 
-### 16.4 export_header payload (CBOR map)
+### 16.4 export_header payload (UTF-8 JSON)
 
-```text
+```json
 {
   "schema": "dc-vault-export-v1",
   "vault_id": "ABCD2345WXYZ",
-  "vault_genesis_fingerprint": h'<16 bytes>',
-  "created_at": "2026-05-02T10:00:00.000Z",
-  "source_relay_url": "https://old.example.com",
-  "export_type": "full_vault",
-  "header_revision": 5,
-  "manifest_count": 12,
-  "chunk_count": 12483,
-  "op_log_segment_count": 2,
-  "ciphertext_byte_total": 8589934592,
-  "argon_params": {
-    "memory_kib": 131072,
-    "iterations": 4,
-    "parallelism": 1
-  }
+  "manifest_revision": 5,
+  "format_version": 1,
+  "exported_at": "2026-05-02T10:00:00.000Z"
 }
 ```
 
-The plaintext genesis fingerprint here is an aid to the import preview (T0 §gaps §17). The `argon_params` are **mirrored** from the outer header so the import code can show them in the preview without re-parsing the outer header.
+Canonicalized per §17. The reader does **not** trust this payload for crypto decisions — it's preview-grade metadata used to populate the import wizard's confirmation screen (T0 §gaps §17).
 
-### 16.5 bundle_index payload (CBOR map)
+### 16.5 bundle_index payload (reserved)
+
+Reserved for v1.5. v1 writers do not emit this record. v1 readers see record_type=2, decrypt, and ignore the contents — preserving AEAD integrity without committing to a structure.
+
+### 16.6 chunk payload (bytes)
+
+The inner payload for a `chunk` record is the literal bytes:
 
 ```text
-{
-  "entries": [
-    {"chunk_id": "ch_v1_…", "ciphertext_size": 2097168, "hash": h'<32 bytes sha-256>', "stream_offset": 12345678},
-    …
-  ]
-}
+chunk_id_ascii (30 bytes) ‖ chunk_envelope (variable, formats §11.1)
 ```
 
-`stream_offset` is the byte offset (from the **start of the file**) where the matching `chunk` record's `record_on_disk` header begins. Used for resumable import: a reader can hash-verify a specific chunk without traversing the full stream linearly.
+The 30-byte ASCII chunk_id at offset 0 lets the reader recover the chunk's identity without re-deriving the keyed chunk-id (which would require the master key). The envelope bytes are the exact response that `GET /api/vaults/{id}/chunks/{chunk_id}` would return on the source relay.
 
-### 16.6 chunk payload (CBOR map)
+> **v1 verifiability gap.** v1 omits the per-chunk SHA-256 hash from the bundle (T0 §A10 expected one). The chunk's identity is still cryptographically pinned by the AAD-bound `chunk_id` plus the manifest's `chunks[*].chunk_id` reference, and the chunk envelope's own AEAD verifies on import. v1.5 adds an explicit `hash` field once it lands in `bundle_index` so per-chunk `hash == sha256(envelope_bytes)` verification is callable without decrypting the manifest.
+
+### 16.7 footer payload (bytes)
 
 ```text
-{
-  "chunk_id": "ch_v1_…",
-  "ciphertext_size": 2097168,
-  "hash": h'<32 bytes sha-256>',
-  "envelope": h'<chunk_envelope bytes per §11.1>'
-}
+footer_payload := overall_hash (32 bytes, SHA-256)
+               ‖ predecessor_record_count_be32 (4 bytes)
+                                                   # ───────────
+                                                   # total: 36 bytes
 ```
 
-`envelope` is the exact bytes that `GET /api/vaults/{id}/chunks/{chunk_id}` would return on the source relay. The hash covers the envelope bytes.
+`overall_hash` is the SHA-256 over each preceding record's on-disk bytes (the `record_byte_length_be32 || nonce || ciphertext+tag` triple, in order). It does NOT include the outer header / wrapped-key prefix — the magic-bytes check at file open already covers those.
 
-### 16.7 footer payload (CBOR map)
-
-```text
-{
-  "schema": "dc-vault-export-footer-v1",
-  "record_count": 12498,                             # total records, including this footer (= records before footer + 1)
-  "overall_hash": h'<32 bytes sha-256>'              # SHA-256 of every byte from the start of the file through the byte
-                                                     # immediately before this footer record's `ciphertext_length_be32` field
-}
-```
+`predecessor_record_count_be32` is the count of records preceding the footer (so a v1 bundle with header + manifest + N chunks + footer has `predecessor_record_count == 2 + N`).
 
 ### 16.8 Verification on import
 
 After AEAD-decrypting each record, the reader:
 
-1. Verifies the inner CBOR `payload_length` matches the actual payload bytes length.
-2. For `chunk` records: verifies `hash == sha256(envelope_bytes)` and `ciphertext_size == len(envelope_bytes)`.
-3. For `manifest` / `op_log_segment` records: verifies the corresponding envelope's AEAD with the vault's master key (post-import, after the user supplied the recovery material to unlock the vault on the target side).
-4. Footer: re-computes `overall_hash` over the file prefix and verifies. Mismatch → `vault_export_tampered` with `details.section = "footer"`.
+1. Verifies the inner `inner_payload_length` matches the actual payload bytes length.
+2. For `manifest` records: verifies the corresponding envelope's AEAD with the vault's master key (post-import, after the user supplied the recovery material to unlock the vault on the target side).
+3. For `chunk` records: AEAD-verifies the chunk envelope on import (§11.1) — failure surfaces as `vault_chunk_tampered` rather than a bundle-level error.
+4. Footer: re-computes `overall_hash` over each preceding record's on-disk bytes and verifies. Count must equal the actual number of records before the footer. Mismatch → `vault_export_tampered` with `details.section = "footer"`.
 
-Any AEAD failure during streaming → `vault_export_tampered` with `details.section ∈ {"envelope", "header", "manifest", "chunk", "index", "footer"}`.
+Any AEAD failure during streaming → `vault_export_tampered` with `details.section ∈ {"envelope", "header", "manifest", "chunk", "footer"}`.
 
 ### 16.9 Resumability
 
@@ -993,20 +991,27 @@ The writer's checkpoint file at `~/.cache/desktop-connector/vault/exports/<sessi
 
 ## 17. JSON canonicalization
 
-All JSON used as AEAD plaintext or as input to a hash MUST be produced and parsed using **RFC 8785 JSON Canonicalization Scheme (JCS)**. Concretely:
+All JSON used as AEAD plaintext or as input to a hash MUST round-trip byte-exactly across implementations. v1 ships a **stdlib-only** profile so neither the desktop nor the server needs an extra canonicalization library; the rules are a strict subset of RFC 8785 (JCS) and trade JCS-perfect Unicode handling for predictable outputs from `json.dumps` (Python) and `json_encode` (PHP).
+
+Concretely:
 
 - UTF-8 encoded; no UTF-8 BOM.
-- Keys in **lexicographic order** of their UTF-16 code units (the default JCS rule).
+- Keys in **lexicographic order** of their UTF-16 code units (the JCS rule). Both stdlib encoders match for keys in the BMP, which covers every key in this spec.
 - No insignificant whitespace between tokens.
-- Numbers use the JCS `JSON.stringify` rules (integers render with no fractional part; floats use the shortest round-trippable IEEE 754 representation).
-- Strings use the JSON.stringify-style `\uXXXX` escapes for control characters; printable Unicode is left as raw UTF-8 bytes.
+- Object/array separators are `","` and `":"` (no surrounding spaces) — Python `json.dumps(separators=(",", ":"))`, PHP `JSON_UNESCAPED_SLASHES` with default separators.
+- All non-ASCII characters in strings are emitted as `\uXXXX` escapes — Python's `ensure_ascii=True` (the default) and PHP's `JSON_HEX_*` flags both produce identical bytes here. JCS keeps printable Unicode as raw UTF-8; v1 deliberately diverges so the stdlib encoders agree.
+- Forward slashes are NOT escaped (`json.dumps` doesn't; PHP requires `JSON_UNESCAPED_SLASHES`).
+- Numbers: integers render as their decimal form. v1 plaintext uses no floats — every numeric field is an integer (revisions, sizes, byte counts, epoch seconds). If a future field needs a float, the spec MUST be revised before it lands.
+- Boolean / null tokens render as `true`, `false`, `null`.
 
-Implementation pointers:
+Implementation:
 
-- Python: `pip install rfc8785` (or use the pure-stdlib alternative documented in `desktop/src/vault_crypto.py`).
-- PHP: vendor the small canonical-encoder in `server/src/Crypto/JsonCanonical.php`.
+- Python: `json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")` (see `desktop/src/vault.py:_canonical_json`).
+- PHP: `json_encode($obj, JSON_UNESCAPED_SLASHES)` after recursive key-sort. The relay never canonicalizes today (it stores opaque ciphertexts) but `server/src/Crypto/JsonCanonical.php` lands when needed.
 
-A second implementer can swap in any RFC-8785-compliant library; round-trip vectors at `tests/protocol/vault-v1/manifest_v1.json` enforce byte-exact match.
+Why the divergence from JCS: v1 has one client (desktop). A second implementer following this spec exactly reproduces the desktop's bytes without an external dependency. v1.5 may upgrade to RFC-8785-perfect canonicalization once a real cross-platform need surfaces (Android Vault); the upgrade is gated on a `manifest_format_version` bump so old vaults still round-trip.
+
+Round-trip vectors at `tests/protocol/vault-v1/*.json` ship pre-canonicalized plaintext bytes, so vector tests don't depend on which canonicalizer the runtime uses.
 
 ## 18. CBOR canonicalization
 

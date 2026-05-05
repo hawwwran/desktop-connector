@@ -75,14 +75,18 @@ final class HealthCapabilitiesIntegrationTest extends TestCase
     public function test_health_emits_no_vault_bits_for_transfer_only_relay(): void
     {
         // Simulate a relay that hasn't wired any vault endpoints by
-        // disabling the entire T1 surface.
+        // disabling every advertised bit.
         VaultCapabilities::setDisabled([
             'vault_create_v1',
             'vault_header_v1',
             'vault_manifest_cas_v1',
             'vault_chunk_v1',
             'vault_gc_v1',
+            'vault_soft_delete_v1',
+            'vault_export_v1',
+            'vault_migration_v1',
             'vault_grant_qr_v1',
+            'vault_purge_v1',
         ]);
 
         $resp = $this->invoke(fn() => DeviceController::health(

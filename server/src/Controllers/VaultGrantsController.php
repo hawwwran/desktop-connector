@@ -76,16 +76,7 @@ class VaultGrantsController
 
     private static function requireAdmin(Database $db, string $vaultId, string $deviceId): void
     {
-        $grants = new VaultDeviceGrantsRepository($db);
-        $grant = $grants->getByDevice($vaultId, $deviceId);
-        if ($grant === null || $grant['revoked_at'] !== null) {
-            throw new VaultAccessDeniedError('caller is not a granted device on this vault');
-        }
-        if ((string)$grant['role'] !== 'admin') {
-            throw new VaultAccessDeniedError(
-                "operation requires role=admin, caller has role={$grant['role']}"
-            );
-        }
+        VaultAuthService::requireRole($db, $vaultId, $deviceId, 'admin');
     }
 
     private static function generateId(string $prefix): string
@@ -169,11 +160,17 @@ class VaultGrantsController
     public static function getJoinRequest(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
         $reqId = (string)($ctx->params['req_id'] ?? '');
         if (!preg_match('/^jr_v1_[a-z2-7]{24}$/', $reqId)) {
             throw new VaultInvalidRequestError('malformed join_request_id', 'req_id');
         }
+
+        // Device auth is always required (§8.2). Vault auth is conditional:
+        // either the caller has admin vault auth (admin polling for claim),
+        // or the caller IS the claimant_device_id from a prior §8.3 claim
+        // (claimant polling for approval). The claimant doesn't have the
+        // vault access secret yet — that's the whole point of the QR flow.
+        $callerDevice = VaultAuthService::requireDeviceAuthForCreate($db);
 
         $repo = new VaultJoinRequestsRepository($db);
         $repo->expirePastDue(time());
@@ -182,12 +179,19 @@ class VaultGrantsController
             throw new VaultJoinRequestStateError("unknown join-request: {$reqId}");
         }
 
+        $rowClaimant = (string)($row['claimant_device_id'] ?? '');
+        $callerIsClaimant = $rowClaimant !== '' && $rowClaimant === $callerDevice;
+
+        if (!$callerIsClaimant) {
+            // Admin path: vault-bearer + admin role.
+            VaultAuthService::requireVaultAuth($db, $vaultId);
+            self::requireAdmin($db, $vaultId, $callerDevice);
+        }
+
         // The wrapped grant is *only* visible to the claimant device — it
         // contains the AEAD-wrapped vault material. Other callers see the
         // metadata only.
-        $callerDevice = (string)($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
-        $includeGrant = ($row['claimant_device_id'] ?? '') === $callerDevice
-            && $row['state'] === 'approved';
+        $includeGrant = $callerIsClaimant && $row['state'] === 'approved';
 
         Router::json([
             'ok' => true,
@@ -202,12 +206,13 @@ class VaultGrantsController
     public static function claim(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
         $reqId = (string)($ctx->params['req_id'] ?? '');
         if (!preg_match('/^jr_v1_[a-z2-7]{24}$/', $reqId)) {
             throw new VaultInvalidRequestError('malformed join_request_id', 'req_id');
         }
-        $deviceId = self::deviceIdHeader();
+        // §8.3: device auth only. The join_request_id from the QR is the
+        // per-claim authority — the claimant has no vault auth yet.
+        $deviceId = VaultAuthService::requireDeviceAuthForCreate($db);
 
         $body = $ctx->jsonBody();
         $pubkey = self::decodeBase64Field($body, 'claimant_pubkey', 32);
@@ -287,8 +292,8 @@ class VaultGrantsController
         }
 
         // Insert the post-approval grant so subsequent vault calls from
-        // the claimant device pass the role gate.
-        $grantId = self::generateId('dg_v1_');
+        // the claimant device pass the role gate. Spec §3.3: `gr_v1_`.
+        $grantId = self::generateId('gr_v1_');
         $grants->insertGrant(
             $grantId,
             $vaultId,

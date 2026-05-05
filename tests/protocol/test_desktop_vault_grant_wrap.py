@@ -1,4 +1,8 @@
-"""T13.4 — wrap / unwrap the vault grant payload via X25519 + XChaCha20-Poly1305."""
+"""T13.4 — wrap / unwrap the vault grant payload via X25519 + XChaCha20-Poly1305.
+
+Verifies the spec-correct primitives in ``desktop/src/vault_grant_wrap.py``
+match the formats §13.5 / §14 envelope, AAD, and plaintext schema.
+"""
 
 from __future__ import annotations
 
@@ -18,19 +22,28 @@ from src.vault_grant_wrap import (  # noqa: E402
 )
 
 
+VAULT_ID = "ABCD2345WXYZ"
+GRANT_ID = "gr_v1_aaaaaaaaaaaaaaaaaaaaaaaa"  # gr_v1_ + 24 base32 lowercase
+ADMIN_DEVICE_ID = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+CLAIMANT_DEVICE_ID = "ffeeddccbbaa99887766554433221100"
+
+
 def _keypair():
     from nacl.public import PrivateKey
     priv = PrivateKey.generate()
     return bytes(priv), bytes(priv.public_key)
 
 
-def _sample_payload() -> GrantPayload:
+def _sample_payload(*, role: str = "sync") -> GrantPayload:
     return GrantPayload(
+        vault_id=VAULT_ID,
+        grant_id=GRANT_ID,
+        claimant_device_id=CLAIMANT_DEVICE_ID,
+        approved_role=role,
+        granted_by_device_id=ADMIN_DEVICE_ID,
+        granted_at="2026-05-03T12:00:00.000Z",
         vault_master_key_b64=base64.b64encode(b"\x10" * 32).decode("ascii"),
         vault_access_secret="super-high-entropy-secret",
-        role="sync",
-        granted_by_device_id="a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
-        granted_at=1_777_900_000,
     )
 
 
@@ -44,84 +57,112 @@ class WrapUnwrapTests(unittest.TestCase):
 
     def test_wrap_unwrap_round_trip(self) -> None:
         payload = _sample_payload()
-        wrapped = wrap_grant_for_claimant(
+        envelope = wrap_grant_for_claimant(
             payload=payload,
             admin_priv=self.admin_priv,
             claimant_pub=self.claimant_pub,
-            join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
         )
         recovered = unwrap_grant_for_claimant(
-            wrapped=wrapped,
+            envelope=envelope,
             claimant_priv=self.claimant_priv,
             admin_pub=self.admin_pub,
-            join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
+            expected_vault_id=VAULT_ID,
+            expected_claimant_device_id=CLAIMANT_DEVICE_ID,
         )
         self.assertEqual(recovered, payload)
 
+    def test_envelope_carries_99_byte_prefix(self) -> None:
+        # formats §14.1: 1 + 12 + 30 + 32 + 24 = 99 bytes deterministic prefix.
+        env = wrap_grant_for_claimant(
+            payload=_sample_payload(),
+            admin_priv=self.admin_priv,
+            claimant_pub=self.claimant_pub,
+        )
+        self.assertGreater(len(env), 99)
+        self.assertEqual(env[0], 0x01)                        # format_version
+        self.assertEqual(env[1:13].decode("ascii"), VAULT_ID)
+        self.assertEqual(env[13:43].decode("ascii"), GRANT_ID)
+        self.assertEqual(env[43:75], self.claimant_pub)
+
     def test_wrap_uses_random_nonce_per_call(self) -> None:
         payload = _sample_payload()
-        w1 = wrap_grant_for_claimant(
+        e1 = wrap_grant_for_claimant(
             payload=payload, admin_priv=self.admin_priv,
             claimant_pub=self.claimant_pub,
-            join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
         )
-        w2 = wrap_grant_for_claimant(
+        e2 = wrap_grant_for_claimant(
             payload=payload, admin_priv=self.admin_priv,
             claimant_pub=self.claimant_pub,
-            join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
         )
-        self.assertNotEqual(w1, w2)
+        self.assertNotEqual(e1, e2)
         # But both decrypt to the same payload.
         self.assertEqual(
             unwrap_grant_for_claimant(
-                wrapped=w1, claimant_priv=self.claimant_priv,
+                envelope=e1, claimant_priv=self.claimant_priv,
                 admin_pub=self.admin_pub,
-                join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
+                expected_vault_id=VAULT_ID,
+                expected_claimant_device_id=CLAIMANT_DEVICE_ID,
             ),
             unwrap_grant_for_claimant(
-                wrapped=w2, claimant_priv=self.claimant_priv,
+                envelope=e2, claimant_priv=self.claimant_priv,
                 admin_pub=self.admin_pub,
-                join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
+                expected_vault_id=VAULT_ID,
+                expected_claimant_device_id=CLAIMANT_DEVICE_ID,
             ),
         )
 
     def test_wrong_claimant_priv_fails_decrypt(self) -> None:
-        wrapped = wrap_grant_for_claimant(
+        envelope = wrap_grant_for_claimant(
             payload=_sample_payload(),
             admin_priv=self.admin_priv,
             claimant_pub=self.claimant_pub,
-            join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
         )
         attacker_priv, _ = _keypair()
         with self.assertRaises(GrantWrapError):
             unwrap_grant_for_claimant(
-                wrapped=wrapped, claimant_priv=attacker_priv,
+                envelope=envelope, claimant_priv=attacker_priv,
                 admin_pub=self.admin_pub,
-                join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
+                expected_vault_id=VAULT_ID,
+                expected_claimant_device_id=CLAIMANT_DEVICE_ID,
             )
 
-    def test_wrong_join_request_id_fails_decrypt(self) -> None:
-        """join_request_id is the AEAD AAD — a mismatched id breaks the tag."""
-        wrapped = wrap_grant_for_claimant(
+    def test_wrong_claimant_device_id_fails_decrypt(self) -> None:
+        """Claimant device id is in the AAD; a mismatched id breaks the tag."""
+        envelope = wrap_grant_for_claimant(
             payload=_sample_payload(),
             admin_priv=self.admin_priv,
             claimant_pub=self.claimant_pub,
-            join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
         )
         with self.assertRaises(GrantWrapError):
             unwrap_grant_for_claimant(
-                wrapped=wrapped, claimant_priv=self.claimant_priv,
+                envelope=envelope, claimant_priv=self.claimant_priv,
                 admin_pub=self.admin_pub,
-                join_request_id="jr_v1_yyyyyyyyyyyyyyyyyyyyyyyy",
+                expected_vault_id=VAULT_ID,
+                expected_claimant_device_id="ffffffffffffffffffffffffffffffff",
             )
 
-    def test_truncated_wrapped_blob_rejected(self) -> None:
+    def test_wrong_vault_id_rejected(self) -> None:
+        envelope = wrap_grant_for_claimant(
+            payload=_sample_payload(),
+            admin_priv=self.admin_priv,
+            claimant_pub=self.claimant_pub,
+        )
         with self.assertRaises(GrantWrapError):
             unwrap_grant_for_claimant(
-                wrapped=b"\x00" * 16,  # less than 24-byte nonce + at least 1 byte ct
+                envelope=envelope, claimant_priv=self.claimant_priv,
+                admin_pub=self.admin_pub,
+                expected_vault_id="WXYZ2345ABCD",
+                expected_claimant_device_id=CLAIMANT_DEVICE_ID,
+            )
+
+    def test_truncated_envelope_rejected(self) -> None:
+        with self.assertRaises(GrantWrapError):
+            unwrap_grant_for_claimant(
+                envelope=b"\x00" * 16,  # < 99-byte prefix + tag
                 claimant_priv=self.claimant_priv,
                 admin_pub=self.admin_pub,
-                join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
+                expected_vault_id=VAULT_ID,
+                expected_claimant_device_id=CLAIMANT_DEVICE_ID,
             )
 
     def test_invalid_key_lengths_rejected(self) -> None:
@@ -130,23 +171,29 @@ class WrapUnwrapTests(unittest.TestCase):
                 payload=_sample_payload(),
                 admin_priv=b"\x00" * 31,
                 claimant_pub=self.claimant_pub,
-                join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
             )
         with self.assertRaises(GrantWrapError):
             wrap_grant_for_claimant(
                 payload=_sample_payload(),
                 admin_priv=self.admin_priv,
                 claimant_pub=b"\x00" * 33,
-                join_request_id="jr_v1_xxxxxxxxxxxxxxxxxxxxxxxx",
             )
 
-    def test_empty_join_request_id_rejected(self) -> None:
+    def test_invalid_payload_role_rejected_at_wrap(self) -> None:
+        bad = GrantPayload(
+            vault_id=VAULT_ID, grant_id=GRANT_ID,
+            claimant_device_id=CLAIMANT_DEVICE_ID,
+            approved_role="superuser",  # not in §D11
+            granted_by_device_id=ADMIN_DEVICE_ID,
+            granted_at="2026-05-03T12:00:00.000Z",
+            vault_master_key_b64=base64.b64encode(b"\x10" * 32).decode("ascii"),
+            vault_access_secret="x",
+        )
         with self.assertRaises(GrantWrapError):
             wrap_grant_for_claimant(
-                payload=_sample_payload(),
+                payload=bad,
                 admin_priv=self.admin_priv,
                 claimant_pub=self.claimant_pub,
-                join_request_id="",
             )
 
 

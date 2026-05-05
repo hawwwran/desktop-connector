@@ -45,10 +45,12 @@ from src.vault_crypto import (  # noqa: E402
     build_manifest_envelope,
     build_recovery_aad,
     build_recovery_envelope,
+    derive_content_fingerprint_key,
     derive_device_grant_wrap_key,
     derive_export_wrap_key,
     derive_recovery_wrap_key,
     derive_subkey,
+    make_content_fingerprint,
 )
 
 VECTORS_DIR = os.path.join(os.path.dirname(__file__), "vault-v1")
@@ -60,6 +62,7 @@ EXPECTED_FILES = (
     "recovery_envelope_v1.json",
     "device_grant_v1.json",
     "export_bundle_v1.json",
+    "content_fingerprint_v1.json",
 )
 
 
@@ -405,6 +408,20 @@ def _run_export_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
     )
 
 
+def _run_content_fingerprint_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
+    """Verify a content_fingerprint_v1.json case (formats §10.2)."""
+    inputs = case["inputs"]
+    expected = case["expected"]
+    master_key = bytes.fromhex(inputs["vault_master_key"])
+    plaintext_sha256 = bytes.fromhex(inputs["plaintext_sha256"])
+
+    subkey = derive_content_fingerprint_key(master_key)
+    fingerprint = make_content_fingerprint(subkey, plaintext_sha256)
+
+    test.assertEqual(subkey.hex(), expected["subkey"])
+    test.assertEqual(fingerprint, expected["fingerprint_b64"])
+
+
 # Map filename → runner. Every primitive file has a runner now; T2.4
 # adds the PHP twin so the same JSON files exercise both runtimes.
 _RUNNERS = {
@@ -414,6 +431,7 @@ _RUNNERS = {
     "recovery_envelope_v1.json": _run_recovery_case,
     "device_grant_v1.json": _run_device_grant_case,
     "export_bundle_v1.json": _run_export_case,
+    "content_fingerprint_v1.json": _run_content_fingerprint_case,
 }
 
 
@@ -490,6 +508,13 @@ class VaultV1VectorsTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_export_case(self, case)
+
+    def test_content_fingerprint_v1_cases(self) -> None:
+        cases = _load_cases("content_fingerprint_v1.json")
+        self.assertGreaterEqual(len(cases), 1, "≥ 1 content_fingerprint case")
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                _run_content_fingerprint_case(self, case)
 
     def test_total_loaded_count_reported(self) -> None:
         total = sum(len(_load_cases(name)) for name in EXPECTED_FILES)
