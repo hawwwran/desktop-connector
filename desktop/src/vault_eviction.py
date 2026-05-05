@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Protocol
 
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
 from .vault_manifest import (
     compute_recoverable_until,
@@ -110,6 +111,7 @@ def eviction_pass(
     target_bytes_to_free: int = 0,
     now_iso: str | None = None,
     local_index: Any = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> EvictionResult:
     """Run the §D2 eviction pipeline until ``target_bytes_to_free`` is reached.
 
@@ -120,12 +122,31 @@ def eviction_pass(
 
     The caller decides whether to prompt the user before invoking; this
     function performs the work and returns what was freed.
+
+    F-U03: ``should_continue`` is checked between every stage. Each
+    stage publishes a single manifest revision atomically, so a Cancel
+    between stages leaves the vault in a coherent state — anything
+    freed by completed stages stays freed; remaining stages don't run.
+    Mid-stage cancel is intentionally not supported (it would require
+    unwinding a partial gc_execute + manifest publish).
     """
     current_manifest = normalize_manifest_plaintext(manifest)
     bytes_freed = 0
     chunks_freed = 0
     stages: list[EvictionStageResult] = []
     now = now_iso or _now_rfc3339()
+
+    def _check_cancel(stage_label: str) -> None:
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.eviction.cancelled vault=%s before_stage=%s freed_bytes=%d",
+                vault.vault_id, stage_label, bytes_freed,
+            )
+            raise SyncCancelledError(
+                f"eviction cancelled before {stage_label} (freed {bytes_freed} bytes)"
+            )
+
+    _check_cancel("stage_1")
 
     # Stage 1 — expired tombstones (always safe).
     stage_1, current_manifest = _run_stage(
@@ -161,6 +182,8 @@ def eviction_pass(
             no_more_candidates=False,
         )
 
+    _check_cancel("stage_2")
+
     # Stage 2 — unexpired tombstones, oldest deleted_at first. User has
     # been warned via the §D2 100% banner; we surface the per-purge
     # event in the activity log per spec.
@@ -186,6 +209,8 @@ def eviction_pass(
             stages=stages,
             no_more_candidates=False,
         )
+
+    _check_cancel("stage_3")
 
     # Stage 3 — oldest historical version of multi-version live files.
     stage_3, current_manifest = _run_stage(

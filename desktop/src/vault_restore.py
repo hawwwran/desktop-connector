@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterable, Protocol
 
 from datetime import datetime, timezone
 
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_conflict_naming import make_conflict_path
 from .vault_download import (
     DownloadProgress,
@@ -103,11 +104,18 @@ def restore_remote_folder(
     chunk_cache_dir: Path | None = None,
     progress: Callable[[RestoreProgress], None] | None = None,
     when: Any = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> RestoreResult:
     """Materialize ``remote_folder_id``'s current state into ``destination``.
 
     Tombstoned entries and entries without a downloadable version are
     skipped. Returns a :class:`RestoreResult` summarising what landed.
+
+    F-U03: ``should_continue`` is checked between every plan entry and
+    forwarded into the inner ``download_latest_file`` call so a Cancel
+    button click lands within ~1 chunk worth of work. Already-written
+    files stay on disk; the partial result is returned (the caller's
+    UI uses it to surface "stopped at file X of Y").
     """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
@@ -128,6 +136,19 @@ def restore_remote_folder(
     result = RestoreResult()
 
     for relative_path, entry, version in plan:
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.restore.cancelled vault=%s folder=%s files_done=%d total=%d",
+                vault.vault_id, remote_folder_id,
+                len(result.written) + len(result.skipped_identical)
+                + len(result.conflict_copies),
+                len(plan),
+            )
+            raise SyncCancelledError(
+                f"restore cancelled at file "
+                f"{len(result.written) + len(result.skipped_identical) + len(result.conflict_copies)}"
+                f"/{len(plan)} of folder {remote_folder_id}"
+            )
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         # F-D28: refuse to follow a symlinked subdirectory out of the
@@ -190,6 +211,7 @@ def restore_remote_folder(
                 vault=vault, relay=relay, manifest=manifest,
                 display_path=display_path, target=conflict_target,
                 cache_dir=cache_dir,
+                should_continue=should_continue,
             )
             result.conflict_copies.append((relative_path, conflict_path))
         else:
@@ -197,6 +219,7 @@ def restore_remote_folder(
                 vault=vault, relay=relay, manifest=manifest,
                 display_path=display_path, target=target,
                 cache_dir=cache_dir,
+                should_continue=should_continue,
             )
             result.written.append(relative_path)
 
@@ -224,6 +247,7 @@ def restore_remote_folder_at_date(
     chunk_cache_dir: Path | None = None,
     progress: Callable[[RestoreProgress], None] | None = None,
     when: Any = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> RestoreResult:
     """Materialize the snapshot of ``remote_folder_id`` as of ``cutoff``.
 
@@ -259,6 +283,19 @@ def restore_remote_folder_at_date(
     result = RestoreResult()
 
     for relative_path, _entry, version in plan:
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.restore.cancelled vault=%s folder=%s files_done=%d total=%d cutoff=%s",
+                vault.vault_id, remote_folder_id,
+                len(result.written) + len(result.skipped_identical)
+                + len(result.conflict_copies),
+                len(plan), cutoff.isoformat(),
+            )
+            raise SyncCancelledError(
+                f"restore-at-date cancelled at file "
+                f"{len(result.written) + len(result.skipped_identical) + len(result.conflict_copies)}"
+                f"/{len(plan)} of folder {remote_folder_id}"
+            )
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         display_path = f"{folder_display_name}/{relative_path}"
@@ -295,6 +332,7 @@ def restore_remote_folder_at_date(
                 destination=conflict_target,
                 existing_policy="overwrite",
                 chunk_cache_dir=cache_dir,
+                should_continue=should_continue,
             )
             result.conflict_copies.append((relative_path, conflict_path))
         else:
@@ -304,6 +342,7 @@ def restore_remote_folder_at_date(
                 destination=target,
                 existing_policy="overwrite",
                 chunk_cache_dir=cache_dir,
+                should_continue=should_continue,
             )
             result.written.append(relative_path)
 
@@ -542,12 +581,14 @@ def _download_one(
     display_path: str,
     target: Path,
     cache_dir: Path,
+    should_continue: Callable[[], bool] | None = None,
 ) -> None:
     download_latest_file(
         vault=vault, relay=relay, manifest=manifest,
         path=display_path, destination=target,
         existing_policy="overwrite",
         chunk_cache_dir=cache_dir,
+        should_continue=should_continue,
     )
 
 

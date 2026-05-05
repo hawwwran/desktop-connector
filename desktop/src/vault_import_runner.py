@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
 from .vault_export import (
     BundleContents,
@@ -139,8 +140,16 @@ def run_import(
     active_genesis_fingerprint: str | None = None,
     progress: Callable[[ImportRunProgress], None] | None = None,
     local_index: Any = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> ImportRunResult:
-    """Drive the import end to end (T8.5 backbone)."""
+    """Drive the import end to end (T8.5 backbone).
+
+    F-U03: ``should_continue`` is checked before each chunk PUT and
+    once before the CAS publish. Cancel-before-publish is safe (the
+    merge isn't published until all chunks land); cancelled chunks
+    that already landed on the relay stay there as orphans, cleaned up
+    by the next eviction housekeeping pass per §D2.
+    """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
 
@@ -214,6 +223,18 @@ def run_import(
         progress, "uploading_chunks", 0, already_present, len(bundle_chunk_ids), 0,
     )
     for cid in bundle_chunk_ids:
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.import.cancelled vault=%s chunks_done=%d total=%d",
+                vault.vault_id,
+                chunks_uploaded + chunks_skipped + already_present,
+                len(bundle_chunk_ids),
+            )
+            raise SyncCancelledError(
+                f"import cancelled at chunk "
+                f"{chunks_uploaded + chunks_skipped + already_present}"
+                f"/{len(bundle_chunk_ids)}"
+            )
         head = chunks_already.get(cid) if isinstance(chunks_already, dict) else None
         if isinstance(head, dict) and head.get("present"):
             chunks_skipped += 1
@@ -228,6 +249,15 @@ def run_import(
             progress, "uploading_chunks",
             chunks_uploaded, chunks_skipped + already_present,
             len(bundle_chunk_ids), bytes_uploaded,
+        )
+
+    if should_continue is not None and not should_continue():
+        log.info(
+            "vault.import.cancelled_pre_publish vault=%s chunks_done=%d",
+            vault.vault_id, chunks_uploaded + chunks_skipped + already_present,
+        )
+        raise SyncCancelledError(
+            "import cancelled before merge publish"
         )
 
     # Merge manifests + CAS-publish (T8.4 + T6.3 retry).

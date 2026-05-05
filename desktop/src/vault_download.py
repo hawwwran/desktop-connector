@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Protocol
 
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import get_file
 from .vault_crypto import (
     aead_decrypt,
@@ -102,8 +103,18 @@ def download_latest_file(
     existing_policy: ExistingFilePolicy = "fail",
     chunk_cache_dir: Path | None = None,
     progress: Callable[[DownloadProgress], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> Path:
-    """Download one file's latest non-deleted version to ``destination``."""
+    """Download one file's latest non-deleted version to ``destination``.
+
+    F-U03: ``should_continue`` is checked between every chunk fetch
+    and once before the final atomic write. When it returns ``False``,
+    the function raises :class:`vault_binding_lifecycle.SyncCancelledError`.
+    Already-fetched plaintext is discarded (the destination's
+    ``.dc-temp-…`` is cleaned up by the atomic-write guard); idempotent
+    chunk dedup means a future restart pays the cache-hit price, not
+    a re-fetch.
+    """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
 
@@ -133,6 +144,16 @@ def download_latest_file(
     completed = 0
     bytes_written = 0
     for chunk in chunks:
+        # F-U03: bail before each chunk fetch so a Cancel button click
+        # lands within ~1 chunk worth of network + decrypt work.
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.download.cancelled vault=%s path=%s chunks_done=%d total=%d",
+                vault.vault_id, path, completed, len(chunks),
+            )
+            raise SyncCancelledError(
+                f"download cancelled at chunk {completed}/{len(chunks)} of {path}"
+            )
         encrypted = _load_cached_chunk(
             chunk_cache_dir=chunk_cache_dir,
             vault_id=vault.vault_id,
@@ -156,6 +177,13 @@ def download_latest_file(
         bytes_written += len(plaintext)
         _report(progress, "downloading", completed, len(chunks), bytes_written)
 
+    if should_continue is not None and not should_continue():
+        log.info(
+            "vault.download.cancelled_pre_write vault=%s path=%s",
+            vault.vault_id, path,
+        )
+        raise SyncCancelledError(f"download cancelled before write of {path}")
+
     data = b"".join(plaintext_parts)
     expected_size = _int_value(version.get("logical_size"))
     if expected_size and len(data) != expected_size:
@@ -177,6 +205,7 @@ def download_version(
     existing_policy: ExistingFilePolicy = "fail",
     chunk_cache_dir: Path | None = None,
     progress: Callable[[DownloadProgress], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> Path:
     """Download a specific historical version to a side path.
 
@@ -186,6 +215,9 @@ def download_version(
     version timestamp and cannot collide with the latest file's name.
     The ``existing_policy`` is honoured if even that side-path already
     exists (e.g. the same version was downloaded twice).
+
+    F-U03: ``should_continue`` is checked between every chunk fetch
+    (same contract as :func:`download_latest_file`).
     """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
@@ -220,6 +252,14 @@ def download_version(
     completed = 0
     bytes_written = 0
     for chunk in chunks:
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.download.cancelled vault=%s path=%s version=%s chunks_done=%d total=%d",
+                vault.vault_id, path, version_id, completed, len(chunks),
+            )
+            raise SyncCancelledError(
+                f"version download cancelled at chunk {completed}/{len(chunks)} of {path}"
+            )
         encrypted = _load_cached_chunk(
             chunk_cache_dir=chunk_cache_dir,
             vault_id=vault.vault_id,
@@ -244,6 +284,15 @@ def download_version(
         completed += 1
         bytes_written += len(plaintext)
         _report(progress, "downloading", completed, len(chunks), bytes_written)
+
+    if should_continue is not None and not should_continue():
+        log.info(
+            "vault.download.cancelled_pre_write vault=%s path=%s version=%s",
+            vault.vault_id, path, version_id,
+        )
+        raise SyncCancelledError(
+            f"version download cancelled before write of {path}"
+        )
 
     data = b"".join(plaintext_parts)
     expected_size = _int_value(version.get("logical_size"))

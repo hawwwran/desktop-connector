@@ -400,15 +400,20 @@ relay log (filenames are local-only).
 | `vault.atomic.temp_unlink_failed` | desktop | warning | `path`, `error` | Live atomic-write couldn't clean up its own temp |
 | `vault.baseline.skip_unsafe` | desktop | warning | `path` | Baseline refused to write a path traversing outside the binding root |
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
+| `vault.download.cancelled` | desktop | info | `vault`, `path`, `chunks_done`, `total` | F-U03 — chunk-level cancel mid-download |
+| `vault.download.cancelled_pre_write` | desktop | info | `vault`, `path` | F-U03 — cancel landed after the last chunk fetch but before the atomic write |
 | `vault.download.duplicate_path` | desktop | warning | `path` | F-D09 — folder download saw two entries claiming the same relative path |
 | `vault.download.entry_has_no_version` | desktop | warning | `path` | F-D09 — folder download skipped a version-less entry |
 | `vault.download.skip_unsafe_path` | desktop | warning | `path`, `error` | F-D09 — folder download skipped a manifest path that escapes the root |
+| `vault.eviction.cancelled` | desktop | info | `vault`, `before_stage`, `freed_bytes` | F-U03 — between-stage cancel; coherent state preserved |
 | `vault.eviction.no_more_candidates` | desktop | info | `vault_id` | Quota pressure ran out of evictable old versions |
 | `vault.eviction.tombstone_purged_early` | desktop | info | `vault_id`, `path` | Tombstone purged before retention horizon under quota pressure |
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal) |
 | `vault.eviction.version_purged` | desktop | info | `vault_id`, `path`, `version_id` | Old version evicted to free space |
 | `vault.folder.cleared` | desktop | info | `remote_folder_id`, `tombstoned`, `author` | T14.1 bulk-soft-delete published |
 | `vault.gc.unlink_failed` | server | warning | `plan`, `path` | F-S12 — gcExecute couldn't remove a chunk file |
+| `vault.import.cancelled` | desktop | info | `vault`, `chunks_done`, `total` | F-U03 — import cancelled mid-chunk-upload |
+| `vault.import.cancelled_pre_publish` | desktop | info | `vault`, `chunks_done` | F-U03 — import cancelled after chunks but before merge publish |
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
 | `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
 | `vault.migration.verify.chunk_aead_failed` | desktop | warning | `chunk`, `error` | F-C05 — chunk failed AEAD during sample |
@@ -425,6 +430,7 @@ relay log (filenames are local-only).
 | `vault.purge.state_read_failed` | desktop | warning | `path`, `error` | Pending-purges JSON unreadable; treating as empty |
 | `vault.recovery_test.*` | desktop | info | varies | Subsystem for the M1 recovery-test dialog (T3.5/T3.6) |
 | `vault.repair.marked_broken` | desktop | info | `count`, `author`, `revision` | T17.4 — broken-version markers committed |
+| `vault.restore.cancelled` | desktop | info | `vault`, `folder`, `files_done`, `total`, optional `cutoff` | F-U03 — restore cancelled between files |
 | `vault.restore.skip_symlinked_dest` | desktop | warning | `path`, `reason` | F-D28 — refused to write through a symlink in destination |
 | `vault.restore.skip_unsafe` | desktop | warning | `path` | Restore refused a path traversing outside the destination |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
