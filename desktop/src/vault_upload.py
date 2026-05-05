@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Protocol
 log = logging.getLogger(__name__)
 
 from .vault_atomic import atomic_write_file
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_crypto import (
     aead_encrypt,
     build_chunk_aad,
@@ -298,6 +299,7 @@ def upload_file(
     progress: Callable[[UploadProgress], None] | None = None,
     local_index: Any = None,
     resume_cache_dir: Path | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> UploadResult:
     """Encrypt + upload ``local_path`` and CAS-publish a new manifest revision.
 
@@ -305,6 +307,14 @@ def upload_file(
     T6.3's job. On any error after the manifest mutation step, partial
     state is bounded to chunks already PUT to the relay; nothing local
     is touched.
+
+    F-Y08: ``should_continue`` is consulted between every chunk PUT
+    and once before the CAS publish. When it returns ``False`` the
+    function raises :class:`vault_binding_lifecycle.SyncCancelledError`;
+    the upload session is already saved per chunk so the next
+    :func:`resume_upload` picks up exactly where the bail happened
+    (relay-side dedup means re-PUTting a completed chunk is a 200 OK
+    no-op). Pass ``None`` (the default) for "always continue".
     """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
@@ -456,6 +466,18 @@ def upload_file(
     bytes_uploaded = 0
     completed = 0
     for index, chunk in enumerate(chunks_plan):
+        # F-Y08: bail before each chunk so a Pause / Disconnect lands
+        # within ~1 chunk worth of work. The session is already saved
+        # for every prior chunk, so a future resume is a HEAD-and-skip.
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.sync.upload_cancelled vault=%s remote_path=%s chunks_done=%d total=%d",
+                vault.vault_id, normalized_remote_path, completed, total_chunks,
+            )
+            raise SyncCancelledError(
+                f"upload cancelled at chunk {completed}/{total_chunks} of "
+                f"{normalized_remote_path}"
+            )
         head = heads.get(chunk["chunk_id"]) if isinstance(heads, dict) else None
         if isinstance(head, dict) and head.get("present"):
             chunks_skipped += 1
@@ -472,6 +494,18 @@ def upload_file(
         save_session(session, cache_dir)
         completed += 1
         _report(progress, "uploading", completed, total_chunks, bytes_uploaded)
+
+    # F-Y08: one more checkpoint before publishing — if pause lands
+    # right after the last PUT, we'd rather defer the manifest mutation
+    # to the next cycle than hold the CAS slot.
+    if should_continue is not None and not should_continue():
+        log.info(
+            "vault.sync.upload_cancelled_pre_publish vault=%s remote_path=%s",
+            vault.vault_id, normalized_remote_path,
+        )
+        raise SyncCancelledError(
+            f"upload cancelled before publish for {normalized_remote_path}"
+        )
 
     # Build the version payload + mutate the manifest.
     version_payload = _make_version_payload(
@@ -530,6 +564,7 @@ def resume_upload(
     progress: Callable[[UploadProgress], None] | None = None,
     local_index: Any = None,
     resume_cache_dir: Path | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> UploadResult:
     """Pick up a partially-completed ``upload_file`` from disk (T6.5).
 
@@ -539,6 +574,11 @@ def resume_upload(
     byte-identical to the pre-crash run, so the relay's hash-equality
     idempotency turns retries into 200 OKs), then runs the normal CAS
     publish.
+
+    F-Y08: ``should_continue`` is checked between each chunk PUT and
+    once before publish — same contract as :func:`upload_file`. The
+    on-disk session keeps progress so a second resume picks up
+    seamlessly.
     """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
@@ -571,6 +611,18 @@ def resume_upload(
     completed = 0
     with open(local_path, "rb") as fh:
         for index, record in enumerate(session.chunks):
+            # F-Y08: same per-chunk bail as upload_file. Already-done
+            # chunks are still counted (cheap) so the resume can finish
+            # where it left off if Pause is followed by another resume.
+            if should_continue is not None and not should_continue():
+                log.info(
+                    "vault.sync.resume_cancelled vault=%s session=%s chunks_done=%d total=%d",
+                    vault.vault_id, session.session_id, completed, len(chunk_ids),
+                )
+                raise SyncCancelledError(
+                    f"resume cancelled at chunk {completed}/{len(chunk_ids)} of "
+                    f"{session.remote_path}"
+                )
             plaintext = fh.read(int(session.chunk_size))
             chunk_id = str(record["chunk_id"])
             head = heads.get(chunk_id) if isinstance(heads, dict) else None
@@ -626,6 +678,16 @@ def resume_upload(
             })
             completed += 1
             _report(progress, "uploading", completed, len(chunk_ids), bytes_uploaded)
+
+    # F-Y08: pre-publish checkpoint, same as upload_file.
+    if should_continue is not None and not should_continue():
+        log.info(
+            "vault.sync.resume_cancelled_pre_publish vault=%s session=%s",
+            vault.vault_id, session.session_id,
+        )
+        raise SyncCancelledError(
+            f"resume cancelled before publish for {session.remote_path}"
+        )
 
     version_payload = {
         "version_id": session.version_id,

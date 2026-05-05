@@ -73,6 +73,7 @@ def _previously_synced_via_store(
         return False
     return bool(entry and entry.content_fingerprint)
 
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_bindings import (
     VaultBinding,
     VaultBindingsStore,
@@ -92,7 +93,7 @@ class SyncOpOutcome:
     op_id: int
     op_type: str
     relative_path: str
-    status: str        # "uploaded" | "deleted" | "skipped" | "failed"
+    status: str        # "uploaded" | "deleted" | "skipped" | "failed" | "cancelled"
     error: str | None = None
     bytes_uploaded: int = 0
     chunks_uploaded: int = 0
@@ -105,6 +106,7 @@ class SyncCycleResult:
     ended_at_revision: int
     outcomes: list[SyncOpOutcome] = field(default_factory=list)
     binding: VaultBinding | None = None
+    cancelled: bool = False  # F-Y08: should_continue returned False mid-cycle
 
     @property
     def succeeded_count(self) -> int:
@@ -146,6 +148,7 @@ def flush_and_sync_binding(
     watcher_coordinator: Any = None,
     chunk_cache_dir: Path | None = None,
     progress: Callable[["SyncOpOutcome"], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> "SyncCycleResult":
     """Manual "Sync now" entrypoint (T10.6).
 
@@ -154,6 +157,10 @@ def flush_and_sync_binding(
     :func:`vault_binding_twoway.run_two_way_cycle`; backup-only and
     download-only fall through to the local-drain cycle. Paused
     bindings are a no-op (logged).
+
+    F-Y08: ``should_continue`` is forwarded to the dispatched cycle
+    driver (and downward into ``upload_file``) so a Pause / Disconnect
+    landing mid-cycle stops the chunk loop within ~1 chunk.
     """
     if watcher_coordinator is not None:
         try:
@@ -182,17 +189,21 @@ def flush_and_sync_binding(
             binding=binding, author_device_id=author_device_id,
             device_name=device_name or "this device",
             chunk_cache_dir=chunk_cache_dir, progress=progress,
+            should_continue=should_continue,
         )
     return run_backup_only_cycle(
         vault=vault, relay=relay, store=store,
         binding=binding, author_device_id=author_device_id,
         chunk_cache_dir=chunk_cache_dir, progress=progress,
+        should_continue=should_continue,
     )
 
 
 def format_sync_outcome_toast(result: "SyncCycleResult") -> str:
     """Render a one-line user-facing summary of a sync cycle result."""
     if not result.outcomes:
+        if result.cancelled:
+            return "Sync now: cancelled."
         if result.ended_at_revision == result.started_at_revision:
             return "Sync now: nothing to do."
         return (
@@ -201,6 +212,7 @@ def format_sync_outcome_toast(result: "SyncCycleResult") -> str:
     uploaded = sum(1 for o in result.outcomes if o.status == "uploaded")
     deleted = sum(1 for o in result.outcomes if o.status == "deleted")
     skipped = sum(1 for o in result.outcomes if o.status == "skipped")
+    cancelled_n = sum(1 for o in result.outcomes if o.status == "cancelled")
     failed = result.failed_count
     parts: list[str] = []
     if uploaded:
@@ -211,6 +223,8 @@ def format_sync_outcome_toast(result: "SyncCycleResult") -> str:
         parts.append(f"{skipped} skipped")
     if failed:
         parts.append(f"{failed} failed")
+    if cancelled_n or result.cancelled:
+        parts.append("cancelled")
     summary = ", ".join(parts) if parts else "no changes"
     return f"Sync now: {summary}."
 
@@ -225,11 +239,20 @@ def run_backup_only_cycle(
     manifest: dict[str, Any] | None = None,
     chunk_cache_dir: Path | None = None,
     progress: Callable[[SyncOpOutcome], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> SyncCycleResult:
     """Drain ``binding``'s pending ops once. Returns a summary.
 
     The caller may pass an already-fetched ``manifest`` to avoid an
     extra round-trip; otherwise we fetch the head fresh.
+
+    F-Y08: ``should_continue`` is checked before each op and passed
+    down into ``upload_file``. When it returns ``False`` mid-cycle
+    the loop exits early; the in-flight op's outcome is recorded
+    (status ``"cancelled"`` if the chunk loop bailed, else the op
+    was never started) and the result's ``cancelled`` flag is set.
+    Remaining queue rows are left untouched and pick up on the next
+    cycle.
     """
     if binding.state != "bound":
         raise ValueError(
@@ -252,9 +275,19 @@ def run_backup_only_cycle(
     local_root = Path(binding.local_path)
     pending = store.list_pending_ops(binding.binding_id)
     outcomes: list[SyncOpOutcome] = []
+    cancelled = False
 
     current_manifest: dict[str, Any] = head
     for op in pending:
+        # F-Y08: bail before starting another op when cancellation
+        # fired between ops. The remaining ops stay queued.
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.sync.cycle_cancelled_between_ops binding=%s remaining=%d",
+                binding.binding_id, len(pending) - len(outcomes),
+            )
+            cancelled = True
+            break
         outcome = _execute_op(
             vault=vault,
             relay=relay,
@@ -265,6 +298,7 @@ def run_backup_only_cycle(
             manifest=current_manifest,
             author_device_id=author_device_id,
             chunk_cache_dir=chunk_cache_dir,
+            should_continue=should_continue,
         )
         outcomes.append(outcome)
         if progress is not None:
@@ -272,6 +306,10 @@ def run_backup_only_cycle(
                 progress(outcome)
             except Exception:  # noqa: BLE001
                 log.exception("vault.sync.progress_callback_failed")
+        if outcome.status == "cancelled":
+            # Chunk-level bail surfaced upward; stop the queue drain.
+            cancelled = True
+            break
         # Refresh the manifest if this op published a new revision OR
         # failed (likely a CAS conflict — refresh so the next op
         # sees the new world). F-Y07.
@@ -297,6 +335,7 @@ def run_backup_only_cycle(
         ended_at_revision=ended_at_revision,
         outcomes=outcomes,
         binding=rebound,
+        cancelled=cancelled,
     )
 
 
@@ -311,6 +350,7 @@ def _execute_op(
     manifest: dict[str, Any],
     author_device_id: str,
     chunk_cache_dir: Path | None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> SyncOpOutcome:
     """Execute one pending op end-to-end. Errors stay scoped per-op."""
     relative_path = op.relative_path
@@ -320,6 +360,7 @@ def _execute_op(
             binding=binding, local_root=local_root, op=op,
             manifest=manifest, author_device_id=author_device_id,
             chunk_cache_dir=chunk_cache_dir,
+            should_continue=should_continue,
         )
     if op.op_type == "delete":
         return _execute_delete(
@@ -349,6 +390,7 @@ def _execute_upload(
     manifest: dict[str, Any],
     author_device_id: str,
     chunk_cache_dir: Path | None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> SyncOpOutcome:
     relative_path = op.relative_path
     absolute = local_root / relative_path
@@ -386,6 +428,20 @@ def _execute_upload(
             author_device_id=author_device_id,
             mode="new_file_or_version",
             resume_cache_dir=chunk_cache_dir,
+            should_continue=should_continue,
+        )
+    except SyncCancelledError as exc:
+        # F-Y08: chunk-level bail. The op stays queued; the partial
+        # upload session was saved per chunk so a future cycle picks
+        # up via resume_upload (or just re-PUTs idempotent chunks).
+        log.info(
+            "vault.sync.upload_cancelled_op binding=%s path=%s",
+            binding.binding_id, relative_path,
+        )
+        return SyncOpOutcome(
+            op_id=op.op_id, op_type="upload",
+            relative_path=relative_path, status="cancelled",
+            error=str(exc),
         )
     except UploadSpecialFileSkipped:
         # F-Y17: never propagate a tombstone for a symlink/FIFO. Drop

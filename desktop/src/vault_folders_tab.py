@@ -11,6 +11,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Pango
 
 from .vault_binding_baseline import run_initial_baseline
+from .vault_binding_lifecycle import BindingCancellationRegistry
 from .vault_binding_sync import (
     flush_and_sync_binding,
     format_sync_outcome_toast,
@@ -563,6 +564,12 @@ def build_vault_folders_tab(
     # ----------------------- Bindings panel (T10.6) -----------------------
 
     sync_in_flight: dict[str, bool] = {}
+    # F-Y08: per-binding cancellation registry. The Sync-now worker
+    # registers an event before each cycle so a future Pause /
+    # Disconnect button can call ``cancellation_registry.cancel(id)``
+    # to abort an in-flight chunk loop. F-Y15 adds the buttons; the
+    # registry plumbing here is the backbone they hook into.
+    cancellation_registry = BindingCancellationRegistry()
 
     def clear_bindings_grid() -> None:
         child = bindings_grid.get_first_child()
@@ -600,14 +607,17 @@ def build_vault_folders_tab(
                 device_name = (
                     str(config.device_name or "").strip() or "this device"
                 )
+                event = cancellation_registry.register(binding_id)
                 try:
                     result = flush_and_sync_binding(
                         vault=vault, relay=relay, store=store,
                         binding=binding, author_device_id=author_device_id,
                         device_name=device_name,
+                        should_continue=lambda: not event.is_set(),
                     )
                 finally:
                     vault.close()
+                    cancellation_registry.clear(binding_id)
                 toast_text = format_sync_outcome_toast(result)
             except Exception as exc:  # noqa: BLE001
                 error_message = humanize(exc)

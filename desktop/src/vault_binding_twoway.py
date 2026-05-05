@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .vault_atomic import fsync_dir
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_binding_sync import (
     SyncCycleResult,
     SyncOpOutcome,
@@ -68,12 +69,18 @@ def run_two_way_cycle(
     device_name: str,
     chunk_cache_dir: Path | None = None,
     progress: Callable[[SyncOpOutcome], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> SyncCycleResult:
     """Run one two-way sync cycle for ``binding``.
 
     Combines :func:`vault_binding_sync.run_backup_only_cycle`'s pending-
     ops drain with a remote-changes-applied phase that downloads new
     remote versions and tombstones-with-trash according to §A20 / §D4.
+
+    F-Y08: ``should_continue`` is consulted between Phase A and Phase
+    B, between every Phase B op (and inside ``upload_file`` between
+    chunks), and between full iterations. The result's ``cancelled``
+    flag is set when a Pause / Disconnect lands mid-cycle.
     """
     if binding.state != "bound":
         raise ValueError(
@@ -93,9 +100,17 @@ def run_two_way_cycle(
     head = vault.fetch_manifest(relay)
     started_revision = int(head.get("revision", 0))
     outcomes: list[SyncOpOutcome] = []
+    cancelled = False
 
     last_revision = started_revision - 1  # force first iter
     for _ in range(MAX_TWO_WAY_ITERATIONS):
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.sync.twoway_cancelled_pre_iteration binding=%s",
+                binding.binding_id,
+            )
+            cancelled = True
+            break
         revision_at_start = int(head.get("revision", 0))
         # Phase A: apply remote → local.
         remote_outcomes = _apply_remote_to_local(
@@ -108,12 +123,32 @@ def run_two_way_cycle(
             cache_dir=cache_dir,
             device_name=device_name,
             progress=progress,
+            should_continue=should_continue,
         )
         outcomes.extend(remote_outcomes)
+        if remote_outcomes and remote_outcomes[-1].status == "cancelled":
+            cancelled = True
+            break
+
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.sync.twoway_cancelled_between_phases binding=%s",
+                binding.binding_id,
+            )
+            cancelled = True
+            break
 
         # Phase B: drain pending uploads/deletes.
         pending = store.list_pending_ops(binding.binding_id)
+        b_outcomes_before = len(outcomes)
         for op in pending:
+            if should_continue is not None and not should_continue():
+                log.info(
+                    "vault.sync.twoway_cancelled_between_ops binding=%s remaining=%d",
+                    binding.binding_id, len(pending) - (len(outcomes) - b_outcomes_before),
+                )
+                cancelled = True
+                break
             outcome = _execute_op(
                 vault=vault,
                 relay=relay,
@@ -124,6 +159,7 @@ def run_two_way_cycle(
                 manifest=head,
                 author_device_id=author_device_id,
                 chunk_cache_dir=cache_dir,
+                should_continue=should_continue,
             )
             outcomes.append(outcome)
             if progress is not None:
@@ -131,6 +167,9 @@ def run_two_way_cycle(
                     progress(outcome)
                 except Exception:  # noqa: BLE001
                     log.exception("vault.sync.progress_callback_failed")
+            if outcome.status == "cancelled":
+                cancelled = True
+                break
             if outcome.status in ("uploaded", "deleted", "failed"):
                 # F-Y07: a failed publish (CAS conflict) is a strong
                 # "the world changed" signal — re-fetch head so the
@@ -142,6 +181,8 @@ def run_two_way_cycle(
                         "vault.sync.refetch_after_publish_failed binding=%s",
                         binding.binding_id, exc_info=True,
                     )
+        if cancelled:
+            break
 
         # Convergence check: no progress made in this iteration. F-Y26.
         # "Progress" means either the revision advanced OR at least one
@@ -180,6 +221,7 @@ def run_two_way_cycle(
         ended_at_revision=ended_revision,
         outcomes=outcomes,
         binding=rebound,
+        cancelled=cancelled,
     )
 
 
@@ -199,6 +241,7 @@ def _apply_remote_to_local(
     cache_dir: Path,
     device_name: str,
     progress: Callable[[SyncOpOutcome], None] | None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> list[SyncOpOutcome]:
     folder = _find_folder(manifest, binding.remote_folder_id)
     if folder is None:
@@ -217,6 +260,21 @@ def _apply_remote_to_local(
     outcomes: list[SyncOpOutcome] = []
 
     for entry in folder.get("entries", []) or []:
+        # F-Y08: bail between remote entries so a Pause / Disconnect
+        # lands within one entry's worth of work even on a folder with
+        # hundreds of files. We append a sentinel "cancelled" outcome
+        # so the caller can flip the cycle's cancelled flag.
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.sync.twoway_phase_a_cancelled binding=%s processed=%d",
+                binding.binding_id, len(outcomes),
+            )
+            outcomes.append(SyncOpOutcome(
+                op_id=0, op_type="apply_remote",
+                relative_path="", status="cancelled",
+                error="cancelled_phase_a",
+            ))
+            return outcomes
         if not isinstance(entry, dict):
             continue
         if str(entry.get("type", "file")) != "file":

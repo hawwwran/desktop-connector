@@ -24,6 +24,7 @@ The folder remains browsable via the Browser mode.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -31,6 +32,80 @@ from .vault_bindings import VaultBinding, VaultBindingsStore
 
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# F-Y08 — cooperative cancellation primitives
+# ---------------------------------------------------------------------------
+
+
+class SyncCancelledError(RuntimeError):
+    """Raised inside a sync cycle (cycle driver or chunk PUT loop) when
+    a registered cancellation event fires.
+
+    Cycle drivers translate this into a ``status="cancelled"`` outcome
+    on the in-flight op (the op stays queued for the next cycle) and
+    flag the cycle's :class:`SyncCycleResult.cancelled` so callers can
+    distinguish a cooperative bail from a true completion.
+    """
+
+
+class BindingCancellationRegistry:
+    """Thread-safe map of ``binding_id -> threading.Event`` used to
+    coordinate Pause / Disconnect with in-flight sync cycles (F-Y08).
+
+    The runtime owns one registry. Cycle drivers ``register()`` on
+    entry, derive ``should_continue = lambda: not event.is_set()``,
+    and ``clear()`` on exit. Lifecycle calls (``pause_binding`` /
+    ``disconnect_binding``) call ``cancel(binding_id)`` before
+    flipping state — any in-flight cycle observes the event and
+    returns early instead of running the queue to completion against
+    a binding the user just asked to stop.
+
+    A registry is optional; passing ``should_continue`` directly is
+    equally supported (and is what most tests do).
+    """
+
+    def __init__(self) -> None:
+        self._events: dict[str, threading.Event] = {}
+        self._lock = threading.Lock()
+
+    def register(self, binding_id: str) -> threading.Event:
+        """Create or replace the cancellation event for ``binding_id``.
+
+        Returning a freshly-cleared event lets back-to-back cycles
+        re-use the same registry without re-cancelling on the second
+        run; the caller should pair every ``register`` with a
+        ``clear`` once the cycle ends (typically in ``finally``).
+        """
+        event = threading.Event()
+        with self._lock:
+            self._events[binding_id] = event
+        return event
+
+    def cancel(self, binding_id: str) -> bool:
+        """Set the event registered for ``binding_id`` if any.
+
+        Returns ``True`` when a registered event was tripped, ``False``
+        when no in-flight cycle is registered (the caller may still
+        proceed with the lifecycle transition; this is just a signal
+        for whether anything was actively running).
+        """
+        with self._lock:
+            event = self._events.get(binding_id)
+        if event is None:
+            return False
+        event.set()
+        return True
+
+    def clear(self, binding_id: str) -> None:
+        """Drop the cancellation event for ``binding_id``."""
+        with self._lock:
+            self._events.pop(binding_id, None)
+
+    def is_registered(self, binding_id: str) -> bool:
+        with self._lock:
+            return binding_id in self._events
 
 
 @dataclass
@@ -53,13 +128,23 @@ class DisconnectResult:
 
 
 def pause_binding(
-    store: VaultBindingsStore, binding_id: str,
+    store: VaultBindingsStore,
+    binding_id: str,
+    *,
+    cancellation: BindingCancellationRegistry | None = None,
 ) -> PauseResult:
     """Transition a bound binding into ``state="paused"``.
 
     Pending ops are preserved verbatim (§A12). The sync_mode field
     is unchanged so resume restores the same direction without asking
     the user. No-op if already paused.
+
+    F-Y08: if a ``cancellation`` registry is supplied, any in-flight
+    cycle for this binding is signalled to abort *before* the state
+    flip, so the cycle observes the bail signal at its next chunk /
+    op checkpoint. The state transition itself does not block on the
+    cycle exiting; the next checkpoint cleans up and the worker
+    thread joins on its own schedule.
     """
     binding = _require_binding(store, binding_id)
     if binding.state == "paused":
@@ -67,6 +152,8 @@ def pause_binding(
             "vault.sync.binding_pause_noop binding=%s already_paused",
             binding_id,
         )
+        if cancellation is not None:
+            cancellation.cancel(binding_id)
         return PauseResult(
             binding=binding,
             pending_ops_preserved=len(store.list_pending_ops(binding_id)),
@@ -77,6 +164,13 @@ def pause_binding(
             "pause requires state=='bound'"
         )
 
+    if cancellation is not None:
+        cancelled = cancellation.cancel(binding_id)
+        if cancelled:
+            log.info(
+                "vault.sync.binding_pause_cancelled_inflight_cycle binding=%s",
+                binding_id,
+            )
     store.update_binding_state(binding_id, state="paused")
     paused = store.get_binding(binding_id) or binding
     pending = len(store.list_pending_ops(binding_id))
@@ -135,7 +229,10 @@ def resume_binding(
 
 
 def disconnect_binding(
-    store: VaultBindingsStore, binding_id: str,
+    store: VaultBindingsStore,
+    binding_id: str,
+    *,
+    cancellation: BindingCancellationRegistry | None = None,
 ) -> DisconnectResult:
     """Flip ``state="unbound"``; preserve ``vault_local_entries`` (T12.5).
 
@@ -149,6 +246,11 @@ def disconnect_binding(
     an active binding nothing will flush them, and stale entries would
     re-fire on a future re-connect.
 
+    F-Y08: ``cancellation`` (if provided) signals any in-flight cycle
+    on this binding to stop before the state flip lands; otherwise the
+    cycle would happily run a chunk loop against a freshly-unbound
+    binding for up to one whole pass.
+
     The user GC path (a future "Forget local index" button, §gaps §20)
     is what physically removes the row; until then the local_entries
     rows survive for fast change detection on reconnect.
@@ -159,11 +261,19 @@ def disconnect_binding(
             "vault.sync.binding_disconnect_noop binding=%s already_unbound",
             binding_id,
         )
+        if cancellation is not None:
+            cancellation.cancel(binding_id)
         return DisconnectResult(
             binding_id=binding_id,
             local_entries_preserved=len(store.list_local_entries(binding_id)),
             pending_ops_dropped=0,
         )
+    if cancellation is not None:
+        if cancellation.cancel(binding_id):
+            log.info(
+                "vault.sync.binding_disconnect_cancelled_inflight_cycle binding=%s",
+                binding_id,
+            )
     local_count = len(store.list_local_entries(binding_id))
     pending = store.list_pending_ops(binding_id)
     for op in pending:
@@ -191,9 +301,11 @@ def _require_binding(
 
 
 __all__ = [
+    "BindingCancellationRegistry",
     "DisconnectResult",
     "PauseResult",
     "ResumeResult",
+    "SyncCancelledError",
     "disconnect_binding",
     "pause_binding",
     "resume_binding",

@@ -428,12 +428,15 @@ relay log (filenames are local-only).
 | `vault.restore.skip_symlinked_dest` | desktop | warning | `path`, `reason` | F-D28 — refused to write through a symlink in destination |
 | `vault.restore.skip_unsafe` | desktop | warning | `path` | Restore refused a path traversing outside the destination |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
+| `vault.sync.binding_disconnect_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — disconnect cancelled an in-flight cycle via the registry |
 | `vault.sync.binding_disconnect_noop` | desktop | info | `binding` | Disconnect on already-unbound binding |
 | `vault.sync.binding_disconnected` | desktop | info | `binding`, `sync_mode`, `local_entries_preserved`, `pending_ops_dropped` | T12.5 disconnect |
+| `vault.sync.binding_pause_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — pause cancelled an in-flight cycle via the registry |
 | `vault.sync.binding_pause_noop` | desktop | info | `binding` | Pause on already-paused binding |
 | `vault.sync.binding_paused` | desktop | info | `binding`, `sync_mode`, `pending_ops` | T12.4 pause |
 | `vault.sync.binding_resume_noop` | desktop | info | `binding` | Resume on already-bound binding |
 | `vault.sync.binding_resumed` | desktop | info | `binding`, `sync_mode`, `pending_ops` | T12.4 resume |
+| `vault.sync.cycle_cancelled_between_ops` | desktop | info | `binding`, `remaining` | F-Y08 — backup-only loop bailed before the next op |
 | `vault.sync.delete_cas_exhausted` | desktop | warning | `binding`, `path` | F-Y06 — tombstone retry budget exhausted |
 | `vault.sync.delete_cas_retry` | desktop | info | `attempt`, `binding`, `path` | F-Y06 — tombstone publish hit CAS race; retrying |
 | `vault.sync.delete_failed` | desktop | warning | `binding`, `path`, `error` | Delete op left in queue with attempts++ |
@@ -453,20 +456,29 @@ relay log (filenames are local-only).
 | `vault.sync.ransomware_threshold_total` | desktop | warning | `binding`, `total`, `window_s` | T12.3 trip via total events |
 | `vault.sync.refetch_after_publish_failed` | desktop | warning | `binding` | Manifest re-fetch after our own publish failed; cycle continues |
 | `vault.sync.refetch_for_next_iter_failed` | desktop | warning | `binding` | Two-way next-iter re-fetch failed |
+| `vault.sync.resume_cancelled` | desktop | info | `vault`, `session`, `chunks_done`, `total` | F-Y08 — resume_upload bailed mid-chunk-loop |
+| `vault.sync.resume_cancelled_pre_publish` | desktop | info | `vault`, `session` | F-Y08 — resume_upload bailed before CAS publish |
 | `vault.sync.special_file_skipped` | desktop | info | `binding`, `path`, `kind` | T6.4 skipped a symlink/FIFO/socket/device |
 | `vault.sync.trash_failed` | desktop | warning | `path`, `exit`, `stderr` | `gio trash` returned non-zero |
 | `vault.sync.trash_fallback_unlink_failed` | desktop | error | `path`, `error` | trash fallback `unlink` also failed |
 | `vault.sync.trash_invocation_failed` | desktop | error | `path`, `error` | `gio` could not be invoked at all |
 | `vault.sync.trash_unavailable` | desktop | warning | `path`, `reason` | `gio` not installed; falling back to unlink |
+| `vault.sync.twoway_cancelled_between_ops` | desktop | info | `binding`, `remaining` | F-Y08 — two-way Phase B bailed between ops |
+| `vault.sync.twoway_cancelled_between_phases` | desktop | info | `binding` | F-Y08 — two-way bailed between Phase A and Phase B |
+| `vault.sync.twoway_cancelled_pre_iteration` | desktop | info | `binding` | F-Y08 — two-way bailed before starting a new iteration |
 | `vault.sync.twoway_conflict_move_failed` | desktop | warning | `binding`, `src`, `dst`, `error` | Couldn't rename local copy aside before download |
 | `vault.sync.twoway_download_failed` | desktop | warning | `binding`, `path`, `error` | Two-way remote-upsert phase couldn't fetch file |
 | `vault.sync.twoway_folder_no_display_name` | desktop | warning | `binding`, `folder` | Two-way phase aborted; manifest folder lacked display name |
 | `vault.sync.twoway_local_fingerprint_unreadable` | desktop | warning | `binding`, `path` | F-Y04 — fingerprint failed; treated file as modified |
+| `vault.sync.twoway_phase_a_cancelled` | desktop | info | `binding`, `processed` | F-Y08 — Phase A (apply remote → local) bailed mid-folder |
 | `vault.sync.twoway_remote_tombstone_applied` | desktop | info | `binding`, `path` | Local file trashed after remote-tombstone applied (unmodified case) |
 | `vault.sync.twoway_remote_tombstone_kept_local_modified` | desktop | info | `binding`, `path` | Local edits preserved over remote tombstone (re-upload re-enqueued) |
 | `vault.sync.twoway_remote_tombstone_unreadable` | desktop | warning | `binding`, `path` | F-Y05 — fingerprint failed; deferred to next cycle |
 | `vault.sync.twoway_skip_unsafe_path` | desktop | warning | `path` | Two-way refused a manifest path that traverses out of root |
 | `vault.sync.twoway_trash_failed` | desktop | warning | `binding`, `path` | T12.1 remote-tombstone trash failed; row left in place |
+| `vault.sync.upload_cancelled` | desktop | info | `vault`, `remote_path`, `chunks_done`, `total` | F-Y08 — upload_file bailed mid-chunk-loop |
+| `vault.sync.upload_cancelled_op` | desktop | info | `binding`, `path` | F-Y08 — sync cycle translated chunk-level bail into op outcome |
+| `vault.sync.upload_cancelled_pre_publish` | desktop | info | `vault`, `remote_path` | F-Y08 — upload_file bailed before CAS publish |
 | `vault.sync.upload_cas_conflict` | desktop | warning | `binding`, `path` | Inner T6.3 retry budget exhausted; op stays for next cycle |
 | `vault.sync.upload_failed` | desktop | warning | `binding`, `path`, `error` | Generic upload failure; op left in queue with attempts++ |
 | `vault.sync.upload_path_vanished_promoted_to_delete` | desktop | info | `binding`, `path` | Watcher saw modify; sync saw missing — promoted to delete |
