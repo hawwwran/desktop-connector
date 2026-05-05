@@ -25,7 +25,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
-from .vault_bindings import VaultBindingsStore, VaultBinding, VaultLocalEntry
+from .vault_bindings import (
+    VaultBindingsStore, VaultBinding, VaultLocalEntry,
+    normalize_relative_path,
+)
 from .vault_download import (
     DownloadProgress,
     default_vault_download_cache_dir,
@@ -160,11 +163,16 @@ def run_initial_baseline(
 
     # Pre-existing local files that aren't in the remote folder: log
     # as ``extra`` rows (content_fingerprint = "" so the watcher knows
-    # they aren't backed by remote yet).
+    # they aren't backed by remote yet). F-Y16/F-Y28: normalize the
+    # walk-side path so the membership test against ``downloaded_set``
+    # (whose entries were normalized by ``_plan_baseline``) doesn't
+    # miss on NFD↔NFC drift.
     extras: list[str] = []
     downloaded_set = set(downloaded)
     for absolute in _walk_local(local_root):
-        relative = absolute.relative_to(local_root).as_posix()
+        relative = normalize_relative_path(
+            absolute.relative_to(local_root).as_posix()
+        )
         if relative in downloaded_set:
             continue
         try:
@@ -206,6 +214,9 @@ def _plan_baseline(folder: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     """Walk the folder's entries and return ``(relative_path, entry)`` pairs.
 
     Skips tombstones (§D15) and entries without a downloadable version.
+    Paths are NFC-normalized (F-Y16/F-Y28) so a manifest written by an
+    NFD-emitting client doesn't seed a row that will never match the
+    Linux/Windows watcher's NFC events.
     """
     out: list[tuple[str, dict[str, Any]]] = []
     for entry in folder.get("entries", []) or []:
@@ -218,14 +229,16 @@ def _plan_baseline(folder: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         relative = str(entry.get("path") or "").strip()
         if not relative:
             continue
-        # Defensive: never write outside the binding root.
+        # Defensive: never write outside the binding root. (This check
+        # runs against the un-normalized form so a path like ``/foo``
+        # is rejected before NFC could mask the leading slash.)
         if relative.startswith("/") or ".." in relative.replace("\\", "/").split("/"):
             log.warning("vault.baseline.skip_unsafe path=%s", relative)
             continue
         latest = _latest_version(entry)
         if latest is None:
             continue
-        out.append((relative.replace("\\", "/"), entry))
+        out.append((normalize_relative_path(relative), entry))
     return out
 
 

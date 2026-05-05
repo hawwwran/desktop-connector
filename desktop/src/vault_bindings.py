@@ -21,9 +21,32 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
+
+
+def normalize_relative_path(path: str) -> str:
+    """Canonicalize a binding-relative path before it touches the store.
+
+    F-Y16 / F-Y28: paths come in from three sources — manifest entries
+    (``entry["path"]``), filesystem walks (``Path.as_posix()``), and
+    watcher events. macOS NFD vs Linux/Windows NFC encodings of the
+    same Czech / accented filename produce different bytes, so SQL
+    byte-equality lookups miss; the fingerprint shortcut bypasses;
+    every two-way pass re-downloads. Single normalization step:
+    ``unicodedata.normalize("NFC", …)`` + ``\\ → /`` + strip a leading
+    ``/`` so the store layer is symmetric regardless of caller origin.
+
+    Empty input returns ``""`` (callers decide whether that's an
+    error). Path-traversal validation is the caller's job — this
+    helper is a normalizer, not a validator.
+    """
+    if not path:
+        return ""
+    nfc = unicodedata.normalize("NFC", str(path))
+    return nfc.replace("\\", "/").lstrip("/")
 
 
 BindingState = Literal[
@@ -252,7 +275,8 @@ class VaultBindingsStore:
                     last_synced_revision = excluded.last_synced_revision
                 """,
                 (
-                    entry.binding_id, entry.relative_path,
+                    entry.binding_id,
+                    normalize_relative_path(entry.relative_path),
                     str(entry.content_fingerprint or ""),
                     int(entry.size_bytes or 0),
                     int(entry.mtime_ns or 0),
@@ -265,7 +289,7 @@ class VaultBindingsStore:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM vault_local_entries WHERE binding_id = ? AND relative_path = ?",
-                (binding_id, relative_path),
+                (binding_id, normalize_relative_path(relative_path)),
             ).fetchone()
         return _row_to_local_entry(row) if row else None
 
@@ -281,7 +305,7 @@ class VaultBindingsStore:
         with self._connect() as conn:
             cursor = conn.execute(
                 "DELETE FROM vault_local_entries WHERE binding_id = ? AND relative_path = ?",
-                (binding_id, relative_path),
+                (binding_id, normalize_relative_path(relative_path)),
             )
             conn.commit()
             return cursor.rowcount == 1
@@ -300,6 +324,7 @@ class VaultBindingsStore:
     ) -> VaultPendingOperation:
         if op_type not in VALID_OP_TYPES:
             raise ValueError(f"unknown op_type: {op_type!r}")
+        normalized = normalize_relative_path(relative_path)
         enqueued = int(now if now is not None else time.time())
         with self._connect() as conn:
             cursor = conn.execute(
@@ -308,7 +333,7 @@ class VaultBindingsStore:
                     binding_id, op_type, relative_path, enqueued_at
                 ) VALUES (?, ?, ?, ?)
                 """,
-                (binding_id, op_type, relative_path, enqueued),
+                (binding_id, op_type, normalized, enqueued),
             )
             conn.commit()
             op_id = int(cursor.lastrowid or 0)
@@ -316,7 +341,7 @@ class VaultBindingsStore:
             op_id=op_id,
             binding_id=binding_id,
             op_type=op_type,
-            relative_path=relative_path,
+            relative_path=normalized,
             enqueued_at=enqueued,
             attempts=0,
             last_error=None,
@@ -386,12 +411,13 @@ class VaultBindingsStore:
         at insert time keeps the queue O(distinct paths) instead of
         O(filesystem events).
         """
-        existing = self._first_pending_op_for_path(binding_id, op_type, relative_path)
+        normalized = normalize_relative_path(relative_path)
+        existing = self._first_pending_op_for_path(binding_id, op_type, normalized)
         if existing is None:
             return self.enqueue_pending_op(
                 binding_id=binding_id,
                 op_type=op_type,
-                relative_path=relative_path,
+                relative_path=normalized,
                 now=now,
             )
         enqueued = int(now if now is not None else time.time())
@@ -414,7 +440,7 @@ class VaultBindingsStore:
                 WHERE binding_id = ? AND op_type = ? AND relative_path = ?
                 ORDER BY op_id ASC LIMIT 1
                 """,
-                (binding_id, op_type, relative_path),
+                (binding_id, op_type, normalize_relative_path(relative_path)),
             ).fetchone()
         return _row_to_pending_op(row) if row else None
 

@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
 
+from .vault_bindings import normalize_relative_path
+
 
 log = logging.getLogger(__name__)
 
@@ -199,7 +201,11 @@ class WatcherCoordinator:
     ) -> None:
         """Receive a single filesystem event."""
         now_t = self._clock() if now is None else float(now)
-        path = relative_path.replace("\\", "/").lstrip("/")
+        # F-Y16: NFC-normalize at the watcher boundary so the same
+        # Czech-named file doesn't enqueue twice (NFD bytes from a Mac
+        # plus NFC bytes from a Linux walker would otherwise key
+        # distinct rows in vault_pending_operations).
+        path = normalize_relative_path(relative_path)
         if not path:
             return
 

@@ -47,7 +47,10 @@ from .vault_binding_sync import (
     SyncVault,
     _execute_op,
 )
-from .vault_bindings import VaultBinding, VaultBindingsStore, VaultLocalEntry
+from .vault_bindings import (
+    VaultBinding, VaultBindingsStore, VaultLocalEntry,
+    normalize_relative_path,
+)
 from .vault_conflict_naming import make_conflict_path
 from .vault_download import default_vault_download_cache_dir, download_latest_file
 from .vault_trash import trash_path
@@ -282,10 +285,16 @@ def _apply_remote_to_local(
         relative = str(entry.get("path") or "").strip()
         if not relative:
             continue
+        # Reject before NFC so a leading-slash / .. path can't slip past
+        # the traversal guard.
         relative = relative.replace("\\", "/")
         if relative.startswith("/") or ".." in relative.split("/"):
             log.warning("vault.sync.twoway_skip_unsafe_path path=%s", relative)
             continue
+        # F-Y16: NFC for the comparison + lookup paths so manifest
+        # entries written by an NFD-emitting client still match the
+        # NFC bytes the watcher / baseline put into the store.
+        relative = normalize_relative_path(relative)
 
         target = local_root / relative
         local_entry = store.get_local_entry(binding.binding_id, relative)
