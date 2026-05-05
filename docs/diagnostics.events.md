@@ -411,6 +411,8 @@ relay log (filenames are local-only).
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal) |
 | `vault.eviction.version_purged` | desktop | info | `vault_id`, `path`, `version_id` | Old version evicted to free space |
 | `vault.folder.cleared` | desktop | info | `remote_folder_id`, `tombstoned`, `author` | T14.1 bulk-soft-delete published |
+| `vault.folder_upload.cancelled` | desktop | info | `vault`, `files_done`, `total` | F-U03 — folder upload cancelled between files |
+| `vault.folder_upload.cancelled_pre_publish` | desktop | info | `vault`, `files_done` | F-U03 — folder upload cancelled before the batch CAS publish |
 | `vault.gc.unlink_failed` | server | warning | `plan`, `path` | F-S12 — gcExecute couldn't remove a chunk file |
 | `vault.import.cancelled` | desktop | info | `vault`, `chunks_done`, `total` | F-U03 — import cancelled mid-chunk-upload |
 | `vault.import.cancelled_pre_publish` | desktop | info | `vault`, `chunks_done` | F-U03 — import cancelled after chunks but before merge publish |

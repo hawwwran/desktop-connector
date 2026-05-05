@@ -747,6 +747,7 @@ def upload_folder(
     created_at: str | None = None,
     progress: Callable[[FolderUploadProgress], None] | None = None,
     local_index: Any = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> FolderUploadResult:
     """Recursively upload every accepted file under ``local_root``.
 
@@ -759,6 +760,13 @@ def upload_folder(
     a folder upload is atomic from the manifest's point of view. The CAS
     retry from T6.3 still kicks in when a concurrent device beat us to
     the publish.
+
+    F-U03: ``should_continue`` is checked between every file in the
+    plan and once before the CAS publish. Already-uploaded chunks
+    stay on the relay (orphans cleaned up by the next eviction
+    housekeeping pass per §D2); the manifest is NOT mutated when the
+    bail fires before publish, so a cancelled folder upload leaves no
+    half-applied state in the vault.
     """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
@@ -803,6 +811,14 @@ def upload_folder(
     upload_results: list[UploadResult] = []
     bytes_completed = 0
     for plan in plans:
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.folder_upload.cancelled vault=%s files_done=%d total=%d",
+                vault.vault_id, len(upload_results), files_total,
+            )
+            raise SyncCancelledError(
+                f"folder upload cancelled at file {len(upload_results)}/{files_total}"
+            )
         remote_path = (
             f"{base_remote_path}/{plan.relative_path}"
             if base_remote_path
@@ -840,6 +856,15 @@ def upload_folder(
             manifest=parent_n,
             uploaded=upload_results,
             skipped=skipped,
+        )
+
+    if should_continue is not None and not should_continue():
+        log.info(
+            "vault.folder_upload.cancelled_pre_publish vault=%s files_done=%d",
+            vault.vault_id, len(upload_results),
+        )
+        raise SyncCancelledError(
+            f"folder upload cancelled before publish ({len(upload_results)} files staged)"
         )
 
     _report_folder(progress, "publishing", files_total, files_total, bytes_total, bytes_completed, "")

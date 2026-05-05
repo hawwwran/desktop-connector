@@ -16,6 +16,7 @@ from .brand import (
     apply_pointer_cursors,
     apply_theme_mode_from_config_dir,
 )
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import list_folder, list_versions
 from .vault_cache import VaultLocalIndex
 from .vault_download import previous_version_filename
@@ -137,9 +138,63 @@ def show_vault_browser(config_dir: Path) -> None:
         status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
         outer.append(status)
 
-        progress_bar = Gtk.ProgressBar(show_text=True)
-        progress_bar.set_visible(False)
-        outer.append(progress_bar)
+        # F-U03: progress + Cancel cluster. Workers running long-flow
+        # operations (upload / download / restore / eviction / resume)
+        # register their ``threading.Event`` in ``active_cancel``
+        # before starting and clear it in their ``finally``. Cancel
+        # button reads the slot at click time and sets the event;
+        # backend hooks observe ``should_continue() == False`` at the
+        # next checkpoint and raise ``SyncCancelledError``.
+        progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        progress_box.set_visible(False)
+        progress_bar = Gtk.ProgressBar(show_text=True, hexpand=True)
+        progress_box.append(progress_bar)
+        cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
+        progress_box.append(cancel_btn)
+        outer.append(progress_box)
+
+        active_cancel: dict[str, "threading.Event | None"] = {"event": None}
+
+        def _arm_cancel(event: "threading.Event") -> None:
+            """Worker calls this just before kicking off a long-running backend.
+
+            The Cancel button becomes clickable; on click it sets the
+            event and the backend's next ``should_continue`` checkpoint
+            raises ``SyncCancelledError``.
+            """
+            active_cancel["event"] = event
+            cancel_btn.set_label("Cancel")
+            cancel_btn.set_sensitive(True)
+            cancel_btn.set_visible(True)
+            progress_box.set_visible(True)
+
+        def _show_progress_no_cancel() -> None:
+            """Short-running flow that shouldn't expose a Cancel button.
+
+            Used for the delete worker (single manifest mutation) where
+            cancel mid-publish would be a partial-state hazard.
+            """
+            active_cancel["event"] = None
+            cancel_btn.set_visible(False)
+            progress_box.set_visible(True)
+
+        def _disarm_cancel() -> None:
+            """Worker calls this in its ``finally`` (via GLib.idle_add)."""
+            active_cancel["event"] = None
+            progress_box.set_visible(False)
+            cancel_btn.set_label("Cancel")
+            cancel_btn.set_sensitive(True)
+            cancel_btn.set_visible(True)
+
+        def _on_cancel_clicked(_btn: Gtk.Button) -> None:
+            event = active_cancel["event"]
+            if event is None:
+                return
+            event.set()
+            cancel_btn.set_sensitive(False)
+            cancel_btn.set_label("Cancelling…")
+
+        cancel_btn.connect("clicked", _on_cancel_clicked)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
         outer.append(paned)
@@ -654,7 +709,8 @@ def show_vault_browser(config_dir: Path) -> None:
                 return
 
             refresh_btn.set_sensitive(False)
-            progress_bar.set_visible(True)
+            cancel_event = threading.Event()
+            _arm_cancel(cancel_event)
             progress_bar.set_fraction(0.0)
             progress_bar.set_text("Reclaiming space...")
             set_status(f"{action}: running eviction to free {target_bytes} bytes...")
@@ -675,14 +731,23 @@ def show_vault_browser(config_dir: Path) -> None:
                             author_device_id=device_id,
                             target_bytes_to_free=target_bytes,
                             local_index=local_index,
+                            should_continue=lambda: not cancel_event.is_set(),
                         )
                     finally:
                         vault.close()
+                except SyncCancelledError:
+                    def cancelled() -> bool:
+                        _disarm_cancel()
+                        refresh_btn.set_sensitive(True)
+                        set_status("Eviction cancelled.")
+                        return False
+                    GLib.idle_add(cancelled)
+                    return
                 except Exception as exc:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         refresh_btn.set_sensitive(True)
                         set_status(f"Eviction failed: {error_message}", "error")
                         return False
@@ -692,7 +757,7 @@ def show_vault_browser(config_dir: Path) -> None:
                 def succeed() -> bool:
                     state["manifest"] = result.manifest
                     state["selected_file"] = None
-                    progress_bar.set_visible(False)
+                    _disarm_cancel()
                     refresh_btn.set_sensitive(True)
                     if result.no_more_candidates:
                         quota_banner.set_title(
@@ -749,7 +814,8 @@ def show_vault_browser(config_dir: Path) -> None:
             upload_btn.set_sensitive(False)
             upload_folder_btn.set_sensitive(False)
             resume_banner.set_revealed(False)
-            progress_bar.set_visible(True)
+            cancel_event = threading.Event()
+            _arm_cancel(cancel_event)
             progress_bar.set_fraction(0.0)
             progress_bar.set_text("Resuming uploads...")
             set_status(f"Resuming {len(sessions)} interrupted upload(s)...")
@@ -759,6 +825,7 @@ def show_vault_browser(config_dir: Path) -> None:
 
                 completed = 0
                 failed = 0
+                cancelled_count = 0
                 last_manifest = state.get("manifest")
                 try:
                     config.reload()
@@ -766,6 +833,8 @@ def show_vault_browser(config_dir: Path) -> None:
                     vault = open_local_vault_from_grant(config_dir, config, vault_id)
                     try:
                         for session in sessions:
+                            if cancel_event.is_set():
+                                break
                             try:
                                 current_manifest = vault.fetch_manifest(relay, local_index=local_index)
                                 result = resume_upload(
@@ -774,9 +843,13 @@ def show_vault_browser(config_dir: Path) -> None:
                                     manifest=current_manifest,
                                     session=session,
                                     local_index=local_index,
+                                    should_continue=lambda: not cancel_event.is_set(),
                                 )
                                 last_manifest = result.manifest
                                 completed += 1
+                            except SyncCancelledError:
+                                cancelled_count += 1
+                                break
                             except Exception:
                                 failed += 1
                     finally:
@@ -785,7 +858,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         refresh_btn.set_sensitive(True)
                         upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                         upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
@@ -796,7 +869,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     return
 
                 def succeed() -> bool:
-                    progress_bar.set_visible(False)
+                    _disarm_cancel()
                     refresh_btn.set_sensitive(True)
                     upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                     upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
@@ -804,7 +877,12 @@ def show_vault_browser(config_dir: Path) -> None:
                         state["manifest"] = last_manifest
                     state["selected_file"] = None
                     render_all()
-                    if failed == 0:
+                    if cancelled_count > 0:
+                        set_status(
+                            f"Resume cancelled. {completed} upload(s) finished, "
+                            f"{len(sessions) - completed - failed} pending.",
+                        )
+                    elif failed == 0:
                         set_status(
                             f"Resumed {completed} upload(s).", "success",
                         )
@@ -836,7 +914,8 @@ def show_vault_browser(config_dir: Path) -> None:
             selected_path = folder_path if is_folder_download else str(file_row.get("path", ""))
             download_label = "folder" if is_folder_download else selected_path
             download_btn.set_sensitive(False)
-            progress_bar.set_visible(True)
+            cancel_event = threading.Event()
+            _arm_cancel(cancel_event)
             progress_bar.set_fraction(0.0)
             progress_bar.set_text("Preparing download...")
             set_status(f"Downloading {download_label}...")
@@ -887,14 +966,23 @@ def show_vault_browser(config_dir: Path) -> None:
                                 existing_policy=existing_policy,
                                 chunk_cache_dir=default_vault_download_cache_dir(),
                                 progress=report_progress,
+                                should_continue=lambda: not cancel_event.is_set(),
                             )
                     finally:
                         vault.close()
+                except SyncCancelledError:
+                    def cancelled() -> bool:
+                        _disarm_cancel()
+                        download_btn.set_sensitive(state.get("selected_file") is not None)
+                        set_status(f"Download cancelled: {download_label}.")
+                        return False
+                    GLib.idle_add(cancelled)
+                    return
                 except Exception as exc:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         download_btn.set_sensitive(bool(state.get("selected_file")) or bool(state["path"]))
                         set_status(f"Download failed: {error_message}", "error")
                         return False
@@ -904,7 +992,7 @@ def show_vault_browser(config_dir: Path) -> None:
 
                 def succeed() -> bool:
                     state["manifest"] = current_manifest
-                    progress_bar.set_visible(False)
+                    _disarm_cancel()
                     download_btn.set_sensitive(bool(state.get("selected_file")) or bool(state["path"]))
                     noun = "folder" if is_folder_download else "file"
                     set_status(f"Downloaded {noun} to {final_path}.", "success")
@@ -961,7 +1049,8 @@ def show_vault_browser(config_dir: Path) -> None:
             modified = str(version.get("modified") or "?")
             download_btn.set_sensitive(False)
             versions_btn.set_sensitive(False)
-            progress_bar.set_visible(True)
+            cancel_event = threading.Event()
+            _arm_cancel(cancel_event)
             progress_bar.set_fraction(0.0)
             progress_bar.set_text("Preparing version download...")
             set_status(f"Downloading {label} (version {modified})...")
@@ -1000,14 +1089,26 @@ def show_vault_browser(config_dir: Path) -> None:
                             existing_policy=existing_policy,
                             chunk_cache_dir=default_vault_download_cache_dir(),
                             progress=report_progress,
+                            should_continue=lambda: not cancel_event.is_set(),
                         )
                     finally:
                         vault.close()
+                except SyncCancelledError:
+                    def cancelled() -> bool:
+                        _disarm_cancel()
+                        download_btn.set_sensitive(
+                            bool(state.get("selected_file")) or bool(state["path"])
+                        )
+                        versions_btn.set_sensitive(bool(state.get("selected_file")))
+                        set_status(f"Version download cancelled: {label}.")
+                        return False
+                    GLib.idle_add(cancelled)
+                    return
                 except Exception as exc:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         download_btn.set_sensitive(
                             bool(state.get("selected_file")) or bool(state["path"])
                         )
@@ -1020,7 +1121,7 @@ def show_vault_browser(config_dir: Path) -> None:
 
                 def succeed() -> bool:
                     state["manifest"] = current_manifest
-                    progress_bar.set_visible(False)
+                    _disarm_cancel()
                     download_btn.set_sensitive(
                         bool(state.get("selected_file")) or bool(state["path"])
                     )
@@ -1157,7 +1258,8 @@ def show_vault_browser(config_dir: Path) -> None:
             )
             upload_btn.set_sensitive(False)
             refresh_btn.set_sensitive(False)
-            progress_bar.set_visible(True)
+            cancel_event = threading.Event()
+            _arm_cancel(cancel_event)
             progress_bar.set_fraction(0.0)
             progress_bar.set_text("Preparing upload...")
             set_status(f"Uploading {local_path.name}...")
@@ -1194,12 +1296,26 @@ def show_vault_browser(config_dir: Path) -> None:
                             mode=upload_mode,
                             progress=report_progress,
                             local_index=local_index,
+                            should_continue=lambda: not cancel_event.is_set(),
                         )
                     finally:
                         vault.close()
+                except SyncCancelledError:
+                    def cancelled() -> bool:
+                        _disarm_cancel()
+                        upload_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        refresh_btn.set_sensitive(True)
+                        set_status(
+                            f"Upload cancelled: {local_path.name}. "
+                            "Resume from the bell-banner anytime.",
+                        )
+                        _refresh_resume_banner(vault_id)
+                        return False
+                    GLib.idle_add(cancelled)
+                    return
                 except VaultQuotaExceededError as exc:
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                         refresh_btn.set_sensitive(True)
                         _handle_quota_exceeded(exc, action="Upload")
@@ -1210,7 +1326,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                         refresh_btn.set_sensitive(True)
                         set_status(f"Upload failed: {error_message}", "error")
@@ -1220,7 +1336,7 @@ def show_vault_browser(config_dir: Path) -> None:
 
                 def succeed() -> bool:
                     state["manifest"] = result.manifest
-                    progress_bar.set_visible(False)
+                    _disarm_cancel()
                     refresh_btn.set_sensitive(True)
                     state["selected_file"] = None
                     render_all()
@@ -1334,7 +1450,8 @@ def show_vault_browser(config_dir: Path) -> None:
             upload_btn.set_sensitive(False)
             upload_folder_btn.set_sensitive(False)
             refresh_btn.set_sensitive(False)
-            progress_bar.set_visible(True)
+            cancel_event = threading.Event()
+            _arm_cancel(cancel_event)
             progress_bar.set_fraction(0.0)
             progress_bar.set_text("Walking folder...")
             set_status(f"Uploading folder {local_root.name}...")
@@ -1375,12 +1492,25 @@ def show_vault_browser(config_dir: Path) -> None:
                             author_device_id=device_id,
                             progress=report_progress,
                             local_index=local_index,
+                            should_continue=lambda: not cancel_event.is_set(),
                         )
                     finally:
                         vault.close()
+                except SyncCancelledError:
+                    def cancelled() -> bool:
+                        _disarm_cancel()
+                        upload_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
+                        refresh_btn.set_sensitive(True)
+                        set_status(
+                            f"Folder upload cancelled: {local_root.name}.",
+                        )
+                        return False
+                    GLib.idle_add(cancelled)
+                    return
                 except VaultQuotaExceededError as exc:
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                         upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
                         refresh_btn.set_sensitive(True)
@@ -1392,7 +1522,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         upload_btn.set_sensitive(_resolve_upload_destination() is not None)
                         upload_folder_btn.set_sensitive(_resolve_upload_destination() is not None)
                         refresh_btn.set_sensitive(True)
@@ -1403,7 +1533,7 @@ def show_vault_browser(config_dir: Path) -> None:
 
                 def succeed() -> bool:
                     state["manifest"] = result.manifest
-                    progress_bar.set_visible(False)
+                    _disarm_cancel()
                     refresh_btn.set_sensitive(True)
                     state["selected_file"] = None
                     render_all()
@@ -1465,7 +1595,11 @@ def show_vault_browser(config_dir: Path) -> None:
 
             delete_btn.set_sensitive(False)
             refresh_btn.set_sensitive(False)
-            progress_bar.set_visible(True)
+            # F-U03: delete is a single manifest mutation — no chunk
+            # loop to interrupt — so progress is shown without a Cancel
+            # button. (Cancel mid-publish would be a partial-state
+            # hazard.)
+            _show_progress_no_cancel()
             progress_bar.set_fraction(0.0)
             progress_bar.set_text(label)
             set_status(f"{label}...")
@@ -1488,7 +1622,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
-                        progress_bar.set_visible(False)
+                        _disarm_cancel()
                         refresh_btn.set_sensitive(True)
                         render_all(f"{label} failed: {error_message}", "error")
                         return False
@@ -1498,7 +1632,7 @@ def show_vault_browser(config_dir: Path) -> None:
                 def succeed() -> bool:
                     state["manifest"] = published
                     state["selected_file"] = None
-                    progress_bar.set_visible(False)
+                    _disarm_cancel()
                     refresh_btn.set_sensitive(True)
                     render_all(f"{label} succeeded.", "success")
                     return False

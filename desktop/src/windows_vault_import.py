@@ -28,6 +28,7 @@ from .brand import (
     apply_pointer_cursors,
     apply_theme_mode_from_config_dir,
 )
+from .vault_binding_lifecycle import SyncCancelledError
 from .vault_cache import VaultLocalIndex
 from .vault_error_messages import humanize
 from .vault_export import ExportError
@@ -157,7 +158,25 @@ def show_vault_import(config_dir: Path) -> None:
         progress_bar = Gtk.ProgressBar(show_text=True)
         progress_box.append(progress_label)
         progress_box.append(progress_bar)
+        # F-U03: Cancel during import. Cancel-before-publish is safe;
+        # any chunks already PUT to the relay become orphans cleaned
+        # up by the next eviction housekeeping pass per §D2.
+        progress_actions = _hbox(spacing=8)
+        progress_actions.set_halign(Gtk.Align.END)
+        progress_cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
+        progress_actions.append(progress_cancel_btn)
+        progress_box.append(progress_actions)
         stack.add_named(progress_box, "progress")
+        import_cancel_event: dict[str, "threading.Event | None"] = {"event": None}
+
+        def _on_progress_cancel(_btn: Gtk.Button) -> None:
+            event = import_cancel_event["event"]
+            if event is None:
+                return
+            event.set()
+            progress_cancel_btn.set_sensitive(False)
+            progress_cancel_btn.set_label("Cancelling…")
+        progress_cancel_btn.connect("clicked", _on_progress_cancel)
 
         # ---- Page 4: summary ------------------------------------------
         summary_box = _vbox(margin=24, spacing=12)
@@ -299,6 +318,11 @@ def show_vault_import(config_dir: Path) -> None:
                     return False
                 GLib.idle_add(update)
 
+            cancel_event = threading.Event()
+            import_cancel_event["event"] = cancel_event
+            progress_cancel_btn.set_sensitive(True)
+            progress_cancel_btn.set_label("Cancel")
+
             def worker() -> None:
                 try:
                     from .vault_import_runner import run_import
@@ -319,13 +343,28 @@ def show_vault_import(config_dir: Path) -> None:
                             author_device_id=device_id,
                             progress=report,
                             local_index=local_index,
+                            should_continue=lambda: not cancel_event.is_set(),
                         )
                     finally:
                         vault.close()
+                except SyncCancelledError:
+                    def cancelled() -> bool:
+                        import_cancel_event["event"] = None
+                        summary_title.set_label("Import cancelled")
+                        summary_body.set_label(
+                            "Import was cancelled before publish. Any chunks already "
+                            "uploaded to the relay become orphans and are reclaimed by "
+                            "the next eviction housekeeping pass."
+                        )
+                        go_to("summary")
+                        return False
+                    GLib.idle_add(cancelled)
+                    return
                 except Exception as exc:
                     error_message = humanize(exc)
 
                     def fail() -> bool:
+                        import_cancel_event["event"] = None
                         summary_title.set_label("Import failed")
                         summary_body.set_label(error_message)
                         go_to("summary")
@@ -334,6 +373,7 @@ def show_vault_import(config_dir: Path) -> None:
                     return
 
                 def succeed() -> bool:
+                    import_cancel_event["event"] = None
                     state["result"] = result
                     if result.action == "refuse":
                         summary_title.set_label("Import refused")
