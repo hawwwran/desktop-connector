@@ -13,7 +13,7 @@ from pathlib import Path
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw, GLib, Pango
 
 from .brand import (
     apply_brand_css,
@@ -196,6 +196,72 @@ def show_vault_main(config_dir: Path):
         recovery_warning.add_css_class("warning")
         recovery_warning.set_visible(recovery_status_text in ("Untested", "Stale"))
         recovery.append(recovery_warning)
+
+        # F-501.5: Export reminder banner. Driven by
+        # ``vault_export_reminder.should_show_export_reminder``; the
+        # "Dismiss" button persists ``last_dismissed_at`` so the
+        # cadence-based gate has somewhere to anchor.
+        from .vault_export_reminder import (
+            normalize_cadence,
+            should_show_export_reminder,
+        )
+        export_reminder_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            margin_top=12,
+        )
+        export_reminder_label = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+        export_reminder_label.add_css_class("warning")
+        export_reminder_dismiss_btn = Gtk.Button(
+            label="Dismiss", css_classes=["pill"],
+        )
+        export_reminder_box.append(export_reminder_label)
+        export_reminder_box.append(export_reminder_dismiss_btn)
+        export_reminder_box.set_visible(False)
+        recovery.append(export_reminder_box)
+
+        def _refresh_export_reminder() -> None:
+            cadence = normalize_cadence(config.vault_export_reminder_cadence)
+            if cadence == "off" or not vault_id_undashed:
+                export_reminder_box.set_visible(False)
+                return
+            now_iso = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z"
+            )
+            should = should_show_export_reminder(
+                last_export_at=config.vault_last_export_at,
+                last_dismissed_at=config.vault_export_reminder_last_dismissed_at,
+                cadence=cadence,
+                now=now_iso,
+            )
+            if not should:
+                export_reminder_box.set_visible(False)
+                return
+            last_export = config.vault_last_export_at
+            if last_export:
+                export_reminder_label.set_label(
+                    f"Vault hasn't been exported since {last_export[:10]}. "
+                    f"Export now to keep your recovery kit current "
+                    f"(cadence: {cadence})."
+                )
+            else:
+                export_reminder_label.set_label(
+                    "You haven't exported this vault yet. Export now to "
+                    "create an offline backup of every file + the manifest "
+                    "history (cadence: {cadence}).".format(cadence=cadence)
+                )
+            export_reminder_box.set_visible(True)
+
+        def on_dismiss_export_reminder(_btn) -> None:
+            now_iso = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z"
+            )
+            config.vault_export_reminder_last_dismissed_at = now_iso
+            _refresh_export_reminder()
+
+        export_reminder_dismiss_btn.connect(
+            "clicked", on_dismiss_export_reminder,
+        )
+        _refresh_export_reminder()
 
         def refresh_recovery_summary(status: str, last_tested: str | None = None) -> None:
             recovery_value_labels["Status"].set_label(status)
@@ -415,10 +481,9 @@ def show_vault_main(config_dir: Path):
         ))
 
         # Other tabs are empty placeholders for later phases.
+        # (Activity + Maintenance get real implementations below — F-501.)
         for name, title in [
             ("devices", "Devices"),
-            ("activity", "Activity"),
-            ("maintenance", "Maintenance"),
             ("security", "Security"),
             ("sync_safety", "Sync safety"),
             ("storage", "Storage"),
@@ -432,6 +497,401 @@ def show_vault_main(config_dir: Path):
                 xalign=0, css_classes=["dim-label"],
             ))
             add_tab(name, title, placeholder)
+
+        # ---- F-501: Activity tab — merged audit + op-log timeline -----
+        from .vault_activity import (
+            ACTIVITY_KIND_PREFIXES,
+            ActivityRow,
+            filter_timeline,
+            merge_timeline,
+        )
+
+        activity_tab = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
+        )
+        activity_tab.append(Gtk.Label(
+            label="Activity timeline",
+            xalign=0, css_classes=["title-3"],
+        ))
+        activity_tab.append(Gtk.Label(
+            label=(
+                "Major operations on this vault: uploads, deletes, restore, "
+                "device grants, eviction, purge. Sourced from the encrypted "
+                "op-log in the head manifest."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+
+        activity_filter_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+        )
+        activity_search = Gtk.SearchEntry()
+        activity_search.set_placeholder_text("Filter by filename…")
+        activity_search.set_hexpand(True)
+        activity_filter_row.append(activity_search)
+        activity_refresh_btn = Gtk.Button(label="Refresh", css_classes=["pill"])
+        activity_filter_row.append(activity_refresh_btn)
+        activity_tab.append(activity_filter_row)
+
+        activity_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        activity_tab.append(activity_status)
+
+        activity_scroller = Gtk.ScrolledWindow(vexpand=True)
+        activity_list_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=4,
+        )
+        activity_scroller.set_child(activity_list_box)
+        activity_tab.append(activity_scroller)
+
+        activity_state: dict[str, Any] = {"rows": []}
+
+        def _humanize_event_type(event_type: str) -> str:
+            # Quick prose map for the rendered list. F-511 follow-up
+            # asks for a richer humanizer in vault_activity itself; for
+            # now this matches what the user expects to see.
+            return {
+                "vault.upload.completed": "Uploaded",
+                "vault.delete.completed": "Deleted",
+                "vault.folder.cleared": "Folder cleared",
+                "vault.vault.cleared": "Vault cleared",
+                "vault.restore.completed": "Restored",
+                "vault.grant.created": "Device granted access",
+                "vault.revoke.completed": "Device access revoked",
+                "vault.rotation.completed": "Access secret rotated",
+                "vault.migration.committed": "Relay migration committed",
+                "vault.eviction.tombstone_purged_expired": "Eviction (expired tombstone)",
+                "vault.eviction.tombstone_purged_early": "Eviction (early purge)",
+                "vault.eviction.version_purged": "Eviction (old version)",
+                "vault.purge.scheduled": "Hard purge scheduled",
+                "vault.purge.cancelled": "Hard purge cancelled",
+                "vault.purge.executed": "Hard purge executed",
+            }.get(event_type, event_type)
+
+        def _render_activity_rows(rows: list[ActivityRow]) -> None:
+            child = activity_list_box.get_first_child()
+            while child is not None:
+                next_child = child.get_next_sibling()
+                activity_list_box.remove(child)
+                child = next_child
+            if not rows:
+                empty = Gtk.Label(
+                    label="No activity yet. Once you upload, delete, or grant "
+                          "access, entries will appear here.",
+                    xalign=0, wrap=True, css_classes=["dim-label"],
+                )
+                activity_list_box.append(empty)
+                return
+            for row in rows:
+                row_box = Gtk.Box(
+                    orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                )
+                ts = datetime.fromtimestamp(
+                    row.timestamp_epoch or 0, tz=timezone.utc,
+                ).strftime("%Y-%m-%d %H:%M") if row.timestamp_epoch else "—"
+                ts_lbl = Gtk.Label(label=ts, xalign=0, css_classes=["dim-label"])
+                ts_lbl.set_size_request(140, -1)
+                row_box.append(ts_lbl)
+                kind_lbl = Gtk.Label(
+                    label=_humanize_event_type(row.event_type), xalign=0,
+                )
+                kind_lbl.set_size_request(220, -1)
+                row_box.append(kind_lbl)
+                detail_text = row.display_path or row.summary or ""
+                if row.device_name:
+                    detail_text = f"{detail_text}  ({row.device_name})".strip()
+                detail_lbl = Gtk.Label(
+                    label=detail_text, xalign=0, hexpand=True,
+                    ellipsize=Pango.EllipsizeMode.MIDDLE,
+                )
+                row_box.append(detail_lbl)
+                activity_list_box.append(row_box)
+
+        def _apply_activity_filter() -> None:
+            search = activity_search.get_text().strip() or None
+            filtered = filter_timeline(
+                activity_state.get("rows") or [],
+                filename_search=search,
+            )
+            _render_activity_rows(filtered)
+
+        def _refresh_activity(_btn=None) -> None:
+            if not vault_id_undashed:
+                activity_status.set_label("No vault is connected.")
+                _render_activity_rows([])
+                return
+            activity_status.set_label("Loading…")
+
+            def worker() -> None:
+                try:
+                    from .vault_runtime import (
+                        create_vault_relay, open_local_vault_from_grant,
+                    )
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(
+                        config_dir, config, vault_id_undashed,
+                    )
+                    try:
+                        manifest = vault.fetch_manifest(relay)
+                    finally:
+                        vault.close()
+                except Exception as exc:  # noqa: BLE001
+                    msg = humanize(exc)
+
+                    def fail() -> bool:
+                        activity_status.set_label(
+                            f"Could not load activity: {msg}"
+                        )
+                        return False
+                    GLib.idle_add(fail)
+                    return
+
+                op_entries = list(manifest.get("operation_log_tail") or [])
+                rows = merge_timeline(op_log_entries=op_entries)
+
+                def succeed() -> bool:
+                    activity_state["rows"] = rows
+                    activity_status.set_label(f"{len(rows)} event(s).")
+                    _apply_activity_filter()
+                    return False
+                GLib.idle_add(succeed)
+            threading.Thread(target=worker, daemon=True).start()
+
+        activity_refresh_btn.connect("clicked", _refresh_activity)
+        activity_search.connect("search-changed", lambda _e: _apply_activity_filter())
+        _refresh_activity()
+        add_tab("activity", "Activity", activity_tab)
+
+        # ---- F-501: Maintenance tab — debug bundle + integrity check --
+        from .vault_debug_bundle import write_debug_bundle, DebugBundleError
+        from .vault_integrity import (
+            IntegrityReport, run_full_check, run_quick_check,
+        )
+
+        maintenance_tab = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
+        )
+        maintenance_tab.append(Gtk.Label(
+            label="Diagnostics",
+            xalign=0, css_classes=["title-3"],
+        ))
+        maintenance_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        maintenance_tab.append(maintenance_status)
+
+        # Debug bundle
+        maintenance_tab.append(Gtk.Label(
+            label="Download debug bundle",
+            xalign=0, css_classes=["title-4"], margin_top=12,
+        ))
+        maintenance_tab.append(Gtk.Label(
+            label=(
+                "Packages a redacted snapshot of vault config, local index "
+                "schema, binding states, and the tail of the vault.log file "
+                "into a ZIP. The bundle is scrubbed for forbidden patterns "
+                "before it lands on disk; if any leak survives the scrub, "
+                "the build is refused outright."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        debug_bundle_btn = Gtk.Button(
+            label="Download debug bundle…", css_classes=["pill"],
+        )
+        debug_bundle_btn.set_halign(Gtk.Align.START)
+        maintenance_tab.append(debug_bundle_btn)
+
+        def on_download_debug_bundle(_btn) -> None:
+            dlg = Gtk.FileDialog()
+            dlg.set_title("Save debug bundle")
+            dlg.set_initial_name("vault-debug-bundle.zip")
+
+            def on_chosen(file_dialog, result) -> None:
+                try:
+                    gio_file = file_dialog.save_finish(result)
+                except GLib.Error:
+                    return
+                if gio_file is None:
+                    return
+                path = gio_file.get_path()
+                if not path:
+                    maintenance_status.set_label(
+                        "Choose a destination for the bundle."
+                    )
+                    return
+                _do_write_bundle(Path(path))
+
+            dlg.save(parent=win, callback=on_chosen)
+
+        def _do_write_bundle(destination: Path) -> None:
+            debug_bundle_btn.set_sensitive(False)
+            maintenance_status.set_label("Building debug bundle…")
+
+            def worker() -> None:
+                try:
+                    config.reload()
+                    config_dump = dict(config._data)
+                    from .vault_cache import VaultLocalIndex
+                    local_index = VaultLocalIndex(config_dir)
+                    activity_log = config_dir / "logs" / "vault.log"
+                    out = write_debug_bundle(
+                        destination,
+                        config=config_dump,
+                        db_path=local_index.db_path,
+                        activity_log_path=(
+                            activity_log if activity_log.exists() else None
+                        ),
+                    )
+                except DebugBundleError as exc:
+                    msg = str(exc)
+
+                    def fail() -> bool:
+                        debug_bundle_btn.set_sensitive(True)
+                        maintenance_status.set_label(
+                            f"Debug bundle refused: {msg}"
+                        )
+                        return False
+                    GLib.idle_add(fail)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    msg = humanize(exc)
+
+                    def fail() -> bool:
+                        debug_bundle_btn.set_sensitive(True)
+                        maintenance_status.set_label(
+                            f"Debug bundle failed: {msg}"
+                        )
+                        return False
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    debug_bundle_btn.set_sensitive(True)
+                    maintenance_status.set_label(
+                        f"Debug bundle saved to {out}."
+                    )
+                    return False
+                GLib.idle_add(succeed)
+            threading.Thread(target=worker, daemon=True).start()
+
+        debug_bundle_btn.connect("clicked", on_download_debug_bundle)
+
+        # Integrity check
+        maintenance_tab.append(Gtk.Label(
+            label="Check integrity",
+            xalign=0, css_classes=["title-4"], margin_top=12,
+        ))
+        maintenance_tab.append(Gtk.Label(
+            label=(
+                "Quick: re-fetch head manifest, verify the parent-revision "
+                "chain links cleanly, and confirm every referenced chunk "
+                "is present on the relay. Full: also AEAD-decrypts each "
+                "retained revision to surface bit-rot in older history."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        integrity_buttons = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+        )
+        quick_check_btn = Gtk.Button(label="Quick check", css_classes=["pill"])
+        full_check_btn = Gtk.Button(label="Full check", css_classes=["pill"])
+        integrity_buttons.append(quick_check_btn)
+        integrity_buttons.append(full_check_btn)
+        maintenance_tab.append(integrity_buttons)
+
+        integrity_report_label = Gtk.Label(
+            xalign=0, wrap=True, selectable=True,
+        )
+        maintenance_tab.append(integrity_report_label)
+
+        def _format_integrity_report(report: IntegrityReport) -> str:
+            head = (
+                f"{report.scope.title()} check: "
+                f"{report.revisions_checked} revision(s), "
+                f"{report.chunks_checked} chunk(s) checked. "
+            )
+            if report.ok:
+                return head + "No issues found."
+            head += f"{len(report.broken)} issue(s):"
+            issue_lines = []
+            for issue in report.broken[:20]:
+                bits = [issue.kind, issue.target]
+                if issue.detail:
+                    bits.append(issue.detail)
+                issue_lines.append("  • " + " — ".join(bits))
+            if len(report.broken) > 20:
+                issue_lines.append(
+                    f"  …and {len(report.broken) - 20} more."
+                )
+            return head + "\n" + "\n".join(issue_lines)
+
+        def _run_integrity_check(*, full: bool) -> None:
+            quick_check_btn.set_sensitive(False)
+            full_check_btn.set_sensitive(False)
+            integrity_report_label.set_label("")
+            scope = "full" if full else "quick"
+            maintenance_status.set_label(
+                f"Running {scope} integrity check…"
+            )
+
+            def worker() -> None:
+                try:
+                    from .vault_runtime import (
+                        create_vault_relay, open_local_vault_from_grant,
+                    )
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(
+                        config_dir, config, vault_id_undashed,
+                    )
+                    try:
+                        if full:
+                            report = run_full_check(vault=vault, relay=relay)
+                        else:
+                            report = run_quick_check(vault=vault, relay=relay)
+                    finally:
+                        vault.close()
+                except Exception as exc:  # noqa: BLE001
+                    msg = humanize(exc)
+
+                    def fail() -> bool:
+                        quick_check_btn.set_sensitive(True)
+                        full_check_btn.set_sensitive(True)
+                        maintenance_status.set_label(
+                            f"Integrity check failed: {msg}"
+                        )
+                        return False
+                    GLib.idle_add(fail)
+                    return
+
+                def succeed() -> bool:
+                    quick_check_btn.set_sensitive(True)
+                    full_check_btn.set_sensitive(True)
+                    summary = (
+                        "✓ No issues" if report.ok
+                        else f"⚠ {len(report.broken)} issue(s)"
+                    )
+                    maintenance_status.set_label(
+                        f"{scope.title()} check: {summary}."
+                    )
+                    integrity_report_label.set_label(
+                        _format_integrity_report(report)
+                    )
+                    return False
+                GLib.idle_add(succeed)
+            threading.Thread(target=worker, daemon=True).start()
+
+        quick_check_btn.connect("clicked", lambda _b: _run_integrity_check(full=False))
+        full_check_btn.connect("clicked", lambda _b: _run_integrity_check(full=True))
+        # Disable integrity checks when no vault is loaded.
+        if not vault_id_undashed:
+            quick_check_btn.set_sensitive(False)
+            full_check_btn.set_sensitive(False)
+            maintenance_status.set_label(
+                "Connect a vault before running integrity checks."
+            )
+
+        add_tab("maintenance", "Maintenance", maintenance_tab)
 
         # ---- Migration tab (T9.6) ----------------------------------------
         from .vault_migration_propagation import can_switch_back

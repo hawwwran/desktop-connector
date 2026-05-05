@@ -54,6 +54,16 @@ def main():
     config_dir = Path(args.config_dir)
     _setup_subprocess_logging(config_dir)
 
+    # F-501: vault windows additionally get the scrubbed vault.log
+    # handler attached so vault.* events flow into a separate file
+    # the user can ship via Maintenance → Download debug bundle.
+    # Idempotent — safe to call regardless of whether logging is
+    # already enabled at all (the helper no-ops if log dir creation
+    # fails).
+    if args.window.startswith("vault-"):
+        from .vault_logging import attach_vault_log_handler
+        attach_vault_log_handler(config_dir)
+
     if args.window == "send-files":
         show_send_files(config_dir)
     elif args.window == "settings":
