@@ -21,9 +21,57 @@ cycle still fetches the head manifest at the end so the binding's
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
+
+
+# Atomic-rename grace window: editors like KeePass / Vim / SQLite-WAL
+# perform "write tmp ; unlink target ; rename tmp target" — the unlink
+# briefly publishes "file gone" before the rename completes. Without a
+# grace window, F-Y03 publishes a remote tombstone for the just-saved
+# file. 5 retries × 200 ms = 1 s ceiling: long enough to absorb every
+# atomic-rename writer we know of, short enough to feel snappy if the
+# file genuinely vanished.
+_ATOMIC_RENAME_GRACE_RETRIES = 5
+_ATOMIC_RENAME_GRACE_DELAY_S = 0.2
+
+
+def _file_present_with_atomic_rename_grace(absolute: Path) -> bool:
+    """Return True if ``absolute`` is a regular file, retrying briefly
+    to absorb atomic-rename windows.
+    """
+    for attempt in range(_ATOMIC_RENAME_GRACE_RETRIES):
+        if absolute.is_file():
+            return True
+        if attempt == _ATOMIC_RENAME_GRACE_RETRIES - 1:
+            break
+        time.sleep(_ATOMIC_RENAME_GRACE_DELAY_S)
+    return False
+
+
+def _previously_synced_via_store(
+    store: "VaultBindingsStore",
+    binding_id: str,
+    relative_path: str,
+) -> bool:
+    """Whether the path has a non-empty content fingerprint in local entries.
+
+    A non-empty ``content_fingerprint`` means the path participated in
+    at least one prior successful sync (baseline or upload). Used to
+    enforce §A17 — never publish a tombstone for a never-synced path.
+    """
+    try:
+        entry = store.get_local_entry(binding_id, relative_path)
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "vault.sync.previously_synced_check_failed binding=%s path=%s",
+            binding_id, relative_path,
+        )
+        # Fail closed: we don't *know* it was previously synced.
+        return False
+    return bool(entry and entry.content_fingerprint)
 
 from .vault_bindings import (
     VaultBinding,
@@ -32,8 +80,8 @@ from .vault_bindings import (
     VaultPendingOperation,
 )
 from .vault_manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
-from .vault_relay_errors import VaultCASConflictError
-from .vault_upload import UploadResult, upload_file
+from .vault_relay_errors import VaultCASConflictError, VaultQuotaExceededError
+from .vault_upload import UploadResult, UploadSpecialFileSkipped, upload_file
 
 
 log = logging.getLogger(__name__)
@@ -94,6 +142,7 @@ def flush_and_sync_binding(
     store: VaultBindingsStore,
     binding: VaultBinding,
     author_device_id: str,
+    device_name: str | None = None,
     watcher_coordinator: Any = None,
     chunk_cache_dir: Path | None = None,
     progress: Callable[["SyncOpOutcome"], None] | None = None,
@@ -101,9 +150,10 @@ def flush_and_sync_binding(
     """Manual "Sync now" entrypoint (T10.6).
 
     Drains any in-flight watcher events into the pending-ops queue,
-    then runs one backup-only cycle. Used by the per-binding "Sync
-    now" button so the UI doesn't need to wait for the next watcher
-    tick before pushing a fresh batch of edits.
+    then dispatches on ``binding.sync_mode``: two-way runs
+    :func:`vault_binding_twoway.run_two_way_cycle`; backup-only and
+    download-only fall through to the local-drain cycle. Paused
+    bindings are a no-op (logged).
     """
     if watcher_coordinator is not None:
         try:
@@ -113,6 +163,26 @@ def flush_and_sync_binding(
                 "vault.sync.watcher_flush_failed binding=%s",
                 binding.binding_id,
             )
+    if binding.sync_mode == "paused":
+        log.info(
+            "vault.sync.flush_skipped_paused binding=%s",
+            binding.binding_id,
+        )
+        return SyncCycleResult(
+            binding_id=binding.binding_id,
+            started_at_revision=int(binding.last_synced_revision or 0),
+            ended_at_revision=int(binding.last_synced_revision or 0),
+            outcomes=[],
+        )
+    if binding.sync_mode == "two-way":
+        # Imported lazily to avoid an import cycle (twoway imports from sync).
+        from .vault_binding_twoway import run_two_way_cycle
+        return run_two_way_cycle(
+            vault=vault, relay=relay, store=store,
+            binding=binding, author_device_id=author_device_id,
+            device_name=device_name or "this device",
+            chunk_cache_dir=chunk_cache_dir, progress=progress,
+        )
     return run_backup_only_cycle(
         vault=vault, relay=relay, store=store,
         binding=binding, author_device_id=author_device_id,
@@ -202,14 +272,16 @@ def run_backup_only_cycle(
                 progress(outcome)
             except Exception:  # noqa: BLE001
                 log.exception("vault.sync.progress_callback_failed")
-        # Refresh the manifest if this op published a new revision.
-        if outcome.status in ("uploaded", "deleted"):
+        # Refresh the manifest if this op published a new revision OR
+        # failed (likely a CAS conflict — refresh so the next op
+        # sees the new world). F-Y07.
+        if outcome.status in ("uploaded", "deleted", "failed"):
             try:
                 current_manifest = vault.fetch_manifest(relay)
             except Exception:  # noqa: BLE001
-                log.exception(
+                log.warning(
                     "vault.sync.refetch_after_publish_failed binding=%s",
-                    binding.binding_id,
+                    binding.binding_id, exc_info=True,
                 )
 
     ended_at_revision = int(current_manifest.get("revision", started_at_revision))
@@ -280,9 +352,23 @@ def _execute_upload(
 ) -> SyncOpOutcome:
     relative_path = op.relative_path
     absolute = local_root / relative_path
-    if not absolute.is_file():
+    if not _file_present_with_atomic_rename_grace(absolute):
         # The watcher may have queued the upload right before the file
-        # was renamed/removed; treat this like a delete op.
+        # was renamed/removed; treat this like a delete op only if the
+        # path was previously synced (else the §A17 invariant would be
+        # violated by publishing a tombstone for a never-synced file).
+        if not _previously_synced_via_store(store, binding.binding_id, relative_path):
+            log.info(
+                "vault.sync.upload_path_vanished_silent "
+                "binding=%s path=%s",
+                binding.binding_id, relative_path,
+            )
+            store.delete_pending_op(op.op_id)
+            return SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="skipped",
+                error="path_vanished_never_synced",
+            )
         return _promote_to_delete(
             vault=vault, relay=relay, store=store,
             binding=binding, op=op, manifest=manifest,
@@ -300,6 +386,30 @@ def _execute_upload(
             author_device_id=author_device_id,
             mode="new_file_or_version",
             resume_cache_dir=chunk_cache_dir,
+        )
+    except UploadSpecialFileSkipped:
+        # F-Y17: never propagate a tombstone for a symlink/FIFO. Drop
+        # the op; the file simply isn't part of the vault.
+        store.delete_pending_op(op.op_id)
+        return SyncOpOutcome(
+            op_id=op.op_id, op_type="upload",
+            relative_path=relative_path, status="skipped",
+            error="special_file",
+        )
+    except VaultQuotaExceededError as exc:
+        # F-D03: leave the op pending, surface a typed failure so the
+        # UI can render the §D2 eviction prompt. Don't increment
+        # attempts as this is a transient blocked state, not a bug.
+        log.warning(
+            "vault.sync.upload_quota_exceeded binding=%s path=%s used=%d quota=%d",
+            binding.binding_id, relative_path,
+            getattr(exc, "used_bytes", 0),
+            getattr(exc, "quota_bytes", 0),
+        )
+        return SyncOpOutcome(
+            op_id=op.op_id, op_type="upload",
+            relative_path=relative_path, status="failed",
+            error="quota_exceeded",
         )
     except VaultCASConflictError as exc:
         # T6.3 owns CAS retry; if it bubbles here it means the inner
@@ -376,43 +486,83 @@ def _execute_delete(
 
     from datetime import datetime, timezone
     deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    parent_revision = int(manifest.get("revision", 0))
-    next_revision = parent_revision + 1
-    next_manifest = tombstone_file_entry(
-        manifest,
-        remote_folder_id=binding.remote_folder_id,
-        path=normalized,
-        deleted_at=deleted_at,
-        author_device_id=author_device_id,
-    )
-    next_manifest["revision"] = next_revision
-    next_manifest["parent_revision"] = parent_revision
-    next_manifest["created_at"] = deleted_at
-    next_manifest["author_device_id"] = str(author_device_id)
-    try:
-        vault.publish_manifest(relay, next_manifest)
-    except VaultCASConflictError as exc:
-        store.mark_op_failed(op.op_id, f"cas_conflict: {exc}")
-        log.warning(
-            "vault.sync.delete_cas_conflict binding=%s path=%s",
-            binding.binding_id, relative_path,
+
+    # F-Y06: §D4 rebase loop — re-fetch + re-tombstone on CAS conflict.
+    # Without this a tombstone publish on a hot multi-device vault
+    # never converges; the spec retry budget here matches upload's 5.
+    DELETE_CAS_MAX_RETRIES = 5
+    current_manifest = manifest
+    last_exc: Exception | None = None
+    for attempt in range(DELETE_CAS_MAX_RETRIES + 1):
+        normalized_path = normalize_manifest_path(relative_path)
+        entry_now = find_file_entry(
+            current_manifest, binding.remote_folder_id, normalized_path,
         )
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="delete",
-            relative_path=relative_path, status="failed",
-            error="cas_conflict",
+        if entry_now is None or bool(entry_now.get("deleted")):
+            store.delete_local_entry(binding.binding_id, relative_path)
+            store.delete_pending_op(op.op_id)
+            return SyncOpOutcome(
+                op_id=op.op_id, op_type="delete",
+                relative_path=relative_path, status="skipped",
+            )
+        parent_revision = int(current_manifest.get("revision", 0))
+        next_revision = parent_revision + 1
+        next_manifest = tombstone_file_entry(
+            current_manifest,
+            remote_folder_id=binding.remote_folder_id,
+            path=normalized_path,
+            deleted_at=deleted_at,
+            author_device_id=author_device_id,
         )
-    except Exception as exc:  # noqa: BLE001
-        store.mark_op_failed(op.op_id, str(exc))
-        log.warning(
-            "vault.sync.delete_failed binding=%s path=%s error=%s",
-            binding.binding_id, relative_path, exc,
-        )
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="delete",
-            relative_path=relative_path, status="failed",
-            error=str(exc),
-        )
+        next_manifest["revision"] = next_revision
+        next_manifest["parent_revision"] = parent_revision
+        next_manifest["created_at"] = deleted_at
+        next_manifest["author_device_id"] = str(author_device_id)
+        try:
+            vault.publish_manifest(relay, next_manifest)
+            break
+        except VaultCASConflictError as exc:
+            last_exc = exc
+            log.info(
+                "vault.sync.delete_cas_retry attempt=%d/%d binding=%s path=%s",
+                attempt + 1, DELETE_CAS_MAX_RETRIES,
+                binding.binding_id, relative_path,
+            )
+            if attempt == DELETE_CAS_MAX_RETRIES:
+                store.mark_op_failed(op.op_id, f"cas_conflict: {exc}")
+                log.warning(
+                    "vault.sync.delete_cas_exhausted binding=%s path=%s",
+                    binding.binding_id, relative_path,
+                )
+                return SyncOpOutcome(
+                    op_id=op.op_id, op_type="delete",
+                    relative_path=relative_path, status="failed",
+                    error="cas_conflict",
+                )
+            try:
+                current_manifest = vault.fetch_manifest(relay)
+            except Exception as fetch_exc:  # noqa: BLE001
+                store.mark_op_failed(op.op_id, str(fetch_exc))
+                log.warning(
+                    "vault.sync.delete_refetch_failed binding=%s error=%s",
+                    binding.binding_id, fetch_exc,
+                )
+                return SyncOpOutcome(
+                    op_id=op.op_id, op_type="delete",
+                    relative_path=relative_path, status="failed",
+                    error=f"refetch_failed: {fetch_exc}",
+                )
+        except Exception as exc:  # noqa: BLE001
+            store.mark_op_failed(op.op_id, str(exc))
+            log.warning(
+                "vault.sync.delete_failed binding=%s path=%s error=%s",
+                binding.binding_id, relative_path, exc,
+            )
+            return SyncOpOutcome(
+                op_id=op.op_id, op_type="delete",
+                relative_path=relative_path, status="failed",
+                error=str(exc),
+            )
 
     store.delete_local_entry(binding.binding_id, relative_path)
     store.delete_pending_op(op.op_id)

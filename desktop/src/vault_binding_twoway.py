@@ -131,20 +131,30 @@ def run_two_way_cycle(
                     progress(outcome)
                 except Exception:  # noqa: BLE001
                     log.exception("vault.sync.progress_callback_failed")
-            if outcome.status in ("uploaded", "deleted"):
+            if outcome.status in ("uploaded", "deleted", "failed"):
+                # F-Y07: a failed publish (CAS conflict) is a strong
+                # "the world changed" signal — re-fetch head so the
+                # next op in this iteration sees the new revision.
                 try:
                     head = vault.fetch_manifest(relay)
                 except Exception:  # noqa: BLE001
-                    log.exception(
+                    log.warning(
                         "vault.sync.refetch_after_publish_failed binding=%s",
-                        binding.binding_id,
+                        binding.binding_id, exc_info=True,
                     )
 
-        # Convergence check: revision didn't change AND queue is empty.
+        # Convergence check: no progress made in this iteration. F-Y26.
+        # "Progress" means either the revision advanced OR at least one
+        # op was processed successfully. A loop where every op fails
+        # would never converge under the old (queue-empty) rule.
         new_revision = int(head.get("revision", revision_at_start))
+        any_progress = any(
+            o.status in ("uploaded", "deleted", "skipped")
+            for o in outcomes[-len(pending) :]
+        ) if pending else False
         if (
             new_revision == revision_at_start
-            and not store.list_pending_ops(binding.binding_id)
+            and not any_progress
         ):
             break
         last_revision = new_revision
@@ -153,9 +163,9 @@ def run_two_way_cycle(
         try:
             head = vault.fetch_manifest(relay)
         except Exception:  # noqa: BLE001
-            log.exception(
+            log.warning(
                 "vault.sync.refetch_for_next_iter_failed binding=%s",
-                binding.binding_id,
+                binding.binding_id, exc_info=True,
             )
 
     ended_revision = int(head.get("revision", started_revision))
@@ -308,7 +318,21 @@ def _apply_remote_delete(
         )
 
     local_fp = _file_keyed_fingerprint(target, fingerprint_key)
-    if local_fp is not None and local_fp == local_entry.content_fingerprint:
+    if local_fp is None:
+        # Read error or no master key. We do NOT enqueue an upload —
+        # that would inverse the remote's stated intent (delete) and
+        # silently revive a tombstoned file. Defer to the next cycle.
+        log.warning(
+            "vault.sync.twoway_remote_tombstone_unreadable "
+            "binding=%s path=%s",
+            binding.binding_id, relative,
+        )
+        return SyncOpOutcome(
+            op_id=0, op_type="remote-delete",
+            relative_path=relative, status="skipped",
+            error="local_fingerprint_unreadable",
+        )
+    if local_fp == local_entry.content_fingerprint:
         # Unmodified: safe to trash.
         ok = trash_path(target)
         if ok:
@@ -387,11 +411,27 @@ def _apply_remote_upsert(
 
         # Local has different bytes than both the previous baseline AND
         # the remote latest version → §D4 keep-both: rename the local
-        # copy aside before the download lands.
+        # copy aside before the download lands. When the keyed
+        # fingerprint can't be computed (read error, no master key) we
+        # fail closed and treat the file as modified — better to keep
+        # both than to silently overwrite the user's local edit.
         baseline_fp = local_entry.content_fingerprint if local_entry else ""
-        if local_fp is not None and local_fp != baseline_fp:
+        local_modified = (
+            local_fp is None
+            or local_fp != baseline_fp
+        )
+        if local_fp is None:
+            log.warning(
+                "vault.sync.twoway_local_fingerprint_unreadable "
+                "binding=%s path=%s",
+                binding.binding_id, relative,
+            )
+        if local_modified:
             conflict_relative = _unique_conflict_path(
-                local_root=target.parent.parent if False else Path(binding.local_path),
+                # F-Y29: callers always pass binding.local_path; the
+                # earlier `target.parent.parent if False else …` was
+                # leftover dead code.
+                local_root=Path(binding.local_path),
                 relative_path=relative, device_name=device_name,
             )
             conflict_target = Path(binding.local_path) / conflict_relative

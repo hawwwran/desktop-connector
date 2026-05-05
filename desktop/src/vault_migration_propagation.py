@@ -63,7 +63,9 @@ def propagate_relay_migration(
             reason="already_on_target",
         )
 
-    when = _parse_iso(now) if now else datetime.now(timezone.utc)
+    # F-C11: an unparseable ``now`` should not crash with TypeError.
+    parsed_now = _parse_iso(now) if now else None
+    when = parsed_now if parsed_now is not None else datetime.now(timezone.utc)
     expires = when + timedelta(days=PREVIOUS_RELAY_GRACE_DAYS)
     return PropagationDecision(
         should_switch=True,
@@ -88,7 +90,8 @@ def can_switch_back(
     expiry = _parse_iso(previous_relay_expires_at)
     if expiry is None:
         return False
-    when = _parse_iso(now) if now else datetime.now(timezone.utc)
+    parsed_now = _parse_iso(now) if now else None
+    when = parsed_now if parsed_now is not None else datetime.now(timezone.utc)
     return when < expiry
 
 

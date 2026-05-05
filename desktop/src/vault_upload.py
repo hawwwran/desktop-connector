@@ -213,6 +213,19 @@ class UploadConflictError(RuntimeError):
     """Raised when the chosen ``mode`` doesn't match the existing path state."""
 
 
+class UploadSpecialFileSkipped(RuntimeError):
+    """Raised when ``upload_file`` rejects a non-regular file (symlink/FIFO/etc).
+
+    F-Y17 — a binding that contains a symlink would otherwise follow it
+    and upload the symlink target as if it were the user's file. The
+    sync engine catches this and treats the op as ``skipped``.
+    """
+
+
+class UploadFileTooLargeError(RuntimeError):
+    """Raised when a single file exceeds ``MAX_FILE_BYTES_DEFAULT`` (F-D01)."""
+
+
 class UploadVault(Protocol):
     @property
     def vault_id(self) -> str: ...
@@ -297,8 +310,47 @@ def upload_file(
         raise ValueError("vault is closed")
 
     local_path = Path(local_path)
+    # F-Y17: lstat first to reject symlinks / FIFOs / sockets / device
+    # files. ``is_file()`` follows symlinks, which would silently
+    # upload the symlink target's contents as if they belonged to the
+    # binding (e.g. a symlink pointing at /etc/passwd).
+    try:
+        st = local_path.lstat()
+    except OSError as exc:
+        raise FileNotFoundError(f"local file not found: {local_path}") from exc
+    import stat as _stat
+    mode_bits = st.st_mode
+    if (
+        _stat.S_ISLNK(mode_bits)
+        or _stat.S_ISFIFO(mode_bits)
+        or _stat.S_ISSOCK(mode_bits)
+        or _stat.S_ISCHR(mode_bits)
+        or _stat.S_ISBLK(mode_bits)
+    ):
+        log.info(
+            "vault.sync.special_file_skipped path=%s reason=non-regular",
+            local_path,
+        )
+        raise UploadSpecialFileSkipped(
+            f"refusing to upload non-regular file: {local_path}"
+        )
     if not local_path.is_file():
         raise FileNotFoundError(f"local file not found: {local_path}")
+
+    # F-D01: enforce the §gaps §7 per-file size cap on every upload
+    # path, not just the folder walker. Without this, a sync-engine
+    # caller renaming a 4 GiB file into the binding root would
+    # pre-encrypt the entire file into RAM (~2× peak) before the cap
+    # had any chance to fire.
+    try:
+        observed_size = int(local_path.stat().st_size)
+    except OSError as exc:
+        raise FileNotFoundError(f"local file not found: {local_path}") from exc
+    if observed_size > MAX_FILE_BYTES_DEFAULT:
+        raise UploadFileTooLargeError(
+            f"{local_path} is {observed_size} bytes, "
+            f"max per-file is {MAX_FILE_BYTES_DEFAULT}"
+        )
 
     normalized_remote_path = normalize_manifest_path(remote_path)
     existing_entry = find_file_entry(manifest, remote_folder_id, normalized_remote_path)
@@ -445,6 +497,12 @@ def upload_file(
         author_device_id=author_device_id,
         local_index=local_index,
     )
+    # F-D05: mark the session as published BEFORE the filesystem-side
+    # cleanup. If clear_session fails (rare disk error), the
+    # list_resumable_sessions filter still skips this row so we don't
+    # republish a duplicate version on the next resume.
+    session.phase = "complete"
+    save_session(session, cache_dir)
     clear_session(session.session_id, cache_dir)
     _report(progress, "done", total_chunks, total_chunks, bytes_uploaded)
 

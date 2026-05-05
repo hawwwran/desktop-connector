@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import shutil
 import uuid
+
+log = logging.getLogger(__name__)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Protocol
@@ -36,8 +39,11 @@ class VaultLocalDiskFullError(OSError):
     """Local destination volume does not have enough free space."""
 
 
-class VaultChunkMissingError(RuntimeError):
-    """The manifest references a chunk the relay does not currently have."""
+# Single source of truth for the chunk-missing error lives in
+# vault_relay_errors so the relay client and the download pipeline
+# share one type. The local re-export keeps any existing imports
+# in this module working.
+from .vault_relay_errors import VaultChunkMissingError  # noqa: F401, E402
 
 
 class ChunkRelay(Protocol):
@@ -504,7 +510,17 @@ def _folder_file_plans(manifest: dict[str, Any], path: str) -> list[_FolderFileP
             continue
         if bool(entry.get("deleted")) or str(entry.get("type", "file")) != "file":
             continue
-        entry_parts = _safe_manifest_path_parts(str(entry.get("path", "")))
+        # F-D09 / F-D29: a single corrupt path must NOT abort the whole
+        # batch. Skip the entry with a warning so the rest of the folder
+        # still downloads.
+        try:
+            entry_parts = _safe_manifest_path_parts(str(entry.get("path", "")))
+        except ValueError as exc:
+            log.warning(
+                "vault.download.skip_unsafe_path path=%s error=%s",
+                str(entry.get("path", ""))[:200], exc,
+            )
+            continue
         if len(entry_parts) < len(prefix) or tuple(entry_parts[:len(prefix)]) != prefix:
             continue
         relative_parts = tuple(entry_parts[len(prefix):])
@@ -512,12 +528,20 @@ def _folder_file_plans(manifest: dict[str, Any], path: str) -> list[_FolderFileP
             continue
         relative_path = Path(*relative_parts)
         if relative_path in seen_relative_paths:
-            raise ValueError(f"duplicate current file path in folder: {relative_path}")
+            log.warning(
+                "vault.download.duplicate_path path=%s",
+                str(relative_path),
+            )
+            continue
         seen_relative_paths.add(relative_path)
 
         version = _latest_version(entry)
         if version is None:
-            raise ValueError(f"file has no downloadable version: {entry.get('path', '')}")
+            log.warning(
+                "vault.download.entry_has_no_version path=%s",
+                str(entry.get("path", "")),
+            )
+            continue
         display_path = "/".join([display_folder_name, *entry_parts])
         plans.append(_FolderFilePlan(
             display_path=display_path,

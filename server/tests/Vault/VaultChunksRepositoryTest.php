@@ -17,7 +17,7 @@ final class VaultChunksRepositoryTest extends TestCase
     private VaultsRepository $vaultsRepo;
     private VaultChunksRepository $chunksRepo;
 
-    private const VAULT_ID    = 'H9K7M4Q2Z8TD';
+    private const VAULT_ID    = 'HAKMQ2ZTDABC';
     private const TOKEN_HASH  = "\xaa\xbb";
     private const ENC_HEADER  = "\xde\xad";
     private const HEADER_HASH = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
@@ -76,10 +76,10 @@ final class VaultChunksRepositoryTest extends TestCase
     public function test_storagePath_uses_d13_layout(): void
     {
         $path = VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_A);
-        self::assertSame('vaults/H9K7M4Q2Z8TD/aa/ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', $path);
+        self::assertSame('vaults/HAKMQ2ZTDABC/aa/ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', $path);
 
         $pathB = VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_B);
-        self::assertSame('vaults/H9K7M4Q2Z8TD/bb/ch_v1_bbbbbbbbbbbbbbbbbbbbbbbb', $pathB);
+        self::assertSame('vaults/HAKMQ2ZTDABC/bb/ch_v1_bbbbbbbbbbbbbbbbbbbbbbbb', $pathB);
     }
 
     public function test_storagePath_throws_for_invalid_id(): void

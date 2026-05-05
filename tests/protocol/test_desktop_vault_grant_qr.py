@@ -14,6 +14,7 @@ ensure_desktop_on_path()
 
 from src.vault_grant_qr import (  # noqa: E402
     DEFAULT_TTL_SECONDS, SCHEME, VaultGrantQRError, VaultJoinUrl,
+    derive_shared_secret,
     derive_verification_code,
     make_join_url, parse_join_url,
 )
@@ -156,58 +157,58 @@ class ParseJoinUrlTests(unittest.TestCase):
 
 
 class VerificationCodeTests(unittest.TestCase):
-    """T13.3 — both sides derive the same 6-digit code from both pubkeys."""
+    """Spec §13.4 — derive a NNN-NNN code from the X25519 shared secret."""
 
-    def test_returns_six_digit_string(self) -> None:
-        code = derive_verification_code(b"\x01" * 32, b"\x02" * 32)
-        self.assertRegex(code, r"^\d{6}$")
-        self.assertEqual(len(code), 6)
+    def test_returns_dashed_code(self) -> None:
+        code = derive_verification_code(b"\x01" * 32)
+        self.assertRegex(code, r"^\d{3}-\d{3}$")
+        self.assertEqual(len(code), 7)
 
-    def test_order_independence(self) -> None:
-        a, b = bytes(range(32)), bytes(range(31, -1, -1))
-        self.assertEqual(
-            derive_verification_code(a, b),
-            derive_verification_code(b, a),
-            "verification code must not depend on argument order",
-        )
+    def test_spec_pinned_vector(self) -> None:
+        # Spec-pinned: HMAC-SHA256(key=32 zero bytes, msg=b"dc-vault-v1/qr-verification")
+        # first 3 bytes interpreted big-endian then mod 1_000_000.
+        code = derive_verification_code(b"\x00" * 32)
+        import hashlib
+        import hmac
+        digest = hmac.new(
+            key=b"\x00" * 32,
+            msg=b"dc-vault-v1/qr-verification",
+            digestmod=hashlib.sha256,
+        ).digest()
+        expected_int = int.from_bytes(digest[:3], "big") % 1_000_000
+        expected = f"{expected_int:06d}"
+        self.assertEqual(code, f"{expected[:3]}-{expected[3:]}")
 
-    def test_different_pubkeys_produce_different_codes(self) -> None:
-        c1 = derive_verification_code(b"\x00" * 32, b"\x01" * 32)
-        c2 = derive_verification_code(b"\x00" * 32, b"\x02" * 32)
+    def test_different_secrets_produce_different_codes(self) -> None:
+        c1 = derive_verification_code(b"\x00" * 32)
+        c2 = derive_verification_code(b"\x01" * 32)
         self.assertNotEqual(c1, c2)
 
-    def test_identical_pubkeys_produce_stable_code(self) -> None:
-        c1 = derive_verification_code(b"\x05" * 32, b"\x09" * 32)
-        c2 = derive_verification_code(b"\x05" * 32, b"\x09" * 32)
+    def test_identical_secret_produces_stable_code(self) -> None:
+        c1 = derive_verification_code(b"\x05" * 32)
+        c2 = derive_verification_code(b"\x05" * 32)
         self.assertEqual(c1, c2)
 
-    def test_invalid_pubkey_length_raises(self) -> None:
+    def test_invalid_secret_length_raises(self) -> None:
         with self.assertRaises(VaultGrantQRError):
-            derive_verification_code(b"\x00" * 31, b"\x00" * 32)
+            derive_verification_code(b"\x00" * 31)
         with self.assertRaises(VaultGrantQRError):
-            derive_verification_code(b"\x00" * 32, b"\x00" * 33)
+            derive_verification_code(b"\x00" * 33)
 
 
 class GrantExchangeIntegrationTests(unittest.TestCase):
-    """T13.3 acceptance: the QR + claim cycle ends with matching codes."""
+    """Spec §13.3/13.4 acceptance: X25519 commutativity → both sides match."""
 
     def test_admin_and_claimant_compute_matching_code(self) -> None:
-        """Simulates the two halves of the grant exchange.
-
-        Admin generates a join request with its ephemeral pubkey,
-        encodes it in a QR, and shows the resulting verification code
-        on screen. Claimant scans the QR, generates its own ephemeral
-        pubkey, posts a claim, and shows the same verification code.
-        Both sides must match — that's the whole point of the manual
-        confirmation step.
-        """
+        """Admin and claimant compute identical codes via X25519 commutativity."""
         try:
             from nacl.public import PrivateKey
         except ImportError:
             self.skipTest("PyNaCl not available")
 
-        admin_priv = PrivateKey.generate()
-        admin_pk = bytes(admin_priv.public_key)
+        admin_priv_obj = PrivateKey.generate()
+        admin_priv = bytes(admin_priv_obj.encode())
+        admin_pk = bytes(admin_priv_obj.public_key)
         url = make_join_url(
             relay_url=RELAY,
             vault_id=VAULT_ID_DASHED,
@@ -215,20 +216,23 @@ class GrantExchangeIntegrationTests(unittest.TestCase):
             ephemeral_pubkey=admin_pk,
             expires_at=2_000_000_000,
         )
-
-        # Claimant side: parse, generate keypair, derive code.
         parsed = parse_join_url(url)
-        claimant_priv = PrivateKey.generate()
-        claimant_pk = bytes(claimant_priv.public_key)
-        claimant_code = derive_verification_code(
-            parsed.ephemeral_pubkey, claimant_pk,
-        )
 
-        # Admin side: receives claimant_pk via the relay's poll
-        # response, derives the same code.
-        admin_code = derive_verification_code(admin_pk, claimant_pk)
+        claimant_priv_obj = PrivateKey.generate()
+        claimant_priv = bytes(claimant_priv_obj.encode())
+        claimant_pk = bytes(claimant_priv_obj.public_key)
 
-        self.assertEqual(claimant_code, admin_code)
+        # Each side computes the X25519 shared secret using its own
+        # private key + the other side's public key. Commutativity
+        # guarantees the two scalars are byte-identical.
+        admin_secret = derive_shared_secret(admin_priv, claimant_pk)
+        claimant_secret = derive_shared_secret(claimant_priv, parsed.ephemeral_pubkey)
+        self.assertEqual(admin_secret, claimant_secret)
+
+        admin_code = derive_verification_code(admin_secret)
+        claimant_code = derive_verification_code(claimant_secret)
+        self.assertEqual(admin_code, claimant_code)
+        self.assertRegex(admin_code, r"^\d{3}-\d{3}$")
 
 
 if __name__ == "__main__":

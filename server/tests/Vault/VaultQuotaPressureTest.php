@@ -109,6 +109,9 @@ final class VaultQuotaPressureTest extends TestCase
     /** Quietly upload a chunk and discard the controller's echoed JSON. */
     private function uploadChunk(string $chunkId, string $bytes): void
     {
+        // Prepend the v1 format-version byte (formats §11.3) so the
+        // server's plaintext-byte gate accepts the body.
+        $body = ($bytes !== '' && $bytes[0] === "\x01") ? $bytes : "\x01" . $bytes;
         ob_start();
         try {
             VaultController::putChunk(
@@ -116,7 +119,7 @@ final class VaultQuotaPressureTest extends TestCase
                 new RequestContext(
                     method: 'PUT',
                     params: ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId],
-                    bodyOverride: $bytes
+                    bodyOverride: $body
                 )
             );
         } finally {
@@ -154,25 +157,25 @@ final class VaultQuotaPressureTest extends TestCase
 
     public function test_threshold_walk_80_90_100_percent(): void
     {
-        // Acceptance: uploading until 80% / 90% / 100% returns the right
-        // thresholds in subsequent header reads. We use the explicit byte
-        // sizes (800, 100, 100) so the test reads as a hand-counted walk.
+        // Each chunk gets a +1 byte format-version prefix on the wire,
+        // so the on-disk size is `caller_bytes + 1`. Reflect that in
+        // the assertions to keep the hand-counted walk explicit.
 
-        // 1. Upload 800 bytes — vault at 80%.
-        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', 800));
+        // 1. Upload 799 bytes (+1 prefix = 800) — vault at 80%.
+        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', 799));
         $at80 = $this->readHeader();
         self::assertSame(800, $at80['used']);
         self::assertSame(self::TEST_QUOTA, $at80['quota']);
         self::assertSame(80.0, ($at80['used'] / $at80['quota']) * 100.0);
 
-        // 2. Upload another 100 bytes — vault at 90%.
-        $this->uploadChunk('ch_v1_bbbbbbbbbbbbbbbbbbbbbbbb', str_repeat('b', 100));
+        // 2. Upload 99 bytes (+1 prefix = 100) — vault at 90%.
+        $this->uploadChunk('ch_v1_bbbbbbbbbbbbbbbbbbbbbbbb', str_repeat('b', 99));
         $at90 = $this->readHeader();
         self::assertSame(900, $at90['used']);
         self::assertSame(90.0, ($at90['used'] / $at90['quota']) * 100.0);
 
-        // 3. Upload another 100 bytes — vault at 100%.
-        $this->uploadChunk('ch_v1_cccccccccccccccccccccccc', str_repeat('c', 100));
+        // 3. Upload 99 bytes (+1 prefix = 100) — vault at 100%.
+        $this->uploadChunk('ch_v1_cccccccccccccccccccccccc', str_repeat('c', 99));
         $at100 = $this->readHeader();
         self::assertSame(1000, $at100['used']);
         self::assertSame(100.0, ($at100['used'] / $at100['quota']) * 100.0);
@@ -180,8 +183,9 @@ final class VaultQuotaPressureTest extends TestCase
 
     public function test_upload_past_100_percent_returns_507(): void
     {
-        // Fill the vault.
-        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', self::TEST_QUOTA));
+        // Fill the vault. The +1 format-version prefix is added by
+        // uploadChunk, so caller bytes = TEST_QUOTA - 1.
+        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', self::TEST_QUOTA - 1));
 
         // Next byte should fail with vault_quota_exceeded.
         try {
@@ -191,12 +195,9 @@ final class VaultQuotaPressureTest extends TestCase
             self::assertSame(507, $e->status);
             self::assertSame('vault_quota_exceeded', $e->errorCode);
             self::assertSame(self::TEST_QUOTA, $e->details['quota_bytes']);
-            // eviction_available is false here — no historical versions exist
-            // (T7 wires the eviction-pass flag once tombstones are tracked).
             self::assertFalse($e->details['eviction_available']);
         }
 
-        // Header still reports 100% — the failed upload didn't bump usage.
         $h = $this->readHeader();
         self::assertSame(self::TEST_QUOTA, $h['used']);
     }
@@ -205,10 +206,10 @@ final class VaultQuotaPressureTest extends TestCase
     {
         // T0 §A21: quota counts unique chunks. Re-uploading the same chunk
         // is a no-op and must not bump used_ciphertext_bytes a second time.
-        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', 500));
+        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', 499));
         $first = $this->readHeader();
 
-        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', 500));
+        $this->uploadChunk('ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa', str_repeat('a', 499));
         $second = $this->readHeader();
 
         self::assertSame(500, $first['used']);

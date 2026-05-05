@@ -40,6 +40,7 @@ from .vault_crypto import (
     XCHACHA20_NONCE_BYTES,
     aead_decrypt,
     aead_encrypt,
+    normalize_vault_id,
 )
 
 log = logging.getLogger(__name__)
@@ -150,7 +151,8 @@ class KeyringGrantStore:
 
     @staticmethod
     def _key(vault_id: str) -> str:
-        return _KEYRING_KEY_PREFIX + vault_id
+        # F-C18: normalize so save/load symmetry is independent of dashing.
+        return _KEYRING_KEY_PREFIX + normalize_vault_id(vault_id)
 
     def save(self, grant: VaultGrant) -> None:
         self._kr.set_password(_KEYRING_SERVICE, self._key(grant.vault_id), grant.to_json())
@@ -214,7 +216,10 @@ class FileGrantStore:
         return fallback_grant_path(self._config_dir, vault_id)
 
     def _aad(self, vault_id: str) -> bytes:
-        return _FILE_AAD_SCHEMA + vault_id.encode("ascii")
+        # F-C18: bind AAD to the canonical vault id so save/load
+        # symmetry doesn't depend on whether the caller passed dashed
+        # or undashed input.
+        return _FILE_AAD_SCHEMA + normalize_vault_id(vault_id).encode("ascii")
 
     def save(self, grant: VaultGrant) -> None:
         nonce = os.urandom(XCHACHA20_NONCE_BYTES)
@@ -296,8 +301,10 @@ def fallback_grant_path(config_dir: Path, vault_id: str) -> Path:
 
     Kept as a free function so disconnect flows can remove the local
     file without needing the device seed required to decrypt it.
+    Normalizes the vault id so dashed / undashed callers all reach the
+    same on-disk file (F-C18).
     """
-    return Path(config_dir) / f"vault_grant_{vault_id}.json"
+    return Path(config_dir) / f"vault_grant_{normalize_vault_id(vault_id)}.json"
 
 
 def delete_local_grant_artifacts(config_dir: Path, vault_id: str) -> None:

@@ -360,6 +360,18 @@ def add_or_append_file_version(
         target["versions"] = [
             v for v in target.get("versions", []) if isinstance(v, dict)
         ]
+        # F-D05 defense in depth: idempotent re-publish must not append
+        # a duplicate version row. If the same version_id is already
+        # the latest, return the manifest unchanged (the caller has
+        # nothing new to do).
+        version_id_str = str(new_version.get("version_id", ""))
+        existing_ids = [str(v.get("version_id", "")) for v in target["versions"]]
+        if version_id_str and version_id_str in existing_ids:
+            target["latest_version_id"] = version_id_str
+            target["deleted"] = False
+            target.pop("deleted_at", None)
+            target.pop("recoverable_until", None)
+            return out
         target["versions"].append(new_version)
         target["latest_version_id"] = new_version["version_id"]
         target["deleted"] = False

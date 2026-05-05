@@ -39,7 +39,9 @@ class VaultDisconnectSourceTests(unittest.TestCase):
             'danger.append(Gtk.Label(label="Disconnect vault"',
             'disconnect_btn = Gtk.Button(label="Disconnect vault"',
             'heading="Disconnect vault?"',
-            'body="The vault will still exist. This machine will only lose the connection to it."',
+            # F-U18: copy now spells out the local-data wipe.
+            "Removes all local vault material",
+            "The relay vault is untouched",
             'dlg.add_response("disconnect", "Disconnect vault")',
             "Adw.ResponseAppearance.DESTRUCTIVE",
             "disconnect_local_vault(config)",

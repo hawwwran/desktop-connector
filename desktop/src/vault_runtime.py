@@ -4,7 +4,29 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from pathlib import Path
+
+
+# F-D23: server error pages occasionally reflect POST-body fields. The
+# desktop must never propagate purge_secret / Authorization / passphrase
+# back into a user-facing message — even for transient 5xx errors that
+# could later land in the activity log. Pattern targets the visible
+# tokens we know we send.
+_SECRET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r'(?i)(purge_secret\s*[:=]\s*)\S+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(passphrase\s*[:=]\s*)\S+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(Authorization\s*:\s*)[^\s"\']+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(Bearer\s+)[A-Za-z0-9._\-]{16,}'), r"\1<redacted>"),
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Best-effort redaction of secret tokens before user-facing display."""
+    out = text
+    for pattern, replacement in _SECRET_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
 
 
 def create_vault_relay(config):
@@ -189,6 +211,20 @@ class VaultHttpRelay:
             from .vault_relay_errors import VaultCASConflictError
 
             raise VaultCASConflictError(self._extract_error(resp))
+        if resp.status_code == 507:
+            # F-D02: quota exceeded at publish time (e.g. a peer's
+            # upload pushed used_bytes past the cap between our
+            # batch-head and our publish). Surface as the typed error so
+            # the sync engine can run an eviction pass.
+            from .vault_relay_errors import VaultQuotaExceededError
+
+            raise VaultQuotaExceededError(self._extract_error(resp))
+        if resp.status_code in (413, 422):
+            from .vault_relay_errors import VaultRelayError
+
+            raise VaultRelayError(
+                self._extract_error(resp), status_code=resp.status_code,
+            )
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Relay rejected vault manifest publish: HTTP {resp.status_code} "
@@ -235,6 +271,15 @@ class VaultHttpRelay:
         )
         if resp is None:
             raise RuntimeError("Could not reach the relay while downloading a vault chunk.")
+        if resp.status_code == 404:
+            # F-D27: typed error so the download retry budget can
+            # distinguish "chunk not yet uploaded by peer" from a
+            # generic relay failure.
+            from .vault_relay_errors import VaultChunkMissingError
+
+            raise VaultChunkMissingError(
+                f"vault chunk missing: {chunk_id}",
+            )
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Relay rejected vault chunk download: HTTP {resp.status_code} "
@@ -323,6 +368,38 @@ class VaultHttpRelay:
         except Exception as exc:
             raise RuntimeError("Relay returned an invalid GC plan response.") from exc
 
+    def gc_cancel(self, vault_id, vault_access_secret, *, plan_id=None, job_id=None):
+        """Cancel a planned/scheduled GC job (F-D06).
+
+        Either ``plan_id`` or ``job_id`` must be provided — see spec
+        §6.14. Idempotent: cancelling an already-cancelled or
+        already-completed job is a 200 with no state change.
+        """
+        if plan_id is None and job_id is None:
+            raise ValueError("gc_cancel requires plan_id or job_id")
+        body: dict = {}
+        if plan_id is not None:
+            body["plan_id"] = str(plan_id)
+        if job_id is not None:
+            body["job_id"] = str(job_id)
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/gc/cancel",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=body,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while cancelling vault GC.")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault GC cancel: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid GC cancel response.") from exc
+
     def gc_execute(self, vault_id, vault_access_secret, *, plan_id, purge_secret=None):
         body = {"plan_id": str(plan_id)}
         if purge_secret is not None:
@@ -375,15 +452,19 @@ class VaultHttpRelay:
         try:
             body = resp.json()
         except ValueError:
-            return {"code": "", "message": resp.text.strip()[:200], "details": {}}
+            return {
+                "code": "",
+                "message": _scrub_secrets(resp.text.strip()[:200]),
+                "details": {},
+            }
         if not isinstance(body, dict):
             return {"code": "", "message": "", "details": {}}
         error = body.get("error")
         if not isinstance(error, dict):
-            return {"code": "", "message": str(error or ""), "details": {}}
+            return {"code": "", "message": _scrub_secrets(str(error or "")), "details": {}}
         return {
             "code": str(error.get("code") or ""),
-            "message": str(error.get("message") or ""),
+            "message": _scrub_secrets(str(error.get("message") or "")),
             "details": error.get("details") if isinstance(error.get("details"), dict) else {},
         }
 
@@ -392,18 +473,18 @@ class VaultHttpRelay:
         try:
             body = resp.json()
         except ValueError:
-            return resp.text.strip()[:200]
+            return _scrub_secrets(resp.text.strip()[:200])
         if isinstance(body, dict):
             error = body.get("error")
             if isinstance(error, dict):
                 code = error.get("code")
                 message = error.get("message")
                 if code and message:
-                    return f"{code}: {message}"
+                    return _scrub_secrets(f"{code}: {message}")
                 if message:
-                    return str(message)
+                    return _scrub_secrets(str(message))
             if isinstance(error, str):
-                return error
+                return _scrub_secrets(error)
         return ""
 
 

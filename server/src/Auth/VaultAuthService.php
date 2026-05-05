@@ -153,6 +153,14 @@ class VaultAuthService
                 requiredRole: $minRole,
             );
         }
+        // F-S15: bump last_seen_at so the Devices tab can show
+        // "active vs idle" status. Cheap UPDATE on a hot row.
+        try {
+            $grants->bumpLastSeen($vaultId, $deviceId, time());
+        } catch (\Throwable $ignored) {
+            // Best-effort — never fail an authorized request because the
+            // last_seen_at update threw.
+        }
         return $grant;
     }
 

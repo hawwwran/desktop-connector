@@ -393,17 +393,27 @@ relay log (filenames are local-only).
 
 | Event | Where | Severity | Context | Notes |
 |---|---|---|---|---|
+| `vault.atomic.sweep_failed` | desktop | error | `binding` | F-Y14 — startup sweep threw on a binding |
 | `vault.atomic.sweep_removed` | desktop | info | `root`, `count` | Startup swept ≥1 orphan `*.dc-temp-*` file (T11.1) |
 | `vault.atomic.sweep_stat_failed` | desktop | warning | `path`, `error` | Couldn't stat a candidate during sweep; skipped |
 | `vault.atomic.sweep_unlink_failed` | desktop | warning | `path`, `error` | Sweep matched a temp file but couldn't unlink it |
 | `vault.atomic.temp_unlink_failed` | desktop | warning | `path`, `error` | Live atomic-write couldn't clean up its own temp |
 | `vault.baseline.skip_unsafe` | desktop | warning | `path` | Baseline refused to write a path traversing outside the binding root |
+| `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
+| `vault.download.duplicate_path` | desktop | warning | `path` | F-D09 — folder download saw two entries claiming the same relative path |
+| `vault.download.entry_has_no_version` | desktop | warning | `path` | F-D09 — folder download skipped a version-less entry |
+| `vault.download.skip_unsafe_path` | desktop | warning | `path`, `error` | F-D09 — folder download skipped a manifest path that escapes the root |
 | `vault.eviction.no_more_candidates` | desktop | info | `vault_id` | Quota pressure ran out of evictable old versions |
 | `vault.eviction.tombstone_purged_early` | desktop | info | `vault_id`, `path` | Tombstone purged before retention horizon under quota pressure |
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal) |
 | `vault.eviction.version_purged` | desktop | info | `vault_id`, `path`, `version_id` | Old version evicted to free space |
 | `vault.folder.cleared` | desktop | info | `remote_folder_id`, `tombstoned`, `author` | T14.1 bulk-soft-delete published |
+| `vault.gc.unlink_failed` | server | warning | `plan`, `path` | F-S12 — gcExecute couldn't remove a chunk file |
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
+| `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
+| `vault.migration.verify.chunk_aead_failed` | desktop | warning | `chunk`, `error` | F-C05 — chunk failed AEAD during sample |
+| `vault.migration.verify.chunk_fetch_failed` | desktop | warning | `chunk`, `error` | F-C05 — relay get_chunk failed during sample |
+| `vault.migration.verify.chunk_truncated` | desktop | warning | `chunk` | F-C05 — chunk too short to be a valid envelope |
 | `vault.migration.verify_failed` | desktop | error | `vault_id`, `reason` | Source/target hash diff during T9.4 verify |
 | `vault.open.ok` | desktop | info | `vault_id` | Vault unlocked from cached grant or fresh passphrase |
 | `vault.prepare.ok` | desktop | info | `vault_id`, `revision` | Vault create/preflight succeeded |
@@ -414,6 +424,8 @@ relay log (filenames are local-only).
 | `vault.purge.scheduled` | desktop | info | `vault`, `job_id`, `scope`, `scheduled_for` | T14.3 hard-purge queued |
 | `vault.purge.state_read_failed` | desktop | warning | `path`, `error` | Pending-purges JSON unreadable; treating as empty |
 | `vault.recovery_test.*` | desktop | info | varies | Subsystem for the M1 recovery-test dialog (T3.5/T3.6) |
+| `vault.repair.marked_broken` | desktop | info | `count`, `author`, `revision` | T17.4 — broken-version markers committed |
+| `vault.restore.skip_symlinked_dest` | desktop | warning | `path`, `reason` | F-D28 — refused to write through a symlink in destination |
 | `vault.restore.skip_unsafe` | desktop | warning | `path` | Restore refused a path traversing outside the destination |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
 | `vault.sync.binding_disconnect_noop` | desktop | info | `binding` | Disconnect on already-unbound binding |
@@ -422,15 +434,21 @@ relay log (filenames are local-only).
 | `vault.sync.binding_paused` | desktop | info | `binding`, `sync_mode`, `pending_ops` | T12.4 pause |
 | `vault.sync.binding_resume_noop` | desktop | info | `binding` | Resume on already-bound binding |
 | `vault.sync.binding_resumed` | desktop | info | `binding`, `sync_mode`, `pending_ops` | T12.4 resume |
-| `vault.sync.delete_cas_conflict` | desktop | warning | `binding`, `path` | Delete-tombstone publish lost CAS race; retry next cycle |
+| `vault.sync.delete_cas_exhausted` | desktop | warning | `binding`, `path` | F-Y06 — tombstone retry budget exhausted |
+| `vault.sync.delete_cas_retry` | desktop | info | `attempt`, `binding`, `path` | F-Y06 — tombstone publish hit CAS race; retrying |
 | `vault.sync.delete_failed` | desktop | warning | `binding`, `path`, `error` | Delete op left in queue with attempts++ |
+| `vault.sync.delete_refetch_failed` | desktop | warning | `binding`, `error` | F-Y06 — couldn't refetch head between retries |
 | `vault.sync.file_moved_to_trash` | desktop | info | `path` | T11.4 trash-on-delete (sync flow, not user-initiated) |
 | `vault.sync.file_skipped_ignored` | desktop | info | `binding`, `path`, `pattern` | T6.4 ignore-pattern match |
 | `vault.sync.file_skipped_too_large` | desktop | warning | `binding`, `path`, `size`, `cap` | T6.4 size cap (default 2 GiB) |
 | `vault.sync.file_stability_hung` | desktop | warning | `path`, `waited` | T10.4 stability gate hung-after cap hit |
+| `vault.sync.flush_skipped_paused` | desktop | info | `binding` | F-Y01 — sync now no-op for paused binding |
 | `vault.sync.local_delete_unsynced_silent` | desktop | info | `binding`, `path` | T12.2 watcher gate dropped a delete on a never-synced path |
 | `vault.sync.previously_synced_check_failed` | desktop | warning | `binding`, `path` | The T12.2 predicate raised; treating as not-synced |
 | `vault.sync.progress_callback_failed` | desktop | error | exception traceback | UI progress callback raised; cycle continues |
+| `vault.sync.ransomware_callback_failed` | desktop | error | `binding` | F-Y27 — UI callback for trip raised |
+| `vault.sync.ransomware_pause_failed` | desktop | error | `binding` | F-Y27 — pause helper threw |
+| `vault.sync.ransomware_pause_triggered` | desktop | warning | `binding`, `title`, `body` | F-Y27 — detector tripped; binding paused |
 | `vault.sync.ransomware_threshold_rename_ratio` | desktop | warning | `binding`, `total`, `renames`, `ratio` | T12.3 trip via rename ratio |
 | `vault.sync.ransomware_threshold_total` | desktop | warning | `binding`, `total`, `window_s` | T12.3 trip via total events |
 | `vault.sync.refetch_after_publish_failed` | desktop | warning | `binding` | Manifest re-fetch after our own publish failed; cycle continues |
@@ -443,19 +461,34 @@ relay log (filenames are local-only).
 | `vault.sync.twoway_conflict_move_failed` | desktop | warning | `binding`, `src`, `dst`, `error` | Couldn't rename local copy aside before download |
 | `vault.sync.twoway_download_failed` | desktop | warning | `binding`, `path`, `error` | Two-way remote-upsert phase couldn't fetch file |
 | `vault.sync.twoway_folder_no_display_name` | desktop | warning | `binding`, `folder` | Two-way phase aborted; manifest folder lacked display name |
+| `vault.sync.twoway_local_fingerprint_unreadable` | desktop | warning | `binding`, `path` | F-Y04 — fingerprint failed; treated file as modified |
 | `vault.sync.twoway_remote_tombstone_applied` | desktop | info | `binding`, `path` | Local file trashed after remote-tombstone applied (unmodified case) |
 | `vault.sync.twoway_remote_tombstone_kept_local_modified` | desktop | info | `binding`, `path` | Local edits preserved over remote tombstone (re-upload re-enqueued) |
+| `vault.sync.twoway_remote_tombstone_unreadable` | desktop | warning | `binding`, `path` | F-Y05 — fingerprint failed; deferred to next cycle |
 | `vault.sync.twoway_skip_unsafe_path` | desktop | warning | `path` | Two-way refused a manifest path that traverses out of root |
 | `vault.sync.twoway_trash_failed` | desktop | warning | `binding`, `path` | T12.1 remote-tombstone trash failed; row left in place |
 | `vault.sync.upload_cas_conflict` | desktop | warning | `binding`, `path` | Inner T6.3 retry budget exhausted; op stays for next cycle |
 | `vault.sync.upload_failed` | desktop | warning | `binding`, `path`, `error` | Generic upload failure; op left in queue with attempts++ |
 | `vault.sync.upload_path_vanished_promoted_to_delete` | desktop | info | `binding`, `path` | Watcher saw modify; sync saw missing — promoted to delete |
+| `vault.sync.upload_path_vanished_silent` | desktop | info | `binding`, `path` | Upload op for never-synced path dropped |
+| `vault.sync.upload_quota_exceeded` | desktop | warning | `binding`, `path`, `used`, `quota` | F-D03 — sync engine surfaced 507 to caller |
 | `vault.sync.watchdog_unavailable` | desktop | warning | `reason` | python3-watchdog not installed; falling back to polling |
 | `vault.sync.watcher_flush_failed` | desktop | error | `binding` | "Sync now" couldn't drain watcher events first |
+| `vault.sync.watcher_runtime_boot_failed` | desktop | error | exception traceback | F-Y13 — watcher boot crashed |
+| `vault.sync.watcher_runtime_init_failed` | desktop | error | exception traceback | F-Y13 — watcher init crashed |
+| `vault.sync.watcher_skip_missing_root` | desktop | warning | `binding`, `path` | F-Y13 — binding root vanished |
+| `vault.sync.watcher_stop_failed` | desktop | warning | `binding` | F-Y13 — observer stop raised |
+| `vault.sync.watcher_tick_failed` | desktop | error | `binding` | F-Y13 — coordinator tick raised |
+| `vault.sync.watchers_started` | desktop | info | `vault`, `count` | F-Y13 — boot-time watcher init |
+| `vault.tray.export.notify_failed` | desktop | error | exception traceback | Tray notification for stub Export failed |
 | `vault.tray.export.stub` | desktop | info | — | Tray menu Export entry placeholder pre-T8 |
+| `vault.tray.import.notify_failed` | desktop | error | exception traceback | Tray notification for stub Import failed |
 | `vault.tray.import.stub` | desktop | info | — | Tray menu Import entry placeholder pre-T8 |
+| `vault.tray.sync_now.notify_failed` | desktop | error | exception traceback | Tray notification for stub Sync now failed |
 | `vault.tray.sync_now.stub` | desktop | info | — | Tray menu Sync now entry placeholder pre-T10.6 |
+| `vault.upload.completed` | desktop | info | `vault`, `revision`, `path` | A single-file upload completed (post-publish) |
 | `vault.vault.cleared` | desktop | info | `total_tombstoned`, `author` | T14.2 whole-vault bulk-soft-delete published |
+| `vault.vault_access_secret.encode` | desktop | info | — | Access-secret encoding helper invoked |
 
 ---
 

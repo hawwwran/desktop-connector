@@ -35,6 +35,20 @@ class VaultQuotaExceededError(VaultRelayError):
         self.eviction_available = bool(details.get("eviction_available", False))
 
 
+class VaultChunkMissingError(VaultRelayError):
+    """Server returned 404 ``vault_chunk_missing`` for a chunk fetch.
+
+    Auto-retried by the download pipeline within the spec's transfer
+    budget; surfaces as terminal once the budget is exhausted.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            {"code": "vault_chunk_missing", "message": message},
+            status_code=404,
+        )
+
+
 class VaultCASConflictError(VaultRelayError):
     """Server rejected a manifest publish because the CAS revision moved (HTTP 409).
 

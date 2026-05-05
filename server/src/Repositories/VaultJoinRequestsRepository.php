@@ -79,6 +79,23 @@ class VaultJoinRequestsRepository
     }
 
     /**
+     * Count outstanding join-requests for a vault (pending or claimed but
+     * not yet approved/rejected). Used to enforce the §10 rate limit:
+     * "Pending join-requests per vault: 5 simultaneous max." F-S08.
+     */
+    public function countPending(string $vaultId): int
+    {
+        $row = $this->db->querySingle(
+            "SELECT COUNT(*) AS c
+               FROM vault_join_requests
+              WHERE vault_id = :vid
+                AND state IN ('pending', 'claimed')",
+            [':vid' => $vaultId]
+        );
+        return $row !== null ? (int) ($row['c'] ?? 0) : 0;
+    }
+
+    /**
      * Atomic claim: only flips a ``pending`` row, captures the claimant
      * pubkey + device_name + claimed_at. Returns the post-claim row, or
      * ``null`` if the row wasn't claimable (already claimed, expired, or

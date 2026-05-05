@@ -115,7 +115,11 @@ def delete_folder_contents(
         op=op,
         local_index=local_index,
     )
-    last_tombstoned = captured[0] if captured else []
+    # F-D08: return the tombstone list from the *winning* CAS attempt
+    # so the UI count reflects what actually landed (including any
+    # peer-added files that were tombstoned on retry). The first
+    # attempt's list undercounts whenever a CAS retry happens.
+    last_tombstoned = captured[-1] if captured else []
     return published, last_tombstoned
 
 

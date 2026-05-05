@@ -81,8 +81,14 @@ def secret_to_wire_hash(secret: str) -> dict[str, Any]:
     digest = hashlib.sha256(secret.encode("utf-8")).digest()
     return {
         "new_vault_access_token_hash": base64.b64encode(digest).decode("ascii"),
-        "_hash_hex": digest.hex(),  # convenience for tests + diagnostics
     }
+
+
+def _compute_secret_hex_for_tests(secret: str) -> str:
+    """Hex form of the SHA-256 digest. Tests-only — never log this."""
+    if not isinstance(secret, str) or not secret:
+        raise ValueError("secret must be a non-empty string")
+    return hashlib.sha256(secret.encode("utf-8")).digest().hex()
 
 
 def rotation_request_body(

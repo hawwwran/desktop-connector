@@ -22,6 +22,7 @@ the toggle OFF leaves no vault.log on disk.
 from __future__ import annotations
 
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -33,16 +34,58 @@ VAULT_LOG_MAX_BYTES = 1_000_000  # 1 MB
 VAULT_LOG_BACKUPS = 1            # 2 files max → 2 MB ceiling
 
 
+# F-503 / F-504: defense-in-depth scrubber. Even though every catalogued
+# vault.* call is supposed to be free of secrets, the filter rewrites
+# common high-risk shapes so a careless future call doesn't leak
+# credentials into vault.log.
+_REDACT_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r'(?i)(passphrase\s*[:=]\s*)\S+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(recovery[_-]?phrase\s*[:=]\s*)\S+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(mnemonic\s*[:=]\s*)\S+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(purge_secret\s*[:=]\s*)\S+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(token\s*[:=]\s*)\S{16,}'), r"\1<redacted>"),
+    (re.compile(r'(?i)(Authorization\s*:\s*)[^\s"\']+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(X-Vault-Authorization\s*:\s*)[^\s"\']+'), r"\1<redacted>"),
+    (re.compile(r'(?i)(Bearer\s+)[A-Za-z0-9._\-]{16,}'), r"\1<redacted>"),
+)
+
+
+def _redact_message(message: str) -> str:
+    """Apply the defence-in-depth scrubs before vault.log writes."""
+    out = message
+    for pattern, replacement in _REDACT_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
 class _VaultMessageFilter(logging.Filter):
-    """Pass records whose message body starts with ``vault.``."""
+    """Pass records whose message body starts with ``vault.``.
+
+    Mutates the record so the formatter sees the scrubbed text. Other
+    handlers attached to the root logger see the original — by design,
+    the scrubbing is targeted to vault.log only.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         # Use ``getMessage()`` so %-substitution + args are applied.
         try:
             message = record.getMessage()
         except Exception:  # noqa: BLE001
+            # F-521: a record-format bug shouldn't silently disappear.
+            try:
+                logging.lastResort.handle(record)  # type: ignore[union-attr]
+            except Exception:
+                pass
             return False
-        return message.startswith(VAULT_TAG_PREFIX)
+        if not message.startswith(VAULT_TAG_PREFIX):
+            return False
+        scrubbed = _redact_message(message)
+        if scrubbed != message:
+            # Substitute the scrubbed message; clear args so the
+            # formatter doesn't re-apply % substitution.
+            record.msg = scrubbed
+            record.args = None
+        return True
 
 
 def attach_vault_log_handler(

@@ -75,10 +75,12 @@ class VaultMigrationIntentsRepository
 
     public function markVerified(string $vaultId, int $now): bool
     {
+        // Idempotent: preserve the original verified_at on retry so the
+        // /verify endpoint returns the same timestamp every time. F-S05.
         $this->db->execute(
             'UPDATE vault_migration_intents
-             SET verified_at = :now
-             WHERE vault_id = :id',
+                SET verified_at = COALESCE(verified_at, :now)
+              WHERE vault_id = :id',
             [':now' => $now, ':id' => $vaultId]
         );
         return $this->db->changes() === 1;
@@ -86,10 +88,13 @@ class VaultMigrationIntentsRepository
 
     public function markCommitted(string $vaultId, int $now): bool
     {
+        // Idempotent: preserve the original committed_at on retry so a
+        // re-commit returns the original timestamp instead of a fresh
+        // one. F-S05 / spec §5.
         $this->db->execute(
             'UPDATE vault_migration_intents
-             SET committed_at = :now
-             WHERE vault_id = :id',
+                SET committed_at = COALESCE(committed_at, :now)
+              WHERE vault_id = :id',
             [':now' => $now, ':id' => $vaultId]
         );
         return $this->db->changes() === 1;

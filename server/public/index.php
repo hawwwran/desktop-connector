@@ -199,6 +199,9 @@ $router->vaultPut('/api/vaults/{vault_id}/header', function (RequestContext $ctx
 $router->vaultGet('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
     VaultController::getManifest($db, $ctx);
 });
+$router->vaultGet('/api/vaults/{vault_id}/manifest/revisions/{revision}', function (RequestContext $ctx) use ($db) {
+    VaultController::getManifestRevision($db, $ctx);
+});
 $router->vaultPut('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
     VaultController::putManifest($db, $ctx);
 });
@@ -239,6 +242,9 @@ $router->vaultPost('/api/vaults/{vault_id}/join-requests', function (RequestCont
 });
 $router->vaultGet('/api/vaults/{vault_id}/join-requests/{req_id}', function (RequestContext $ctx) use ($db) {
     VaultGrantsController::getJoinRequest($db, $ctx);
+});
+$router->vaultDelete('/api/vaults/{vault_id}/join-requests/{req_id}', function (RequestContext $ctx) use ($db) {
+    VaultGrantsController::rejectJoinRequest($db, $ctx);
 });
 $router->vaultPost('/api/vaults/{vault_id}/join-requests/{req_id}/claim', function (RequestContext $ctx) use ($db) {
     VaultGrantsController::claim($db, $ctx);

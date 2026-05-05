@@ -25,6 +25,16 @@ Files named `.fn.<function>.<subtype>` trigger receiver-side behavior instead of
 
 For commands too small for the full transfer pipeline. `fasttrack_messages` table stores opaque blobs; three endpoints (send/pending/ack); server fires `{type:"fasttrack"}` FCM wake — no content leaked. Payload `{fn, action, …}` is E2E-encrypted (same AES-256-GCM as transfers), so the server is function-agnostic. 10-minute expiry, 100 pending per recipient, bidirectional. 128 KB ceiling (`MessageTransportPolicy`). Used by Find my Device; the compatibility wire value remains `fn=find-phone` while receivers also accept `fn=find-device`.
 
+## Vault (vault_v1)
+
+Account-less, end-to-end-encrypted personal vault on the relay. The desktop unlocks with an Argon2id passphrase; the relay only ever sees AEAD ciphertext (chunks, manifests, headers) plus opaque metadata (vault id, manifest revisions, GC plans, join requests, device grants).
+
+- **Wire surface**: every endpoint lives under `/api/vaults/...` and emits errors via the `vault_v1` envelope (`{ok:false, error:{code, message, details}}`). Spec: `docs/protocol/vault-v1.md`. Wire-format details (envelope layouts, AEAD AAD, hash chains): `docs/protocol/vault-v1-formats.md`. Cross-runtime test vectors: `tests/protocol/vault-v1/*.json`.
+- **Server tree**: `server/src/Controllers/Vault{,Grants}Controller.php`, `server/src/Repositories/Vault*.php`, `server/src/Crypto/VaultCrypto.php`, `server/src/Auth/VaultAuthService.php`, `server/src/Http/VaultApiError.php`, `server/migrations/002-004_vault*.sql`.
+- **Desktop tree**: `desktop/src/vault*.py` covers crypto (Argon2id, AEAD, HKDF labels in `vault_crypto.py`), passphrase wordlist, manifests, sync engine (`vault_binding_*.py`, `vault_filesystem_watcher.py`, `vault_runtime_watchers.py`), data path (`vault_upload.py`, `vault_download.py`, `vault_eviction.py`, `vault_restore.py`, `vault_clear.py`), grants + QR join (`vault_grant*.py`), export/import (`vault_export.py`, `vault_import*.py`), migration (`vault_migration*.py`), diagnostics (`vault_logging.py`, `vault_debug_bundle.py`, `vault_integrity.py`, `vault_repair.py`, `vault_activity.py`).
+- **GTK windows**: `windows_vault.py` (main + onboard wizards), `windows_vault_browser.py` (file/folder browser), `windows_vault_import.py` (import wizard), all subprocesses spawned via `python3 -m src.windows vault-*`. The Folders tab inside Vault Settings owns the bindings UI (`vault_folders_tab.py`).
+- **Capabilities** flow through `VaultCapabilities.php` and are advertised on `GET /api/health`. Format-version byte 0x01 is enforced on every envelope (chunk, manifest, header, device-grant, export bundle); v2-bumped envelopes surface as 422 `vault_format_version_unsupported` before any AEAD attempt.
+
 ## Building
 
 ```bash

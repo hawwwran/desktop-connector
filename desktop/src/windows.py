@@ -9,6 +9,11 @@ Usage:
     python3 -m src.windows send-files --config-dir=~/.config/desktop-connector
     python3 -m src.windows settings --config-dir=~/.config/desktop-connector
     python3 -m src.windows history --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-onboard --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-main --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-browser --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-import --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-passphrase-generator --config-dir=~/.config/desktop-connector
 """
 
 import argparse

@@ -40,7 +40,8 @@ class VaultsRepository
         string $initialManifestHash,
         int $now,
         int $initialHeaderRevision = 1,
-        int $initialManifestRevision = 1
+        int $initialManifestRevision = 1,
+        ?string $purgeTokenHash = null
     ): void {
         $this->db->execute(
             'INSERT INTO vaults (
@@ -53,6 +54,7 @@ class VaultsRepository
                 current_manifest_hash,
                 used_ciphertext_bytes,
                 chunk_count,
+                purge_token_hash,
                 created_at,
                 updated_at
              ) VALUES (
@@ -65,6 +67,7 @@ class VaultsRepository
                 :manifest_hash,
                 0,
                 0,
+                :purge_hash,
                 :now,
                 :now
              )',
@@ -76,6 +79,7 @@ class VaultsRepository
                 ':header_hash'   => $headerHash,
                 ':manifest_rev'  => $initialManifestRevision,
                 ':manifest_hash' => $initialManifestHash,
+                ':purge_hash'    => $purgeTokenHash !== null ? new Blob($purgeTokenHash) : null,
                 ':now'           => $now,
             ]
         );
@@ -259,13 +263,16 @@ class VaultsRepository
         string $targetRelayUrl,
         int $now
     ): bool {
+        // Idempotent: when migrated_to already matches the requested
+        // target, preserve the original migrated_at so a repeat commit
+        // returns the same wire timestamp. F-S05.
         $this->db->execute(
             'UPDATE vaults
-             SET migrated_to = :target,
-                 migrated_at = :now,
-                 updated_at  = :now
-             WHERE vault_id = :id
-               AND (migrated_to IS NULL OR migrated_to = :target)',
+                SET migrated_to = :target,
+                    migrated_at = COALESCE(migrated_at, :now),
+                    updated_at  = :now
+              WHERE vault_id = :id
+                AND (migrated_to IS NULL OR migrated_to = :target)',
             [
                 ':target' => $targetRelayUrl,
                 ':now'    => $now,

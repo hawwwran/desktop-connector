@@ -316,3 +316,104 @@ class VaultJoinRequestStateError extends VaultApiError
         );
     }
 }
+
+/**
+ * 422 vault_format_version_unsupported. The first byte of an envelope is
+ * the format version; readers MUST stop before AEAD when the version is
+ * unknown. The relay enforces this so a v2 envelope can never be stored
+ * on a v1 server even by accident. Spec §6.6 / formats §7.
+ */
+class VaultFormatVersionUnsupportedError extends VaultApiError
+{
+    public function __construct(string $envelopeKind, int $observedVersion)
+    {
+        parent::__construct(
+            status: 422,
+            errorCode: 'vault_format_version_unsupported',
+            message: "Unsupported {$envelopeKind} format version: {$observedVersion}",
+            details: [
+                'envelope'         => $envelopeKind,
+                'observed_version' => $observedVersion,
+                'supported'        => [1],
+            ],
+        );
+    }
+}
+
+/**
+ * 422 vault_header_tampered. Header envelope's deterministic prefix
+ * disagrees with the body claims. Permanent — never retried.
+ */
+class VaultHeaderTamperedError extends VaultApiError
+{
+    public function __construct(string $reason)
+    {
+        parent::__construct(
+            status: 422,
+            errorCode: 'vault_header_tampered',
+            message: $reason,
+            details: ['reason' => $reason],
+        );
+    }
+}
+
+/**
+ * 422 vault_manifest_tampered. Manifest envelope's deterministic prefix
+ * disagrees with the body claims. Permanent — never retried.
+ */
+class VaultManifestTamperedError extends VaultApiError
+{
+    public function __construct(string $reason)
+    {
+        parent::__construct(
+            status: 422,
+            errorCode: 'vault_manifest_tampered',
+            message: $reason,
+            details: ['reason' => $reason],
+        );
+    }
+}
+
+/**
+ * 413 vault_payload_too_large. Chunk envelope exceeds 8 MiB plaintext or
+ * manifest envelope exceeds 16 MiB. Permanent — clients can't recover
+ * by retrying with the same body.
+ */
+class VaultPayloadTooLargeError extends VaultApiError
+{
+    public function __construct(string $kind, int $observedBytes, int $maxBytes)
+    {
+        parent::__construct(
+            status: 413,
+            errorCode: 'vault_payload_too_large',
+            message: "{$kind} payload too large: {$observedBytes} bytes (max {$maxBytes})",
+            details: [
+                'kind'           => $kind,
+                'observed_bytes' => $observedBytes,
+                'max_bytes'      => $maxBytes,
+            ],
+        );
+    }
+}
+
+/**
+ * 429 vault_rate_limited. Caller exceeded a per-device, per-vault, or
+ * per-pair quota. ``retry_after_ms`` lets clients back off precisely.
+ */
+class VaultRateLimitedError extends VaultApiError
+{
+    public function __construct(string $reason, int $retryAfterMs)
+    {
+        $retryAfterSeconds = (int) max(1, (int) ceil($retryAfterMs / 1000));
+        parent::__construct(
+            status: 429,
+            errorCode: 'vault_rate_limited',
+            message: $reason,
+            details: [
+                'reason'         => $reason,
+                'retry_after_ms' => max(0, $retryAfterMs),
+            ],
+            headers: ['Retry-After' => (string) $retryAfterSeconds],
+        );
+    }
+}

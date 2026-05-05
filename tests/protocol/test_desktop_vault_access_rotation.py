@@ -57,7 +57,11 @@ class WireBodyTests(unittest.TestCase):
         self.assertEqual(
             base64.b64decode(wire["new_vault_access_token_hash"]), expected,
         )
-        self.assertEqual(wire["_hash_hex"], expected.hex())
+        # F-C10: the wire payload must NOT carry the hex digest. Tests
+        # asking for the hex form go through the explicit test helper.
+        self.assertNotIn("_hash_hex", wire)
+        from src.vault_access_rotation import _compute_secret_hex_for_tests
+        self.assertEqual(_compute_secret_hex_for_tests(secret), expected.hex())
 
     def test_rotation_request_body_carries_just_the_hash(self) -> None:
         body = rotation_request_body("super-secret-bytes")

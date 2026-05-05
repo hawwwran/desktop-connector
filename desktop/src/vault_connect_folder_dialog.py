@@ -157,10 +157,12 @@ def present_connect_folder_dialog(
         state["preflight"] = summary
         preflight_label.set_label(render_preflight_text(summary))
         # Connect is enabled when the preflight had no fatal warning.
-        connect_btn.set_sensitive(
-            summary.local_path_writable
-            or summary.local_path_exists  # writable check may fail on parent
-        )
+        # F-512: writable is the only authoritative gate.
+        # ``compute_preflight`` already covers the "doesn't exist yet
+        # but parent is writable" case, so OR-ing in
+        # ``local_path_exists`` was theatre that allowed read-only
+        # destinations through.
+        connect_btn.set_sensitive(bool(summary.local_path_writable))
 
     def on_pick_local(_btn) -> None:
         file_dialog = Gtk.FileDialog()

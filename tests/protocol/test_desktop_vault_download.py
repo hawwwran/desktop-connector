@@ -280,18 +280,22 @@ class VaultDownloadTests(unittest.TestCase):
         relay = FakeChunkRelay(chunks)
         vault = _vault()
         try:
-            with self.assertRaisesRegex(ValueError, "unsafe vault path"):
-                download_folder(
-                    vault=vault,
-                    relay=relay,
-                    manifest=manifest,
-                    path="Documents",
-                    destination=self.tmpdir / "Documents",
-                )
+            # F-D09: an unsafe path is skipped with a warning rather
+            # than aborting the whole batch. With only the malicious
+            # entry present, the result is an empty download — no
+            # bytes ever land outside the destination root.
+            download_folder(
+                vault=vault,
+                relay=relay,
+                manifest=manifest,
+                path="Documents",
+                destination=self.tmpdir / "Documents",
+            )
         finally:
             vault.close()
 
         self.assertFalse((self.tmpdir / "evil.txt").exists())
+        self.assertFalse((self.tmpdir / "Documents" / "evil.txt").exists())
 
     def test_keep_both_folder_policy_preserves_existing_destination(self) -> None:
         destination = self.tmpdir / "Documents"

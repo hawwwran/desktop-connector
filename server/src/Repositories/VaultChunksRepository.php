@@ -54,6 +54,14 @@ class VaultChunksRepository
      */
     public static function storagePath(string $vaultId, string $chunkId): string
     {
+        // F-S19 defense in depth: every caller currently normalizes
+        // vaultId, but a future caller forgetting would let `..` slip
+        // through and traverse out of the storage root.
+        if (preg_match('/^[A-Z2-7]{12}$/', $vaultId) !== 1) {
+            throw new VaultChunkInvalidIdException(
+                "vault_id '{$vaultId}' fails ^[A-Z2-7]{12}\$"
+            );
+        }
         if (!self::isValidChunkId($chunkId)) {
             throw new VaultChunkInvalidIdException(
                 "chunk_id '{$chunkId}' fails ^ch_v1_[a-z2-7]{24}\$"
@@ -245,6 +253,20 @@ class VaultChunksRepository
              SET state = :state
              WHERE vault_id = :vid AND chunk_id = :cid',
             [':state' => $newState, ':vid' => $vaultId, ':cid' => $chunkId]
+        );
+    }
+
+    /**
+     * Delete the chunk row outright. Used when a chunk PUT's disk write
+     * fails after row insert — the row+counters reset together, so the
+     * next upload can succeed (F-S02).
+     */
+    public function deleteRow(string $vaultId, string $chunkId): void
+    {
+        $this->db->execute(
+            'DELETE FROM vault_chunks
+             WHERE vault_id = :vid AND chunk_id = :cid',
+            [':vid' => $vaultId, ':cid' => $chunkId]
         );
     }
 }

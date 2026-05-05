@@ -19,6 +19,7 @@ from .brand import (
 from .vault_browser_model import list_folder, list_versions
 from .vault_cache import VaultLocalIndex
 from .vault_download import previous_version_filename
+from .vault_error_messages import humanize
 from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError
 from .vault_upload import (
     default_upload_resume_dir,
@@ -574,7 +575,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         refresh_btn.set_sensitive(True)
@@ -614,9 +615,14 @@ def show_vault_browser(config_dir: Path) -> None:
                 )
                 dlg.add_response("cancel", "Cancel")
                 dlg.add_response("evict", info["primary_action_label"])
-                dlg.set_default_response("evict")
+                # F-U04: eviction is irreversible (history is dropped),
+                # so Enter must default to Cancel. The action button is
+                # rendered destructive to match brand guidance.
+                dlg.set_default_response("cancel")
                 dlg.set_close_response("cancel")
-                dlg.set_response_appearance("evict", Adw.ResponseAppearance.SUGGESTED)
+                dlg.set_response_appearance(
+                    "evict", Adw.ResponseAppearance.DESTRUCTIVE,
+                )
 
                 def on_response(_dialog, response: str) -> None:
                     if response == "evict":
@@ -673,7 +679,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
@@ -776,7 +782,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
@@ -885,7 +891,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
@@ -998,7 +1004,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
@@ -1201,7 +1207,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     GLib.idle_add(fail)
                     return
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
@@ -1383,7 +1389,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     GLib.idle_add(fail)
                     return
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
@@ -1479,7 +1485,7 @@ def show_vault_browser(config_dir: Path) -> None:
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         progress_bar.set_visible(False)
@@ -1612,7 +1618,9 @@ def show_vault_browser(config_dir: Path) -> None:
             dlg = Adw.AlertDialog(heading=heading, body=body)
             dlg.add_response("cancel", "Cancel")
             dlg.add_response("restore", "Restore")
-            dlg.set_default_response("restore")
+            # F-U05: restore is rare and a relay-mutating action; default
+            # to Cancel so bare Enter doesn't auto-confirm.
+            dlg.set_default_response("cancel")
             dlg.set_close_response("cancel")
             dlg.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
 

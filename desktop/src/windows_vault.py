@@ -538,7 +538,15 @@ def show_vault_main(config_dir: Path):
         def on_disconnect_vault(_btn):
             dlg = Adw.AlertDialog(
                 heading="Disconnect vault?",
-                body="The vault will still exist. This machine will only lose the connection to it.",
+                # F-U18: spell out exactly what disconnect removes vs.
+                # leaves alone — "vault will still exist" was technically
+                # true but underplayed the local data wipe.
+                body=(
+                    "Removes all local vault material from this machine "
+                    "(keys, manifests, downloaded chunks, sync state). "
+                    "The relay vault is untouched. To reconnect, ask an "
+                    "admin device to grant access again."
+                ),
             )
             dlg.add_response("cancel", "Cancel")
             dlg.add_response("disconnect", "Disconnect vault")
@@ -996,8 +1004,13 @@ def show_vault_onboard(config_dir: Path):
         def on_pp_next(_btn):
             entered = pp_entry.get_text()
             confirm = pp_confirm.get_text()
-            if len(entered) < 8:
-                pp_status.set_text("Passphrase must be at least 8 characters.")
+            # F-U23: enforce a stricter minimum + nudge typed input
+            # toward the Generate button for short / non-mixed inputs.
+            if len(entered) < 12:
+                pp_status.set_text(
+                    "Passphrase must be at least 12 characters. The "
+                    "Generate button produces a stronger 7-word phrase."
+                )
                 return
             if entered != confirm:
                 pp_status.set_text("Passphrases don't match.")

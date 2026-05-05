@@ -217,11 +217,24 @@ final class VaultControllerTest extends TestCase
         try {
             VaultController::putChunk(
                 $this->db,
-                $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], $bytes)
+                $this->ctx(
+                    'PUT',
+                    ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId],
+                    self::chunkBody($bytes),
+                )
             );
         } finally {
             ob_end_clean();
         }
+    }
+
+    /** Prepend the v1 format-version byte (formats §11.3) to a chunk body. */
+    private static function chunkBody(string $bytes): string
+    {
+        if ($bytes !== '' && $bytes[0] === "\x01") {
+            return $bytes;
+        }
+        return "\x01" . $bytes;
     }
 
     // ===================================================================
@@ -369,10 +382,10 @@ final class VaultControllerTest extends TestCase
         ];
         try {
             VaultController::putHeader($this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body));
-            self::fail('expected VaultInvalidRequestError');
-        } catch (VaultInvalidRequestError $e) {
-            self::assertSame(400, $e->status);
-            self::assertSame('encrypted_header', $e->details['field']);
+            self::fail('expected VaultHeaderTamperedError');
+        } catch (VaultHeaderTamperedError $e) {
+            self::assertSame(422, $e->status);
+            self::assertSame('vault_header_tampered', $e->errorCode);
         }
     }
 
@@ -439,10 +452,10 @@ final class VaultControllerTest extends TestCase
                 $this->db,
                 $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
             );
-            self::fail('expected VaultInvalidRequestError');
-        } catch (VaultInvalidRequestError $e) {
-            self::assertSame(400, $e->status);
-            self::assertSame('manifest_ciphertext', $e->details['field']);
+            self::fail('expected VaultManifestTamperedError');
+        } catch (VaultManifestTamperedError $e) {
+            self::assertSame(422, $e->status);
+            self::assertSame('vault_manifest_tampered', $e->errorCode);
         }
     }
 
@@ -463,9 +476,9 @@ final class VaultControllerTest extends TestCase
                 $this->db,
                 $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
             );
-            self::fail('expected VaultInvalidRequestError');
-        } catch (VaultInvalidRequestError $e) {
-            self::assertSame(400, $e->status);
+            self::fail('expected VaultManifestTamperedError');
+        } catch (VaultManifestTamperedError $e) {
+            self::assertSame(422, $e->status);
             self::assertStringContainsString('author_device_id', $e->details['reason']);
         }
     }
@@ -500,7 +513,7 @@ final class VaultControllerTest extends TestCase
     public function test_putChunk_happy_path_creates_blob_and_bumps_quota(): void
     {
         $chunkId = 'ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa';
-        $bytes = str_repeat('x', 4096);
+        $bytes = self::chunkBody(str_repeat('x', 4096));
 
         $res = $this->invoke(fn() => VaultController::putChunk(
             $this->db, $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], $bytes)
@@ -508,14 +521,14 @@ final class VaultControllerTest extends TestCase
 
         self::assertSame(201, $res['status']);
         self::assertTrue($res['json']['data']['stored']);
-        self::assertSame(4096, $res['json']['data']['size']);
+        self::assertSame(strlen($bytes), $res['json']['data']['size']);
 
         $absPath = VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId);
         self::assertFileExists($absPath);
         self::assertSame($bytes, file_get_contents($absPath));
 
         $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
-        self::assertSame(4096, (int)$vault['used_ciphertext_bytes']);
+        self::assertSame(strlen($bytes), (int)$vault['used_ciphertext_bytes']);
         self::assertSame(1, (int)$vault['chunk_count']);
     }
 
@@ -526,12 +539,12 @@ final class VaultControllerTest extends TestCase
         $this->uploadChunk($chunkId, $bytes);
 
         $res = $this->invoke(fn() => VaultController::putChunk(
-            $this->db, $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], $bytes)
+            $this->db, $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], self::chunkBody($bytes))
         ));
         self::assertSame(200, $res['status']);
 
         $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
-        self::assertSame(strlen($bytes), (int)$vault['used_ciphertext_bytes']);
+        self::assertSame(strlen(self::chunkBody($bytes)), (int)$vault['used_ciphertext_bytes']);
         self::assertSame(1, (int)$vault['chunk_count']);
     }
 
@@ -543,7 +556,7 @@ final class VaultControllerTest extends TestCase
         try {
             VaultController::putChunk(
                 $this->db,
-                $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], 'second-with-different-size')
+                $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], self::chunkBody('second-with-different-size'))
             );
             self::fail('expected VaultChunkSizeMismatchError');
         } catch (VaultChunkSizeMismatchError $e) {
@@ -561,7 +574,7 @@ final class VaultControllerTest extends TestCase
             $this->ctx('PUT', [
                 'vault_id' => self::VAULT_ID,
                 'chunk_id' => 'ch_v2_aaaaaaaaaaaaaaaaaaaaaaaa',
-            ], 'whatever')
+            ], self::chunkBody('whatever'))
         );
     }
 
@@ -580,7 +593,7 @@ final class VaultControllerTest extends TestCase
         ));
 
         self::assertSame(200, $res['status']);
-        self::assertSame($bytes, $res['raw']);
+        self::assertSame(self::chunkBody($bytes), $res['raw']);
     }
 
     public function test_getChunk_404_vault_chunk_missing(): void
@@ -638,7 +651,8 @@ final class VaultControllerTest extends TestCase
 
         self::assertSame(200, $res['status']);
         self::assertTrue($res['json']['data']['chunks'][$idA]['present']);
-        self::assertSame(1, $res['json']['data']['chunks'][$idA]['size']);
+        // Stored body has the +1 prefix byte.
+        self::assertSame(strlen(self::chunkBody('A')), $res['json']['data']['chunks'][$idA]['size']);
         self::assertFalse($res['json']['data']['chunks'][$idB]['present']);
     }
 
@@ -712,7 +726,7 @@ final class VaultControllerTest extends TestCase
 
         self::assertSame(200, $res['status']);
         self::assertSame(1, $res['json']['data']['deleted_count']);
-        self::assertSame(strlen($bytes), $res['json']['data']['freed_ciphertext_bytes']);
+        self::assertSame(strlen(self::chunkBody($bytes)), $res['json']['data']['freed_ciphertext_bytes']);
 
         self::assertFileDoesNotExist(VaultStorage::chunkAbsolutePath(self::VAULT_ID, $cid));
         $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);

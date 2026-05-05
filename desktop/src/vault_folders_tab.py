@@ -10,6 +10,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Pango
 
+from .vault_binding_baseline import run_initial_baseline
 from .vault_binding_sync import (
     flush_and_sync_binding,
     format_sync_outcome_toast,
@@ -17,6 +18,7 @@ from .vault_binding_sync import (
 from .vault_bindings import VaultBindingsStore
 from .vault_cache import VaultLocalIndex
 from .vault_connect_folder_dialog import present_connect_folder_dialog
+from .vault_error_messages import humanize
 from .vault_folder_ui_state import (
     BINDING_COLUMNS,
     FOLDER_COLUMNS,
@@ -145,7 +147,7 @@ def build_vault_folders_tab(
                     vault.close()
                 usage = calculate_vault_usage(manifest).by_folder
             except Exception as exc:
-                error_message = str(exc)
+                error_message = humanize(exc)
 
                 def fail() -> bool:
                     refresh_folders_table(f"Folder usage unavailable: {error_message}")
@@ -261,7 +263,7 @@ def build_vault_folders_tab(
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         confirm_btn.set_sensitive(True)
@@ -406,7 +408,7 @@ def build_vault_folders_tab(
                     finally:
                         vault.close()
                 except Exception as exc:
-                    error_message = str(exc)
+                    error_message = humanize(exc)
 
                     def fail() -> bool:
                         confirm_btn.set_sensitive(True)
@@ -452,7 +454,7 @@ def build_vault_folders_tab(
                 finally:
                     vault.close()
             except Exception as exc:
-                error_message = str(exc)
+                error_message = humanize(exc)
 
                 def fail() -> bool:
                     connect_local_btn.set_sensitive(True)
@@ -480,16 +482,74 @@ def build_vault_folders_tab(
                     )
                     return False
                 store = VaultBindingsStore(local_index.db_path)
+
+                def on_dialog_confirmed(record) -> None:
+                    # Binding row was just written with state="needs-preflight";
+                    # baseline below drives it to "bound" once the remote folder
+                    # is materialized locally.
+                    folders_status.set_label(
+                        "Binding created — running initial baseline…"
+                    )
+                    threading.Thread(
+                        target=lambda: _run_baseline_for_record(record),
+                        daemon=True,
+                    ).start()
+
+                def _run_baseline_for_record(record) -> None:
+                    try:
+                        config.reload()
+                        baseline_relay = create_vault_relay(config)
+                        baseline_vault = open_local_vault_from_grant(
+                            config_dir, config, vault_id,
+                        )
+                        try:
+                            baseline_manifest = baseline_vault.fetch_manifest(
+                                baseline_relay, local_index=local_index,
+                            )
+                            store_for_baseline = VaultBindingsStore(local_index.db_path)
+                            binding_for_baseline = store_for_baseline.get_binding(
+                                record.binding_id
+                            )
+                            if binding_for_baseline is None:
+                                raise RuntimeError(
+                                    f"binding row vanished: {record.binding_id}"
+                                )
+                            run_initial_baseline(
+                                vault=baseline_vault,
+                                relay=baseline_relay,
+                                manifest=baseline_manifest,
+                                store=store_for_baseline,
+                                binding=binding_for_baseline,
+                            )
+                        finally:
+                            baseline_vault.close()
+                    except Exception as exc:  # noqa: BLE001
+                        msg = str(exc)
+
+                        def fail() -> bool:
+                            folders_status.set_label(
+                                f"Initial baseline failed: {msg}"
+                            )
+                            return False
+
+                        GLib.idle_add(fail)
+                        return
+
+                    def succeed() -> bool:
+                        folders_status.set_label(
+                            "Binding ready — initial baseline complete."
+                        )
+                        return False
+
+                    GLib.idle_add(succeed)
+
                 present_connect_folder_dialog(
                     parent_window=parent_window,
                     folder_choices=choices,
                     manifest=manifest,
                     vault_id=vault_id,
                     store=store,
-                    on_confirmed=lambda record: folders_status.set_label(
-                        f"Binding created (state: needs-preflight). "
-                        f"Initial baseline lands in T10.3."
-                    ),
+                    on_confirmed=on_dialog_confirmed,
                 )
                 return False
 
@@ -537,16 +597,20 @@ def build_vault_folders_tab(
                 if binding is None:
                     raise RuntimeError(f"binding not found: {binding_id}")
                 author_device_id = config.device_id or ("0" * 32)
+                device_name = (
+                    str(config.device_name or "").strip() or "this device"
+                )
                 try:
                     result = flush_and_sync_binding(
                         vault=vault, relay=relay, store=store,
                         binding=binding, author_device_id=author_device_id,
+                        device_name=device_name,
                     )
                 finally:
                     vault.close()
                 toast_text = format_sync_outcome_toast(result)
             except Exception as exc:  # noqa: BLE001
-                error_message = str(exc)
+                error_message = humanize(exc)
 
                 def fail() -> bool:
                     sync_in_flight[binding_id] = False

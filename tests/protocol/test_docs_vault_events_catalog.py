@@ -62,6 +62,60 @@ class VaultEventCatalogTests(unittest.TestCase):
             "Reorder so adjacent rows always increase by tag name.",
         )
 
+    def test_every_emit_site_has_a_catalog_entry(self) -> None:
+        """F-T03: catalog parity must run in both directions.
+
+        Every literal ``vault.<topic>.<verb>`` string emitted in the
+        desktop / server source must appear in the catalog (allowing
+        wildcard rows to absorb whole subsystems).
+        """
+        emitted = self._collect_emitted_tags()
+        catalog_set = set(self.tags)
+        wildcard_prefixes = [
+            tag.rstrip("*").rstrip(".") + "."
+            for tag in self.tags
+            if tag.endswith("*")
+        ]
+        missing: list[str] = []
+        for tag in sorted(emitted):
+            if tag in catalog_set:
+                continue
+            if any(tag.startswith(prefix) for prefix in wildcard_prefixes):
+                continue
+            missing.append(tag)
+        self.assertFalse(
+            missing,
+            "vault.* tags emitted in source but missing from catalog: "
+            + ", ".join(missing),
+        )
+
+    # ------------------------------------------------------------------
+    def _collect_emitted_tags(self) -> set[str]:
+        """grep desktop/src + server/src for `vault.<topic>.<verb>` strings."""
+        emit_re = re.compile(
+            r'(?<![A-Za-z0-9_])(vault\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*'
+            r'(?:\.[a-z][a-z0-9_]*)?)'
+        )
+        out: set[str] = set()
+        for root in (
+            REPO_ROOT / "desktop" / "src",
+            REPO_ROOT / "server" / "src",
+        ):
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                if path.suffix not in (".py", ".php"):
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for tag in emit_re.findall(text):
+                    out.add(tag)
+        return out
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

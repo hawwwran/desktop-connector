@@ -17,7 +17,7 @@ One file per primitive:
 | `device_grant_v1.json` | Device grant envelope | formats §14 |
 | `export_bundle_v1.json` | Export bundle (outer + records) | formats §16 |
 
-`op_log_segment_v1.json` is added in T2 alongside its first vectors.
+`op_log_segment_v1.json` is **deferred to v1.5** — segment archival is not emitted by v1 writers (the in-manifest op log carries the lifetime), so neither the JSON vectors nor `GET /api/vaults/{id}/op-log-segments/{segment_id}` are wired in v1. F-T17.
 
 ## Case shape
 

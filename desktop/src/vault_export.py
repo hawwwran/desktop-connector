@@ -384,10 +384,13 @@ def read_export_bundle(
         )
         record_type = plaintext[0]
         inner_len = int.from_bytes(plaintext[1:5], "big")
-        if 5 + inner_len > len(plaintext):
+        # F-C07 / spec §16.3: inner_payload_length MUST equal the length
+        # of inner_payload bytes (exact match, not just upper bound).
+        if 5 + inner_len != len(plaintext):
             raise ExportError(
                 "vault_export_tampered",
-                f"record {record_index} inner_len={inner_len} exceeds plaintext frame",
+                f"record {record_index} inner_len={inner_len} does not match "
+                f"plaintext frame size {len(plaintext) - 5}",
             )
         inner = plaintext[5:5 + inner_len]
 
@@ -421,6 +424,12 @@ def read_export_bundle(
         elif record_type == RECORD_TYPE_FOOTER:
             footer_payload = bytes(inner)
             footer_index = record_index
+            cursor = record_end
+            record_index += 1
+            # F-C08: footer must be the last record. Stop parsing
+            # immediately so trailing garbage gets surfaced clearly
+            # below instead of via opaque AEAD failures.
+            break
         elif record_type in (RECORD_TYPE_BUNDLE_INDEX, RECORD_TYPE_OP_LOG_SEGMENT):
             pass  # not emitted by v1, ignored if encountered
         else:
@@ -431,6 +440,12 @@ def read_export_bundle(
 
         cursor = record_end
         record_index += 1
+
+    if footer_payload is not None and cursor < len(raw):
+        raise ExportError(
+            "vault_export_tampered",
+            f"trailing bytes after footer record (got {len(raw) - cursor} extra)",
+        )
 
     if footer_payload is None:
         raise ExportError("vault_export_truncated", "no footer record present")
@@ -513,6 +528,15 @@ def _parse_outer_header(raw: bytes) -> dict[str, Any]:
         raise ExportError(
             "vault_export_unknown_format",
             f"outer header magic mismatch: {raw[:4]!r}",
+        )
+    # F-C02 / spec §7: stop before any AEAD attempt when the version
+    # byte is unknown. Surfaces as 422 vault_format_version_unsupported
+    # so clients can prompt for an upgrade instead of "wrong passphrase".
+    if raw[4] != EXPORT_FORMAT_VERSION:
+        raise ExportError(
+            "vault_format_version_unsupported",
+            f"export bundle uses format_version={raw[4]}; this build "
+            f"only supports v{EXPORT_FORMAT_VERSION}",
         )
     return {
         "format_version": raw[4],

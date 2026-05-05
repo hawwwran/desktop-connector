@@ -144,12 +144,13 @@ def merge_timeline(
             if normalised is not None:
                 out.append(normalised)
 
-    # De-duplicate by (timestamp, event_type, device_id, path) — keep
-    # the row with the longest summary OR display_path (proxy for
-    # "richer plaintext available").
-    bucketed: dict[tuple[int, str, str, str], ActivityRow] = {}
+    # F-509: dedup key drops display_path so an audit-event row
+    # (no plaintext path) and an op-log entry (with the plaintext
+    # path) collapse to a single row. The collision resolver picks
+    # whichever row carries the richer summary + path.
+    bucketed: dict[tuple[int, str, str], ActivityRow] = {}
     for r in out:
-        key = (r.timestamp_epoch, r.event_type, r.device_id, r.display_path)
+        key = (r.timestamp_epoch, r.event_type, r.device_id)
         prior = bucketed.get(key)
         if prior is None:
             bucketed[key] = r

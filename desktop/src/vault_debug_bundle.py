@@ -51,10 +51,27 @@ log = logging.getLogger(__name__)
 # REDACT_KEYS / redact_config.
 FORBIDDEN_PATTERNS: tuple[re.Pattern, ...] = (
     # Authorization-header-shaped strings (not the redacted placeholder).
-    re.compile(r"Authorization\s*:\s*(?!\"?<redacted>)[^\s\"<]+", re.IGNORECASE),
-    re.compile(r"X-Vault-Authorization\s*:\s*(?!\"?<redacted>)[^\s\"<]+", re.IGNORECASE),
-    # Bearer-token-shaped values (16+ chars of base64-ish).
-    re.compile(r"\bBearer\s+(?!<redacted>)[A-Za-z0-9._\-]{16,}", re.IGNORECASE),
+    # Greedy enough to consume "Authorization: Bearer <token>" as one
+    # match so the trailing token is scrubbed alongside the header
+    # name; otherwise a JWT-shaped value would survive (F-504/F-505).
+    re.compile(r"Authorization\s*:\s*(?!\"?<redacted>)\S+(\s+\S+)?", re.IGNORECASE),
+    re.compile(r"X-Vault-Authorization\s*:\s*(?!\"?<redacted>)\S+(\s+\S+)?", re.IGNORECASE),
+    # Bearer-token-shaped values (16+ chars of base64-ish or url-safe).
+    re.compile(r"\bBearer\s+(?!<redacted>)[A-Za-z0-9._\-/+=]{16,}", re.IGNORECASE),
+    # F-504: passphrase/recovery/mnemonic followed by a value.
+    re.compile(r"passphrase\s*[:=]\s*(?!\"?<redacted>)\S{4,}", re.IGNORECASE),
+    re.compile(r"recovery[_-]?phrase\s*[:=]\s*(?!\"?<redacted>)\S{4,}", re.IGNORECASE),
+    re.compile(r"mnemonic\s*[:=]\s*(?!\"?<redacted>)\S{4,}", re.IGNORECASE),
+    re.compile(r"purge_secret\s*[:=]\s*(?!\"?<redacted>)\S{4,}", re.IGNORECASE),
+    # X25519 / master-key shaped base64 (32 bytes → 43-44 chars). Allow
+    # the explicit "<redacted>" placeholder through. Anchored on a
+    # non-trivial run length so generic 32+ char identifiers don't
+    # false-positive.
+    re.compile(
+        r"(?<![A-Za-z0-9+/=_-])(?!<redacted>)[A-Za-z0-9+/]{43,44}={0,2}(?![A-Za-z0-9+/=])"
+    ),
+    # FCM-token-shaped values: 100+ chars of url-safe base64.
+    re.compile(r"(?<![A-Za-z0-9_-])(?!<redacted>)[A-Za-z0-9_-]{100,}"),
 )
 
 
@@ -125,6 +142,14 @@ def redact_config(config_obj: Any) -> Any:
         return out
     if isinstance(config_obj, list):
         return [redact_config(item) for item in config_obj]
+    # F-505: a non-sensitive key holding a sensitive-shaped value still
+    # needs to be redacted. Apply the FORBIDDEN_PATTERNS scrub to scalar
+    # strings before returning.
+    if isinstance(config_obj, str):
+        scrubbed = config_obj
+        for pattern in FORBIDDEN_PATTERNS:
+            scrubbed = pattern.sub(REDACTED, scrubbed)
+        return scrubbed
     return config_obj
 
 

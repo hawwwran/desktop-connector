@@ -127,6 +127,15 @@ class Router
                 return;
             }
 
+            // F-S20: vault-namespace 404s emit the vault_v1 envelope so
+            // feature-detecting clients see a code they recognise.
+            if (str_starts_with($uri, '/api/vaults')) {
+                throw new VaultApiError(
+                    status: 404,
+                    errorCode: 'vault_not_found',
+                    message: "Not found: {$method} {$uri}",
+                );
+            }
             throw new NotFoundError();
         } catch (ApiError $e) {
             // 5xx: error. 425: debug — streaming pipelines emit one per

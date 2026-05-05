@@ -335,6 +335,12 @@ class VaultBindingsStore:
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_pending_op(r) for r in rows]
 
+    # F-Y09: cap on retries before an op is treated as permanent
+    # failure. Caller decides what to do beyond the cap (drop the op,
+    # surface in UI, etc.). 10 keeps transient flakes safe and
+    # bounds the queue depth on a stuck op.
+    MAX_OP_ATTEMPTS = 10
+
     def mark_op_failed(self, op_id: int, error: str) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -346,6 +352,15 @@ class VaultBindingsStore:
                 (str(error)[:500], int(op_id)),
             )
             conn.commit()
+
+    def is_op_permanently_failed(self, op_id: int) -> bool:
+        """True iff ``attempts >= MAX_OP_ATTEMPTS``. Caller should drop or surface."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM vault_pending_operations WHERE op_id = ?",
+                (int(op_id),),
+            ).fetchone()
+        return bool(row and int(row["attempts"]) >= self.MAX_OP_ATTEMPTS)
 
     def delete_pending_op(self, op_id: int) -> bool:
         with self._connect() as conn:

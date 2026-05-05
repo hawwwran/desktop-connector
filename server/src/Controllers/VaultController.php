@@ -19,6 +19,55 @@
  */
 class VaultController
 {
+    /**
+     * Hard size caps from spec §10. Chunk envelopes are 8 MiB plaintext
+     * + AEAD tag + envelope metadata; the 9 MiB ceiling absorbs
+     * formatter-side variation while still failing fast on attackers
+     * trying to OOM the relay. Manifest envelopes are 16 MiB.
+     */
+    public const MAX_CHUNK_BYTES    = 9 * 1024 * 1024;
+    public const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
+    public const MAX_HEADER_BYTES   = 64 * 1024;
+    public const SUPPORTED_FORMAT_VERSION = 1;
+
+    /** Reject vault-route bodies that exceed the spec's size envelope. */
+    private static function guardEnvelopeSize(string $kind, int $observed, int $max): void
+    {
+        if ($observed > $max) {
+            throw new VaultPayloadTooLargeError($kind, $observed, $max);
+        }
+    }
+
+    /** Reject envelopes whose first byte (format_version) isn't supported. */
+    private static function guardFormatVersion(string $kind, int $observedVersion): void
+    {
+        if ($observedVersion !== self::SUPPORTED_FORMAT_VERSION) {
+            throw new VaultFormatVersionUnsupportedError($kind, $observedVersion);
+        }
+    }
+
+    /** Vault-shaped requireInt — emits vault_v1 envelope on missing field. F-S04. */
+    private static function vaultRequireInt(array $body, string $field): int
+    {
+        if (!array_key_exists($field, $body) || !is_int($body[$field])) {
+            throw new VaultInvalidRequestError(
+                "{$field} is required and must be an integer", $field,
+            );
+        }
+        return (int) $body[$field];
+    }
+
+    /** Vault-shaped requireNonEmptyString — emits vault_v1 envelope on missing field. F-S04. */
+    private static function vaultRequireNonEmptyString(array $body, string $field): string
+    {
+        if (!array_key_exists($field, $body) || !is_string($body[$field]) || $body[$field] === '') {
+            throw new VaultInvalidRequestError(
+                "{$field} is required and must be a non-empty string", $field,
+            );
+        }
+        return (string) $body[$field];
+    }
+
     /** Server-side timestamp serialization (UTC, second precision, RFC 3339). */
     private static function ts(int $epoch): string
     {
@@ -67,23 +116,33 @@ class VaultController
         $deviceId = VaultAuthService::requireDeviceAuthForCreate($db);
 
         $body = $ctx->jsonBody();
-        $vaultId = self::normalizeVaultId(Validators::requireNonEmptyString($body, 'vault_id'));
+        $vaultId = self::normalizeVaultId(self::vaultRequireNonEmptyString($body, 'vault_id'));
 
         $tokenHash = self::decodeBase64Field($body, 'vault_access_token_hash', 32);
         $encHeader = self::decodeBase64Field($body, 'encrypted_header');
-        $headerHash = Validators::requireNonEmptyString($body, 'header_hash');
+        self::guardEnvelopeSize('header', strlen($encHeader), self::MAX_HEADER_BYTES);
+        $headerHash = self::vaultRequireNonEmptyString($body, 'header_hash');
 
         $manifestCipher = self::decodeBase64Field($body, 'initial_manifest_ciphertext');
-        $manifestHash = Validators::requireNonEmptyString($body, 'initial_manifest_hash');
+        self::guardEnvelopeSize('manifest', strlen($manifestCipher), self::MAX_MANIFEST_BYTES);
+        $manifestHash = self::vaultRequireNonEmptyString($body, 'initial_manifest_hash');
+
+        // F-S11: persist the recovery-derived purge_token_hash so the
+        // T14 hard-purge path can authenticate `purge_secret`. Optional
+        // for older clients that haven't been migrated yet.
+        $purgeTokenHash = null;
+        if (isset($body['purge_token_hash'])) {
+            $purgeTokenHash = self::decodeBase64Field($body, 'purge_token_hash', 32);
+        }
 
         // T9.3 — relay-to-relay migration bootstraps the target at the
         // source's revision so manifest envelope AAD (which carries
         // revision/parent_revision) round-trips verbatim. Defaults to 1
         // for the standard create path.
         $initialManifestRevision = isset($body['initial_manifest_revision'])
-            ? Validators::requireInt($body, 'initial_manifest_revision') : 1;
+            ? self::vaultRequireInt($body, 'initial_manifest_revision') : 1;
         $initialHeaderRevision = isset($body['initial_header_revision'])
-            ? Validators::requireInt($body, 'initial_header_revision') : 1;
+            ? self::vaultRequireInt($body, 'initial_header_revision') : 1;
         if ($initialManifestRevision < 1 || $initialHeaderRevision < 1) {
             throw new VaultInvalidRequestError(
                 'initial_*_revision must be >= 1',
@@ -99,7 +158,7 @@ class VaultController
         $now = time();
         $vaultsRepo->create(
             $vaultId, $tokenHash, $encHeader, $headerHash, $manifestHash, $now,
-            $initialHeaderRevision, $initialManifestRevision,
+            $initialHeaderRevision, $initialManifestRevision, $purgeTokenHash,
         );
 
         $manifestsRepo = new VaultManifestsRepository($db);
@@ -131,13 +190,19 @@ class VaultController
             );
         }
 
+        // F-S18: emit the actual stored quota — never a hardcoded value.
+        $persistedVault = $vaultsRepo->getById($vaultId);
+        $quotaBytes = $persistedVault !== null
+            ? (int) ($persistedVault['quota_ciphertext_bytes'] ?? 0)
+            : 0;
+
         Router::json([
             'ok' => true,
             'data' => [
                 'vault_id'               => self::dashedVaultId($vaultId),
                 'header_revision'        => $initialHeaderRevision,
                 'manifest_revision'      => $initialManifestRevision,
-                'quota_ciphertext_bytes' => 1073741824,
+                'quota_ciphertext_bytes' => $quotaBytes,
                 'used_ciphertext_bytes'  => 0,
                 'created_at'             => self::ts($now),
             ],
@@ -179,8 +244,8 @@ class VaultController
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
-        $expected = Validators::requireInt($body, 'expected_header_revision');
-        $newRev   = Validators::requireInt($body, 'new_header_revision');
+        $expected = self::vaultRequireInt($body, 'expected_header_revision');
+        $newRev   = self::vaultRequireInt($body, 'new_header_revision');
         if ($newRev !== $expected + 1) {
             throw new VaultInvalidRequestError(
                 'new_header_revision must be expected_header_revision + 1',
@@ -188,7 +253,8 @@ class VaultController
             );
         }
         $encHeader  = self::decodeBase64Field($body, 'encrypted_header');
-        $headerHash = Validators::requireNonEmptyString($body, 'header_hash');
+        $headerHash = self::vaultRequireNonEmptyString($body, 'header_hash');
+        self::guardEnvelopeSize('header', strlen($encHeader), self::MAX_HEADER_BYTES);
 
         // Authoritatively read (vault_id, header_revision) from the
         // envelope's deterministic prefix and reject if it disagrees with
@@ -203,16 +269,16 @@ class VaultController
                 'encrypted_header'
             );
         }
+        // F-S09: format-version validation before commit.
+        self::guardFormatVersion('header', (int) $envHeader['format_version']);
         if ($envHeader['vault_id'] !== $vaultId) {
-            throw new VaultInvalidRequestError(
+            throw new VaultHeaderTamperedError(
                 'encrypted_header envelope vault_id does not match path vault_id',
-                'encrypted_header'
             );
         }
         if ($envHeader['header_revision'] !== $newRev) {
-            throw new VaultInvalidRequestError(
+            throw new VaultHeaderTamperedError(
                 'encrypted_header envelope header_revision does not match new_header_revision',
-                'encrypted_header'
             );
         }
 
@@ -267,6 +333,39 @@ class VaultController
     }
 
     // ===================================================================
+    //  6.5  GET /api/vaults/{vault_id}/manifest/revisions/{revision}
+    // ===================================================================
+
+    public static function getManifestRevision(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $revisionRaw = (string) ($ctx->params['revision'] ?? '');
+        if ($revisionRaw === '' || !ctype_digit($revisionRaw)) {
+            throw new VaultInvalidRequestError(
+                'revision must be a non-negative integer', 'revision',
+            );
+        }
+        $revision = (int) $revisionRaw;
+        VaultAuthService::requireVaultAuth($db, $vaultId);
+
+        $manifestsRepo = new VaultManifestsRepository($db);
+        $row = $manifestsRepo->getByRevision($vaultId, $revision);
+        if ($row === null) {
+            throw new VaultNotFoundError("manifest revision {$revision} for {$vaultId}");
+        }
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'revision'            => (int) $row['revision'],
+                'parent_revision'     => (int) $row['parent_revision'],
+                'manifest_hash'       => (string) $row['manifest_hash'],
+                'manifest_ciphertext' => base64_encode((string) $row['manifest_ciphertext']),
+                'manifest_size'       => (int) $row['manifest_size'],
+            ],
+        ], 200);
+    }
+
+    // ===================================================================
     //  6.6  PUT /api/vaults/{vault_id}/manifest (CAS, A1 conflict)
     // ===================================================================
 
@@ -278,11 +377,15 @@ class VaultController
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
-        $expected     = Validators::requireInt($body, 'expected_current_revision');
-        $newRev       = Validators::requireInt($body, 'new_revision');
-        $parentRev    = Validators::requireInt($body, 'parent_revision');
-        $manifestHash = Validators::requireNonEmptyString($body, 'manifest_hash');
+        // F-S04: vault routes must use vault-shaped errors. Wrap the
+        // legacy validators so any "missing field" emits the vault_v1
+        // envelope, not the legacy {"error":"…"} shape.
+        $expected     = self::vaultRequireInt($body, 'expected_current_revision');
+        $newRev       = self::vaultRequireInt($body, 'new_revision');
+        $parentRev    = self::vaultRequireInt($body, 'parent_revision');
+        $manifestHash = self::vaultRequireNonEmptyString($body, 'manifest_hash');
         $manifestCipher = self::decodeBase64Field($body, 'manifest_ciphertext');
+        self::guardEnvelopeSize('manifest', strlen($manifestCipher), self::MAX_MANIFEST_BYTES);
 
         if ($parentRev !== $expected) {
             throw new VaultInvalidRequestError(
@@ -315,28 +418,27 @@ class VaultController
         } catch (InvalidArgumentException $e) {
             throw new VaultInvalidRequestError($e->getMessage(), 'manifest_ciphertext');
         }
+        // F-S09: reject unsupported format versions before the body is
+        // committed. A v2 envelope cannot be stored on a v1 server.
+        self::guardFormatVersion('manifest', (int) $envManifest['format_version']);
         if ($envManifest['vault_id'] !== $vaultId) {
-            throw new VaultInvalidRequestError(
+            throw new VaultManifestTamperedError(
                 'manifest envelope vault_id does not match path vault_id',
-                'manifest_ciphertext'
             );
         }
         if ($envManifest['revision'] !== $newRev) {
-            throw new VaultInvalidRequestError(
+            throw new VaultManifestTamperedError(
                 'manifest envelope revision does not match new_revision',
-                'manifest_ciphertext'
             );
         }
         if ($envManifest['parent_revision'] !== $parentRev) {
-            throw new VaultInvalidRequestError(
+            throw new VaultManifestTamperedError(
                 'manifest envelope parent_revision does not match body parent_revision',
-                'manifest_ciphertext'
             );
         }
         if ($authorDeviceId !== '' && $envManifest['author_device_id'] !== $authorDeviceId) {
-            throw new VaultInvalidRequestError(
+            throw new VaultManifestTamperedError(
                 'manifest envelope author_device_id does not match X-Device-ID',
-                'manifest_ciphertext'
             );
         }
 
@@ -389,6 +491,14 @@ class VaultController
         $size  = strlen($bytes);
         if ($size === 0) {
             throw new VaultInvalidRequestError('chunk body is empty', 'body');
+        }
+        self::guardEnvelopeSize('chunk', $size, self::MAX_CHUNK_BYTES);
+        // Reject unknown format-version bytes before any storage work
+        // (formats §7 / §11.3): byte 0 of a chunk envelope is the
+        // version. We can't fully parse the body — only the desktop has
+        // the master key — but the format-version byte is plaintext.
+        if (ord($bytes[0]) !== self::SUPPORTED_FORMAT_VERSION) {
+            throw new VaultFormatVersionUnsupportedError('chunk', ord($bytes[0]));
         }
         $hash = hash('sha256', $bytes);
 
@@ -451,11 +561,21 @@ class VaultController
         if ($result === 'created') {
             $absPath = VaultStorage::chunkAbsolutePath($vaultId, $chunkId);
             VaultStorage::ensureDir($absPath);
-            if (file_put_contents($absPath, $bytes) === false) {
-                // Compensating undo: release the bytes we just reserved.
-                // The chunk row stays — a subsequent re-upload of the same
-                // bytes is idempotent (`already_exists`); a re-upload with
-                // different bytes hits the size/tamper guard.
+            // Atomic write: first to a temp sibling, then rename. On
+            // any failure we delete the chunk row AND release the
+            // bytes — leaving neither half-state behind. F-S02.
+            $tempPath = $absPath . '.part-' . bin2hex(random_bytes(6));
+            $tempOk = @file_put_contents($tempPath, $bytes);
+            $writeOk = ($tempOk !== false && $tempOk === $size);
+            $renameOk = false;
+            if ($writeOk) {
+                $renameOk = @rename($tempPath, $absPath);
+            }
+            if (!$writeOk || !$renameOk) {
+                if (is_file($tempPath)) {
+                    @unlink($tempPath);
+                }
+                $chunksRepo->deleteRow($vaultId, $chunkId);
                 $vaultsRepo->incUsedBytes($vaultId, -$size, -1, $now);
                 throw new VaultStorageUnavailableError("Failed to write chunk to {$relativePath}");
             }
@@ -520,8 +640,9 @@ class VaultController
 
         $chunksRepo = new VaultChunksRepository($db);
         $head = $chunksRepo->head($vaultId, $chunkId);
-        if ($head === null) {
-            // 404 with no body (HEAD response semantics).
+        if ($head === null || !self::isUserVisibleChunkState((string)$head['state'])) {
+            // F-S10: purged / gc_pending rows must not advertise as
+            // present — the bytes are gone. 404 with no body.
             http_response_code(404);
             return;
         }
@@ -530,6 +651,13 @@ class VaultController
         header('Content-Length: ' . (int)$head['ciphertext_size']);
         header('X-Chunk-Hash: ' . (string)$head['chunk_hash']);
         header('X-Chunk-Stored-At: ' . self::ts((int)$head['created_at']));
+    }
+
+    /** Whether a chunk's lifecycle state is visible to user-facing queries. */
+    private static function isUserVisibleChunkState(string $state): bool
+    {
+        return $state === VaultChunksRepository::STATE_ACTIVE
+            || $state === VaultChunksRepository::STATE_RETAINED;
     }
 
     // ===================================================================
@@ -563,7 +691,7 @@ class VaultController
 
         $chunks = [];
         foreach ($rows as $cid => $info) {
-            if ($info === null) {
+            if ($info === null || !self::isUserVisibleChunkState((string)$info['state'])) {
                 $chunks[$cid] = ['present' => false];
             } else {
                 $chunks[$cid] = [
@@ -667,11 +795,36 @@ class VaultController
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
-        $planId = Validators::requireNonEmptyString($body, 'plan_id');
+        $planId = self::vaultRequireNonEmptyString($body, 'plan_id');
 
         $jobsRepo = new VaultGcJobsRepository($db);
         $job = $jobsRepo->getById($planId);
         if ($job === null || $job['vault_id'] !== $vaultId) {
+            throw new VaultNotFoundError($planId);
+        }
+        // F-S01: spec §5/§6.13 — gc/execute is idempotent. Re-running on
+        // a `completed` job returns the persisted totals; cancelled or
+        // expired plans 404; other states are still hard errors.
+        if ($job['state'] === VaultGcJobsRepository::STATE_COMPLETED) {
+            $targetCount = is_array($job['target_chunk_ids'])
+                ? count($job['target_chunk_ids'])
+                : 0;
+            $deleted = (int) ($job['deleted_count'] ?? 0);
+            Router::json([
+                'ok' => true,
+                'data' => [
+                    'plan_id'                => $planId,
+                    'deleted_count'          => $deleted,
+                    'skipped_count'          => max(0, $targetCount - $deleted),
+                    'freed_ciphertext_bytes' => (int) ($job['freed_bytes'] ?? 0),
+                ],
+            ], 200);
+            return;
+        }
+        if (
+            $job['state'] === VaultGcJobsRepository::STATE_CANCELLED
+            || $job['state'] === VaultGcJobsRepository::STATE_EXPIRED
+        ) {
             throw new VaultNotFoundError($planId);
         }
         if ($job['state'] !== VaultGcJobsRepository::STATE_PLANNED) {
@@ -713,27 +866,53 @@ class VaultController
         $chunksRepo = new VaultChunksRepository($db);
         $vaultsRepo = new VaultsRepository($db);
 
+        // F-S12: collect plans first, then commit DB state in a single
+        // transaction, then unlink files. A crash mid-loop now leaves
+        // either (a) no DB change + files intact, or (b) all DB changes
+        // committed + some files possibly still on disk (those get
+        // cleaned up at next gc/execute call which is idempotent now).
         $deletedCount = 0;
         $freedBytes   = 0;
+        $unlinkPaths  = [];
         $now = time();
-        foreach ($job['target_chunk_ids'] as $cid) {
-            $row = $chunksRepo->get($vaultId, $cid);
-            if ($row === null) {
-                continue; // already gone
+
+        $db->execute('BEGIN IMMEDIATE');
+        try {
+            foreach ($job['target_chunk_ids'] as $cid) {
+                $row = $chunksRepo->get($vaultId, $cid);
+                if ($row === null) {
+                    continue; // already gone
+                }
+                if ($row['state'] === VaultChunksRepository::STATE_PURGED) {
+                    continue; // idempotent re-execute
+                }
+                $chunksRepo->setState($vaultId, $cid, VaultChunksRepository::STATE_PURGED);
+                $deletedCount++;
+                $freedBytes += (int)$row['ciphertext_size'];
+                $unlinkPaths[] = VaultStorage::root() . '/' . (string)$row['storage_path'];
             }
-            if ($row['state'] === VaultChunksRepository::STATE_PURGED) {
-                continue; // idempotent re-execute
+            if ($deletedCount > 0) {
+                $vaultsRepo->incUsedBytes($vaultId, -$freedBytes, -$deletedCount, $now);
             }
-            $absPath = VaultStorage::root() . '/' . (string)$row['storage_path'];
-            if (is_file($absPath)) {
-                @unlink($absPath);
-            }
-            $chunksRepo->setState($vaultId, $cid, VaultChunksRepository::STATE_PURGED);
-            $deletedCount++;
-            $freedBytes += (int)$row['ciphertext_size'];
+            $jobsRepo->markCompleted($planId, $deletedCount, $freedBytes, $now);
+            $db->execute('COMMIT');
+        } catch (\Throwable $e) {
+            try { $db->execute('ROLLBACK'); } catch (\Throwable $ignored) {}
+            throw $e;
         }
-        $vaultsRepo->incUsedBytes($vaultId, -$freedBytes, -$deletedCount, $now);
-        $jobsRepo->markCompleted($planId, $deletedCount, $freedBytes, $now);
+
+        // After-commit unlinks. A failure here is logged; the bytes
+        // count is already debited from the vault, so leftover files
+        // are dead-weight that the next purge will clean up.
+        foreach ($unlinkPaths as $absPath) {
+            if (is_file($absPath) && @unlink($absPath) === false) {
+                AppLog::log('vault', sprintf(
+                    'vault.gc.unlink_failed plan=%s path=%s',
+                    substr($planId, 0, 12),
+                    $absPath,
+                ), 'warning');
+            }
+        }
 
         Router::json([
             'ok' => true,
@@ -900,6 +1079,14 @@ class VaultController
         $chunkCount = (int)($vault['chunk_count'] ?? 0);
         $usedBytes  = (int)($vault['used_ciphertext_bytes'] ?? 0);
 
+        // F-S05: stamp verified_at idempotently. Subsequent verify-source
+        // calls return the same timestamp.
+        $intentsRepo->markVerified($vaultId, time());
+        $persistedIntent = $intentsRepo->getIntent($vaultId);
+        $verifiedAt = $persistedIntent !== null && $persistedIntent['verified_at'] !== null
+            ? (int)$persistedIntent['verified_at']
+            : time();
+
         Router::json([
             'ok' => true,
             'data' => [
@@ -910,6 +1097,7 @@ class VaultController
                 'used_ciphertext_bytes'    => $usedBytes,
                 'target_relay_url'         => (string)$intent['target_relay_url'],
                 'started_at'               => self::ts((int)$intent['started_at']),
+                'verified_at'              => self::ts($verifiedAt),
             ],
         ], 200);
     }
@@ -931,7 +1119,23 @@ class VaultController
         VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
 
         $body = $ctx->jsonBody();
-        $target = Validators::requireNonEmptyString($body, 'target_relay_url');
+        $target = self::vaultRequireNonEmptyString($body, 'target_relay_url');
+        // F-S14: target_relay_url is exposed to all paired devices via
+        // GET /header. Keep the storage shape clean by validating to a
+        // real http(s) URL before we commit it.
+        if (filter_var($target, FILTER_VALIDATE_URL) === false) {
+            throw new VaultInvalidRequestError(
+                'target_relay_url must be a valid URL',
+                'target_relay_url',
+            );
+        }
+        $scheme = parse_url($target, PHP_URL_SCHEME);
+        if ($scheme === false || ($scheme !== 'http' && $scheme !== 'https')) {
+            throw new VaultInvalidRequestError(
+                'target_relay_url must use http(s)',
+                'target_relay_url',
+            );
+        }
 
         $intentsRepo = new VaultMigrationIntentsRepository($db);
         $intent = $intentsRepo->getIntent($vaultId);
@@ -942,6 +1146,12 @@ class VaultController
             );
         }
         if ((string)$intent['target_relay_url'] !== $target) {
+            throw new VaultMigrationInProgressError(
+                'started', (string)$intent['target_relay_url'],
+            );
+        }
+        // F-S05: spec §7.3 — commit before verify is 409 with state="started".
+        if ($intent['verified_at'] === null) {
             throw new VaultMigrationInProgressError(
                 'started', (string)$intent['target_relay_url'],
             );
@@ -959,12 +1169,19 @@ class VaultController
         }
         $intentsRepo->markCommitted($vaultId, $now);
 
+        // Re-read so the response reflects whatever timestamp was
+        // actually persisted (idempotent retry returns the original).
+        $persistedIntent = $intentsRepo->getIntent($vaultId);
+        $committedAt = $persistedIntent !== null && $persistedIntent['committed_at'] !== null
+            ? (int)$persistedIntent['committed_at']
+            : $now;
+
         Router::json([
             'ok' => true,
             'data' => [
                 'vault_id'         => self::dashedVaultId($vaultId),
                 'target_relay_url' => $target,
-                'committed_at'     => self::ts($now),
+                'committed_at'     => self::ts($committedAt),
             ],
         ], 200);
     }

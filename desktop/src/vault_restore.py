@@ -130,6 +130,26 @@ def restore_remote_folder(
     for relative_path, entry, version in plan:
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
+        # F-D28: refuse to follow a symlinked subdirectory out of the
+        # restore root. ``resolve(strict=False)`` returns the canonical
+        # path with all symlinks expanded.
+        try:
+            resolved_target = target.resolve(strict=False)
+            resolved_root = destination.resolve(strict=False)
+        except OSError:
+            log.warning(
+                "vault.restore.skip_symlinked_dest path=%s reason=resolve_failed",
+                relative_path,
+            )
+            continue
+        try:
+            resolved_target.relative_to(resolved_root)
+        except ValueError:
+            log.warning(
+                "vault.restore.skip_symlinked_dest path=%s reason=escape_root",
+                relative_path,
+            )
+            continue
         display_path = f"{folder_display_name}/{relative_path}"
         _emit(progress, "downloading", len(plan),
               len(result.written) + len(result.skipped_identical),
@@ -383,8 +403,16 @@ def _plan_restore(folder: dict[str, Any]) -> list[tuple[str, dict[str, Any], dic
         relative = str(entry.get("path") or "").strip()
         if not relative:
             continue
-        if relative.startswith("/") or ".." in relative.replace("\\", "/").split("/"):
-            log.warning("vault.restore.skip_unsafe path=%s", relative)
+        # F-D15: explicit NUL byte rejection on top of the existing
+        # ``..``/absolute-path guards. NUL bytes are a corruption /
+        # tamper signal and pathlib treats them inconsistently across
+        # versions.
+        if (
+            relative.startswith("/")
+            or ".." in relative.replace("\\", "/").split("/")
+            or "\x00" in relative
+        ):
+            log.warning("vault.restore.skip_unsafe path=%s", relative[:200])
             continue
         version = _latest_version(entry)
         if version is None:

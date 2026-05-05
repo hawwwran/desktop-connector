@@ -8,13 +8,33 @@ from typing import Any
 from .vault_manifest import normalize_manifest_plaintext
 
 
+_NEAR_QUOTA_THRESHOLD = 0.9
+
+
 @dataclass(frozen=True)
 class VaultUsageSummary:
     by_folder: dict[str, dict[str, int]]
     whole_vault_stored_bytes: int
+    quota_bytes: int | None = None
+    near_quota_threshold: float = _NEAR_QUOTA_THRESHOLD
+
+    @property
+    def percent_used(self) -> float | None:
+        """0.0–1.0, or ``None`` when quota is unknown. F-516."""
+        if self.quota_bytes is None or self.quota_bytes <= 0:
+            return None
+        return float(self.whole_vault_stored_bytes) / float(self.quota_bytes)
+
+    @property
+    def is_near_quota(self) -> bool:
+        """True when usage crosses ``near_quota_threshold`` (default 90%). F-516."""
+        used = self.percent_used
+        return used is not None and used >= self.near_quota_threshold
 
 
-def calculate_vault_usage(manifest: dict[str, Any]) -> VaultUsageSummary:
+def calculate_vault_usage(
+    manifest: dict[str, Any], *, quota_bytes: int | None = None,
+) -> VaultUsageSummary:
     """Calculate descriptive per-folder usage from a decrypted manifest.
 
     Whole-vault quota enforcement remains relay-authoritative. The
@@ -60,6 +80,7 @@ def calculate_vault_usage(manifest: dict[str, Any]) -> VaultUsageSummary:
     return VaultUsageSummary(
         by_folder=by_folder,
         whole_vault_stored_bytes=sum(whole_vault_chunks.values()),
+        quota_bytes=quota_bytes,
     )
 
 

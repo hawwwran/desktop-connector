@@ -405,27 +405,47 @@ def _verify_migration(
     sample_chunks = _pick_random_sample(bundle_manifest, sample_size)
     sample_size_actual = len(sample_chunks)
     chunk_subkey = derive_subkey("dc-vault-v1/chunk", bytes(vault.master_key))
+    transient_failures = 0
     for spec in sample_chunks:
         try:
             on_disk = target_relay.get_chunk(
                 vault.vault_id, vault.vault_access_secret, spec["chunk_id"],
             )
-            if len(on_disk) < 24 + 16:
-                continue
-            nonce = on_disk[:24]
-            ciphertext = on_disk[24:]
-            aad = build_chunk_aad(
-                vault.vault_id,
-                spec["remote_folder_id"],
-                spec["entry_id"],
-                spec["version_id"],
-                int(spec["index"]),
-                int(spec["plaintext_size"]),
+        except Exception as exc:
+            # F-C05: a transient relay error is NOT a chunk mismatch.
+            # Surface separately so the operator can distinguish "1/5
+            # failed AEAD" from "all 5 timed out".
+            log.warning(
+                "vault.migration.verify.chunk_fetch_failed chunk=%s error=%s",
+                str(spec.get("chunk_id"))[:12], exc,
             )
-            aead_decrypt(ciphertext, chunk_subkey, nonce, aad)
-            sample_passed += 1
-        except Exception:
+            transient_failures += 1
             continue
+        if len(on_disk) < 24 + 16:
+            log.warning(
+                "vault.migration.verify.chunk_truncated chunk=%s",
+                str(spec.get("chunk_id"))[:12],
+            )
+            continue
+        nonce = on_disk[:24]
+        ciphertext = on_disk[24:]
+        aad = build_chunk_aad(
+            vault.vault_id,
+            spec["remote_folder_id"],
+            spec["entry_id"],
+            spec["version_id"],
+            int(spec["index"]),
+            int(spec["plaintext_size"]),
+        )
+        try:
+            aead_decrypt(ciphertext, chunk_subkey, nonce, aad)
+        except Exception as exc:
+            log.warning(
+                "vault.migration.verify.chunk_aead_failed chunk=%s error=%s",
+                str(spec.get("chunk_id"))[:12], exc,
+            )
+            continue
+        sample_passed += 1
     if sample_size_actual > 0 and sample_passed < sample_size_actual:
         mismatches.append("chunk_sample")
     if src_chunks and sample_size_actual == 0:

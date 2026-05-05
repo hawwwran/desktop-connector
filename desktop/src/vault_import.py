@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
+from .vault_crypto import normalize_vault_id
 from .vault_manifest import (
     add_or_append_file_version,
     find_file_entry,
@@ -136,13 +137,16 @@ def decide_import_action(
     active_vault_id = str(active_manifest.get("vault_id", "")).strip()
     if not active_vault_id:
         return "new_vault"
-    if active_vault_id != bundle_vault_id:
+    # F-C04: normalize both sides — accept dashed and undashed forms.
+    if normalize_vault_id(active_vault_id) != normalize_vault_id(bundle_vault_id):
         return "refuse"
     # Same vault_id is necessary but not sufficient — genesis fingerprint
     # is the cryptographic anchor. If both sides report a fingerprint,
     # they must agree.
     if active_genesis_fingerprint and bundle_genesis_fingerprint:
-        if active_genesis_fingerprint != bundle_genesis_fingerprint:
+        active_fp = active_genesis_fingerprint.strip().lower()
+        bundle_fp = bundle_genesis_fingerprint.strip().lower()
+        if active_fp != bundle_fp:
             return "refuse"
     return "merge"
 

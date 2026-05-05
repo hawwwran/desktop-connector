@@ -189,15 +189,25 @@ class BuildBundleTests(unittest.TestCase):
         body = self._read_zip_member(payload, "activity_tail.txt")
         self.assertIn("binding_paused", body)
 
-    def test_bundle_refuses_when_forbidden_text_leaks(self) -> None:
-        # Forge a config whose key isn't in REDACT_KEYS but whose value
-        # contains a forbidden substring. The catch-all leak-scanner
-        # must still refuse.
+    def test_bundle_redacts_forbidden_text_in_innocent_field(self) -> None:
+        # F-505: redact_config now scrubs scalar string values that
+        # match FORBIDDEN_PATTERNS, so a leak in an "innocent_field"
+        # key is rewritten before the bundle is built. The leak-scan
+        # is the second-line defence; if it does spot something the
+        # scrubber missed, build_debug_bundle_bytes still raises
+        # DebugBundleError.
         config = {
-            "innocent_field": "Authorization: Bearer leaks-if-shipped",
+            "innocent_field": (
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9_leak"
+            ),
         }
-        with self.assertRaises(DebugBundleError):
-            build_debug_bundle_bytes(config=config)
+        payload = build_debug_bundle_bytes(config=config)
+        body = self._read_zip_member(payload, "config.redacted.json")
+        # The Bearer-shaped substring is now scrubbed by F-505's
+        # scalar-value pass; the leak-scan never sees a forbidden
+        # token in the final bundle.
+        self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9_leak", body)
+        self.assertIn("redacted", body.lower())
 
     def test_write_debug_bundle_atomic_to_destination(self) -> None:
         dest = self.tmpdir / "out.zip"

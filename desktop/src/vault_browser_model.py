@@ -36,6 +36,13 @@ def decrypt_manifest(vault: ManifestVault, ciphertext: bytes | bytearray) -> dic
     if len(envelope) < 85 + 16:
         raise ValueError("manifest ciphertext too short")
 
+    # F-C13 / spec §7: stop before AEAD when the format version is
+    # unknown. v2 envelopes must surface as upgrade-prompt material,
+    # not silent ciphertext-failure.
+    if envelope[0] != 1:
+        raise ValueError(
+            f"vault_format_version_unsupported: manifest format_version={envelope[0]}"
+        )
     envelope_vault_id = envelope[1:13].decode("ascii")
     expected_vault_id = normalize_vault_id(vault.vault_id)
     if envelope_vault_id != expected_vault_id:

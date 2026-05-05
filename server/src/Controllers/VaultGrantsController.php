@@ -141,6 +141,16 @@ class VaultGrantsController
         $repo = new VaultJoinRequestsRepository($db);
         $now = time();
         $repo->expirePastDue($now);
+        // F-S08 / spec §10: max 5 outstanding join-requests per vault.
+        // Defends against compromised admin devices spamming pending
+        // rows. ttl is 15 min so this drains naturally.
+        $pending = $repo->countPending($vaultId);
+        if ($pending >= 5) {
+            throw new VaultRateLimitedError(
+                'too many pending join-requests for this vault',
+                15 * 60 * 1000,
+            );
+        }
         $joinRequestId = self::generateId('jr_v1_');
         $repo->create(
             $joinRequestId, $vaultId, $pubkey, $now, $now + self::JOIN_REQUEST_TTL_S
@@ -197,6 +207,36 @@ class VaultGrantsController
             'ok' => true,
             'data' => self::joinRequestPayload($row, includeWrappedGrant: $includeGrant),
         ], 200);
+    }
+
+    // ===================================================================
+    //  DELETE /api/vaults/{vault_id}/join-requests/{req_id} (§8.5 reject)
+    // ===================================================================
+
+    public static function rejectJoinRequest(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $reqId = (string)($ctx->params['req_id'] ?? '');
+        if (!preg_match('/^jr_v1_[a-z2-7]{24}$/', $reqId)) {
+            throw new VaultInvalidRequestError('malformed join_request_id', 'req_id');
+        }
+        VaultAuthService::requireVaultAuth($db, $vaultId);
+        $callerDevice = VaultAuthService::callerDeviceId();
+        self::requireAdmin($db, $vaultId, $callerDevice);
+
+        $repo = new VaultJoinRequestsRepository($db);
+        $repo->expirePastDue(time());
+        $row = $repo->get($reqId);
+        if ($row === null || (string)$row['vault_id'] !== $vaultId) {
+            throw new VaultJoinRequestStateError("unknown join-request: {$reqId}");
+        }
+        // Spec §5/§8.5: idempotent — already-rejected returns 204.
+        if ((string)$row['state'] === 'rejected') {
+            http_response_code(204);
+            return;
+        }
+        $repo->reject($reqId, time());
+        http_response_code(204);
     }
 
     // ===================================================================

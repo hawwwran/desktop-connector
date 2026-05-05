@@ -193,36 +193,54 @@ def _decode_pubkey_b64(b64: str) -> bytes:
     return raw
 
 
-def derive_verification_code(
-    admin_pubkey: bytes, claimant_pubkey: bytes,
-) -> str:
-    """Derive the 6-digit verification code from both pubkeys (T13.3).
+def derive_verification_code(shared_secret: bytes) -> str:
+    """Derive the verification code from the X25519 shared secret (spec §13.4).
 
-    Both sides of the grant exchange MUST compute the same code, so we
-    sort the two pubkeys lexicographically before hashing — order
-    independence is the entire point. The HMAC label binds the
-    derivation to vault_v1 so a future scheme change is observable.
+    Per ``vault-v1-formats.md`` §13.4::
 
-    Returns a zero-padded 6-digit string ``"NNNNNN"``. The user reads
-    the code on both screens and confirms they match before approving.
+        code_material = HMAC-SHA256(
+          key  = shared_secret,                          # 32 bytes
+          data = utf8("dc-vault-v1/qr-verification"))
+        code_int    = int.from_bytes(code_material[0:3], "big") % 1_000_000
+        code_string = format(code_int, "06d")
+        display     = code_string[0:3] + "-" + code_string[3:6]
+
+    Both devices compute the same code locally because X25519 is
+    commutative; order independence comes from the shared secret, not
+    from sorting pubkeys. Returns the dashed display form ``"NNN-NNN"``.
     """
-    if not isinstance(admin_pubkey, (bytes, bytearray)) or len(admin_pubkey) != 32:
-        raise VaultGrantQRError("admin_pubkey must be 32 bytes")
-    if not isinstance(claimant_pubkey, (bytes, bytearray)) or len(claimant_pubkey) != 32:
-        raise VaultGrantQRError("claimant_pubkey must be 32 bytes")
+    if not isinstance(shared_secret, (bytes, bytearray)) or len(shared_secret) != 32:
+        raise VaultGrantQRError("shared_secret must be 32 bytes")
     import hashlib
     import hmac
-    a, b = bytes(admin_pubkey), bytes(claimant_pubkey)
-    if a > b:
-        a, b = b, a
     digest = hmac.new(
-        key=b"dc-vault-v1/verification-code",
-        msg=a + b,
+        key=bytes(shared_secret),
+        msg=b"dc-vault-v1/qr-verification",
         digestmod=hashlib.sha256,
     ).digest()
-    # Take the first 4 bytes as a big-endian unsigned int, mod 10^6.
-    code_int = int.from_bytes(digest[:4], "big") % 1_000_000
-    return f"{code_int:06d}"
+    code_int = int.from_bytes(digest[:3], "big") % 1_000_000
+    code_string = f"{code_int:06d}"
+    return f"{code_string[:3]}-{code_string[3:]}"
+
+
+def derive_shared_secret(my_private_key: bytes, peer_public_key: bytes) -> bytes:
+    """Compute the X25519 shared secret used for the verification code and grant wrap.
+
+    Spec §13.3::
+
+        shared_secret = X25519(my_priv, peer_pub)
+    """
+    if not isinstance(my_private_key, (bytes, bytearray)) or len(my_private_key) != 32:
+        raise VaultGrantQRError("my_private_key must be 32 bytes")
+    if not isinstance(peer_public_key, (bytes, bytearray)) or len(peer_public_key) != 32:
+        raise VaultGrantQRError("peer_public_key must be 32 bytes")
+    try:
+        from nacl.bindings import crypto_scalarmult
+    except ImportError as exc:
+        raise VaultGrantQRError(
+            "PyNaCl is required for X25519 shared-secret derivation"
+        ) from exc
+    return crypto_scalarmult(bytes(my_private_key), bytes(peer_public_key))
 
 
 __all__ = [
@@ -230,6 +248,7 @@ __all__ = [
     "SCHEME",
     "VaultGrantQRError",
     "VaultJoinUrl",
+    "derive_shared_secret",
     "derive_verification_code",
     "make_join_url",
     "parse_join_url",

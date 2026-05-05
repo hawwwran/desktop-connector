@@ -35,6 +35,7 @@ class IntegrityIssue:
     kind: str             # 'manifest_chain_broken' | 'chunk_missing' | 'aead_decrypt_failed' | ...
     target: str           # vault_id / revision / chunk_id / display_path
     detail: str = ""
+    path: str = ""        # F-507: human-readable file path where applicable
 
 
 @dataclass
@@ -139,6 +140,8 @@ def run_full_check(
     decrypt_chunk: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], bytes], bytes],
     fetch_chunk: Callable[[str, str, str], bytes],
     decrypt_manifest_envelope: Callable[[bytes], dict[str, Any]] | None = None,
+    deadline_seconds: float | None = None,
+    cancel_event = None,
 ) -> IntegrityReport:
     """Quick check + decrypt every retained revision + decrypt every chunk.
 
@@ -192,17 +195,47 @@ def run_full_check(
         for f in head.get("remote_folders", []) or []
         if isinstance(f, dict)
     }
+    import time as _time
+    started = _time.monotonic()
+    aborted_for_deadline = False
     seen_chunks: set[str] = set()
     for folder_id, folder in folder_by_id.items():
+        if aborted_for_deadline:
+            break
         for entry in folder.get("entries", []) or []:
+            if aborted_for_deadline:
+                break
             if not isinstance(entry, dict) or bool(entry.get("deleted")):
                 continue
             for version in entry.get("versions", []) or []:
+                if aborted_for_deadline:
+                    break
                 if not isinstance(version, dict):
                     continue
                 for chunk in version.get("chunks", []) or []:
                     if not isinstance(chunk, dict):
                         continue
+                    # F-506: bail when the deadline elapses or the
+                    # caller cancels — surface what was unchecked.
+                    if cancel_event is not None and cancel_event.is_set():
+                        report.add(IntegrityIssue(
+                            kind="full_check_cancelled",
+                            target="<aborted>",
+                            detail="cancelled by caller",
+                        ))
+                        aborted_for_deadline = True
+                        break
+                    if (
+                        deadline_seconds is not None
+                        and _time.monotonic() - started >= float(deadline_seconds)
+                    ):
+                        report.add(IntegrityIssue(
+                            kind="full_check_aborted_deadline",
+                            target="<deadline>",
+                            detail=f"deadline of {deadline_seconds:.0f}s elapsed",
+                        ))
+                        aborted_for_deadline = True
+                        break
                     cid = str(chunk.get("chunk_id", ""))
                     if not cid or cid in seen_chunks:
                         continue
@@ -220,9 +253,12 @@ def run_full_check(
                     try:
                         decrypt_chunk(folder, entry, version, encrypted)
                     except Exception as exc:  # noqa: BLE001
+                        # F-507: keep the path on the issue so a UI can
+                        # show "your file <path> is corrupt".
+                        broken_path = str(entry.get("path", ""))
                         report.add(IntegrityIssue(
                             kind="chunk_aead_failed", target=cid,
-                            detail=str(exc),
+                            detail=str(exc), path=broken_path,
                         ))
 
     report.chunks_checked = len(seen_chunks)

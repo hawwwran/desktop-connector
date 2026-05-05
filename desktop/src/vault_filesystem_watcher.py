@@ -207,7 +207,9 @@ class WatcherCoordinator:
             self._pending.pop(path, None)
             self._debouncer.forget(path)
             self._gate.forget(path)
-            self._enqueue_delete_if_synced(path, now=int(now_t))
+            # F-Y22: persist the wall-clock timestamp regardless of the
+            # monotonic clock injected for stability-gate math.
+            self._enqueue_delete_if_synced(path, now=int(time.time()))
             return
 
         # Always update debouncer + pending-path bookkeeping; tick()
@@ -225,6 +227,11 @@ class WatcherCoordinator:
             existing.last_event_at = now_t
             existing.last_event_kind = kind
             existing.enqueued = False  # reopen the gate if the file changed again
+            # F-Y19: actively-edited files (e.g. KeePass long save) hit
+            # the hung-after cap when first_event_at stays pinned to the
+            # original event. Advance it so the cap counts "tried to
+            # settle but failed" rather than "user is editing fast".
+            existing.first_event_at = now_t
 
     # --- driver --------------------------------------------------------
 
@@ -271,7 +278,10 @@ class WatcherCoordinator:
                 binding_id=self.binding_id,
                 op_type="upload",
                 relative_path=path,
-                now=int(now_t),
+                # F-Y22: use wall-clock for persistence (the column is
+                # consumed by humans/timeline UIs); the monotonic clock
+                # stays inside StabilityGate.
+                now=int(time.time()),
             )
             pending.enqueued = True
             self._pending.pop(path, None)
@@ -297,9 +307,9 @@ class WatcherCoordinator:
             try:
                 synced = bool(self._previously_synced(path))
             except Exception:  # noqa: BLE001
-                log.exception(
+                log.warning(
                     "vault.sync.previously_synced_check_failed binding=%s path=%s",
-                    self.binding_id, path,
+                    self.binding_id, path, exc_info=True,
                 )
                 synced = False
             if not synced:

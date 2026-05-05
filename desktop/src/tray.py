@@ -206,6 +206,12 @@ class TrayApp:
         # re-read os.environ on every menu open.
         self._update_info: version_check.UpdateInfo | None = None
         self._running_appimage = bool(os.environ.get("APPIMAGE"))
+        # Vault watcher runtime — lazily started when the vault is open
+        # and there's at least one bound binding. The runtime owns watch-
+        # dog observers and per-binding ransomware detectors; on tripped
+        # verdicts it pauses the binding via the lifecycle helper. F-Y13.
+        self._vault_watcher_runtime = None  # type: ignore[assignment]
+        self._vault_watcher_lock = threading.Lock()
 
     def run(self) -> None:
         try:
@@ -402,10 +408,12 @@ class TrayApp:
                 if vault_active_now != self._was_vault_active:
                     self._was_vault_active = vault_active_now
                     changed = True
+                    self._ensure_vault_watcher_runtime()
                 vault_exists_now = self._local_vault_exists()
                 if vault_exists_now != self._was_vault_exists:
                     self._was_vault_exists = vault_exists_now
                     changed = True
+                    self._ensure_vault_watcher_runtime()
 
                 # One-time FCM availability check on first connection
                 if not self._fcm_checked and self.conn.state == ConnectionState.CONNECTED:
@@ -441,6 +449,13 @@ class TrayApp:
         # only hit when truly due. Outside an AppImage the loop is a no-op.
         if self._running_appimage:
             _t.Thread(target=self._update_check_loop, daemon=True).start()
+
+        # Boot-time vault watcher start (F-Y13). Idempotent — the
+        # watcher hooks above also call this when the vault toggle flips.
+        try:
+            self._ensure_vault_watcher_runtime()
+        except Exception:  # noqa: BLE001
+            log.exception("vault.sync.watcher_runtime_boot_failed")
 
         self._icon.run()
 
@@ -1022,10 +1037,67 @@ class TrayApp:
         self._open_gtk4_window("vault-browser")
 
     def _vault_sync_now_stub(self, *_) -> None:
+        # F-U20: surface where the real "Sync now" lives so the click
+        # doesn't feel like a dead button. The backend is in Vault
+        # settings → Folders → Sync now per binding.
         log.info("vault.tray.sync_now.stub")
+        try:
+            self.platform.notifications.notify(
+                title="Vault — Sync now",
+                body="Open Vault Settings → Folders → Sync now per binding.",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("vault.tray.sync_now.notify_failed")
+
+    def _ensure_vault_watcher_runtime(self) -> None:
+        """Start filesystem watchers + ransomware detectors when the vault is open.
+
+        Idempotent: re-calling either picks up newly-bound folders or is
+        a no-op. Failures are logged and don't crash the tray — sync via
+        the manual "Sync now" button still works.
+        """
+        with self._vault_watcher_lock:
+            if not self.config.vault_active or not self._local_vault_exists():
+                if self._vault_watcher_runtime is not None:
+                    self._vault_watcher_runtime.stop_all()
+                    self._vault_watcher_runtime = None
+                return
+            try:
+                from .vault_runtime_watchers import VaultWatcherRuntime
+                from .vault_bindings import VaultBindingsStore
+                from .vault_cache import VaultLocalIndex
+                vault_id = str(
+                    self.config._data.get("vault", {}).get("last_known_id") or ""
+                )
+                if not vault_id:
+                    return
+                if self._vault_watcher_runtime is None:
+                    local_index = VaultLocalIndex(self.config.config_dir)
+                    store = VaultBindingsStore(local_index.db_path)
+                    self._vault_watcher_runtime = VaultWatcherRuntime(
+                        vault_id=vault_id,
+                        store=store,
+                    )
+                self._vault_watcher_runtime.start_for_active_bindings()
+            except Exception:  # noqa: BLE001
+                log.exception("vault.sync.watcher_runtime_init_failed")
 
     def _vault_export_stub(self, *_) -> None:
         log.info("vault.tray.export.stub")
+        try:
+            self.platform.notifications.notify(
+                title="Vault — Export",
+                body="Open Vault Settings → Recovery → Export… to back up your vault.",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("vault.tray.export.notify_failed")
 
     def _vault_import_stub(self, *_) -> None:
         log.info("vault.tray.import.stub")
+        try:
+            self.platform.notifications.notify(
+                title="Vault — Import",
+                body="Use Vault Settings → Recovery → Import to load a vault bundle.",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("vault.tray.import.notify_failed")
