@@ -224,4 +224,119 @@ final class VaultQuotaPressureTest extends TestCase
         $resp = json_decode(ob_get_clean(), true);
         self::assertSame(self::VAULT_ID_DASHED, $resp['data']['vault_id']);
     }
+
+    // ===================================================================
+    //  F-T06 — 413 PayloadTooLarge for oversized chunks / manifests
+    //  + concurrent-init serialization
+    // ===================================================================
+
+    public function test_oversized_chunk_returns_413(): void
+    {
+        // MAX_CHUNK_BYTES is 9 MiB. A 9 MiB + 1 byte chunk should hit
+        // the size cap with a 413 *before* the quota check fires —
+        // distinct from the 507 quota-exceeded path the rest of this
+        // suite exercises.
+        $tooBig = str_repeat('x', VaultController::MAX_CHUNK_BYTES + 1);
+        try {
+            VaultController::putChunk(
+                $this->db,
+                new RequestContext(
+                    method: 'PUT',
+                    params: [
+                        'vault_id' => self::VAULT_ID,
+                        'chunk_id' => 'ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa',
+                    ],
+                    bodyOverride: $tooBig,
+                ),
+            );
+            self::fail('expected VaultPayloadTooLargeError');
+        } catch (VaultPayloadTooLargeError $exc) {
+            self::assertSame(413, $exc->status);
+            self::assertSame('vault_payload_too_large', $exc->errorCode);
+            self::assertSame('chunk', $exc->details['kind']);
+        }
+    }
+
+    public function test_oversized_manifest_returns_413(): void
+    {
+        // MAX_MANIFEST_BYTES is 16 MiB. We don't actually need to
+        // build a real envelope — guardEnvelopeSize fires before any
+        // parsing. base64 inflates by ~33%, so the over-cap source
+        // bytes ÷ 0.75 wraps comfortably above the cap when decoded.
+        $rawSize = VaultController::MAX_MANIFEST_BYTES + 1;
+        $body = [
+            'expected_current_revision' => 1,
+            'new_revision'              => 2,
+            'parent_revision'           => 1,
+            'manifest_ciphertext'       => base64_encode(str_repeat('x', $rawSize)),
+            'manifest_hash'             => str_repeat('a', 64),
+        ];
+        try {
+            VaultController::putManifest(
+                $this->db,
+                new RequestContext(
+                    method: 'PUT',
+                    params: ['vault_id' => self::VAULT_ID],
+                    bodyOverride: json_encode($body),
+                ),
+            );
+            self::fail('expected VaultPayloadTooLargeError');
+        } catch (VaultPayloadTooLargeError $exc) {
+            self::assertSame(413, $exc->status);
+            self::assertSame('vault_payload_too_large', $exc->errorCode);
+            self::assertSame('manifest', $exc->details['kind']);
+        }
+    }
+
+    public function test_concurrent_inits_serialize_at_quota_cap(): void
+    {
+        // Single-process simulation: drive ``putChunk`` sequentially
+        // with chunks whose combined size exceeds the quota. The
+        // ``BEGIN IMMEDIATE``-wrapped reservation in putChunk
+        // ensures only the first one(s) below the cap land; the
+        // first one to push past the cap fails with 507. Tests with
+        // real OS-level concurrency live elsewhere; this pins the
+        // serialization invariant from inside the same process.
+        $payloadA = str_repeat('a', 600);   // 60% of TEST_QUOTA
+        $payloadB = str_repeat('b', 500);   // 50% — combined = 110%
+
+        // First chunk lands.
+        ob_start();
+        try {
+            VaultController::putChunk(
+                $this->db,
+                new RequestContext(
+                    method: 'PUT',
+                    params: [
+                        'vault_id' => self::VAULT_ID,
+                        'chunk_id' => 'ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa',
+                    ],
+                    bodyOverride: $payloadA,
+                ),
+            );
+        } finally {
+            ob_end_clean();
+        }
+        // Second chunk would push past the cap — must 507, leaving
+        // the first chunk's reservation intact.
+        try {
+            VaultController::putChunk(
+                $this->db,
+                new RequestContext(
+                    method: 'PUT',
+                    params: [
+                        'vault_id' => self::VAULT_ID,
+                        'chunk_id' => 'ch_v1_bbbbbbbbbbbbbbbbbbbbbbbb',
+                    ],
+                    bodyOverride: $payloadB,
+                ),
+            );
+            self::fail('expected VaultQuotaExceededError on second chunk');
+        } catch (VaultQuotaExceededError $exc) {
+            self::assertSame(507, $exc->status);
+        }
+        // Vault used == first chunk only — second was rolled back.
+        $h = $this->readHeader();
+        self::assertSame(600, $h['used']);
+    }
 }

@@ -941,4 +941,131 @@ final class VaultControllerTest extends TestCase
         self::assertSame('create', (string)$grant['granted_via']);
         self::assertMatchesRegularExpression('/^gr_v1_[a-z2-7]{24}$/', (string)$grant['grant_id']);
     }
+
+    // ===================================================================
+    //  F-T04 — migration endpoints: idempotency + commit semantics
+    // ===================================================================
+
+    public function test_migrationStart_idempotent_returns_existing_token(): void
+    {
+        $target = 'https://target.example.test';
+
+        // First call: 201 + token_returned=true.
+        $first = $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        self::assertSame(201, $first['status']);
+        self::assertTrue($first['json']['data']['token_returned']);
+        self::assertNotEmpty($first['json']['data']['token']);
+
+        // Second call with the same target: 200 + token_returned=false.
+        // The original token is NOT re-emitted (it lives in the
+        // initiating device's keyring after first /start).
+        $second = $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        self::assertSame(200, $second['status']);
+        self::assertFalse($second['json']['data']['token_returned']);
+        self::assertNull($second['json']['data']['token']);
+        self::assertSame(
+            $first['json']['data']['started_at'],
+            $second['json']['data']['started_at'],
+            'started_at must be preserved across retried /start calls',
+        );
+    }
+
+    public function test_migrationStart_different_target_409(): void
+    {
+        $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => 'https://target-a.example.test'],
+            ),
+        ));
+
+        // Second call asking for a different target — vault can only
+        // migrate to one place at a time per §H2.
+        try {
+            VaultController::migrationStart(
+                $this->db, $this->jctx(
+                    'POST', ['vault_id' => self::VAULT_ID],
+                    ['target_relay_url' => 'https://target-b.example.test'],
+                ),
+            );
+            self::fail('expected VaultMigrationInProgressError');
+        } catch (VaultMigrationInProgressError $exc) {
+            self::assertSame(409, $exc->status);
+            self::assertSame('vault_migration_in_progress', $exc->errorCode);
+        }
+    }
+
+    public function test_migrationCommit_marks_read_only(): void
+    {
+        $target = 'https://target.example.test';
+        // Start.
+        $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        // Verify (sets verified_at; commit gates on it).
+        $this->invoke(fn() => VaultController::migrationVerifySource(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        // Commit.
+        $res = $this->invoke(fn() => VaultController::migrationCommit(
+            $this->db, $this->jctx(
+                'PUT', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        self::assertSame(200, $res['status']);
+
+        // Vault row now flagged read-only via migrated_to.
+        $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
+        self::assertSame($target, (string)$vault['migrated_to']);
+    }
+
+    public function test_migrationCommit_repeat_returns_same_committed_at(): void
+    {
+        $target = 'https://target.example.test';
+        $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        $this->invoke(fn() => VaultController::migrationVerifySource(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        $first = $this->invoke(fn() => VaultController::migrationCommit(
+            $this->db, $this->jctx(
+                'PUT', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        // Second commit with same target: idempotent. F-S05 contract
+        // says committed_at is preserved across retries (the COALESCE
+        // in markCommitted), so the second response carries the same
+        // timestamp as the first.
+        $second = $this->invoke(fn() => VaultController::migrationCommit(
+            $this->db, $this->jctx(
+                'PUT', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        self::assertSame(200, $second['status']);
+        self::assertSame(
+            $first['json']['data']['committed_at'],
+            $second['json']['data']['committed_at'],
+            'committed_at must be preserved across retried /commit calls',
+        );
+    }
 }

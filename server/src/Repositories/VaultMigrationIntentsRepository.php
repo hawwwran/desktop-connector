@@ -49,7 +49,11 @@ class VaultMigrationIntentsRepository
              )',
             [
                 ':vault_id'   => $vaultId,
-                ':token_hash' => $tokenHashBinary,
+                // Bind as BLOB so SHA-256 bytes containing NULs round-
+                // trip cleanly. Without this, ~12% of token hashes
+                // would silently truncate at the first 0x00 byte.
+                // F-T04/F-T05.
+                ':token_hash' => new Blob($tokenHashBinary),
                 ':target'     => $targetRelayUrl,
                 ':started_at' => $now,
                 ':device'     => $initiatingDevice,
