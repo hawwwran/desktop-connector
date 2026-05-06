@@ -350,6 +350,9 @@ applies as elsewhere.
 | `file_manager.<kind>.legacy_removed` | desktop (M.6) | info | `name` | Pre-multi-device "Send to Phone" script adopted via fingerprint and removed; per-device replacements come from the same sync pass |
 | `file_manager.dolphin.written` | desktop (M.6) | info | `peers` | Dolphin service-menu file rewritten with N actions, one per paired device |
 | `file_manager.dolphin.removed` | desktop (M.6) | info | `reason=no_pairs` | Dolphin file removed when the last pairing was deleted |
+| `file_manager.<kind>.skip_other_config_collision` | desktop | warning | `name`, `owner`, `self` | Refused to overwrite a managed `Send to <peer>` entry owned by another `--config-dir` install sharing this host's XDG dirs. `<kind> ∈ {nautilus, nemo, dolphin}`. Fires when two installs (e.g. canonical + dev twin) both try to write the same filename |
+| `file_manager.<kind>.skip_other_config` | desktop | debug | `name`, `owner`, `self` | Cleanup pass left a managed entry alone because its config-id marker doesn't match this install's. Same isolation invariant as `skip_other_config_collision` but for the cleanup pass. Debug-level; only useful when investigating cross-config interactions |
+| `file_manager.<kind>.skip_legacy_other_config` | desktop | debug | `name`, `config` | Pre-fix legacy "Send to Phone" / Dolphin file left alone because we're not the canonical install. Only the canonical install (`config_dir.name == "desktop-connector"`) adopts and replaces unmarked legacy entries |
 
 ### config
 

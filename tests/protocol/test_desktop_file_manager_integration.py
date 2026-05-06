@@ -17,6 +17,8 @@ ensure_desktop_on_path()
 from src.config import Config  # noqa: E402
 from src.devices import ConnectedDeviceRegistry  # noqa: E402
 from src.file_manager_integration import (  # noqa: E402
+    APP_NAME,
+    CONFIG_ID_PREFIX,
     DOLPHIN_SERVICE_FILENAME,
     LEGACY_NAUTILUS_NAME,
     MANAGED_SENTINEL,
@@ -94,6 +96,7 @@ class FileManagerIntegrationTests(unittest.TestCase):
         alpha_text = alpha.read_text()
         self.assertIn(MANAGED_SENTINEL, alpha_text)
         self.assertIn(f"{PAIRING_ID_PREFIX}dev-A", alpha_text)
+        self.assertIn(f"{CONFIG_ID_PREFIX}{APP_NAME}", alpha_text)
         self.assertIn(str(self.appimage), alpha_text)
         self.assertIn('TARGET_DEVICE_ID = "dev-A"', alpha_text)
         self.assertIn('--target-device-id=', alpha_text)
@@ -314,6 +317,198 @@ class FileManagerIntegrationTests(unittest.TestCase):
         self.assertTrue(
             (self.nautilus_dir / "Send to Slash-Backslash-Pipe").exists()
         )
+
+
+class FileManagerCrossConfigIsolationTests(unittest.TestCase):
+    """Sibling configs sharing one host's XDG dirs must not clobber each
+    other's managed scripts. Reproduces the 2026-05-06 vault-test bug
+    where a dev twin (``--config-dir=~/.config/desktop-connector-dev``)
+    deleted the canonical install's ``Send to <peer>`` Nautilus script.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+
+        self.canonical_dir = self.home / ".config/desktop-connector"
+        self.canonical_dir.mkdir(parents=True, exist_ok=True)
+        self.canonical_config = Config(self.canonical_dir)
+
+        self.dev_dir = self.home / ".config/desktop-connector-dev"
+        self.dev_dir.mkdir(parents=True, exist_ok=True)
+        self.dev_config = Config(self.dev_dir)
+
+        self.appimage = self.home / "Apps/desktop-connector.AppImage"
+        self.appimage.parent.mkdir(parents=True, exist_ok=True)
+        self.appimage.write_text("#!/bin/bash\nexit 0\n")
+        self.appimage.chmod(0o755)
+
+        self.nautilus_dir = self.home / ".local/share/nautilus/scripts"
+        self.dolphin_path = (
+            self.home
+            / ".local/share/kservices5/ServiceMenus"
+            / DOLPHIN_SERVICE_FILENAME
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _add(self, config: Config, device_id: str, *, name: str) -> None:
+        config.add_paired_device(device_id, f"pk-{device_id}", _key_b64(), name=name)
+        config._data["paired_devices"][device_id]["paired_at"] = 10
+        config.save()
+
+    def _sync(self, config: Config, *, file_managers=("nautilus", "dolphin")) -> None:
+        sync_file_manager_targets(
+            config,
+            appimage_path=self.appimage,
+            home=self.home,
+            file_managers=set(file_managers),
+        )
+
+    def test_dev_twin_does_not_delete_canonical_managed_script(self) -> None:
+        # Canonical install pairs Alpha and writes its script.
+        self._add(self.canonical_config, "dev-A", name="Alpha")
+        self._sync(self.canonical_config)
+        alpha = self.nautilus_dir / "Send to Alpha"
+        self.assertTrue(alpha.exists())
+        original = alpha.read_text()
+        self.assertIn(f"{CONFIG_ID_PREFIX}{APP_NAME}", original)
+
+        # Dev twin (no pairs) syncs into the same shared dir.
+        self._sync(self.dev_config, file_managers=("nautilus",))
+
+        # Canonical script must still be there, byte-identical.
+        self.assertTrue(alpha.exists())
+        self.assertEqual(alpha.read_text(), original)
+
+    def test_dev_twin_does_not_remove_legacy_send_to_phone(self) -> None:
+        # Pre-fix legacy AppImage hook script (no managed sentinel,
+        # only the legacy fingerprint).
+        self.nautilus_dir.mkdir(parents=True, exist_ok=True)
+        legacy = self.nautilus_dir / LEGACY_NAUTILUS_NAME
+        legacy.write_text(
+            "#!/usr/bin/env python3\n"
+            '"""Send selected files to phone via Desktop Connector."""\n'
+            "# old single-pair body\n",
+        )
+        legacy.chmod(0o755)
+
+        self._sync(self.dev_config, file_managers=("nautilus",))
+
+        # Dev twin must leave it alone — only canonical adopts legacy.
+        self.assertTrue(legacy.exists())
+
+    def test_dev_twin_does_not_delete_unmarked_managed_script(self) -> None:
+        # Pre-fix managed script (sentinel + pairing id, no config id):
+        # came from a canonical install built before this fix.
+        self.nautilus_dir.mkdir(parents=True, exist_ok=True)
+        legacy_managed = self.nautilus_dir / "Send to Vivo Phone"
+        legacy_managed.write_text(
+            "#!/usr/bin/env python3\n"
+            '"""auto-managed."""\n'
+            f"# {MANAGED_SENTINEL}\n"
+            f"# {PAIRING_ID_PREFIX}old-peer-id\n"
+            "# (no config-id marker — pre-fix script)\n"
+            "TARGET_DEVICE_ID = 'old-peer-id'\n",
+        )
+        legacy_managed.chmod(0o755)
+
+        self._sync(self.dev_config, file_managers=("nautilus",))
+
+        self.assertTrue(legacy_managed.exists())
+
+    def test_canonical_adopts_unmarked_managed_script(self) -> None:
+        # Same pre-fix unmarked managed script — canonical install
+        # must still be able to clean it up (so older scripts get
+        # eventually rewritten with the new marker on first sync).
+        self._add(self.canonical_config, "dev-A", name="Alpha")
+        self.nautilus_dir.mkdir(parents=True, exist_ok=True)
+        legacy_managed = self.nautilus_dir / "Send to Vivo Phone"
+        legacy_managed.write_text(
+            "#!/usr/bin/env python3\n"
+            '"""auto-managed."""\n'
+            f"# {MANAGED_SENTINEL}\n"
+            f"# {PAIRING_ID_PREFIX}old-peer-id\n"
+            "TARGET_DEVICE_ID = 'old-peer-id'\n",
+        )
+        legacy_managed.chmod(0o755)
+
+        self._sync(self.canonical_config, file_managers=("nautilus",))
+
+        # Canonical removed it (its peer isn't in the canonical pairs).
+        self.assertFalse(legacy_managed.exists())
+        # And wrote the new script (with config marker).
+        new_alpha = self.nautilus_dir / "Send to Alpha"
+        self.assertTrue(new_alpha.exists())
+        self.assertIn(f"{CONFIG_ID_PREFIX}{APP_NAME}", new_alpha.read_text())
+
+    def test_filename_collision_preserves_other_configs_script(self) -> None:
+        # Both installs paired the same peer with the same display
+        # name — filenames collide. Canonical wrote first; dev twin's
+        # write must refuse and not corrupt the file.
+        self._add(self.canonical_config, "shared-peer", name="Phone")
+        self._add(self.dev_config, "shared-peer", name="Phone")
+        self._sync(self.canonical_config, file_managers=("nautilus",))
+        target = self.nautilus_dir / "Send to Phone"
+        canonical_text = target.read_text()
+        self.assertIn(f"{CONFIG_ID_PREFIX}{APP_NAME}", canonical_text)
+
+        self._sync(self.dev_config, file_managers=("nautilus",))
+
+        self.assertEqual(target.read_text(), canonical_text)
+
+    def test_dev_twin_does_not_remove_canonical_dolphin_service(self) -> None:
+        self._add(self.canonical_config, "dev-A", name="Alpha")
+        self._sync(self.canonical_config, file_managers=("dolphin",))
+        original = self.dolphin_path.read_text()
+        self.assertIn(f"{CONFIG_ID_PREFIX}{APP_NAME}", original)
+
+        # Dev twin with no pairs would historically delete the
+        # Dolphin service file in the no-devices branch. With the
+        # ownership check it must leave it alone.
+        self._sync(self.dev_config, file_managers=("dolphin",))
+
+        self.assertTrue(self.dolphin_path.exists())
+        self.assertEqual(self.dolphin_path.read_text(), original)
+
+    def test_dev_twin_does_not_overwrite_canonical_dolphin_service(self) -> None:
+        self._add(self.canonical_config, "dev-A", name="Alpha")
+        self._sync(self.canonical_config, file_managers=("dolphin",))
+        canonical_text = self.dolphin_path.read_text()
+
+        # Dev twin pairs a different peer and tries to write — the
+        # collision check refuses to clobber a managed file owned by
+        # another config.
+        self._add(self.dev_config, "dev-B", name="Beta")
+        self._sync(self.dev_config, file_managers=("dolphin",))
+
+        self.assertEqual(self.dolphin_path.read_text(), canonical_text)
+
+    def test_dev_twin_writes_its_own_scripts_normally(self) -> None:
+        # Sanity check: even though we lock the dev twin out of
+        # cross-config writes, it can still write its own per-pair
+        # scripts when the shared dir has no canonical entries.
+        self._add(self.dev_config, "dev-Z", name="Zeta")
+        self._sync(self.dev_config, file_managers=("nautilus",))
+        zeta = self.nautilus_dir / "Send to Zeta"
+        self.assertTrue(zeta.exists())
+        self.assertIn(
+            f"{CONFIG_ID_PREFIX}desktop-connector-dev",
+            zeta.read_text(),
+        )
+
+    def test_canonical_can_still_clean_its_own_stale_scripts(self) -> None:
+        # Regression: ownership gating must not prevent the canonical
+        # install from cleaning up its OWN stale managed entries
+        # (e.g. after an unpair).
+        self._add(self.canonical_config, "dev-A", name="Alpha")
+        self._sync(self.canonical_config, file_managers=("nautilus",))
+        self.assertTrue((self.nautilus_dir / "Send to Alpha").exists())
+
+        ConnectedDeviceRegistry(self.canonical_config).unpair("dev-A")
+        self._sync(self.canonical_config, file_managers=("nautilus",))
+        self.assertFalse((self.nautilus_dir / "Send to Alpha").exists())
 
 
 if __name__ == "__main__":

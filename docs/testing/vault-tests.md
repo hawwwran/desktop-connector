@@ -19,6 +19,21 @@ isolated `--config-dir`, isolated `--server-url`, and the
 `DC_ALLOW_MULTI_INSTANCE=1` env var that bypasses
 `enforce_single_instance` (`desktop/src/bootstrap/appimage_relocate.py`).
 
+Three shared-resource auto-isolation guarantees back the dev twin up
+so a forgotten env var or wrong invocation can't reach into the user's
+real state:
+
+- **Keyring service** is derived from ``config_dir.name``
+  (``Config.__init__``) — see the 2026-05-06 entry below.
+- **File-manager XDG scripts** carry a ``# CONFIG: <name>`` marker so
+  the dev twin can't delete the canonical install's
+  ``~/.local/share/nautilus/scripts/Send to <peer>`` entry on startup
+  (root cause of suite 0002 test-02; see
+  ``docs/architecture-decisions.md`` 2026-05-06).
+- **Single-instance enforcement** is opt-out via
+  ``DC_ALLOW_MULTI_INSTANCE``; without that env var, two DC processes
+  would SIGTERM each other.
+
 ### Paths
 
 | What | Path |
@@ -234,23 +249,34 @@ and complete device registration.
 
 **Steps**:
 1. Launch the common dev-instance command in the background. Tee
-   stdout+stderr into the test artefact dir.
+   stdout+stderr into the test artefact dir
+   (`dev-instance.{stdout,stderr}.log`).
 2. Sleep 3 s.
-3. `curl -s http://127.0.0.1:4441/api/devices/stats` (no auth) — fall
-   back to inspecting `server/data/connector.db` directly:
-   `sqlite3 server/data/connector.db 'SELECT id, last_seen_at FROM devices;'`
-4. `tail -200 ~/.config/desktop-connector-dev/logs/desktop-connector.log`
-   into result.md (filter to startup events only).
+3. Inspect the relay-side device row:
+   `sqlite3 server/data/connector.db 'SELECT count(*), device_type, substr(device_id,1,12), last_seen_at FROM devices;'`
+   (column is `device_id`, not `id`; the table has no `id` column).
+4. The captured `dev-instance.stderr.log` IS the desktop log for this
+   test. The opt-in `~/.config/desktop-connector-dev/logs/desktop-connector.log`
+   does **not** exist on a fresh wipe (logging is gated on the Settings
+   "Allow logging" toggle per CLAUDE.md "Logging (opt-in)"); don't
+   tail it.
 
 **Assertions**:
 - Process is still alive after 3 s (not crashed).
-- Exactly one row in `devices` table.
-- No `ERROR`/`CRITICAL` lines in the dev desktop log.
+- Exactly one row in `devices` table, `device_type=desktop`.
+- No `ERROR`/`CRITICAL` lines in `dev-instance.stderr.log`.
 - `~/.config/desktop-connector-dev/config.json` exists and contains a
   `device_id` field.
+- Stderr contains
+  `config.secrets.using_keyring service=desktop-connector-dev`
+  (proof the per-config keyring derivation kicked in).
+- Stderr contains **no** `file_manager.*.cleaned` or
+  `file_manager.*.legacy_removed` lines (proof the dev twin didn't
+  reach into the canonical install's XDG scripts dir; if either fires,
+  stop the suite — that's the bug from 2026-05-06).
 
-**Capture**: log tail inline (with secrets scrubbed — keep only event
-tags). No screenshot.
+**Capture**: stderr tail inline (with secrets scrubbed — keep only
+event tags). No screenshot.
 
 **Leaves running**: the headless dev instance stays up for tests 7+.
 Tests 3–6 stop it explicitly because they only need the windows.

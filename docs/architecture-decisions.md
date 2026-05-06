@@ -74,6 +74,54 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-06 — File-manager scripts carry a config-id marker for cross-install isolation
+
+**Status:** accepted.
+
+**Context.** `~/.local/share/nautilus/scripts/`, `~/.local/share/nemo/scripts/`,
+and `~/.local/share/kservices5/ServiceMenus/` are per-user XDG paths
+shared across **all** Desktop Connector installs on a host. Vault
+automation suite 0002 test 02 launched a dev twin
+(`--config-dir=~/.config/desktop-connector-dev`, no pairings); on
+startup the twin's `sync_file_manager_targets` call iterated the shared
+Nautilus dir, treated the canonical install's "Send to Vivo Phone"
+managed script as stale (because its peer wasn't in the dev twin's
+empty pair list), and unlinked it. Same shape as the 2026-05-06
+keyring-isolation bug (`Config` now derives the keyring service name
+from `config_dir.name` to fix that one) but on a different shared
+resource. Per `feedback_test_isolation.md` the rule is: shared-resource
+isolation must live in the code path, not in shell discipline.
+
+**Decision.** Every managed file-manager entry now embeds a
+`# desktop-connector:config-id=<config_dir.name>` marker alongside the
+existing `MANAGED_SENTINEL` and `PAIRING_ID_PREFIX`. Both the cleanup
+pass and the write-collision check honour ownership: a managed entry
+whose marker doesn't match the current `config_dir.name` is left alone
+(even if it would otherwise look stale), and the write pass refuses to
+clobber such an entry with `skip_other_config_collision`. Pre-fix
+unmarked managed entries (and unmarked legacy "Send to Phone" scripts)
+are treated as canonical-owned: only the canonical install
+(`config_dir.name == "desktop-connector"`, the XDG default) adopts and
+rewrites them with the marker on first sync; alternate-config installs
+leave them untouched.
+
+**Alternatives.** (a) Skip `sync_file_manager_targets` entirely on
+non-default config dirs — one-line change, but loses multi-profile
+support for power users running e.g. AppImage + dev-tree side by side
+with their own paired phones. (b) Add a `--no-file-manager-sync` flag
+used only by the harness — same shape as the
+`DC_KEYRING_SERVICE` mistake the rule above warns against (easy to
+forget, leaves shared-state damage as the failure mode). (c) The
+config-id marker — chosen — costs one comment line per script and
+keeps multi-profile working correctly.
+
+**Anchor.** `desktop/src/file_manager_integration.py`:
+`CONFIG_ID_PREFIX`, `_config_marker`, `_owns`, `_extract_config_id`;
+the cleanup ownership gate and the collision refusal in
+`_sync_script_dir` and `_sync_dolphin_service`. Tests:
+`tests/protocol/test_desktop_file_manager_integration.py`
+`FileManagerCrossConfigIsolationTests`.
+
 ### 2026-05-06 — Folders tab dispatches via a VaultRuntime, not raw Vault.* calls
 
 **Status:** accepted.
