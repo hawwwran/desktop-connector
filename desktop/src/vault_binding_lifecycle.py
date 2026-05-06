@@ -34,6 +34,13 @@ from .vault_bindings import VaultBinding, VaultBindingsStore
 log = logging.getLogger(__name__)
 
 
+# F-Y30: cap per-op audit lines emitted on disconnect to keep the
+# rotating local log readable when a binding has thousands of pending
+# ops queued. The cap is high enough that real-world queues
+# (watcher-driven, 5-minute window) emit every op verbatim.
+DISCONNECT_AUDIT_LOG_CAP = 200
+
+
 # ---------------------------------------------------------------------------
 # F-Y08 — cooperative cancellation primitives
 # ---------------------------------------------------------------------------
@@ -148,8 +155,10 @@ def pause_binding(
     """
     binding = _require_binding(store, binding_id)
     if binding.state == "paused":
+        # F-Y24: event name already encodes the noop; drop the redundant
+        # already_paused suffix so the field set matches the catalog.
         log.info(
-            "vault.sync.binding_pause_noop binding=%s already_paused",
+            "vault.sync.binding_pause_noop binding=%s",
             binding_id,
         )
         if cancellation is not None:
@@ -197,8 +206,9 @@ def resume_binding(
     """
     binding = _require_binding(store, binding_id)
     if binding.state == "bound":
+        # F-Y24: event name already encodes the noop.
         log.info(
-            "vault.sync.binding_resume_noop binding=%s already_bound",
+            "vault.sync.binding_resume_noop binding=%s",
             binding_id,
         )
         flushed = flush(binding) if flush is not None else None
@@ -257,8 +267,9 @@ def disconnect_binding(
     """
     binding = _require_binding(store, binding_id)
     if binding.state == "unbound":
+        # F-Y24: event name already encodes the noop.
         log.info(
-            "vault.sync.binding_disconnect_noop binding=%s already_unbound",
+            "vault.sync.binding_disconnect_noop binding=%s",
             binding_id,
         )
         if cancellation is not None:
@@ -276,6 +287,24 @@ def disconnect_binding(
             )
     local_count = len(store.list_local_entries(binding_id))
     pending = store.list_pending_ops(binding_id)
+    # F-Y30: per-op audit trail for what disconnect drops. With a 200-op
+    # queue this prints 200 lines into the rotating local log — that's
+    # acceptable; the alternative is a "dropped 200 ops" summary that
+    # gives the user no recourse if a specific op was important. Capped
+    # at DISCONNECT_AUDIT_LOG_CAP to keep log volume sane in pathological
+    # cases; the summary line below records the full count regardless.
+    for op in pending[:DISCONNECT_AUDIT_LOG_CAP]:
+        log.info(
+            "vault.sync.binding_disconnect_dropping_op binding=%s "
+            "op_type=%s path=%s attempts=%d",
+            binding_id, op.op_type, op.relative_path, op.attempts,
+        )
+    if len(pending) > DISCONNECT_AUDIT_LOG_CAP:
+        log.info(
+            "vault.sync.binding_disconnect_dropping_op_truncated binding=%s "
+            "logged=%d total=%d",
+            binding_id, DISCONNECT_AUDIT_LOG_CAP, len(pending),
+        )
     for op in pending:
         store.delete_pending_op(op.op_id)
     store.update_binding_state(binding_id, state="unbound")

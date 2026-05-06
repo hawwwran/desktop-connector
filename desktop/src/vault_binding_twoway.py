@@ -375,6 +375,19 @@ def _apply_remote_delete(
     """
     if local_entry is None:
         # We never knew about it — leave the local filesystem alone.
+        # F-Y31: surface a warning when a local file *does* exist at the
+        # tombstoned path even though we have no local-entry row. This
+        # can happen when baseline missed the path (e.g. a transient
+        # tombstone-then-restore cycle that elided the entry from the
+        # then-live manifest snapshot). The right action isn't auto-trash
+        # (we can't tell whether the user has an unsaved local-only
+        # change there) — surface it so an operator can reconcile.
+        if target.is_file():
+            log.warning(
+                "vault.sync.twoway_orphan_local_for_remote_tombstone "
+                "binding=%s path=%s",
+                binding.binding_id, relative,
+            )
         return None
     if not target.is_file():
         # Local file already gone; just clear the entry row.

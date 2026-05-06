@@ -329,6 +329,66 @@ class TwoWayCycleTests(unittest.TestCase):
                       f"conflict copy not present in remote: {remote_paths}")
 
     # ------------------------------------------------------------------
+    # F-Y31 — remote tombstone with orphan local file: warn, don't trash
+    # ------------------------------------------------------------------
+
+    def test_remote_tombstone_with_orphan_local_file_warns_and_keeps_local(self) -> None:
+        """A local file that exists on disk at a tombstoned path but has
+        no ``vault_local_entries`` row (e.g. baseline missed it during a
+        transient tombstone-then-restore) must NOT be auto-trashed —
+        the engine can't tell whether the user has unsaved local-only
+        edits there. Surface the orphan via warning so an operator can
+        reconcile.
+        """
+        relay, manifest = self._empty_remote()
+        manifest = self._seed_remote_file(
+            relay, manifest, path="orphan.txt", content=b"original",
+        )
+        binding = self._make_two_way_binding(
+            last_revision=int(manifest["revision"]) - 1,
+        )
+        # Plant a local file WITHOUT a corresponding local-entry row.
+        target = self.local_root / "orphan.txt"
+        target.write_bytes(b"locally-present-but-unknown")
+        self.assertIsNone(
+            self.store.get_local_entry(binding.binding_id, "orphan.txt")
+        )
+        manifest = self._tombstone_remote_file(
+            relay, manifest, path="orphan.txt",
+        )
+
+        vault = _vault()
+        try:
+            with self.assertLogs(
+                "src.vault_binding_twoway", level="WARNING"
+            ) as cm:
+                run_two_way_cycle(
+                    vault=vault, relay=relay,
+                    store=self.store, binding=binding,
+                    author_device_id=THIS_DEVICE,
+                    device_name=DEVICE_NAME,
+                )
+        finally:
+            vault.close()
+
+        # File survives untouched — the engine can't tell what to do.
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), b"locally-present-but-unknown")
+        # No phantom local-entry row was created either.
+        self.assertIsNone(
+            self.store.get_local_entry(binding.binding_id, "orphan.txt")
+        )
+        # And the warning was emitted so an operator can spot the orphan.
+        self.assertTrue(
+            any(
+                "twoway_orphan_local_for_remote_tombstone" in line
+                and "orphan.txt" in line
+                for line in cm.output
+            ),
+            cm.output,
+        )
+
+    # ------------------------------------------------------------------
     # T12.1.D — remote tombstone vs local-modified: keep local + push it back
     # ------------------------------------------------------------------
 

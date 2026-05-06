@@ -422,6 +422,7 @@ relay log (filenames are local-only).
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
 | `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
 | `vault.migration.committed` | desktop | info | `vault`, `source`, `target` | F-510 — relay migration commit landed; Activity-tab "Relay migration committed" anchor |
+| `vault.migration.rollback_verified` | desktop | info | `vault`, `target` | F-C21 — `verified → idle` rollback helper invoked; state file cleared |
 | `vault.migration.verify.chunk_aead_failed` | desktop | warning | `chunk`, `error` | F-C05 — chunk failed AEAD during sample |
 | `vault.migration.verify.chunk_fetch_failed` | desktop | warning | `chunk`, `error` | F-C05 — relay get_chunk failed during sample |
 | `vault.migration.verify.chunk_truncated` | desktop | warning | `chunk` | F-C05 — chunk too short to be a valid envelope |
@@ -444,6 +445,8 @@ relay log (filenames are local-only).
 | `vault.rotation.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when access-secret rotation logs through this surface (F-510) |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
 | `vault.sync.binding_disconnect_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — disconnect cancelled an in-flight cycle via the registry |
+| `vault.sync.binding_disconnect_dropping_op` | desktop | info | `binding`, `op_type`, `path`, `attempts` | F-Y30 — per-op audit trail emitted before disconnect drops a pending op |
+| `vault.sync.binding_disconnect_dropping_op_truncated` | desktop | info | `binding`, `logged`, `total` | F-Y30 — per-op audit log capped; summary follows on `binding_disconnected` |
 | `vault.sync.binding_disconnect_noop` | desktop | info | `binding` | Disconnect on already-unbound binding |
 | `vault.sync.binding_disconnected` | desktop | info | `binding`, `sync_mode`, `local_entries_preserved`, `pending_ops_dropped` | T12.5 disconnect |
 | `vault.sync.binding_pause_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — pause cancelled an in-flight cycle via the registry |
@@ -485,6 +488,7 @@ relay log (filenames are local-only).
 | `vault.sync.twoway_download_failed` | desktop | warning | `binding`, `path`, `error` | Two-way remote-upsert phase couldn't fetch file |
 | `vault.sync.twoway_folder_no_display_name` | desktop | warning | `binding`, `folder` | Two-way phase aborted; manifest folder lacked display name |
 | `vault.sync.twoway_local_fingerprint_unreadable` | desktop | warning | `binding`, `path` | F-Y04 — fingerprint failed; treated file as modified |
+| `vault.sync.twoway_orphan_local_for_remote_tombstone` | desktop | warning | `binding`, `path` | F-Y31 — local file exists at a tombstoned path with no local-entry row; not auto-trashed (operator reconcile) |
 | `vault.sync.twoway_phase_a_cancelled` | desktop | info | `binding`, `processed` | F-Y08 — Phase A (apply remote → local) bailed mid-folder |
 | `vault.sync.twoway_remote_tombstone_applied` | desktop | info | `binding`, `path` | Local file trashed after remote-tombstone applied (unmodified case) |
 | `vault.sync.twoway_remote_tombstone_kept_local_modified` | desktop | info | `binding`, `path` | Local edits preserved over remote tombstone (re-upload re-enqueued) |

@@ -334,5 +334,152 @@ class _FakeRelay:
         return {"manifest_revision": 0, "manifest_ciphertext": b"", "manifest_hash": ""}
 
 
+class CatalogConsistencyTests(unittest.TestCase):
+    """F-Y24 polish — the noop log lines (binding_pause_noop /
+    binding_resume_noop / binding_disconnect_noop) used to emit a
+    trailing ``already_paused`` / ``already_bound`` / ``already_unbound``
+    token beyond the documented ``binding`` field set. The event name
+    already encodes the noop fact, so the suffix was redundant — and a
+    silent divergence from the diagnostics catalog. These tests pin the
+    field set so a future contributor noticing the line and "fixing" it
+    by re-adding the suffix trips the assertion.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_lifecycle_logs_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.index = VaultLocalIndex(self.tmpdir / "config")
+        self.store = VaultBindingsStore(self.index.db_path)
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_binding(self, *, state: str, sync_mode: str = "two-way"):
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id, state=state, sync_mode=sync_mode,
+            last_synced_revision=0,
+        )
+        return binding.binding_id
+
+    def test_pause_noop_log_line_has_only_binding_field(self) -> None:
+        bid = self._make_binding(state="paused")
+        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+            pause_binding(self.store, bid)
+        noop = [ln for ln in cm.output if "binding_pause_noop" in ln]
+        self.assertEqual(len(noop), 1, cm.output)
+        self.assertNotIn("already_paused", noop[0])
+
+    def test_resume_noop_log_line_has_only_binding_field(self) -> None:
+        bid = self._make_binding(state="bound")
+        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+            resume_binding(self.store, bid, flush=None)
+        noop = [ln for ln in cm.output if "binding_resume_noop" in ln]
+        self.assertEqual(len(noop), 1, cm.output)
+        self.assertNotIn("already_bound", noop[0])
+
+    def test_disconnect_noop_log_line_has_only_binding_field(self) -> None:
+        bid = self._make_binding(state="unbound")
+        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+            disconnect_binding(self.store, bid)
+        noop = [ln for ln in cm.output if "binding_disconnect_noop" in ln]
+        self.assertEqual(len(noop), 1, cm.output)
+        self.assertNotIn("already_unbound", noop[0])
+
+
+class DisconnectAuditTrailTests(unittest.TestCase):
+    """F-Y30 polish — disconnect drops every pending op silently before
+    landing the summary line. For a user with 200 queued uploads losing
+    the per-op audit trail eliminates any forensic recourse. Per-op log
+    lines now bracket the deletion loop, capped at
+    ``DISCONNECT_AUDIT_LOG_CAP`` to keep volume sane on pathological
+    queues.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_disconnect_audit_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.index = VaultLocalIndex(self.tmpdir / "config")
+        self.store = VaultBindingsStore(self.index.db_path)
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _make_bound_with_pending(self, *, n_ops: int) -> str:
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id, state="bound", sync_mode="two-way",
+        )
+        for i in range(n_ops):
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=f"pending-{i:03d}.txt",
+            )
+        return binding.binding_id
+
+    def test_each_pending_op_logs_an_audit_line(self) -> None:
+        bid = self._make_bound_with_pending(n_ops=3)
+        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+            disconnect_binding(self.store, bid)
+
+        audit = [
+            ln for ln in cm.output
+            if "binding_disconnect_dropping_op" in ln
+            and "binding_disconnect_dropping_op_truncated" not in ln
+        ]
+        self.assertEqual(len(audit), 3, cm.output)
+        for i in range(3):
+            self.assertTrue(
+                any(f"pending-{i:03d}.txt" in ln for ln in audit),
+                f"missing per-op audit line for pending-{i:03d}.txt: {audit}",
+            )
+        # The summary line still records the full count.
+        summary = [ln for ln in cm.output if "binding_disconnected " in ln]
+        self.assertEqual(len(summary), 1, cm.output)
+        self.assertIn("pending_ops_dropped=3", summary[0])
+
+    def test_audit_log_caps_at_DISCONNECT_AUDIT_LOG_CAP(self) -> None:
+        from src.vault_binding_lifecycle import DISCONNECT_AUDIT_LOG_CAP
+        n = DISCONNECT_AUDIT_LOG_CAP + 5
+        bid = self._make_bound_with_pending(n_ops=n)
+        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+            disconnect_binding(self.store, bid)
+
+        audit = [
+            ln for ln in cm.output
+            if "binding_disconnect_dropping_op " in ln
+        ]
+        truncated = [
+            ln for ln in cm.output
+            if "binding_disconnect_dropping_op_truncated" in ln
+        ]
+        self.assertEqual(len(audit), DISCONNECT_AUDIT_LOG_CAP, cm.output)
+        self.assertEqual(len(truncated), 1, cm.output)
+        # Summary line still has the full count.
+        summary = [ln for ln in cm.output if "binding_disconnected " in ln]
+        self.assertIn(f"pending_ops_dropped={n}", summary[0])
+
+
 if __name__ == "__main__":
     unittest.main()
