@@ -18,7 +18,7 @@ from .brand import (
 )
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import list_folder, list_versions
-from .vault_cache import VaultLocalIndex
+from .vault_local_index import VaultLocalIndex
 from .vault_download import previous_version_filename
 from .vault_error_messages import humanize
 from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError

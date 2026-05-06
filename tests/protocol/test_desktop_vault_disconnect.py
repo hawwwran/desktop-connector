@@ -14,7 +14,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.config import Config  # noqa: E402
-from src.vault_local import disconnect_local_vault  # noqa: E402
+from src.vault_local_state import disconnect_local_vault  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"

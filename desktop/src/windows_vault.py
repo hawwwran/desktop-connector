@@ -266,7 +266,7 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
             try:
                 from datetime import datetime, timezone
                 from .vault import recovery_envelope_meta_from_json, vault_id_dashed
-                from .vault_local import run_recovery_material_test
+                from .vault_local_state import run_recovery_material_test
 
                 # F-U17: ``Adw.Dialog`` (libadwaita 1.5+) replaces the
                 # old ``Adw.ApplicationWindow`` shape so the recovery
@@ -747,7 +747,7 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
                 try:
                     config.reload()
                     config_dump = dict(config._data)
-                    from .vault_cache import VaultLocalIndex
+                    from .vault_local_index import VaultLocalIndex
                     local_index = VaultLocalIndex(config_dir)
                     activity_log = config_dir / "logs" / "vault.log"
                     out = write_debug_bundle(
@@ -1083,7 +1083,7 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
             def on_resp(_dialog, response):
                 if response != "disconnect":
                     return
-                from .vault_local import disconnect_local_vault
+                from .vault_local_state import disconnect_local_vault
                 disconnect_local_vault(config)
                 win.close()
 
@@ -1145,7 +1145,7 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
         def _refresh_clear_folder_options() -> None:
             """Rebuild the folder dropdown from the local vault manifest cache."""
             try:
-                from .vault_cache import VaultLocalIndex
+                from .vault_local_index import VaultLocalIndex
                 local_index = VaultLocalIndex(config_dir)
                 folders = (
                     local_index.list_remote_folders(vault_id_undashed)

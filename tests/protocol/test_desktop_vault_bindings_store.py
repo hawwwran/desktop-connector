@@ -23,7 +23,7 @@ from src.vault_bindings import (  # noqa: E402
     VaultLocalEntry,
     generate_binding_id,
 )
-from src.vault_cache import VaultLocalIndex  # noqa: E402
+from src.vault_local_index import VaultLocalIndex  # noqa: E402
 
 
 class VaultBindingsSchemaTests(unittest.TestCase):

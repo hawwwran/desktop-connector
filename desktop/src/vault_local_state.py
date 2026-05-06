@@ -89,13 +89,13 @@ def _purge_cached_resume_state(vault_id: str) -> None:
             try:
                 session_path.unlink()
                 log.info(
-                    "vault_local.disconnect_dropped_resume_session "
+                    "vault_local_state.disconnect_dropped_resume_session "
                     "session=%s vault=%s",
                     session.session_id, vault_id,
                 )
             except OSError as exc:
                 log.warning(
-                    "vault_local.disconnect_resume_session_unlink_failed "
+                    "vault_local_state.disconnect_resume_session_unlink_failed "
                     "session=%s error=%s",
                     session.session_id, exc,
                 )
@@ -112,12 +112,12 @@ def _purge_cached_resume_state(vault_id: str) -> None:
         try:
             shutil.rmtree(chunk_root)
             log.info(
-                "vault_local.disconnect_chunk_cache_purged vault=%s",
+                "vault_local_state.disconnect_chunk_cache_purged vault=%s",
                 vault_id,
             )
         except OSError as exc:
             log.warning(
-                "vault_local.disconnect_chunk_cache_purge_failed "
+                "vault_local_state.disconnect_chunk_cache_purge_failed "
                 "vault=%s error=%s",
                 vault_id, exc,
             )
@@ -159,7 +159,7 @@ def disconnect_local_vault(
         except FileNotFoundError:
             pass
         except Exception as exc:
-            log.warning("vault_local.disconnect_state_file_delete_failed file=%s error=%s", name, exc)
+            log.warning("vault_local_state.disconnect_state_file_delete_failed file=%s error=%s", name, exc)
 
     # F-D26: scrub upload resume sessions + per-vault chunk cache so a
     # later reconnect (same id or different) doesn't resurrect dead
@@ -169,7 +169,7 @@ def disconnect_local_vault(
             _purge_cached_resume_state(vault_id)
         except Exception as exc:  # noqa: BLE001
             log.warning(
-                "vault_local.disconnect_cache_purge_failed vault=%s error=%s",
+                "vault_local_state.disconnect_cache_purge_failed vault=%s error=%s",
                 vault_id, exc,
             )
 

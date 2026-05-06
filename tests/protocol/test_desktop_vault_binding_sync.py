@@ -23,7 +23,7 @@ from src.vault_binding_sync import (  # noqa: E402
     run_backup_only_cycle,
 )
 from src.vault_bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
-from src.vault_cache import VaultLocalIndex  # noqa: E402
+from src.vault_local_index import VaultLocalIndex  # noqa: E402
 from src.vault_crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault_manifest import (  # noqa: E402
     make_manifest,

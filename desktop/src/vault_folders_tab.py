@@ -23,7 +23,7 @@ from gi.repository import Gtk, Adw, GLib, Pango
 from .vault_binding_lifecycle import BindingCancellationRegistry
 from .vault_binding_sync import format_sync_outcome_toast
 from .vault_bindings import VaultBindingsStore
-from .vault_cache import VaultLocalIndex
+from .vault_local_index import VaultLocalIndex
 from .vault_connect_folder_dialog import present_connect_folder_dialog
 from .vault_error_messages import humanize
 from .vault_folder_actions import (

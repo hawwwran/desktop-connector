@@ -1078,7 +1078,7 @@ class TrayApp:
             try:
                 from .vault_runtime_watchers import VaultWatcherRuntime
                 from .vault_bindings import VaultBindingsStore
-                from .vault_cache import VaultLocalIndex
+                from .vault_local_index import VaultLocalIndex
                 vault_id = str(
                     self.config._data.get("vault", {}).get("last_known_id") or ""
                 )

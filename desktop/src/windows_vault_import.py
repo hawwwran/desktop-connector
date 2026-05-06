@@ -29,7 +29,7 @@ from .brand import (
     apply_theme_mode_from_config_dir,
 )
 from .vault_binding_lifecycle import SyncCancelledError
-from .vault_cache import VaultLocalIndex
+from .vault_local_index import VaultLocalIndex
 from .vault_error_messages import humanize
 from .vault_export import ExportError
 from .vault_export_reminder import normalize_cadence
