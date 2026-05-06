@@ -205,7 +205,15 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
             wrap=True,
         )
         recovery_warning.add_css_class("warning")
-        recovery_warning.set_visible(recovery_status_text in ("Untested", "Stale"))
+        # The "Recovery has not been tested" nag only makes sense when a
+        # vault is actually loaded — without one there's nothing to
+        # recover, so an orange CTA reads as an action the user can't
+        # take. Empty state suppresses the warning; loaded state shows
+        # it whenever recovery hasn't been verified for THIS vault.
+        recovery_warning.set_visible(
+            bool(vault_id_undashed)
+            and recovery_status_text in ("Untested", "Stale")
+        )
         recovery.append(recovery_warning)
 
         # F-501.5: Export reminder banner. Driven by
@@ -274,7 +282,10 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
             recovery_value_labels["Status"].set_label(status)
             if last_tested is not None:
                 recovery_value_labels["Last tested"].set_label(last_tested)
-            recovery_warning.set_visible(status in ("Untested", "Stale"))
+            recovery_warning.set_visible(
+                bool(vault_id_undashed)
+                and status in ("Untested", "Stale")
+            )
 
         def open_recovery_test_dialog(_btn):
             log.info(

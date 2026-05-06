@@ -127,9 +127,14 @@ class VaultDisconnectSourceTests(unittest.TestCase):
 
     def test_recovery_test_refreshes_open_settings_window(self) -> None:
         for text in (
-            "recovery_warning.set_visible(recovery_status_text in (\"Untested\", \"Stale\"))",
+            # The "untested / stale" gate decides when the orange
+            # recovery-warning banner shows; the vault-presence gate
+            # added 2026-05-06 suppresses the banner on the empty
+            # state where there's nothing to recover.
+            "bool(vault_id_undashed)",
+            'recovery_status_text in ("Untested", "Stale")',
             "def refresh_recovery_summary(status: str, last_tested: str | None = None) -> None:",
-            "recovery_warning.set_visible(status in (\"Untested\", \"Stale\"))",
+            'status in ("Untested", "Stale")',
             'config._data["vault"]["recovery_last_tested"] = now',
             'refresh_recovery_summary("Verified", now)',
             'refresh_recovery_summary("Failed", now)',
