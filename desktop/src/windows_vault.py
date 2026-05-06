@@ -312,6 +312,12 @@ def show_vault_main(config_dir: Path):
                     editable=False,
                     hexpand=True,
                 )
+                # F-U10: placeholder text is *not* an accessible name. Bind
+                # an explicit Gtk.Accessible label so AT-SPI / dogtail can
+                # find these widgets by description rather than role only.
+                kit_entry.update_property(
+                    [Gtk.AccessibleProperty.LABEL], ["Recovery kit file path"],
+                )
                 kit_row.append(kit_entry)
                 browse_btn = Gtk.Button(label="Choose...", css_classes=["pill"])
                 kit_row.append(browse_btn)
@@ -320,14 +326,24 @@ def show_vault_main(config_dir: Path):
                 vault_id_entry = Gtk.Entry(hexpand=True)
                 vault_id_entry.set_text(vault_id_dashed(vault_id_undashed) if vault_id_undashed else "")
                 vault_id_entry.set_placeholder_text("Vault ID")
+                vault_id_entry.update_property(
+                    [Gtk.AccessibleProperty.LABEL], ["Vault ID"],
+                )
                 extra.append(vault_id_entry)
 
                 extra.append(Gtk.Label(label="Recovery passphrase", xalign=0))
                 passphrase_entry = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
+                passphrase_entry.update_property(
+                    [Gtk.AccessibleProperty.LABEL], ["Recovery passphrase"],
+                )
                 extra.append(passphrase_entry)
 
                 wipe_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
                 wipe_switch = Gtk.Switch(valign=Gtk.Align.CENTER)
+                wipe_switch.update_property(
+                    [Gtk.AccessibleProperty.LABEL],
+                    ["Securely delete the recovery kit file after a successful test"],
+                )
                 wipe_row.append(wipe_switch)
                 wipe_label = Gtk.Label(
                     label="Securely delete the recovery kit file after a successful test",
@@ -338,6 +354,25 @@ def show_vault_main(config_dir: Path):
                 wipe_label.add_css_class("dim-label")
                 wipe_row.append(wipe_label)
                 extra.append(wipe_row)
+                # F-U09: prominent loss warning. The dim-label above
+                # describes the action; this warning forces the user to
+                # confront that a wipe is irreversible — without another
+                # copy of the kit, the vault is unrecoverable. Per
+                # `feedback_security_ux.md`, security-impacting toggles
+                # must surface a visible loss warning, not bury it in
+                # the description.
+                wipe_warning = Gtk.Label(
+                    label=(
+                        "⚠ Wipes the chosen file from disk after a successful test. "
+                        "Make sure you have another copy of the kit (e.g. in a "
+                        "password manager) — without it AND your passphrase, the "
+                        "vault becomes permanently unrecoverable."
+                    ),
+                    xalign=0,
+                    wrap=True,
+                )
+                wipe_warning.add_css_class("warning")
+                extra.append(wipe_warning)
 
                 status_label = Gtk.Label(xalign=0, wrap=True)
                 status_label.add_css_class("dim-label")
@@ -1505,15 +1540,21 @@ def show_vault_onboard(config_dir: Path):
     """Vault create / import wizard (T3.6).
 
     Two paths: 'Create new vault' (full M1 flow) and 'Import from
-    export' (stubbed for T8). The create flow walks:
+    export' (the import wizard launches via :mod:`windows_vault_import`
+    and lives in its own subprocess). The create flow walks:
         1. relay picker (uses the existing ``server_url`` if set)
         2. recovery passphrase entry + confirm
         3. recovery-test prompt with Skip option
         4. success screen
 
-    Per §A2: cancelling without an existing vault flips
-    ``Config.vault_active`` to False so the user isn't permanently
-    nagged.
+    Cancel behaviour (revised 2026-05-03 vs T0 §A2): cancelling never
+    flips ``Config.vault_active``. The toggle stays where the user put
+    it. The wizard does, however, scrub its own partial state — see
+    :func:`vault_ui_state.wizard_cancel_rule` for the rationale and
+    :func:`on_close` below for the per-phase cleanup
+    (grant_saved-but-not-published artifacts get reaped; in-memory
+    secrets are zeroed; the optional "delete kit after close" toggle
+    runs the shredder).
     """
     from .config import Config
     from .vault_ui_state import wizard_cancel_rule
@@ -1783,6 +1824,14 @@ def show_vault_onboard(config_dir: Path):
         delete_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         ok.append(delete_row)
         delete_switch = Gtk.Switch(valign=Gtk.Align.CENTER, sensitive=False)
+        # F-U10: AT-SPI accessible name. The success screen's top warning
+        # already covers the user-loss case, so no separate F-U09-style
+        # warning here — but the switch still needs a label string so
+        # AT-SPI tools find it by description, not just by role.
+        delete_switch.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Securely delete the exported recovery kit file when this wizard closes"],
+        )
         delete_row.append(delete_switch)
         delete_label = Gtk.Label(
             xalign=0, wrap=True, hexpand=True,

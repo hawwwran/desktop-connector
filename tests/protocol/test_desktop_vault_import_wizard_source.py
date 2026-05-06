@@ -1,4 +1,11 @@
-"""T8.5 source pins for the Vault import wizard."""
+"""T8.5 source pins for the Vault import wizard.
+
+Source-pin file (one of five). See
+``test_desktop_vault_browser_source`` for the policy: these greppers
+catch UI-string regressions only — import-flow correctness is
+covered by ``test_desktop_vault_import`` + the ``vault_import``
+unit tests, not here.
+"""
 
 from __future__ import annotations
 

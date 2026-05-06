@@ -509,53 +509,137 @@ class VaultV1VectorsTests(unittest.TestCase):
                 with self.subTest(file=name, index=index, case=case.get("name", "?")):
                     _validate_case_shape(name, index, case)
 
+    # F-T20: per-primitive expected case-name pins. These are *exact*
+    # frozensets, not the prior ``assertGreaterEqual(N)`` floor. The
+    # floor caught "someone deleted enough cases to fall below N" but
+    # silently accepted "someone deleted a specific case and added an
+    # unrelated one to keep N steady". Pinning exact names traps the
+    # second pattern. To add a vector, append it to the JSON file AND
+    # add the name here in the same commit; the test failure message
+    # tells you exactly which side is out of sync.
+    EXPECTED_MANIFEST_V1_CASES = frozenset({
+        "manifest-v1-genesis-happy-path",
+        "manifest-v1-tombstone-only",
+        "manifest-v1-oplog-tail-with-archived-segments",
+        "manifest-v1-legacy-no-remote-folders",
+        "manifest-v1-t4-add-remote-folder",
+        "manifest-v1-t4-remove-remote-folder",
+        "manifest-v1-tampered-ciphertext",
+        "manifest-v1-wrong-aad-revision",
+        "manifest-v1-format-version-bumped",
+    })
+    EXPECTED_CHUNK_V1_CASES = frozenset({
+        "chunk-v1-small",
+        "chunk-v1-medium",
+        "chunk-v1-tampered-ciphertext",
+    })
+    EXPECTED_HEADER_V1_CASES = frozenset({
+        "header-v1-genesis",
+        "header-v1-revision-n",
+        "header-v1-tampered-revision-in-aad",
+        "header-v1-format-version-bumped",
+    })
+    EXPECTED_RECOVERY_V1_CASES = frozenset({
+        "recovery-v1-kit-plus-passphrase-happy",
+        "recovery-v1-wrong-passphrase",
+        "recovery-v1-tampered-ciphertext",
+        "recovery-v1-format-version-bumped",
+    })
+    EXPECTED_DEVICE_GRANT_V1_CASES = frozenset({
+        "device-grant-v1-read-only",
+        "device-grant-v1-browse-upload",
+        "device-grant-v1-sync",
+        "device-grant-v1-admin",
+        "device-grant-v1-tampered-claimant-id-in-aad",
+        "device-grant-v1-format-version-bumped",
+    })
+    EXPECTED_EXPORT_BUNDLE_V1_CASES = frozenset({
+        "export-v1-outer-and-wrapped-key",
+        "export-v1-wrong-passphrase",
+        "export-v1-tampered-wrapped-key",
+        "export-v1-format-version-bumped",
+    })
+    EXPECTED_CONTENT_FINGERPRINT_V1_CASES = frozenset({
+        "content-fingerprint-v1-happy-path",
+        "content-fingerprint-v1-empty-plaintext",
+    })
+
+    def _assert_case_names(
+        self, file_name: str, cases: list, expected: frozenset,
+    ) -> None:
+        actual = {case["name"] for case in cases}
+        self.assertEqual(
+            actual, expected,
+            f"F-T20: {file_name} case-name set drifted. "
+            f"Missing in JSON: {expected - actual!r}; "
+            f"unexpected in JSON: {actual - expected!r}. "
+            "Update both the JSON file and the EXPECTED_*_CASES "
+            "frozenset in the same commit.",
+        )
+
     def test_manifest_v1_cases_round_trip_byte_exact(self) -> None:
         cases = _load_cases("manifest_v1.json")
-        self.assertGreaterEqual(len(cases), 5,
-            "T2.2 requires at least 5 manifest cases (happy / tombstone / "
-            "op-log-with-archived / tampered / wrong-AAD)")
+        self._assert_case_names(
+            "manifest_v1.json", cases, self.EXPECTED_MANIFEST_V1_CASES,
+        )
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_manifest_case(self, case)
 
     def test_chunk_v1_cases(self) -> None:
         cases = _load_cases("chunk_v1.json")
-        self.assertGreaterEqual(len(cases), 3, "T2.3 requires ≥ 3 chunk cases")
+        self._assert_case_names(
+            "chunk_v1.json", cases, self.EXPECTED_CHUNK_V1_CASES,
+        )
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_chunk_case(self, case)
 
     def test_header_v1_cases(self) -> None:
         cases = _load_cases("header_v1.json")
-        self.assertGreaterEqual(len(cases), 3, "T2.3 requires ≥ 3 header cases")
+        self._assert_case_names(
+            "header_v1.json", cases, self.EXPECTED_HEADER_V1_CASES,
+        )
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_header_case(self, case)
 
     def test_recovery_envelope_v1_cases(self) -> None:
         cases = _load_cases("recovery_envelope_v1.json")
-        self.assertGreaterEqual(len(cases), 3, "T2.3 requires ≥ 3 recovery cases")
+        self._assert_case_names(
+            "recovery_envelope_v1.json", cases,
+            self.EXPECTED_RECOVERY_V1_CASES,
+        )
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_recovery_case(self, case)
 
     def test_device_grant_v1_cases(self) -> None:
         cases = _load_cases("device_grant_v1.json")
-        self.assertGreaterEqual(len(cases), 3, "T2.3 requires ≥ 3 device-grant cases")
+        self._assert_case_names(
+            "device_grant_v1.json", cases,
+            self.EXPECTED_DEVICE_GRANT_V1_CASES,
+        )
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_device_grant_case(self, case)
 
     def test_export_bundle_v1_cases(self) -> None:
         cases = _load_cases("export_bundle_v1.json")
-        self.assertGreaterEqual(len(cases), 3, "T2.3 requires ≥ 3 export cases")
+        self._assert_case_names(
+            "export_bundle_v1.json", cases,
+            self.EXPECTED_EXPORT_BUNDLE_V1_CASES,
+        )
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_export_case(self, case)
 
     def test_content_fingerprint_v1_cases(self) -> None:
         cases = _load_cases("content_fingerprint_v1.json")
-        self.assertGreaterEqual(len(cases), 1, "≥ 1 content_fingerprint case")
+        self._assert_case_names(
+            "content_fingerprint_v1.json", cases,
+            self.EXPECTED_CONTENT_FINGERPRINT_V1_CASES,
+        )
         for case in cases:
             with self.subTest(case=case["name"]):
                 _run_content_fingerprint_case(self, case)

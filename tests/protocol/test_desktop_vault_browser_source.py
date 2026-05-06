@@ -1,4 +1,28 @@
-"""T5.1 source pins for the Vault browser GTK entry point."""
+"""T5.1 source pins for the Vault browser GTK entry point.
+
+This is one of five ``*_source.py`` files in ``tests/protocol/``
+that are deliberately *source-text greppers*, not behavioural tests.
+They open the GTK4 module on disk and assert that specific UI strings
+or import lines appear in it. Per F-T08 (slice 07 review):
+
+- **Scope**: anti-regression for UI strings + import sites that the
+  Maintenance / Folders / Browser / Wizard / Disconnect surfaces
+  rely on. If someone renames "Open Vault…" to "Browse vault" or
+  drops the ``upload_file`` import, this file fails immediately.
+- **Not coverage**: these tests neither construct the widgets nor
+  drive them. Behavioural correctness for the underlying logic
+  lives in ``test_desktop_vault_*.py`` (no ``_source`` suffix) —
+  those exercise the data layer with real fixtures.
+- **Why keep them**: GTK4 widgets cannot be instantiated headlessly
+  in CI without a display server, and dogtail-driven smoke tests
+  need a Wayland session. Source-pinning is the cheapest layer that
+  catches the specific class of regressions UI work introduces.
+
+Take any failure here as: "the UI was structurally edited; review
+the change to confirm the affected surface still does what these
+strings advertise". Don't add behavioural assertions to these
+files — extend the matching ``test_desktop_vault_*.py`` instead.
+"""
 
 from __future__ import annotations
 

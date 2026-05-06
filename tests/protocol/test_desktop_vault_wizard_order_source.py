@@ -10,6 +10,13 @@ Order required:
     2. save_local_vault_grant(...)   # local
     3. vault.publish_initial(relay)  # first relay write
     4. config.save()                 # last_known_id + envelope meta
+
+Source-pin file (one of five). See
+``test_desktop_vault_browser_source`` for the policy: these greppers
+catch UI-string and call-order regressions only — wizard-flow
+correctness (state transitions, cancel handling, secret zeroing) is
+covered by ``test_desktop_vault_wizard`` + the surrounding unit
+tests, not here.
 """
 
 from __future__ import annotations

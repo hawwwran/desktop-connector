@@ -4,6 +4,15 @@ Acceptance: create vault → close → reopen with passphrase → manifest
 decrypts. We use a fake in-memory relay so the test doesn't need a
 real PHP server, and reduced-cost Argon2id (8 MiB / 2 iterations) so
 the suite stays fast.
+
+**Intent (F-T19 follow-up).** This file is *not* a re-export shell —
+it owns the canonical end-to-end Vault domain-class tests
+(`VaultRoundTripTests`, `VaultPrepareThenPublishTests`). Per-feature
+files (``test_desktop_vault_<feature>.py``) cover their own narrower
+seams (passphrase wordlist, sync engine, grants, import wizard, …)
+without duplicating the round-trip here. If you're tempted to add a
+new round-trip case, prefer extending one of the existing classes
+in this file rather than starting a parallel feature module.
 """
 
 from __future__ import annotations

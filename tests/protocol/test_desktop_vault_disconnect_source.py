@@ -1,4 +1,11 @@
-"""Source checks for the Vault settings disconnect action."""
+"""Source checks for the Vault settings disconnect action.
+
+Source-pin file (one of five). See
+``test_desktop_vault_browser_source`` for the policy: these greppers
+catch UI-string regressions only — disconnect-flow correctness is
+covered by ``test_desktop_vault_disconnect`` and the
+``vault_grant`` unit tests, not here.
+"""
 
 from __future__ import annotations
 

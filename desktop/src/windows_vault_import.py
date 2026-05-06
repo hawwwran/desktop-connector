@@ -104,6 +104,14 @@ def show_vault_import(config_dir: Path) -> None:
         file_row.add_suffix(pick_btn)
         pick_box.append(file_row)
 
+        # Single passphrase entry — no confirm field. The create wizard
+        # confirms because a typo there silently locks the user out of
+        # their own vault. Import is the inverse: the user is typing
+        # back a passphrase they already chose, and a typo just fails
+        # the bundle's AEAD with a visible "Bundle decryption failed"
+        # error. They retype and try again. A confirm field would add
+        # friction to the recovery path without preventing any
+        # silent-lockout class of error.
         passphrase_entry = Gtk.PasswordEntry(placeholder_text="Export passphrase")
         passphrase_entry.set_show_peek_icon(True)
         pick_box.append(passphrase_entry)

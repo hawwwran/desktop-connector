@@ -199,7 +199,15 @@ def show_vault_browser(config_dir: Path) -> None:
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
         outer.append(paned)
 
-        tree_scroller = Gtk.ScrolledWindow(min_content_width=220)
+        # F-U16: pane sizing on small windows. The tree column starts at
+        # 220 px (its natural width when the default 1040 × 680 window
+        # opens); ``min_content_width`` tells GtkScrolledWindow the
+        # *minimum* it should ask for, so the user (or window-shrink) can
+        # drag the divider all the way down to 160 px without the pane
+        # disappearing. ``set_shrink_start_child(True)`` lets a narrow
+        # parent shrink the child below its natural width, which is what
+        # the prior ``False`` blocked at small window sizes.
+        tree_scroller = Gtk.ScrolledWindow(min_content_width=160)
         tree_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=4,
@@ -211,12 +219,12 @@ def show_vault_browser(config_dir: Path) -> None:
         tree_scroller.set_child(tree_box)
         paned.set_start_child(tree_scroller)
         paned.set_resize_start_child(False)
-        paned.set_shrink_start_child(False)
+        paned.set_shrink_start_child(True)
 
         right = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         paned.set_end_child(right)
         paned.set_resize_end_child(True)
-        paned.set_shrink_end_child(False)
+        paned.set_shrink_end_child(True)
         paned.set_position(220)
 
         list_scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
@@ -233,9 +241,13 @@ def show_vault_browser(config_dir: Path) -> None:
         list_scroller.set_child(list_grid)
         right.set_start_child(list_scroller)
         right.set_resize_start_child(True)
-        right.set_shrink_start_child(False)
+        right.set_shrink_start_child(True)
 
-        detail_scroller = Gtk.ScrolledWindow(min_content_width=280)
+        # F-U16 (continued): detail pane shrinkable too. 200 px minimum
+        # keeps the detail metadata legible (timestamps + size + version
+        # buttons) while letting the file list claim the remaining space
+        # on narrow windows.
+        detail_scroller = Gtk.ScrolledWindow(min_content_width=200)
         detail_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=8,
@@ -247,7 +259,7 @@ def show_vault_browser(config_dir: Path) -> None:
         detail_scroller.set_child(detail_box)
         right.set_end_child(detail_scroller)
         right.set_resize_end_child(False)
-        right.set_shrink_end_child(False)
+        right.set_shrink_end_child(True)
         right.set_position(540)
 
         def set_status(message: str, css_class: str = "dim-label") -> None:

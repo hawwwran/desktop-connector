@@ -1,4 +1,11 @@
-"""Source pin for the T4.5 folder-rename dialog wiring."""
+"""Source pin for the T4.5 folder-rename dialog wiring.
+
+Source-pin file (one of five). See
+``test_desktop_vault_browser_source`` for the policy: these greppers
+catch UI-string regressions only — rename-flow correctness is
+covered by ``test_desktop_vault_folders_rename`` (no ``_source``
+suffix), not here.
+"""
 
 from __future__ import annotations
 
