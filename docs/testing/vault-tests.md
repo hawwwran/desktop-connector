@@ -483,28 +483,45 @@ line + keyring probe output.
 
 ---
 
-## Test 07 — Wrong-passphrase path is gated to the import / re-derive flow only
+## Test 07 — Wrong-passphrase rejection (BLOCKED in current build)
 
-**Goal**: negative path. The only legitimate code path that derives
-the master key from a passphrase is the **vault import** wizard
-(used when adding a known vault to a new device). A wrong passphrase
-there must produce a visible error and must not quietly succeed nor
-crash. There is no "Unlock" entry on `vault-main` (the daily flow
-opens the cached grant transparently).
+**Goal**: negative path. Verify a wrong passphrase against a
+stored AEAD envelope fails visibly.
 
-**Preconditions**: Test 06 PASS. Stop the dev instance for this test
-— we drive `vault-import` directly.
+**Status**: **BLOCKED** — no automation-drivable wrong-passphrase
+surface exists in today's build. See
+`temp/automation-tests-results/0002/test-07/result.md` for the full
+analysis. Summary:
 
-**Steps**:
-1. Launch `<kind>=vault-import`.
-2. Locate the export-passphrase entry in the dump tree (
-   `password text 'Export passphrase'`, see `windows_vault_import.py:120`).
-3. Type a deliberately wrong passphrase
-   (`zzzz wrong passphrase abc def ghi`).
-4. Trigger import. Wait 2 s (Argon2id is slow — leave headroom).
-5. Screenshot `01-wrong-passphrase-error.png`.
-6. Dump tree → save as `02-attree.txt`.
-7. Close window.
+- "Test recovery now" (vault-main → Recovery tab) needs a recovery
+  kit file on disk; the wizard's export step uses a native
+  `Gtk.FileDialog.save()` which AT-SPI dogtail can't reliably drive.
+- "Import from export…" in vault-onboard is disabled with the
+  literal label `(coming in T8)`.
+- `vault-import` handles `.dcvault` export bundles, not recovery
+  kits — different code path.
+- The onboard "Confirm passphrase" entry checks the two entries
+  match each other in memory, not against a stored AEAD envelope —
+  different invariant.
+
+**Unblock paths** (pick one; A is the right product fix):
+1. **A — add a "Re-export recovery kit" surface to vault-main.**
+   Closes a real product gap (a user who skipped Export at create
+   has no way to get a kit) AND unblocks this test.
+2. **B — land the T8 "Import from export…" / fresh-device-recovery
+   wizard.** Bigger scope.
+3. **C — harness-only `--export-recovery-kit=PATH` hook on the
+   onboard / settings entry.** Test-only surface gated by
+   `DESKTOP_CONNECTOR_TESTING=1`. Brittle (same shape as the
+   `DC_KEYRING_SERVICE` mistake).
+
+**When to revisit**: after option A or B lands. The test as
+written below was never run on the current build.
+
+~~**Preconditions**: Test 06 PASS. Stop the dev instance for this test
+— we drive `vault-import` directly.~~
+
+~~**Steps**:~~ (deferred — see unblock paths above)
 
 **Assertions**:
 - An error label/banner is visible (search dump tree for "Wrong",
@@ -525,9 +542,10 @@ opens the cached grant transparently).
 
 **Goal**: first state-creating action against an unlocked vault.
 
-**Preconditions**: Test 07 PASS. Restart the headless dev instance
-(test 06 step 1) so the keyring grant is loaded into the runtime;
-no passphrase prompt expected.
+**Preconditions**: Test 06 PASS (test 07 may be BLOCKED — see its
+notes). Restart the headless dev instance (test 06 step 1) so the
+keyring grant is loaded into the runtime; no passphrase prompt
+expected.
 
 **Steps**:
 1. Create a temp source folder:
