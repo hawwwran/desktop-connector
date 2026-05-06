@@ -1,9 +1,18 @@
-"""GTK builder for the Vault settings Folders tab."""
+"""GTK builder for the Vault settings Folders tab.
+
+F-518 (refactor): vault-mutation business logic now lives in
+:class:`vault_folder_runtime.VaultRuntime`. This module keeps GTK
+widget assembly + ``threading.Thread`` spawning + ``GLib.idle_add``
+result forwarding. The runtime owns the per-tab serialization lock
+(see F-517 for why that exists) and exposes named operations
+(``fetch_manifest``, ``add_remote_folder``, ``rename_remote_folder``,
+``flush_and_sync_binding``, ``run_initial_baseline``) so worker
+threads don't reach into ``Vault.*`` directly.
+"""
 
 from __future__ import annotations
 
 import threading
-from contextlib import contextmanager
 from pathlib import Path
 
 import gi
@@ -11,12 +20,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Pango
 
-from .vault_binding_baseline import run_initial_baseline
 from .vault_binding_lifecycle import BindingCancellationRegistry
-from .vault_binding_sync import (
-    flush_and_sync_binding,
-    format_sync_outcome_toast,
-)
+from .vault_binding_sync import format_sync_outcome_toast
 from .vault_bindings import VaultBindingsStore
 from .vault_cache import VaultLocalIndex
 from .vault_connect_folder_dialog import present_connect_folder_dialog
@@ -26,6 +31,7 @@ from .vault_folder_actions import (
     dispatch_pause,
     dispatch_resume,
 )
+from .vault_folder_runtime import VaultRuntime
 from .vault_folder_ui_state import (
     BINDING_COLUMNS,
     FOLDER_COLUMNS,
@@ -34,7 +40,6 @@ from .vault_folder_ui_state import (
     folder_rows_from_cache,
     parse_ignore_patterns_text,
 )
-from .vault_runtime import create_vault_relay, open_local_vault_from_grant
 from .vault_usage import calculate_vault_usage
 
 
@@ -50,30 +55,17 @@ def build_vault_folders_tab(
     local_index = VaultLocalIndex(config_dir)
     usage_by_folder_state = {"value": {}}
 
-    # F-517: serialize vault opens across worker threads so overlapping
-    # clicks (Add / Rename / Sync now / …) can't keep two in-memory
-    # copies of the master_key alive at the same time. Each worker that
-    # needs the master_key enters the context manager below; the lock
-    # held across open → close means there's at most one Vault open at
-    # any moment.
-    _vault_lock = threading.Lock()
-
-    @contextmanager
-    def _open_vault_serialized():
-        _vault_lock.acquire()
-        try:
-            config.reload()
-            vault = open_local_vault_from_grant(config_dir, config, vault_id)
-        except Exception:
-            _vault_lock.release()
-            raise
-        try:
-            yield vault
-        finally:
-            try:
-                vault.close()
-            finally:
-                _vault_lock.release()
+    # F-518: VaultRuntime owns the per-tab vault lock + named ops.
+    # Worker threads call into ``runtime.add_remote_folder`` etc.
+    # rather than ``open_local_vault_from_grant`` + raw ``vault.*``
+    # calls. The runtime is GTK-free so its tests don't need
+    # libadwaita on the path.
+    runtime = VaultRuntime(
+        config_dir=config_dir,
+        config=config,
+        vault_id=vault_id,
+        local_index=local_index,
+    )
     folders = Gtk.Box(
         orientation=Gtk.Orientation.VERTICAL, spacing=12,
         margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
@@ -170,9 +162,7 @@ def build_vault_folders_tab(
 
         def worker() -> None:
             try:
-                relay = create_vault_relay(config)
-                with _open_vault_serialized() as vault:
-                    manifest = vault.fetch_manifest(relay, local_index=local_index)
+                manifest = runtime.fetch_manifest()
                 usage = calculate_vault_usage(manifest).by_folder
             except Exception as exc:
                 error_message = humanize(exc)
@@ -275,17 +265,13 @@ def build_vault_folders_tab(
 
             def worker() -> None:
                 try:
-                    relay = create_vault_relay(config)
-                    with _open_vault_serialized() as vault:
-                        author_device_id = config.device_id or ("0" * 32)
-                        manifest = vault.add_remote_folder(
-                            relay,
-                            display_name=folder_name,
-                            ignore_patterns=patterns,
-                            author_device_id=author_device_id,
-                            local_index=local_index,
-                        )
-                        usage = calculate_vault_usage(manifest).by_folder
+                    author_device_id = config.device_id or ("0" * 32)
+                    manifest = runtime.add_remote_folder(
+                        display_name=folder_name,
+                        ignore_patterns=patterns,
+                        author_device_id=author_device_id,
+                    )
+                    usage = calculate_vault_usage(manifest).by_folder
                 except Exception as exc:
                     error_message = humanize(exc)
 
@@ -416,17 +402,13 @@ def build_vault_folders_tab(
 
             def worker() -> None:
                 try:
-                    relay = create_vault_relay(config)
-                    with _open_vault_serialized() as vault:
-                        author_device_id = config.device_id or ("0" * 32)
-                        manifest = vault.rename_remote_folder(
-                            relay,
-                            remote_folder_id=rfid,
-                            new_display_name=new_name,
-                            author_device_id=author_device_id,
-                            local_index=local_index,
-                        )
-                        usage = calculate_vault_usage(manifest).by_folder
+                    author_device_id = config.device_id or ("0" * 32)
+                    manifest = runtime.rename_remote_folder(
+                        remote_folder_id=rfid,
+                        new_display_name=new_name,
+                        author_device_id=author_device_id,
+                    )
+                    usage = calculate_vault_usage(manifest).by_folder
                 except Exception as exc:
                     error_message = humanize(exc)
 
@@ -466,9 +448,7 @@ def build_vault_folders_tab(
 
         def worker() -> None:
             try:
-                relay = create_vault_relay(config)
-                with _open_vault_serialized() as vault:
-                    manifest = vault.fetch_manifest(relay, local_index=local_index)
+                manifest = runtime.fetch_manifest()
             except Exception as exc:
                 error_message = humanize(exc)
 
@@ -513,26 +493,7 @@ def build_vault_folders_tab(
 
                 def _run_baseline_for_record(record) -> None:
                     try:
-                        baseline_relay = create_vault_relay(config)
-                        with _open_vault_serialized() as baseline_vault:
-                            baseline_manifest = baseline_vault.fetch_manifest(
-                                baseline_relay, local_index=local_index,
-                            )
-                            store_for_baseline = VaultBindingsStore(local_index.db_path)
-                            binding_for_baseline = store_for_baseline.get_binding(
-                                record.binding_id
-                            )
-                            if binding_for_baseline is None:
-                                raise RuntimeError(
-                                    f"binding row vanished: {record.binding_id}"
-                                )
-                            run_initial_baseline(
-                                vault=baseline_vault,
-                                relay=baseline_relay,
-                                manifest=baseline_manifest,
-                                store=store_for_baseline,
-                                binding=binding_for_baseline,
-                            )
+                        runtime.run_initial_baseline(record=record)
                     except Exception as exc:  # noqa: BLE001
                         msg = str(exc)
 
@@ -605,26 +566,20 @@ def build_vault_folders_tab(
 
         def worker() -> None:
             try:
-                relay = create_vault_relay(config)
-                with _open_vault_serialized() as vault:
-                    store = VaultBindingsStore(local_index.db_path)
-                    binding = store.get_binding(binding_id)
-                    if binding is None:
-                        raise RuntimeError(f"binding not found: {binding_id}")
-                    author_device_id = config.device_id or ("0" * 32)
-                    device_name = (
-                        str(config.device_name or "").strip() or "this device"
+                author_device_id = config.device_id or ("0" * 32)
+                device_name = (
+                    str(config.device_name or "").strip() or "this device"
+                )
+                event = cancellation_registry.register(binding_id)
+                try:
+                    result = runtime.flush_and_sync_binding(
+                        binding_id=binding_id,
+                        author_device_id=author_device_id,
+                        device_name=device_name,
+                        should_continue=lambda: not event.is_set(),
                     )
-                    event = cancellation_registry.register(binding_id)
-                    try:
-                        result = flush_and_sync_binding(
-                            vault=vault, relay=relay, store=store,
-                            binding=binding, author_device_id=author_device_id,
-                            device_name=device_name,
-                            should_continue=lambda: not event.is_set(),
-                        )
-                    finally:
-                        cancellation_registry.clear(binding_id)
+                finally:
+                    cancellation_registry.clear(binding_id)
                 toast_text = format_sync_outcome_toast(result)
             except Exception as exc:  # noqa: BLE001
                 error_message = humanize(exc)
@@ -700,25 +655,24 @@ def build_vault_folders_tab(
         def worker() -> None:
             store = VaultBindingsStore(local_index.db_path)
 
-            def flush(binding) -> object:
+            def flush(_binding) -> object:
                 # Resume reuses the Sync-now plumbing — same vault open,
                 # same registry registration, same should_continue gate
                 # so a fresh Pause arriving during the post-resume flush
-                # still aborts within ~1 chunk.
-                relay = create_vault_relay(config)
+                # still aborts within ~1 chunk. The runtime re-fetches
+                # the binding row inside its locked vault scope so we
+                # don't pass a stale snapshot back into the loop.
                 event = cancellation_registry.register(binding_id)
                 try:
-                    with _open_vault_serialized() as vault:
-                        return flush_and_sync_binding(
-                            vault=vault, relay=relay, store=store,
-                            binding=binding,
-                            author_device_id=config.device_id or ("0" * 32),
-                            device_name=(
-                                str(config.device_name or "").strip()
-                                or "this device"
-                            ),
-                            should_continue=lambda: not event.is_set(),
-                        )
+                    return runtime.flush_and_sync_binding(
+                        binding_id=binding_id,
+                        author_device_id=config.device_id or ("0" * 32),
+                        device_name=(
+                            str(config.device_name or "").strip()
+                            or "this device"
+                        ),
+                        should_continue=lambda: not event.is_set(),
+                    )
                 finally:
                     cancellation_registry.clear(binding_id)
 
