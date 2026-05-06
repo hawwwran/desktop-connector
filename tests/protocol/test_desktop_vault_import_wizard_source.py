@@ -23,7 +23,13 @@ class VaultImportWizardSourceTests(unittest.TestCase):
         source = Path(REPO_ROOT, "desktop/src/windows.py").read_text(encoding="utf-8")
         self.assertIn("from .windows_vault_import import show_vault_import", source)
         self.assertIn('"vault-import"', source)
-        self.assertIn("show_vault_import(config_dir)", source)
+        # F-U14: dispatcher threads ``vault_id_override`` so the merge
+        # target is pinned at subprocess-spawn time instead of resolved
+        # off whatever ``last_known_id`` happens to be on disk now.
+        self.assertIn(
+            "show_vault_import(config_dir, vault_id_override=vault_id_override)",
+            source,
+        )
 
     def test_wizard_wires_runner_and_progress_pages(self) -> None:
         source = Path(REPO_ROOT, "desktop/src/windows_vault_import.py").read_text(

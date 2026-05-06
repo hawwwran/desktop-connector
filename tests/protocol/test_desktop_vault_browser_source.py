@@ -41,7 +41,13 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
 
         self.assertIn("from .windows_vault_browser import show_vault_browser", source)
         self.assertIn('"vault-browser"', source)
-        self.assertIn("show_vault_browser(config_dir)", source)
+        # F-U14: dispatcher threads ``vault_id_override`` so a future
+        # multi-vault tray (or smoke-test driver) can repoint the
+        # browser without rewriting ``last_known_id`` on disk.
+        self.assertIn(
+            "show_vault_browser(config_dir, vault_id_override=vault_id_override)",
+            source,
+        )
 
     def test_tray_open_vault_launches_browser_not_settings(self) -> None:
         source = Path(REPO_ROOT, "desktop/src/tray.py").read_text(encoding="utf-8")

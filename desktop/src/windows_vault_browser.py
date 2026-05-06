@@ -31,15 +31,22 @@ from .vault_runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
 
 
-def show_vault_browser(config_dir: Path) -> None:
+def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -> None:
     """Show the read-only Vault browser shell.
 
     T5.1 wires browse navigation and manifest rendering. T5.3 wires
     single-file download. Upload, delete, and version actions are
     present in the toolbar but remain disabled until their owning
     T6/T7/T5.5 subtasks land.
+
+    ``vault_id_override`` (F-U14): optional 12-char canonical vault id.
+    When present, every per-action ``local_vault_id()`` call returns this
+    instead of reading ``config['vault']['last_known_id']``. Lets a future
+    multi-vault tray repoint the browser at a specific vault without
+    rewriting config on disk; today the tray spawns without it.
     """
     from .config import Config
+    from .vault_window_args import resolve_active_vault_id
 
     config = Config(config_dir)
     local_index = VaultLocalIndex(config_dir)
@@ -54,11 +61,7 @@ def show_vault_browser(config_dir: Path) -> None:
     }
 
     def local_vault_id() -> str:
-        config.reload()
-        raw = config._data.get("vault")
-        if not isinstance(raw, dict):
-            return ""
-        return str(raw.get("last_known_id") or "")
+        return resolve_active_vault_id(config, vault_id_override)
 
     def on_activate(app: Adw.Application) -> None:
         apply_brand_css()

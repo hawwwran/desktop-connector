@@ -10,15 +10,22 @@ Usage:
     python3 -m src.windows settings --config-dir=~/.config/desktop-connector
     python3 -m src.windows history --config-dir=~/.config/desktop-connector
     python3 -m src.windows vault-onboard --config-dir=~/.config/desktop-connector
-    python3 -m src.windows vault-main --config-dir=~/.config/desktop-connector
-    python3 -m src.windows vault-browser --config-dir=~/.config/desktop-connector
-    python3 -m src.windows vault-import --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-main --config-dir=~/.config/desktop-connector [--vault-id=ABCD-2345-WXYZ]
+    python3 -m src.windows vault-browser --config-dir=~/.config/desktop-connector [--vault-id=ABCD-2345-WXYZ]
+    python3 -m src.windows vault-import --config-dir=~/.config/desktop-connector [--vault-id=ABCD-2345-WXYZ]
     python3 -m src.windows vault-passphrase-generator --config-dir=~/.config/desktop-connector
+
+``--vault-id`` (F-U14) is optional and honoured by ``vault-main`` /
+``vault-browser`` / ``vault-import``. When omitted the windows fall back
+to ``config['vault']['last_known_id']``; when present it lets a future
+multi-vault tray (or a smoke-test driver) repoint a subprocess at a
+specific vault without rewriting config on disk.
 """
 
 import argparse
 from pathlib import Path
 
+from .vault_window_args import parse_vault_id_arg
 from .windows_common import _setup_subprocess_logging
 from .windows_find_phone import show_find_phone, show_locate_alert
 from .windows_history import show_history
@@ -49,10 +56,21 @@ def main():
     )
     parser.add_argument("--config-dir", required=True)
     parser.add_argument("--sender-name", default="")
+    # F-U14: explicit vault routing. Optional; falls back to
+    # ``config['vault']['last_known_id']`` inside each window when absent.
+    # Validated up-front so a malformed value fails the subprocess at
+    # arg-parse time instead of bubbling up as a quiet "no vault opened"
+    # placeholder.
+    parser.add_argument("--vault-id", default=None)
     args = parser.parse_args()
 
     config_dir = Path(args.config_dir)
     _setup_subprocess_logging(config_dir)
+
+    try:
+        vault_id_override = parse_vault_id_arg(args.vault_id)
+    except ValueError as exc:
+        parser.error(f"--vault-id: {exc}")
 
     # F-501: vault windows additionally get the scrubbed vault.log
     # handler attached so vault.* events flow into a separate file
@@ -81,11 +99,11 @@ def main():
     elif args.window == "secret-storage-warning":
         show_secret_storage_warning(config_dir)
     elif args.window == "vault-main":
-        show_vault_main(config_dir)
+        show_vault_main(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-browser":
-        show_vault_browser(config_dir)
+        show_vault_browser(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-import":
-        show_vault_import(config_dir)
+        show_vault_import(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-onboard":
         show_vault_onboard(config_dir)
     elif args.window == "vault-passphrase-generator":

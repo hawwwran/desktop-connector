@@ -65,7 +65,7 @@ def _local_vault_exists(config) -> bool:
     return bool(raw.get("last_known_id"))
 
 
-def show_vault_main(config_dir: Path):
+def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
     """Vault settings GTK window skeleton (T3.4).
 
     Top: Vault ID with copy button + (placeholder) QR icon.
@@ -74,23 +74,29 @@ def show_vault_main(config_dir: Path):
     Sync safety / Storage / Danger zone). Recovery tab implements the
     §gaps §2 emergency-access block.
 
+    ``vault_id_override`` (F-U14): optional 12-char canonical vault id
+    threaded through every tab and worker that uses ``vault_id_undashed``.
+    When omitted, falls back to ``config['vault']['last_known_id']`` for
+    backwards compatibility with the tray's current single-vault wiring.
+
     M1 manual-smoke surface; later phases populate the empty tabs.
     """
     import logging
     from .config import Config
+    from .vault_window_args import resolve_active_vault_id
 
     log = logging.getLogger("desktop-connector.vault-ui")
     config = Config(config_dir)
     app = _make_app()
 
-    vault_id_undashed = ""
     paired = config.paired_devices
     # Reading the vault id from local grant storage is T3.2's surface;
     # for the M1 walk-through we surface whatever's currently stashed
     # under config["vault"]["last_known_id"] (set by the wizard on
-    # successful create) and fall back to a placeholder.
+    # successful create) — unless an explicit ``--vault-id`` override
+    # was passed to the dispatcher (F-U14), in which case that wins.
+    vault_id_undashed = resolve_active_vault_id(config, vault_id_override)
     vault_meta = config._data.get("vault") if isinstance(config._data.get("vault"), dict) else {}
-    vault_id_undashed = (vault_meta or {}).get("last_known_id") or ""
     recovery_status_text = (vault_meta or {}).get("recovery_status") or "Untested"
     recovery_last_tested = (vault_meta or {}).get("recovery_last_tested") or "—"
 

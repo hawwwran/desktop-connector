@@ -38,9 +38,18 @@ from .vault_runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
 
 
-def show_vault_import(config_dir: Path) -> None:
-    """Top-level entry point for ``--gtk-window=vault-import``."""
+def show_vault_import(config_dir: Path, vault_id_override: str | None = None) -> None:
+    """Top-level entry point for ``--gtk-window=vault-import``.
+
+    ``vault_id_override`` (F-U14): optional 12-char canonical vault id;
+    when present every ``local_vault_id()`` call returns it instead of
+    re-reading ``config['vault']['last_known_id']``. The wizard merges
+    the bundle into the active vault, so the override pins which vault
+    that is even if a future multi-vault tray opens several wizards
+    simultaneously.
+    """
     from .config import Config
+    from .vault_window_args import resolve_active_vault_id
 
     config = Config(config_dir)
     local_index = VaultLocalIndex(config_dir)
@@ -57,11 +66,7 @@ def show_vault_import(config_dir: Path) -> None:
     }
 
     def local_vault_id() -> str:
-        config.reload()
-        raw = config._data.get("vault")
-        if not isinstance(raw, dict):
-            return ""
-        return str(raw.get("last_known_id") or "")
+        return resolve_active_vault_id(config, vault_id_override)
 
     def on_activate(app: Adw.Application) -> None:
         apply_brand_css()
