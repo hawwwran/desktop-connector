@@ -300,15 +300,32 @@ need the window.
    visible.
 4. `mcp__gtk-a11y__dump_tree` for that app — save as
    `screenshots/02-attree.txt`.
-5. `mcp__gtk-a11y__screenshot` of the window —
-   `screenshots/01-vault-main-empty.png`.
+5. Capture an on-disk screenshot via
+   `gnome-screenshot -w -f screenshots/01-vault-main-empty.png`. (The
+   `mcp__gtk-a11y__screenshot` tool returns the image inline only — no
+   file is saved automatically.)
 6. Close the window: `pkill -f "src.windows vault-main.*desktop-connector-dev"`.
+   (The `kill $(cat …pid)` form orphans the python child because
+   `echo $!` after a backgrounded `python3 -m src.windows …` captures
+   the bash wrapper PID, not the python child PID. Always use `pkill
+   -f` for window teardown.)
 
 **Assertions**:
 - A window with title containing "Vault" is in the AT-SPI app list.
 - The dump tree contains the string "(no vault opened)" or "(no
-  vault)" — i.e. the empty-state copy from `windows_vault.py:93,1164`.
-- No Python tracebacks on stderr.
+  vault)" — i.e. the empty-state copy at `windows_vault.py:93`.
+- Window stderr is empty (no GTK warnings, no Python tracebacks).
+- The body uses a **left vertical sidebar** (`Gtk.StackSidebar` over
+  `Gtk.Stack`), not a top tab strip. The dump tree shows ten
+  side-by-side `panel '<title>'` entries — Recovery, Folders, Devices,
+  Security, Sync safety, Storage, Activity, Maintenance, Migration,
+  Danger zone — each backed by a `Gtk.Stack` page. Recovery is the
+  default page; the others are reachable via the sidebar.
+- Devices, Security, Sync safety, Storage are **deliberate
+  placeholders**. Activating each shows a `title-3` heading with the
+  tab name plus a dim-label line "This panel is reserved for later
+  development. No controls are available yet." The harness must not
+  treat their lack of interactive widgets as a failure.
 
 **Capture**: window screenshot + AT-SPI tree dump.
 
@@ -374,8 +391,10 @@ nothing is "wizard-only".
   string from test 03.
 - A vault id (formatted like `XXXX-XXXX-XXXX`, see vault wordlist
   format) is visible somewhere in the tree.
-- The Recovery / Folders / Devices / Activity / Maintenance / Security
-  tabs (from `windows_vault.py:59`) are present.
+- The full sidebar — Recovery, Folders, Devices, Security, Sync
+  safety, Storage, Activity, Maintenance, Migration, Danger zone —
+  is present in the AT-SPI tree, exactly as in test 03 (the layout
+  is the same `Gtk.StackSidebar` regardless of vault state).
 
 **Capture**: screenshot + AT-SPI tree.
 

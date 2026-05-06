@@ -55,10 +55,13 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
     """Vault settings GTK window skeleton (T3.4).
 
     Top: Vault ID with copy button + (placeholder) QR icon.
-    Body: tabbed pane with placeholders per the plan
-    (Recovery / Folders / Devices / Activity / Maintenance / Security /
-    Sync safety / Storage / Danger zone). Recovery tab implements the
-    §gaps §2 emergency-access block.
+    Body: a left-hand vertical sidebar (``Gtk.StackSidebar``) over a
+    ``Gtk.Stack`` with one page per section — Recovery, Folders,
+    Devices, Security, Sync safety, Storage, Activity, Maintenance,
+    Migration, Danger zone. Recovery / Folders / Activity / Maintenance
+    / Migration / Danger zone are real; Devices / Security / Sync
+    safety / Storage are deliberate placeholders awaiting later
+    development.
 
     ``vault_id_override`` (F-U14): optional 12-char canonical vault id
     threaded through every tab and worker that uses ``vault_id_undashed``.
@@ -98,8 +101,8 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
         win = Adw.ApplicationWindow(
             application=app,
             title="Vault settings",
-            default_width=720,
-            default_height=540,
+            default_width=880,
+            default_height=560,
         )
         toolbar = Adw.ToolbarView()
         win.set_content(toolbar)
@@ -139,11 +142,27 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
         qr_btn.set_sensitive(False)
         header.append(qr_btn)
 
-        # ---- tabbed pane ----
-        view_stack = Adw.ViewStack()
-        switcher = Adw.ViewSwitcher(stack=view_stack, policy=Adw.ViewSwitcherPolicy.WIDE)
-        outer.append(switcher)
-        outer.append(view_stack)
+        # ---- sidebar + stack pane ----
+        # Vertical sidebar on the left, page content on the right. Uses
+        # ``Gtk.Stack`` (not ``Adw.ViewStack``) because ``Gtk.StackSidebar``
+        # binds directly to a ``Gtk.Stack``; same ``add_titled`` shape, no
+        # behavioural difference for our use.
+        view_stack = Gtk.Stack()
+        view_stack.set_hexpand(True)
+        view_stack.set_vexpand(True)
+        view_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+
+        sidebar = Gtk.StackSidebar()
+        sidebar.set_stack(view_stack)
+        sidebar.set_size_request(180, -1)
+        sidebar.set_vexpand(True)
+
+        split = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        split.set_vexpand(True)
+        split.append(sidebar)
+        split.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        split.append(view_stack)
+        outer.append(split)
 
         def add_tab(name: str, title: str, body: Gtk.Widget) -> None:
             scroller = Gtk.ScrolledWindow(vexpand=True)
@@ -530,8 +549,12 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
                 margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
             )
             placeholder.append(Gtk.Label(
-                label=f"{title} — coming in a later phase.",
-                xalign=0, css_classes=["dim-label"],
+                label=title, xalign=0, css_classes=["title-3"],
+            ))
+            placeholder.append(Gtk.Label(
+                label="This panel is reserved for later development. "
+                      "No controls are available yet.",
+                xalign=0, wrap=True, css_classes=["dim-label"],
             ))
             add_tab(name, title, placeholder)
 
