@@ -313,4 +313,166 @@ final class VaultAuthServiceTest extends TestCase
             self::assertSame('device', $e->details['kind']);
         }
     }
+
+    // ------------------------------------------------- F-T12: requireRole
+
+    /**
+     * F-T12: pin the §D11 role rank matrix directly. Pre-fix
+     * coverage for ``requireRole`` was indirect through every
+     * controller test that happened to invoke a role-gated endpoint —
+     * a future regression that scrambles the rank table or removes
+     * the revoked-grant check would have been silent until a
+     * controller test happened to trip it. The matrix below tests
+     * each (granted, required) pair representatively.
+     */
+    private function seedGrant(
+        string $deviceId,
+        string $role,
+        ?int $revokedAt = null
+    ): void {
+        $grants = new VaultDeviceGrantsRepository($this->db);
+        $grants->insertGrant(
+            'gr_v1_' . str_pad((string)random_int(0, PHP_INT_MAX), 24, 'a', STR_PAD_LEFT),
+            self::VAULT_ID,
+            $deviceId,
+            'name',
+            $role,
+            self::DEVICE_ID,   // granted_by
+            'qr',
+            self::NOW
+        );
+        if ($revokedAt !== null) {
+            $grants->revoke(self::VAULT_ID, $deviceId, self::DEVICE_ID, $revokedAt);
+        }
+    }
+
+    public function test_requireRole_admin_passes_every_gate(): void
+    {
+        $this->seedGrant(self::DEVICE_ID, 'admin');
+        foreach (['read-only', 'browse-upload', 'sync', 'admin'] as $gate) {
+            $row = VaultAuthService::requireRole(
+                $this->db, self::VAULT_ID, self::DEVICE_ID, $gate
+            );
+            self::assertSame('admin', $row['role'], "admin failed gate {$gate}");
+        }
+    }
+
+    public function test_requireRole_each_role_passes_own_gate(): void
+    {
+        $cases = [
+            'b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6' => 'read-only',
+            'b2b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6' => 'browse-upload',
+            'b3b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6' => 'sync',
+        ];
+        foreach ($cases as $deviceId => $role) {
+            $this->seedGrant($deviceId, $role);
+            $row = VaultAuthService::requireRole(
+                $this->db, self::VAULT_ID, $deviceId, $role
+            );
+            self::assertSame($role, $row['role']);
+        }
+    }
+
+    public function test_requireRole_lower_rank_rejected_by_higher_gate(): void
+    {
+        // read-only granted, browse-upload required → 403
+        $a = 'b4b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+        $this->seedGrant($a, 'read-only');
+        try {
+            VaultAuthService::requireRole(
+                $this->db, self::VAULT_ID, $a, 'browse-upload'
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertSame('browse-upload', $e->details['required_role']);
+        }
+
+        // browse-upload granted, sync required → 403
+        $b = 'b5b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+        $this->seedGrant($b, 'browse-upload');
+        try {
+            VaultAuthService::requireRole(
+                $this->db, self::VAULT_ID, $b, 'sync'
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame('sync', $e->details['required_role']);
+        }
+
+        // sync granted, admin required → 403
+        $c = 'b6b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+        $this->seedGrant($c, 'sync');
+        try {
+            VaultAuthService::requireRole(
+                $this->db, self::VAULT_ID, $c, 'admin'
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame('admin', $e->details['required_role']);
+        }
+    }
+
+    public function test_requireRole_rejects_revoked_grant(): void
+    {
+        $deviceId = 'b7b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+        $this->seedGrant($deviceId, 'admin', revokedAt: self::NOW + 60);
+        try {
+            VaultAuthService::requireRole(
+                $this->db, self::VAULT_ID, $deviceId, 'read-only'
+            );
+            self::fail('revoked grant must not pass even the lowest gate');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertSame('read-only', $e->details['required_role']);
+            // The exception message names the revocation so the operator
+            // can tell apart "no grant" from "revoked grant".
+            self::assertStringContainsString('revoked', $e->getMessage());
+        }
+    }
+
+    public function test_requireRole_rejects_unknown_device(): void
+    {
+        // Unknown device id has no grant row.
+        try {
+            VaultAuthService::requireRole(
+                $this->db, self::VAULT_ID,
+                'b8b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6',
+                'read-only'
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertStringContainsString('not a granted device', $e->getMessage());
+        }
+    }
+
+    public function test_requireRole_unknown_role_throws_invalid_argument(): void
+    {
+        // Caller bug — an unknown role string should fail loudly, not
+        // silently grant or reject.
+        $this->seedGrant(self::DEVICE_ID, 'admin');
+        $this->expectException(InvalidArgumentException::class);
+        VaultAuthService::requireRole(
+            $this->db, self::VAULT_ID, self::DEVICE_ID, 'superuser'
+        );
+    }
+
+    public function test_requireRole_bumps_last_seen_on_success(): void
+    {
+        $deviceId = 'b9b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
+        $this->seedGrant($deviceId, 'sync');
+        $before = (new VaultDeviceGrantsRepository($this->db))
+            ->getByDevice(self::VAULT_ID, $deviceId);
+        self::assertNull($before['last_seen_at']);
+
+        VaultAuthService::requireRole(
+            $this->db, self::VAULT_ID, $deviceId, 'sync'
+        );
+
+        $after = (new VaultDeviceGrantsRepository($this->db))
+            ->getByDevice(self::VAULT_ID, $deviceId);
+        self::assertNotNull($after['last_seen_at']);
+        self::assertGreaterThan(0, (int)$after['last_seen_at']);
+    }
 }

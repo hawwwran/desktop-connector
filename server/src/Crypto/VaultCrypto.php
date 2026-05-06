@@ -362,6 +362,40 @@ class VaultCrypto
         return $nonce . $aeadCiphertextAndTag;
     }
 
+    // ---------------------------------------------------------------- Content fingerprint
+
+    /**
+     * F-T10: PHP twin of ``vault_crypto.derive_content_fingerprint_key``.
+     * The relay does not compute fingerprints in production — the
+     * desktop owns the upload-dedup short-circuit — but the spec
+     * promises byte-exact parity across runtimes for every primitive,
+     * and the cross-platform vector harness needs a PHP runner to
+     * enforce it. HKDF info matches formats §10.2 / §4.2.
+     */
+    public static function deriveContentFingerprintKey(string $masterKey): string
+    {
+        return self::deriveSubkey('dc-vault-v1/content-fingerprint', $masterKey);
+    }
+
+    /**
+     * F-T10: PHP twin of ``vault_crypto.make_content_fingerprint``.
+     * Returns the base64-encoded HMAC-SHA256 of ``plaintextSha256``
+     * keyed with ``contentFpKey``. ``plaintextSha256`` MUST be the
+     * 32-byte SHA-256 digest of the file plaintext per spec §10.2.
+     */
+    public static function makeContentFingerprint(
+        string $contentFpKey,
+        string $plaintextSha256
+    ): string {
+        if (strlen($plaintextSha256) !== 32) {
+            throw new InvalidArgumentException(
+                "plaintext_sha256 must be 32 bytes; got " . strlen($plaintextSha256)
+            );
+        }
+        $digest = hash_hmac('sha256', $plaintextSha256, $contentFpKey, true);
+        return base64_encode($digest);
+    }
+
     // ---------------------------------------------------------------- Header AAD + envelope
 
     public static function buildHeaderAad(string $vaultId, int $headerRevision): string

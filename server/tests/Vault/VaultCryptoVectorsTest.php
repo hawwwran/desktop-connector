@@ -342,6 +342,39 @@ final class VaultCryptoVectorsTest extends TestCase
         self::assertSame($plaintext, VaultCrypto::aeadDecrypt($ct, $wrapKey, $nonce, $aad));
     }
 
+    // ---------------------------------------------------------------- content fingerprint
+
+    public static function contentFingerprintCases(): array
+    {
+        return self::loadCases('content_fingerprint_v1.json');
+    }
+
+    /**
+     * F-T10: PHP twin of the Python ``_run_content_fingerprint_case``.
+     * The relay doesn't compute fingerprints in production — only the
+     * desktop does — but the cross-runtime parity guarantee in the
+     * test vectors README requires a PHP runner so the spec invariant
+     * (HKDF info + HMAC-SHA256 + base64 wire encoding) holds on both
+     * sides byte-exact.
+     */
+    #[DataProvider("contentFingerprintCases")]
+    public function test_content_fingerprint_case(string $name, array $case): void
+    {
+        $inputs = $case['inputs'];
+        $expected = $case['expected'];
+        $masterKey = hex2bin($inputs['vault_master_key']);
+        $plaintextSha256 = hex2bin($inputs['plaintext_sha256']);
+
+        $subkey = VaultCrypto::deriveContentFingerprintKey($masterKey);
+        $fingerprint = VaultCrypto::makeContentFingerprint($subkey, $plaintextSha256);
+
+        self::assertSame($expected['subkey'], bin2hex($subkey), "{$name}: subkey mismatch");
+        self::assertSame(
+            $expected['fingerprint_b64'], $fingerprint,
+            "{$name}: fingerprint mismatch — PHP/Python parity break"
+        );
+    }
+
     // ---------------------------------------------------------------- export bundle
 
     public static function exportCases(): array { return self::loadCases('export_bundle_v1.json'); }

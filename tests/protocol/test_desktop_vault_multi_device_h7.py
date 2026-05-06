@@ -1,4 +1,17 @@
-"""T12.6 / §H7 — Multi-device concurrent-ops integration test.
+"""T12.6 / §H7 — Multi-device merge-logic integration test.
+
+**Scope (F-T07).** Both ``Device`` harnesses are objects in the
+*same* Python process pointing at a shared in-memory
+``FakeUploadRelay``. We exercise the §D4 manifest-merge rules and
+the convergence guarantees at the data layer — *not* real
+cross-process / cross-network concurrency. The scenarios below
+walk multi-device interleavings deterministically, but real CAS
+races on the relay (mid-PUT crashes, HTTP retries on 5xx, clock
+skew between client and server) aren't part of this file's
+coverage. A future cross-runtime variant under ``server/tests/``
+would drive a real PHP relay over HTTP; until then, the test
+class name's "MultiDevice" prefix means "manifest from two
+authoring devices" rather than "two processes / two networks".
 
 Spins up two ``Device`` harnesses pointed at the same in-memory
 ``FakeUploadRelay`` and same vault, and walks scripted scenarios:
@@ -152,6 +165,11 @@ class Device:
 
 
 class MultiDeviceH7Tests(unittest.TestCase):
+    """F-T07 scope: manifest merge logic across two device authors,
+    not real network concurrency. See module docstring for the
+    boundary the "MultiDevice" prefix refers to.
+    """
+
     def setUp(self) -> None:
         self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_multi_dev_test_"))
         self._saved_xdg = os.environ.get("XDG_CACHE_HOME")

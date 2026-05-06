@@ -174,6 +174,18 @@ final class VaultControllerTest extends TestCase
      * Build a syntactically-correct manifest envelope (formats §10.1).
      * The relay parses the first 61 bytes for CAS, so tests need a real
      * envelope shape — the AEAD bytes themselves don't have to verify.
+     *
+     * F-T11: ``aeadCiphertextAndTag`` is intentionally an opaque
+     * placeholder ("stub-ciphertext") because the relay is blind: it
+     * never decrypts the manifest — only the deterministic 61-byte
+     * prefix governs CAS, hash, and quota accounting. If a future
+     * relay-side verifier *is* added (e.g. a hash precondition
+     * cross-check that needs the AEAD bytes), every stub helper here
+     * starts failing — that's the point. The break tells the next
+     * contributor "you changed the relay's AEAD posture; stop and
+     * write fixtures with a real round-trip via VaultCrypto::aeadEncrypt."
+     * For an existing real-AEAD round-trip baseline see
+     * ``test_full_aead_round_trip_smoke`` below.
      */
     private function manifestEnvelope(
         int $revision,
@@ -192,7 +204,10 @@ final class VaultControllerTest extends TestCase
         );
     }
 
-    /** Build a syntactically-correct header envelope (formats §9.1). */
+    /**
+     * Build a syntactically-correct header envelope (formats §9.1).
+     * Same F-T11 stub-AEAD contract as :func:`manifestEnvelope`.
+     */
     private function headerEnvelope(
         int $headerRevision,
         string $vaultId = self::VAULT_ID,
@@ -226,6 +241,54 @@ final class VaultControllerTest extends TestCase
         } finally {
             ob_end_clean();
         }
+    }
+
+    // ===================================================================
+    //  F-T11 — real AEAD round-trip baseline
+    // ===================================================================
+
+    /**
+     * F-T11: pin a real AEAD round-trip so the suite has at least one
+     * fixture that exercises ``VaultCrypto::aeadEncrypt`` /
+     * ``aeadDecrypt`` end-to-end. The other tests in this file build
+     * envelopes with ``aeadCiphertextAndTag = "stub-ciphertext"``
+     * because the relay never decrypts — only the deterministic
+     * 61-byte prefix governs CAS. Without this baseline a future
+     * relay-side verifier addition would silently pass every
+     * stub-using test (relay can't tell stub bytes from real bytes
+     * because it doesn't decrypt at all today). The smoke test below
+     * is the canary: if ``aeadEncrypt`` ever drifts from
+     * ``aeadDecrypt``, this fails alone, signalling that the stub
+     * helpers above need refreshing too.
+     */
+    public function test_full_aead_round_trip_smoke(): void
+    {
+        $masterKey = random_bytes(32);
+        $nonce = random_bytes(24);
+        $plaintext = json_encode([
+            'schema' => 'dc-vault-manifest-v1',
+            'revision' => 5,
+            'parent_revision' => 4,
+            'remote_folders' => [],
+        ]);
+
+        $aad = VaultCrypto::buildManifestAad(
+            self::VAULT_ID, 5, 4, self::DEVICE_ID
+        );
+        $subkey = VaultCrypto::deriveSubkey('dc-vault-v1/manifest', $masterKey);
+        $ct = VaultCrypto::aeadEncrypt($plaintext, $subkey, $nonce, $aad);
+        // Decrypt round-trip must return the original bytes byte-exact.
+        self::assertSame(
+            $plaintext,
+            VaultCrypto::aeadDecrypt($ct, $subkey, $nonce, $aad),
+            'F-T11: real AEAD round-trip must succeed; if this fails the '
+            . 'stub-ciphertext helpers above are no longer a safe shorthand'
+        );
+        // And a tampered byte must trip the AEAD tag check.
+        $tampered = $ct;
+        $tampered[0] = chr(ord($tampered[0]) ^ 0x01);
+        $this->expectException(SodiumException::class);
+        VaultCrypto::aeadDecrypt($tampered, $subkey, $nonce, $aad);
     }
 
     // ===================================================================
