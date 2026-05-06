@@ -198,7 +198,7 @@ def main() -> int:
     if not unconfigured:
         rebuild_authenticated_api(context)
 
-        if args.pair or not context.config.is_paired:
+        if args.pair or (not context.config.is_paired and not args.no_pair):
             if args.send:
                 log.error("Not paired yet. Run with --pair first.")
                 return 1
@@ -209,6 +209,8 @@ def main() -> int:
                 headless=args.headless,
             ) != 0:
                 return 1
+        elif args.no_pair and not context.config.is_paired:
+            log.info("startup.pairing.skipped reason=--no-pair")
 
     mode = resolve_startup_mode(args)
     if mode == "send_file":

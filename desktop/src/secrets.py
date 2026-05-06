@@ -34,6 +34,7 @@ the lookup namespace:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Protocol
 
 log = logging.getLogger(__name__)
@@ -53,7 +54,13 @@ SECRET_KEY_PRIVATE_KEY_PEM = "private_key:pem"
 # attribute. Shows up in seahorse / kwalletmanager next to each
 # entry, alongside the per-secret key (``auth_token`` /
 # ``pairing_symkey:<device_id>``).
-SERVICE_NAME = "desktop-connector"
+#
+# Override with ``DC_KEYRING_SERVICE`` to namespace into a different
+# keyring collection — used by the vault automation harness so a
+# dev twin's keyring entries don't alias the user's real install.
+# Read at module import; one process = one service name. Default
+# unchanged so production behaviour is identical.
+SERVICE_NAME = os.environ.get("DC_KEYRING_SERVICE") or "desktop-connector"
 
 
 class SecretServiceUnavailable(Exception):

@@ -25,6 +25,11 @@ self-relocation is a UX nicety, not a security gate.
 
 Opt out with ``DC_NO_RELOCATE=1`` to skip the copy-to-canonical step;
 single-instance enforcement still fires.
+
+Opt out of single-instance enforcement with ``DC_ALLOW_MULTI_INSTANCE=1``
+— used by the vault automation harness to run an isolated dev twin
+alongside the user's real install (separate ``--config-dir`` +
+``--server-url``). Off by default; never set this in production paths.
 """
 
 from __future__ import annotations
@@ -96,6 +101,9 @@ def enforce_single_instance() -> None:
     the AppImage runtime wrapper holding our FUSE mount survives.
     """
     if not is_persistent_mode():
+        return
+    if os.environ.get("DC_ALLOW_MULTI_INSTANCE"):
+        log.info("appimage.single_instance.bypassed env=DC_ALLOW_MULTI_INSTANCE")
         return
     _stop_other_instances()
 

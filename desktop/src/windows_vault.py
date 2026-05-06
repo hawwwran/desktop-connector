@@ -1712,6 +1712,15 @@ def show_vault_onboard(config_dir: Path):
         # leak the passphrase to anyone who happens to glance later.
         pp_entry = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
         pp_confirm = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
+        # Accessible names so screen readers (and AT-SPI test drivers)
+        # can disambiguate the two PasswordEntries — they're otherwise
+        # both reported as anonymous "password text" widgets.
+        pp_entry.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Recovery passphrase"],
+        )
+        pp_confirm.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Confirm passphrase"],
+        )
 
         # Generate button — opens the standalone passphrase generator
         # window. The user copies the result and pastes it into the

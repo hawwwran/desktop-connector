@@ -14,6 +14,7 @@ class StartupArgs:
     headless: bool
     send: str | None
     pair: bool
+    no_pair: bool
     config_dir: str | None
     server_url: str | None
     save_dir: str | None
@@ -41,6 +42,13 @@ def parse_startup_args() -> StartupArgs:
         help="Paired device id to use with --send",
     )
     parser.add_argument("--pair", action="store_true", help="Start pairing flow")
+    parser.add_argument(
+        "--no-pair",
+        action="store_true",
+        help="Skip the pairing flow even when no peer is paired. Used "
+             "by the vault automation harness — vault is account-less "
+             "and does not require a paired phone to exercise.",
+    )
     parser.add_argument("--config-dir", type=str, help="Config directory path")
     parser.add_argument("--server-url", type=str, help="Override server URL")
     parser.add_argument("--save-dir", type=str, help="Override save directory")
@@ -59,6 +67,7 @@ def parse_startup_args() -> StartupArgs:
         send=parsed.send,
         target_device_id=parsed.target_device_id,
         pair=parsed.pair,
+        no_pair=parsed.no_pair,
         config_dir=parsed.config_dir,
         server_url=parsed.server_url,
         save_dir=parsed.save_dir,
