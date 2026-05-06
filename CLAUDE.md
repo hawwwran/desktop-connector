@@ -94,6 +94,13 @@ Requires PHP 8.0+, SQLite3, mod_rewrite (+ curl/openssl for FCM). Router auto-de
 
 ## Key design decisions
 
+> **New decisions go in [`docs/architecture-decisions.md`](docs/architecture-decisions.md).**
+> That file is the long-term tracker; this section keeps the legacy /
+> cross-cutting narrative for fast scan-ability. When you make a
+> non-trivial architectural choice (protocol, state machine, security
+> boundary, dependency, threat-model assumption), add a dated entry
+> there before or alongside the implementation commit.
+
 ### Server pipeline & persistence
 - **Request pipeline**: handlers take `(Database $db, RequestContext $ctx)`. `Router` builds `RequestContext` (route params, query, lazy body) and routes registered via `authGet`/`authPost` resolve identity through `AuthService::requireAuth` before dispatch. Controllers validate via `Validators::*` and throw `ApiError` subclasses; top-level `try/catch` hands them to `ErrorResponder`. No controller touches `$_SERVER`/`$_GET`/`php://input` or hand-writes error JSON. The path-traversal guard on `{transfer_id}` is a pipeline validator, so every endpoint accepting that param is protected.
 - **Persistence**: all SQL lives in `server/src/Repositories/`. Services/controllers express intent (`markTransferDelivered`, `tryClaimCooldown`, `sumPendingBytesForRecipient`); repos own row shape. The ping-rate UPSERT and `MAX(chunks_downloaded, :progress)` idiom stay byte-exact in repos — WAL serialization and the `chunks_downloaded == chunk_count ⇔ downloaded == 1` invariant depend on it. No raw `$db->query*`/`$db->execute` outside repos.
