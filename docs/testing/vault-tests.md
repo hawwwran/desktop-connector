@@ -434,45 +434,74 @@ on next unlock.
 
 **Preconditions**: Test 05 PASS.
 
+**Background — actual unlock model.** The vault is account-less and
+the relay only ever sees ciphertext. The desktop derives the master
+key with Argon2id from the recovery passphrase **once** during
+create / import (test 04), wraps it as a `VaultGrant`, and caches the
+grant in the OS keyring (production: libsecret) under the
+config-derived service name. From that point on the desktop opens the
+vault transparently by loading the grant from keyring — there is no
+daily passphrase prompt and no `vault.lock.*` / `vault.unlock.*` /
+`vault.kdf.argon2id` events to assert on. "Lock" in this codebase
+means **deleting the grant**; "unlock" only happens on a fresh device
+via the import wizard. Earlier drafts of test 06 modeled a daily
+unlock flow that doesn't match the real design — see
+`docs/architecture-decisions.md` 2026-05-06 entries.
+
 **Steps**:
 1. Start the headless dev instance (from test 02). Sleep 2 s.
-2. Watch `~/.config/desktop-connector-dev/logs/desktop-connector.log`.
-3. Issue a "lock" by stopping the dev instance (`pkill -f
-   "src.main.*desktop-connector-dev"`). Sleep 1 s.
-4. Restart the dev instance with the same args. The vault should
-   start in the locked state (no plaintext key material in memory
-   at startup).
-5. Verify the log shows the vault as **locked** at boot.
-6. Drive an unlock through the GTK window: launch `vault-main`,
-   click an "Unlock" button (look it up in dump tree), enter the
-   same fixed passphrase, click confirm.
-7. Wait up to 5 s for an "unlocked" indicator.
+2. Confirm the boot stderr shows
+   `vault_grant.backend.keyring service=desktop-connector-dev`
+   (not the canonical `desktop-connector` — that's the isolation
+   bug from suite 0002 test 06).
+3. Verify the runtime sees the vault id from test 04 by reading
+   `~/.config/desktop-connector-dev/config.json` (`vault.last_known_id`)
+   and confirming it matches the keyring entry.
+4. Stop the dev instance (`pkill -f "src.main.*desktop-connector-dev"`).
+5. Restart the dev instance with the same args. Vault grant must
+   still be present (keyring is durable across kills) so the new
+   process opens the vault transparently — no passphrase prompt.
+6. Confirm the second boot's stderr again shows
+   `vault_grant.backend.keyring service=desktop-connector-dev`.
 
 **Assertions**:
-- Boot log shows a `vault.lock.*` or `vault.locked.*` event before
-  any unlock event.
-- Post-unlock log shows a `vault.unlock.succeeded` (or equivalent)
-  event with the same vault id from test 04.
-- The unlock used Argon2id (look for `vault.kdf.argon2id` events).
+- Both boots emit `vault_grant.backend.keyring service=desktop-connector-dev`
+  on stderr — proof the per-config service derivation kicks in (and
+  proof the dev twin isn't reading from the canonical user's
+  keyring).
+- `python3 -c "import keyring; print(keyring.get_password('desktop-connector-dev', 'vault_grant:QRJCRIE7AXEU') is not None)"`
+  returns `True` after the first boot AND survives the kill+restart.
+- `python3 -c "import keyring; print(keyring.get_password('desktop-connector', 'vault_grant:QRJCRIE7AXEU'))"`
+  returns `None` (canonical user's keyring must not hold the dev's
+  grant — that's the isolation invariant).
+- No `ERROR` / `CRITICAL` lines on dev-instance stderr.
+- No passphrase prompt on either boot (the grant cache is the
+  daily-use unlock path).
 
-**Capture**: pre/post screenshots + log excerpt.
+**Capture**: stderr excerpt with the `vault_grant.backend.keyring`
+line + keyring probe output.
 
 ---
 
-## Test 07 — Wrong passphrase is rejected, vault stays locked
+## Test 07 — Wrong-passphrase path is gated to the import / re-derive flow only
 
-**Goal**: negative path. A wrong passphrase must produce a visible
-error and **must not** quietly succeed nor crash.
+**Goal**: negative path. The only legitimate code path that derives
+the master key from a passphrase is the **vault import** wizard
+(used when adding a known vault to a new device). A wrong passphrase
+there must produce a visible error and must not quietly succeed nor
+crash. There is no "Unlock" entry on `vault-main` (the daily flow
+opens the cached grant transparently).
 
-**Preconditions**: Test 06 PASS. Vault is unlocked. Lock it again
-first (kill + restart dev instance per test 06 step 3–4).
+**Preconditions**: Test 06 PASS. Stop the dev instance for this test
+— we drive `vault-import` directly.
 
 **Steps**:
-1. Open `vault-main`. Find the unlock entry.
-2. Type a deliberately wrong passphrase
+1. Launch `<kind>=vault-import`.
+2. Locate the export-passphrase entry in the dump tree (
+   `password text 'Export passphrase'`, see `windows_vault_import.py:120`).
+3. Type a deliberately wrong passphrase
    (`zzzz wrong passphrase abc def ghi`).
-3. Click confirm.
-4. Sleep 2 s (Argon2id is slow — leave headroom).
+4. Trigger import. Wait 2 s (Argon2id is slow — leave headroom).
 5. Screenshot `01-wrong-passphrase-error.png`.
 6. Dump tree → save as `02-attree.txt`.
 7. Close window.
@@ -480,14 +509,15 @@ first (kill + restart dev instance per test 06 step 3–4).
 **Assertions**:
 - An error label/banner is visible (search dump tree for "Wrong",
   "incorrect", "failed", or `EA7601` in CSS classes).
-- The vault is **still locked**: subsequent dev-instance log shows no
-  `vault.unlock.succeeded`.
+- The keyring grant for the test-04 vault is **unchanged** —
+  `keyring.get_password('desktop-connector-dev', 'vault_grant:QRJCRIE7AXEU')`
+  still returns the same value as before this test (a botched
+  import attempt must not corrupt or replace an existing grant).
 - No Python tracebacks on stderr.
-- The dev server log shows **no** new `vault.*` records associated
-  with the wrong attempt that would indicate accidental decrypt.
+- No new vault rows in `server/data/connector.db` (a wrong
+  passphrase must never reach the relay-publish step).
 
-**Capture**: screenshot + tree dump + log excerpt covering the
-attempt window.
+**Capture**: screenshot + tree dump + before/after keyring probe.
 
 ---
 
@@ -495,8 +525,9 @@ attempt window.
 
 **Goal**: first state-creating action against an unlocked vault.
 
-**Preconditions**: Test 07 PASS. Unlock the vault again
-(driver: same flow as test 06 step 6).
+**Preconditions**: Test 07 PASS. Restart the headless dev instance
+(test 06 step 1) so the keyring grant is loaded into the runtime;
+no passphrase prompt expected.
 
 **Steps**:
 1. Create a temp source folder:
