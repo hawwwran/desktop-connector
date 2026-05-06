@@ -67,6 +67,7 @@ from .vault_crypto import (
 )
 from .vault_manifest import (
     add_remote_folder as manifest_add_remote_folder,
+    assert_publishable_revision,
     canonical_manifest_json,
     generate_remote_folder_id,
     make_manifest,
@@ -584,11 +585,23 @@ class Vault:
         *,
         local_index=None,
     ) -> dict:
-        """Encrypt and CAS-publish a new manifest revision."""
+        """Encrypt and CAS-publish a new manifest revision.
+
+        F-Y21: enforces the §A8 revision invariant
+        (``revision == parent_revision + 1``) at the publish boundary.
+        Callers that mutate the manifest body (tombstone / restore /
+        folder add/remove / merge) own the revision bump; passing in a
+        manifest whose revision pair is inconsistent with the bump
+        raises :class:`ManifestRevisionInvariantError` *before* any
+        AEAD encryption or relay POST. The enforcement is here rather
+        than scattered across every helper because every code path
+        eventually reaches this method to publish.
+        """
         if self._closed or not self._master_key:
             raise ValueError("vault is closed")
 
         normalized = normalize_manifest_plaintext(manifest)
+        assert_publishable_revision(normalized)
         revision = int(normalized["revision"])
         parent_revision = int(normalized["parent_revision"])
         author_device_id = str(normalized["author_device_id"])

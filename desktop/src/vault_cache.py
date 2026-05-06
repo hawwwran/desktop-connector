@@ -215,6 +215,51 @@ class VaultLocalIndex:
                     ON vault_pending_operations (binding_id, enqueued_at)
                 """
             )
+            # F-Y10: collapse pre-existing duplicates before adding the
+            # unique constraint. Keep the smallest op_id per
+            # ``(binding_id, op_type, relative_path)`` triple (preserves
+            # FIFO order); fold the latest ``enqueued_at`` of the
+            # duplicates onto the survivor so the watcher's freshness
+            # signal isn't lost. Then enforce uniqueness going forward
+            # so concurrent watcher / sync calls cannot produce duplicate
+            # rows for the same triple. Idempotent: re-running this
+            # block on a clean DB is a no-op.
+            conn.execute(
+                """
+                UPDATE vault_pending_operations
+                SET enqueued_at = (
+                    SELECT MAX(b.enqueued_at)
+                      FROM vault_pending_operations b
+                     WHERE b.binding_id = vault_pending_operations.binding_id
+                       AND b.op_type = vault_pending_operations.op_type
+                       AND b.relative_path = vault_pending_operations.relative_path
+                )
+                WHERE op_id IN (
+                    SELECT MIN(op_id)
+                      FROM vault_pending_operations
+                     GROUP BY binding_id, op_type, relative_path
+                )
+                """
+            )
+            conn.execute(
+                """
+                DELETE FROM vault_pending_operations
+                WHERE op_id NOT IN (
+                    SELECT MIN(op_id)
+                      FROM vault_pending_operations
+                     GROUP BY binding_id, op_type, relative_path
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_vault_pending_operations_unique
+                    ON vault_pending_operations (
+                        binding_id, op_type, relative_path
+                    )
+                """
+            )
             conn.commit()
         finally:
             conn.close()

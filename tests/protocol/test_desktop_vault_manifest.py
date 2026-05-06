@@ -254,5 +254,144 @@ class VaultManifestSchemaTests(unittest.TestCase):
             rename_remote_folder(base, DOCS_ID, "Notes")
 
 
+class ManifestRevisionInvariantTests(unittest.TestCase):
+    """F-Y21 — ``revision == parent_revision + 1`` enforcement.
+
+    Manifest mutators (tombstone / restore / folder add/remove / merge)
+    inherit revision/parent_revision through ``copy.deepcopy`` from the
+    parent. Callers are responsible for bumping both fields. The
+    invariant check at the publish boundary is the safety net that
+    catches a drift before the relay fork-the-revision-history bug
+    becomes visible.
+    """
+
+    def _manifest_at(self, *, revision: int, parent_revision: int) -> dict:
+        return make_manifest(
+            vault_id=VAULT_ID,
+            revision=revision,
+            parent_revision=parent_revision,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[],
+        )
+
+    def test_assert_publishable_revision_accepts_valid_pairs(self) -> None:
+        from src.vault_manifest import assert_publishable_revision
+
+        # Genesis manifest.
+        assert_publishable_revision(
+            self._manifest_at(revision=1, parent_revision=0),
+        )
+        # Mid-history manifest.
+        assert_publishable_revision(
+            self._manifest_at(revision=42, parent_revision=41),
+        )
+
+    def test_assert_publishable_revision_rejects_inherited_pair(self) -> None:
+        """The dangerous case: the candidate inherited the parent's
+        ``revision`` instead of getting bumped, so it'd republish the
+        same revision number — overwriting the parent in CAS terms.
+        """
+        from src.vault_manifest import (
+            ManifestRevisionInvariantError,
+            assert_publishable_revision,
+        )
+
+        with self.assertRaises(ManifestRevisionInvariantError):
+            assert_publishable_revision(
+                self._manifest_at(revision=5, parent_revision=5),
+            )
+
+    def test_assert_publishable_revision_rejects_unbumped_parent(self) -> None:
+        """Caller forgot the parent_revision bump but advanced revision."""
+        from src.vault_manifest import (
+            ManifestRevisionInvariantError,
+            assert_publishable_revision,
+        )
+
+        with self.assertRaises(ManifestRevisionInvariantError):
+            assert_publishable_revision(
+                self._manifest_at(revision=6, parent_revision=4),
+            )
+
+    def test_assert_publishable_revision_rejects_zero_revision(self) -> None:
+        from src.vault_manifest import (
+            ManifestRevisionInvariantError,
+            assert_publishable_revision,
+        )
+
+        with self.assertRaises(ManifestRevisionInvariantError):
+            assert_publishable_revision(
+                self._manifest_at(revision=0, parent_revision=-1),
+            )
+
+    def test_assert_publishable_revision_rejects_non_integer_pair(self) -> None:
+        """Catches a deepcopy of an encrypted-payload field that
+        skipped normalization (e.g. ``revision`` arrived as a string).
+        """
+        from src.vault_manifest import (
+            ManifestRevisionInvariantError,
+            assert_publishable_revision,
+        )
+
+        bad = {
+            "schema": "dc-vault-manifest-v1",
+            "vault_id": VAULT_ID,
+            "author_device_id": AUTHOR,
+            "revision": "two",
+            "parent_revision": "one",
+            "created_at": "2026-05-04T12:00:00.000Z",
+        }
+        with self.assertRaises(ManifestRevisionInvariantError):
+            assert_publishable_revision(bad)
+
+    def test_bump_revision_sets_pair_byte_exactly(self) -> None:
+        """``bump_revision`` is the named alternative to open-coding the
+        bump in callers. Result must satisfy the publish invariant.
+        """
+        from src.vault_manifest import (
+            assert_publishable_revision, bump_revision,
+        )
+
+        parent = self._manifest_at(revision=10, parent_revision=9)
+        candidate = self._manifest_at(revision=10, parent_revision=9)
+        bumped = bump_revision(candidate, from_parent=parent)
+        self.assertIs(bumped, candidate)  # in-place by design
+        self.assertEqual(bumped["revision"], 11)
+        self.assertEqual(bumped["parent_revision"], 10)
+        # Result satisfies the publish invariant.
+        assert_publishable_revision(bumped)
+
+    def test_publish_manifest_rejects_inherited_revision_pair(self) -> None:
+        """Integration test for the publish-side enforcement. A
+        manifest body with the *parent's* revision (i.e. forgot to
+        bump) must trip ``ManifestRevisionInvariantError`` *before*
+        any AEAD encryption or relay POST.
+        """
+        from src.vault_manifest import ManifestRevisionInvariantError
+
+        VAULT_ACCESS_SECRET = "vault-secret"
+        vault = Vault(
+            vault_id=VAULT_ID, master_key=MASTER_KEY,
+            recovery_secret=None,
+            vault_access_secret=VAULT_ACCESS_SECRET,
+            header_revision=1, manifest_revision=5,
+            manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+        )
+
+        class _ShouldNotBeCalledRelay:
+            def put_manifest(self, *args, **kwargs):
+                raise AssertionError(
+                    "publish_manifest must reject before reaching the relay"
+                )
+
+        bad = self._manifest_at(revision=5, parent_revision=5)  # not bumped
+        try:
+            with self.assertRaises(ManifestRevisionInvariantError):
+                vault.publish_manifest(_ShouldNotBeCalledRelay(), bad)
+        finally:
+            vault.close()
+
+
 if __name__ == "__main__":
     unittest.main()

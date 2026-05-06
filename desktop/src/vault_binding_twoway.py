@@ -261,6 +261,12 @@ def _apply_remote_to_local(
     revision = int(manifest.get("revision", 0))
     fingerprint_key = _content_fingerprint_key(vault)
     outcomes: list[SyncOpOutcome] = []
+    # F-Y20: paths visited by the per-entry loop. After the loop ends
+    # we use this set to find local-entries rows whose remote source
+    # has vanished (server-side retention purge dropped the entry +
+    # tombstone), so we can reap them instead of letting them
+    # accumulate forever.
+    visited: set[str] = set()
 
     for entry in folder.get("entries", []) or []:
         # F-Y08: bail between remote entries so a Pause / Disconnect
@@ -295,6 +301,7 @@ def _apply_remote_to_local(
         # entries written by an NFD-emitting client still match the
         # NFC bytes the watcher / baseline put into the store.
         relative = normalize_relative_path(relative)
+        visited.add(relative)
 
         target = local_root / relative
         local_entry = store.get_local_entry(binding.binding_id, relative)
@@ -352,6 +359,56 @@ def _apply_remote_to_local(
                     progress(outcome)
                 except Exception:  # noqa: BLE001
                     log.exception("vault.sync.progress_callback_failed")
+
+    # F-Y20: reap ghost local-entries rows. After server-side retention
+    # purge drops both the active entry and its tombstone, the local
+    # row is orphaned — never visited by the loop above. Two cases:
+    #
+    # 1. Local file is gone. The row is pure dead state — delete it.
+    #    Without this the row sits at ``last_synced_revision`` forever
+    #    and confuses queries that expect "row exists ⇒ file exists".
+    # 2. Local file still exists. The user kept it after the remote
+    #    purge; treat it the same as a baseline-extra (clear the
+    #    fingerprint so the watcher will pick it up as new). We do
+    #    *not* delete the row in this case — that would lose the
+    #    user's mtime / size cache.
+    #
+    # Tombstones the manifest still carries are NOT ghosts — those
+    # were handled by the ``deleted`` branch above and are in
+    # ``visited``.
+    for local_entry in store.list_local_entries(binding.binding_id):
+        if local_entry.relative_path in visited:
+            continue
+        target = local_root / local_entry.relative_path
+        if target.is_file():
+            # Local-only resurrection: the user kept the file after
+            # the remote dropped it. Demote the row's revision so the
+            # next watcher tick treats it as a candidate upload.
+            if local_entry.last_synced_revision == 0:
+                continue  # already an "extra" row, no work
+            log.info(
+                "vault.sync.twoway_local_entry_demoted_to_extra "
+                "binding=%s path=%s prior_revision=%d",
+                binding.binding_id, local_entry.relative_path,
+                int(local_entry.last_synced_revision),
+            )
+            store.upsert_local_entry(VaultLocalEntry(
+                binding_id=binding.binding_id,
+                relative_path=local_entry.relative_path,
+                content_fingerprint="",
+                size_bytes=int(local_entry.size_bytes),
+                mtime_ns=int(local_entry.mtime_ns),
+                last_synced_revision=0,
+            ))
+            continue
+        log.info(
+            "vault.sync.twoway_orphan_local_entry_reaped "
+            "binding=%s path=%s",
+            binding.binding_id, local_entry.relative_path,
+        )
+        store.delete_local_entry(
+            binding.binding_id, local_entry.relative_path,
+        )
 
     return outcomes
 
@@ -670,27 +727,42 @@ def _stamp_local_entry(
     ))
 
 
+_MAX_CONFLICT_PATH_ATTEMPTS = 20
+
+
 def _unique_conflict_path(
     *,
     local_root: Path,
     relative_path: str,
     device_name: str,
 ) -> str:
-    """Pick an §A20 conflict path that doesn't already exist under ``local_root``."""
+    """Pick an §A20 conflict path that doesn't already exist under ``local_root``.
+
+    F-Y12: bounded. Same-minute repeats use the ``attempt`` parameter
+    on :func:`make_conflict_path` (numeric ``#N`` inside the parens)
+    instead of stacking a fresh suffix on every iteration. After 20
+    failed attempts we give up and return the last candidate; an
+    operator hitting that ceiling has either a clock issue or a
+    truly pathological churn pattern, and silently growing the path
+    is the worse failure.
+    """
     when = datetime.now(timezone.utc)
-    candidate = make_conflict_path(
-        original_path=relative_path,
-        kind="synced",
-        device_name=device_name,
-        when=when,
-    )
-    while (local_root / candidate).exists():
+    candidate = ""
+    for attempt in range(1, _MAX_CONFLICT_PATH_ATTEMPTS + 1):
         candidate = make_conflict_path(
-            original_path=candidate,
+            original_path=relative_path,
             kind="synced",
             device_name=device_name,
             when=when,
+            attempt=attempt,
         )
+        if not (local_root / candidate).exists():
+            return candidate
+    log.warning(
+        "vault.sync.conflict_naming_attempts_exhausted "
+        "kind=synced path=%s attempts=%d",
+        relative_path, _MAX_CONFLICT_PATH_ATTEMPTS,
+    )
     return candidate
 
 

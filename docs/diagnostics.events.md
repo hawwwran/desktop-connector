@@ -457,6 +457,7 @@ relay log (filenames are local-only).
 | `vault.sync.binding_paused` | desktop | info | `binding`, `sync_mode`, `pending_ops` | T12.4 pause |
 | `vault.sync.binding_resume_noop` | desktop | info | `binding` | Resume on already-bound binding |
 | `vault.sync.binding_resumed` | desktop | info | `binding`, `sync_mode`, `pending_ops` | T12.4 resume |
+| `vault.sync.conflict_naming_attempts_exhausted` | desktop | warning | `kind`, `path`, `attempts` | F-Y12 — `_unique_conflict_path` hit the 20-attempt cap; returning the last candidate so the caller still gets a destination |
 | `vault.sync.cycle_cancelled_between_ops` | desktop | info | `binding`, `remaining` | F-Y08 — backup-only loop bailed before the next op |
 | `vault.sync.delete_cas_exhausted` | desktop | warning | `binding`, `path` | F-Y06 — tombstone retry budget exhausted |
 | `vault.sync.delete_cas_retry` | desktop | info | `attempt`, `binding`, `path` | F-Y06 — tombstone publish hit CAS race; retrying |
@@ -471,6 +472,7 @@ relay log (filenames are local-only).
 | `vault.sync.local_delete_unsynced_silent` | desktop | info | `binding`, `path` | T12.2 watcher gate dropped a delete on a never-synced path |
 | `vault.sync.previously_synced_check_failed` | desktop | warning | `binding`, `path` | The T12.2 predicate raised; treating as not-synced |
 | `vault.sync.progress_callback_failed` | desktop | error | exception traceback | UI progress callback raised; cycle continues |
+| `vault.sync.queue_cross_type_superseded` | desktop | info | `binding`, `path`, `superseded`, `by`, `rows` | F-Y11 — last-intent-wins: coalesce_op dropped a stale upload/delete because the inverse op was just enqueued for the same path |
 | `vault.sync.ransomware_callback_failed` | desktop | error | `binding` | F-Y27 — UI callback for trip raised |
 | `vault.sync.ransomware_pause_failed` | desktop | error | `binding` | F-Y27 — pause helper threw |
 | `vault.sync.ransomware_pause_triggered` | desktop | warning | `binding`, `title`, `body` | F-Y27 — detector tripped; binding paused |
@@ -492,7 +494,9 @@ relay log (filenames are local-only).
 | `vault.sync.twoway_conflict_move_failed` | desktop | warning | `binding`, `src`, `dst`, `error` | Couldn't rename local copy aside before download |
 | `vault.sync.twoway_download_failed` | desktop | warning | `binding`, `path`, `error` | Two-way remote-upsert phase couldn't fetch file |
 | `vault.sync.twoway_folder_no_display_name` | desktop | warning | `binding`, `folder` | Two-way phase aborted; manifest folder lacked display name |
+| `vault.sync.twoway_local_entry_demoted_to_extra` | desktop | info | `binding`, `path`, `prior_revision` | F-Y20 — manifest no longer carries this path but the local file still exists; demoted the local-entries row to last_synced_revision=0 + cleared fingerprint so the watcher treats it as a fresh upload candidate |
 | `vault.sync.twoway_local_fingerprint_unreadable` | desktop | warning | `binding`, `path` | F-Y04 — fingerprint failed; treated file as modified |
+| `vault.sync.twoway_orphan_local_entry_reaped` | desktop | info | `binding`, `path` | F-Y20 — both the manifest entry and the local file are gone; deleted the orphaned local-entries row |
 | `vault.sync.twoway_orphan_local_for_remote_tombstone` | desktop | warning | `binding`, `path` | F-Y31 — local file exists at a tombstoned path with no local-entry row; not auto-trashed (operator reconcile) |
 | `vault.sync.twoway_phase_a_cancelled` | desktop | info | `binding`, `processed` | F-Y08 — Phase A (apply remote → local) bailed mid-folder |
 | `vault.sync.twoway_remote_tombstone_applied` | desktop | info | `binding`, `path` | Local file trashed after remote-tombstone applied (unmodified case) |

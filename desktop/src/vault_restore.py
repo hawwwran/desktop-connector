@@ -542,6 +542,9 @@ def _bytes_match_remote(
     return bool(remote_keyed) and local_keyed == remote_keyed
 
 
+_MAX_CONFLICT_PATH_ATTEMPTS = 20
+
+
 def _unique_conflict_path(
     *,
     destination: Path,
@@ -553,18 +556,29 @@ def _unique_conflict_path(
 
     The naming function is deterministic for `(path, device, when)`,
     so when the user re-runs a restore at the same minute we may
-    collide with a prior conflict copy — recurse the suffix in that
-    case (matches §A20's "Recursion" example).
+    collide with a prior conflict copy.
+
+    F-Y12: bounded. Use ``attempt`` to stamp a numeric ``#N`` inside
+    the existing parens, holding ``original_path`` constant; the
+    previous form recursed by passing the prior candidate back as
+    ``original_path``, which stacked suffixes and could blow past
+    PATH_MAX on a same-minute repeat streak. Cap at 20 attempts;
+    the cap-hit path logs the exhaust event and returns the last
+    candidate so the caller still gets *some* destination.
     """
-    candidate = make_conflict_path(
-        original_path=relative_path, kind="restored",
-        device_name=device_name, when=when,
-    )
-    while (destination / candidate).exists():
+    candidate = ""
+    for attempt in range(1, _MAX_CONFLICT_PATH_ATTEMPTS + 1):
         candidate = make_conflict_path(
-            original_path=candidate, kind="restored",
-            device_name=device_name, when=when,
+            original_path=relative_path, kind="restored",
+            device_name=device_name, when=when, attempt=attempt,
         )
+        if not (destination / candidate).exists():
+            return candidate
+    log.warning(
+        "vault.sync.conflict_naming_attempts_exhausted "
+        "kind=restored path=%s attempts=%d",
+        relative_path, _MAX_CONFLICT_PATH_ATTEMPTS,
+    )
     return candidate
 
 

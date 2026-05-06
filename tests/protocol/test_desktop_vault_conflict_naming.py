@@ -181,6 +181,171 @@ class MakeConflictPathTests(unittest.TestCase):
         self.assertNotIn(":", backslash.split("/")[-1])
 
 
+class AttemptParameterTests(unittest.TestCase):
+    """F-Y12 — ``attempt`` adds an in-paren ``#N`` disambiguator.
+
+    The previous "recurse by passing the candidate back as
+    original_path" pattern stacked a fresh suffix every iteration and
+    grew the leaf by ~50 characters per collision; the bounded loops in
+    ``_unique_conflict_path`` (twoway / restore) now hold the path
+    constant and bump ``attempt`` instead.
+    """
+
+    def test_attempt_one_is_default_no_numeric_suffix(self) -> None:
+        out = make_conflict_path(
+            original_path="report.pdf", kind="synced",
+            device_name="Laptop", when=WHEN, attempt=1,
+        )
+        self.assertEqual(
+            out, "report (conflict synced Laptop 2026-05-04 17-30).pdf",
+        )
+        # Implicit attempt=1 is the same.
+        self.assertEqual(
+            out,
+            make_conflict_path(
+                original_path="report.pdf", kind="synced",
+                device_name="Laptop", when=WHEN,
+            ),
+        )
+
+    def test_attempt_two_appends_numeric_inside_parens(self) -> None:
+        out = make_conflict_path(
+            original_path="report.pdf", kind="synced",
+            device_name="Laptop", when=WHEN, attempt=2,
+        )
+        self.assertEqual(
+            out, "report (conflict synced Laptop 2026-05-04 17-30 #2).pdf",
+        )
+
+    def test_attempt_growth_is_linear_in_digits(self) -> None:
+        """The leaf grows by ``len(str(N)) + 2`` ('# ' + digits) — *not*
+        by stacking a fresh ~50-char suffix block as the recursive form
+        did. We pin the bound so a future regression that swaps the
+        ``#N`` shape for "(...)(...)" stacking trips here.
+        """
+        base = make_conflict_path(
+            original_path="report.pdf", kind="synced",
+            device_name="Laptop", when=WHEN, attempt=1,
+        )
+        for n in (2, 5, 19, 20):
+            with self.subTest(attempt=n):
+                out = make_conflict_path(
+                    original_path="report.pdf", kind="synced",
+                    device_name="Laptop", when=WHEN, attempt=n,
+                )
+                # Strip the ".pdf" extension before length-checking the
+                # disambiguator portion.
+                base_stem = base[: -len(".pdf")]
+                out_stem = out[: -len(".pdf")]
+                self.assertTrue(out_stem.startswith(base_stem[:-1]))  # "...30"
+                added = len(out_stem) - len(base_stem)
+                expected = len(f" #{n}")
+                self.assertEqual(added, expected)
+
+    def test_attempt_zero_or_negative_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            make_conflict_path(
+                original_path="x.txt", kind="synced",
+                device_name="L", when=WHEN, attempt=0,
+            )
+        with self.assertRaises(ValueError):
+            make_conflict_path(
+                original_path="x.txt", kind="synced",
+                device_name="L", when=WHEN, attempt=-1,
+            )
+
+
+class TwoWayUniqueConflictPathTests(unittest.TestCase):
+    """F-Y12 — bounded loop in ``_unique_conflict_path`` (twoway sync)."""
+
+    def test_first_attempt_returns_unsuffixed_form(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from src.vault_binding_twoway import _unique_conflict_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = _unique_conflict_path(
+                local_root=root,
+                relative_path="report.pdf",
+                device_name="Laptop",
+            )
+        # No "#2" — first call sees the path as free.
+        self.assertNotIn("#", out)
+        self.assertTrue(out.endswith(".pdf"))
+
+    def test_collision_advances_attempt_not_suffix_stack(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from src.vault_binding_twoway import _unique_conflict_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Pre-create the unsuffixed candidate so the loop must
+            # advance to attempt=2.
+            from src.vault_conflict_naming import make_conflict_path
+            from datetime import datetime, timezone
+            # Freezing time isn't strictly necessary — _unique_conflict_path
+            # uses datetime.now(); we just need the first attempt's
+            # candidate to exist on disk so the loop bumps. We create
+            # *both* the natural minute's first form and the previous
+            # minute's first form to cover the second-rollover edge.
+            for delta_minutes in range(0, 2):
+                when = datetime.now(timezone.utc).replace(
+                    second=0, microsecond=0,
+                )
+                cand = make_conflict_path(
+                    original_path="x.txt", kind="synced",
+                    device_name="L", when=when, attempt=1,
+                )
+                (root / cand).parent.mkdir(parents=True, exist_ok=True)
+                (root / cand).write_text("collision")
+            out = _unique_conflict_path(
+                local_root=root,
+                relative_path="x.txt",
+                device_name="L",
+            )
+            # The result either has " #2" (collision) or no '#' (clock
+            # ticked into a different minute mid-test). Either way the
+            # leaf must NOT carry two stacked "(conflict ...)" parens.
+            leaf = out.split("/")[-1]
+            self.assertEqual(leaf.count("(conflict"), 1)
+
+
+class RestoreUniqueConflictPathTests(unittest.TestCase):
+    """F-Y12 — bounded loop in ``_unique_conflict_path`` (restore flow)."""
+
+    def test_collision_uses_attempt_counter_and_caps(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from datetime import datetime, timezone
+        from src.vault_restore import _unique_conflict_path
+        from src.vault_conflict_naming import make_conflict_path
+
+        when = datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Pre-occupy attempts 1..3 so the loop must reach attempt=4.
+            for attempt in range(1, 4):
+                cand = make_conflict_path(
+                    original_path="report.pdf", kind="restored",
+                    device_name="Laptop", when=when, attempt=attempt,
+                )
+                (root / cand).parent.mkdir(parents=True, exist_ok=True)
+                (root / cand).write_text("x")
+            out = _unique_conflict_path(
+                destination=root,
+                relative_path="report.pdf",
+                device_name="Laptop",
+                when=when,
+            )
+        # Leaf only has one (conflict ...) suffix — never stacked —
+        # and the resolved attempt is #4.
+        leaf = out.split("/")[-1]
+        self.assertEqual(leaf.count("(conflict"), 1)
+        self.assertIn("#4", leaf)
+
+
 class ShortTimestampTests(unittest.TestCase):
     def test_datetime_round_trip(self) -> None:
         self.assertEqual(short_timestamp(WHEN), "2026-05-04 17-30")

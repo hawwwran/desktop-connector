@@ -238,6 +238,79 @@ def canonical_manifest_json(manifest: dict[str, Any]) -> bytes:
     return json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+class ManifestRevisionInvariantError(ValueError):
+    """Raised when a candidate manifest's revision/parent_revision pair
+    violates the §A8 single-bump invariant (``revision ==
+    parent_revision + 1`` and both are non-negative integers).
+
+    F-Y21: callers that mutate a manifest body (tombstone, restore,
+    add/remove folder, etc.) must explicitly bump the revision pair
+    before publishing. Inheriting the parent's pair through
+    ``copy.deepcopy`` and forgetting to overwrite is a silent fork-the-
+    revision-history bug; checking the invariant at the publish
+    boundary forces every code path to go through ``bump_revision`` or
+    open-code the bump correctly.
+    """
+
+
+def bump_revision(
+    candidate: dict[str, Any],
+    *,
+    from_parent: dict[str, Any],
+) -> dict[str, Any]:
+    """Set ``candidate``'s ``revision`` and ``parent_revision`` based on
+    ``from_parent`` and return ``candidate`` unchanged otherwise.
+
+    The mutation is in-place to keep with the call-site idiom of
+    "transform-then-publish on the same dict". Use this instead of
+    open-coding ``next_manifest["revision"] = parent + 1`` so the
+    invariant is named in the call site and easier to grep for.
+    """
+    parent_revision = int(from_parent.get("revision", 0))
+    if parent_revision < 0:
+        raise ManifestRevisionInvariantError(
+            f"parent revision must be non-negative; got {parent_revision}",
+        )
+    candidate["revision"] = parent_revision + 1
+    candidate["parent_revision"] = parent_revision
+    return candidate
+
+
+def assert_publishable_revision(manifest: dict[str, Any]) -> None:
+    """Raise :class:`ManifestRevisionInvariantError` unless the
+    revision / parent_revision pair satisfies the §A8 invariant.
+
+    Called from :meth:`Vault.publish_manifest` at the top so a malformed
+    bump never reaches the relay. Genesis manifests (``revision == 1``,
+    ``parent_revision == 0``) pass; every subsequent revision must be
+    ``parent_revision + 1`` exactly. Negative or non-integer values
+    fail too — they signal a deepcopy-from-encrypted-payload that
+    skipped normalization.
+    """
+    try:
+        revision = int(manifest.get("revision", -1))
+        parent_revision = int(manifest.get("parent_revision", -1))
+    except (TypeError, ValueError) as exc:
+        raise ManifestRevisionInvariantError(
+            f"revision pair must be integers; got "
+            f"revision={manifest.get('revision')!r} "
+            f"parent_revision={manifest.get('parent_revision')!r}",
+        ) from exc
+    if revision < 1:
+        raise ManifestRevisionInvariantError(
+            f"revision must be >= 1; got {revision}",
+        )
+    if parent_revision < 0:
+        raise ManifestRevisionInvariantError(
+            f"parent_revision must be non-negative; got {parent_revision}",
+        )
+    if revision != parent_revision + 1:
+        raise ManifestRevisionInvariantError(
+            f"revision must be parent_revision + 1; "
+            f"got revision={revision} parent_revision={parent_revision}",
+        )
+
+
 _FILE_ENTRY_ID_RE = re.compile(r"^fe_v1_[a-z2-7]{24}$")
 _FILE_VERSION_ID_RE = re.compile(r"^fv_v1_[a-z2-7]{24}$")
 

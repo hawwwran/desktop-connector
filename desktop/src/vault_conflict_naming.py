@@ -53,15 +53,35 @@ def make_conflict_path(
     kind: str,
     when: datetime | None = None,
     device_name: str | None = None,
+    attempt: int = 1,
 ) -> str:
     """Return the §A20 conflict-copy path for ``original_path``.
 
     ``kind`` controls the verb in the suffix; ``device_name`` (when
     provided) is sanitised to filesystem-safe characters and inserted
     between the verb and the timestamp.
+
+    F-Y12: ``attempt`` controls the same-minute disambiguator. The
+    base form (``attempt=1``) carries no numeric suffix, matching the
+    pre-existing wire shape:
+
+        report (conflict synced laptop 2026-05-06 12-34).pdf
+
+    Higher values append ``#N`` *inside* the same parens so the leaf
+    grows by ~5 characters instead of ~50:
+
+        report (conflict synced laptop 2026-05-06 12-34 #2).pdf
+
+    Callers that previously recursed by passing the result back as
+    ``original_path`` would stack a fresh suffix every iteration and
+    blow past PATH_MAX on a same-minute collision streak. The loops in
+    ``_unique_conflict_path`` (twoway sync, restore) now hold
+    ``original_path`` constant and bump ``attempt`` instead.
     """
     if not isinstance(kind, str) or not kind.strip():
         raise ValueError("kind must be a non-empty string")
+    if not isinstance(attempt, int) or attempt < 1:
+        raise ValueError("attempt must be a positive integer")
 
     raw = str(original_path).replace("\\", "/")
     parts = [p for p in raw.split("/") if p]
@@ -87,6 +107,8 @@ def make_conflict_path(
         if sanitized:
             pieces.append(sanitized)
     pieces.append(timestamp)
+    if attempt > 1:
+        pieces.append(f"#{attempt}")
     suffix = " (" + " ".join(pieces) + ")"
     new_leaf = f"{stem}{suffix}{ext}"
     return f"{parent}/{new_leaf}" if parent else new_leaf

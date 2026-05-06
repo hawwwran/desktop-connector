@@ -192,6 +192,199 @@ class VaultBindingsSchemaTests(unittest.TestCase):
         self.assertEqual(self.store.list_local_entries(record.binding_id), [])
         self.assertEqual(self.store.list_pending_ops(record.binding_id), [])
 
+    def test_coalesce_op_is_atomic_and_idempotent(self) -> None:
+        """F-Y10: ON CONFLICT DO UPDATE collapses SELECT+INSERT into a
+        single statement so two concurrent callers can't fork the queue.
+
+        We verify the post-condition (one row, latest enqueued_at)
+        rather than re-engineering a thread race here — the DB-level
+        unique constraint is the load-bearing guarantee, exercised by
+        the duplicate-attempt unique-violation test below.
+        """
+        record = self.store.create_binding(
+            vault_id="V" + "T" * 11,
+            remote_folder_id="rf_v1_y10" * 3,
+            local_path="/y10",
+        )
+        first = self.store.coalesce_op(
+            binding_id=record.binding_id,
+            op_type="upload",
+            relative_path="same.txt",
+            now=100,
+        )
+        # Re-coalescing the same triple yields the same row id with
+        # ``enqueued_at`` bumped — never a second row.
+        second = self.store.coalesce_op(
+            binding_id=record.binding_id,
+            op_type="upload",
+            relative_path="same.txt",
+            now=200,
+        )
+        self.assertEqual(second.op_id, first.op_id)
+        self.assertEqual(second.enqueued_at, 200)
+        ops = self.store.list_pending_ops(record.binding_id)
+        self.assertEqual(len(ops), 1)
+
+    def test_pending_ops_unique_index_rejects_duplicates(self) -> None:
+        """F-Y10: the DB-level UNIQUE constraint refuses two raw
+        ``enqueue_pending_op`` calls for the same triple. This is the
+        backstop ``coalesce_op`` relies on for atomicity.
+        """
+        import sqlite3
+        record = self.store.create_binding(
+            vault_id="V" + "U" * 11,
+            remote_folder_id="rf_v1_y10b" * 2 + "z" * 4,
+            local_path="/y10b",
+        )
+        self.store.enqueue_pending_op(
+            binding_id=record.binding_id,
+            op_type="upload",
+            relative_path="dup.txt",
+            now=10,
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.enqueue_pending_op(
+                binding_id=record.binding_id,
+                op_type="upload",
+                relative_path="dup.txt",
+                now=11,
+            )
+
+    def test_pending_ops_pre_existing_duplicates_collapsed_on_init(self) -> None:
+        """F-Y10 backfill: schema init collapses pre-existing duplicate
+        rows from before the unique index landed. We synthesize the
+        legacy state by writing duplicates with the unique index
+        temporarily dropped, close the index, and re-init the schema —
+        the dedupe step must keep the smallest op_id and bump its
+        ``enqueued_at`` to the max of the duplicates.
+        """
+        import sqlite3
+
+        record = self.store.create_binding(
+            vault_id="V" + "V" * 11,
+            remote_folder_id="rf_v1_y10c" * 2 + "y" * 4,
+            local_path="/y10c",
+        )
+        with sqlite3.connect(self.index.db_path) as conn:
+            conn.execute("DROP INDEX idx_vault_pending_operations_unique")
+            for ts in (50, 75, 100):
+                conn.execute(
+                    "INSERT INTO vault_pending_operations "
+                    "(binding_id, op_type, relative_path, enqueued_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (record.binding_id, "upload", "old.txt", ts),
+                )
+            conn.commit()
+        # Re-init triggers the F-Y10 backfill block (private method;
+        # this is the same call ``__init__`` makes to bring schema up
+        # to date on every open).
+        self.index._ensure_schema()
+        ops = [
+            o for o in self.store.list_pending_ops(record.binding_id)
+            if o.relative_path == "old.txt"
+        ]
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].enqueued_at, 100)
+
+    def test_coalesce_delete_drops_pending_upload_for_same_path(self) -> None:
+        """F-Y11: enqueueing a delete supersedes any pending upload for
+        the same path. The user deleted what we hadn't uploaded yet —
+        running both ops in series would tombstone a now-missing file
+        and then the explicit delete would no-op.
+        """
+        record = self.store.create_binding(
+            vault_id="V" + "W" * 11,
+            remote_folder_id="rf_v1_y11" * 3,
+            local_path="/y11",
+        )
+        self.store.coalesce_op(
+            binding_id=record.binding_id,
+            op_type="upload",
+            relative_path="doomed.txt",
+            now=100,
+        )
+        self.store.coalesce_op(
+            binding_id=record.binding_id,
+            op_type="delete",
+            relative_path="doomed.txt",
+            now=200,
+        )
+        ops = self.store.list_pending_ops(record.binding_id)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].op_type, "delete")
+        self.assertEqual(ops[0].relative_path, "doomed.txt")
+
+    def test_coalesce_upload_drops_pending_delete_for_same_path(self) -> None:
+        """F-Y11 — the symmetric case. User recreated the file before
+        the queue drained the delete; the queued tombstone is stale.
+        """
+        record = self.store.create_binding(
+            vault_id="V" + "X" * 11,
+            remote_folder_id="rf_v1_y11b" * 2 + "y" * 4,
+            local_path="/y11b",
+        )
+        self.store.coalesce_op(
+            binding_id=record.binding_id,
+            op_type="delete",
+            relative_path="resurrected.txt",
+            now=100,
+        )
+        self.store.coalesce_op(
+            binding_id=record.binding_id,
+            op_type="upload",
+            relative_path="resurrected.txt",
+            now=200,
+        )
+        ops = self.store.list_pending_ops(record.binding_id)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].op_type, "upload")
+
+    def test_coalesce_does_not_drop_other_path_or_other_binding(self) -> None:
+        """F-Y11: cross-type drops are scoped to (binding, path).
+        A delete on ``a.txt`` must not touch an upload on ``b.txt``,
+        nor an upload on ``a.txt`` under a different binding.
+        """
+        a = self.store.create_binding(
+            vault_id="V" + "Y" * 11,
+            remote_folder_id="rf_v1_y11c" * 2 + "y" * 4,
+            local_path="/y11c-a",
+        )
+        b = self.store.create_binding(
+            vault_id="V" + "Y" * 11,
+            remote_folder_id="rf_v1_y11c2" * 2 + "x" * 2,
+            local_path="/y11c-b",
+        )
+        self.store.coalesce_op(
+            binding_id=a.binding_id, op_type="upload",
+            relative_path="a.txt", now=10,
+        )
+        self.store.coalesce_op(
+            binding_id=a.binding_id, op_type="upload",
+            relative_path="b.txt", now=10,
+        )
+        self.store.coalesce_op(
+            binding_id=b.binding_id, op_type="upload",
+            relative_path="a.txt", now=10,
+        )
+        # Enqueue a delete for a.txt under binding A.
+        self.store.coalesce_op(
+            binding_id=a.binding_id, op_type="delete",
+            relative_path="a.txt", now=20,
+        )
+        a_ops = sorted(
+            self.store.list_pending_ops(a.binding_id),
+            key=lambda o: o.relative_path,
+        )
+        b_ops = self.store.list_pending_ops(b.binding_id)
+        self.assertEqual(
+            [(o.relative_path, o.op_type) for o in a_ops],
+            [("a.txt", "delete"), ("b.txt", "upload")],
+        )
+        self.assertEqual(
+            [(o.relative_path, o.op_type) for o in b_ops],
+            [("a.txt", "upload")],
+        )
+
     def test_invalid_state_or_mode_rejected(self) -> None:
         with self.assertRaises(ValueError):
             self.store.create_binding(

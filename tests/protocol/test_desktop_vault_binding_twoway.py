@@ -489,6 +489,143 @@ class TwoWayCycleTests(unittest.TestCase):
         self.assertIsNotNone(find_file_entry(current, DOCS_ID, "fresh.txt"))
 
     # ------------------------------------------------------------------
+    # F-Y20 — ghost local-entries reaping
+    # ------------------------------------------------------------------
+
+    def test_ghost_row_reaped_when_local_file_also_gone(self) -> None:
+        """Both the manifest entry AND the local file have vanished
+        (the manifest's tombstone was server-side-purged after retention
+        elapsed). The local-entries row is pure dead state and must be
+        deleted so it doesn't accumulate forever.
+        """
+        relay, manifest = self._empty_remote()
+        binding = self._make_two_way_binding(
+            last_revision=int(manifest["revision"]),
+        )
+        # Pre-seed a local-entries row for a path that has never been
+        # in this manifest. The local file does NOT exist on disk.
+        self.store.upsert_local_entry(VaultLocalEntry(
+            binding_id=binding.binding_id,
+            relative_path="purged.txt",
+            content_fingerprint="ghost-fp",
+            size_bytes=42,
+            mtime_ns=1_700_000_000_000_000_000,
+            last_synced_revision=int(manifest["revision"]),
+        ))
+
+        vault = _vault()
+        try:
+            run_two_way_cycle(
+                vault=vault, relay=relay,
+                store=self.store, binding=binding,
+                author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+            )
+        finally:
+            vault.close()
+
+        relatives = {
+            e.relative_path
+            for e in self.store.list_local_entries(binding.binding_id)
+        }
+        self.assertNotIn("purged.txt", relatives)
+
+    def test_ghost_row_demoted_when_local_file_survives(self) -> None:
+        """The manifest entry has been server-side-purged but the user
+        still has the local file on disk. We don't delete the row —
+        that would lose the watcher's mtime/size cache; instead we
+        clear the fingerprint and reset ``last_synced_revision`` so
+        the next watcher tick treats the file as a fresh upload
+        candidate (the user can choose to back it up again).
+        """
+        relay, manifest = self._empty_remote()
+        binding = self._make_two_way_binding(
+            last_revision=int(manifest["revision"]),
+        )
+        # Pre-seed a local-entries row pointing at a real on-disk file
+        # that the manifest doesn't carry.
+        target = self.local_root / "kept_locally.txt"
+        target.write_bytes(b"user kept this after server purged it")
+        self.store.upsert_local_entry(VaultLocalEntry(
+            binding_id=binding.binding_id,
+            relative_path="kept_locally.txt",
+            content_fingerprint="stale-fp",
+            size_bytes=target.stat().st_size,
+            mtime_ns=target.stat().st_mtime_ns,
+            last_synced_revision=int(manifest["revision"]),
+        ))
+
+        vault = _vault()
+        try:
+            run_two_way_cycle(
+                vault=vault, relay=relay,
+                store=self.store, binding=binding,
+                author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+            )
+        finally:
+            vault.close()
+
+        # Row survives, but is now flagged for re-upload (revision=0,
+        # fingerprint cleared). Local file untouched.
+        rows = {
+            e.relative_path: e
+            for e in self.store.list_local_entries(binding.binding_id)
+        }
+        self.assertIn("kept_locally.txt", rows)
+        self.assertEqual(rows["kept_locally.txt"].last_synced_revision, 0)
+        self.assertEqual(rows["kept_locally.txt"].content_fingerprint, "")
+        self.assertTrue(target.is_file())
+
+    def test_ghost_reaping_does_not_touch_visited_paths(self) -> None:
+        """F-Y20 must only reap *unvisited* rows. A path that's still
+        an active manifest entry — one the loop processed — must keep
+        its row intact.
+        """
+        relay, manifest = self._empty_remote()
+        manifest = self._seed_remote_file(
+            relay, manifest, path="active.txt", content=b"active content",
+        )
+        binding = self._make_two_way_binding(
+            last_revision=int(manifest["revision"]) - 1,
+        )
+        # Existing local row for the active path with up-to-date
+        # fingerprint so no work is needed during the cycle.
+        target = self.local_root / "active.txt"
+        target.write_bytes(b"active content")
+        self.store.upsert_local_entry(VaultLocalEntry(
+            binding_id=binding.binding_id,
+            relative_path="active.txt",
+            content_fingerprint=_keyed_fingerprint(b"active content"),
+            size_bytes=target.stat().st_size,
+            mtime_ns=target.stat().st_mtime_ns,
+            last_synced_revision=int(manifest["revision"]),
+        ))
+
+        vault = _vault()
+        try:
+            run_two_way_cycle(
+                vault=vault, relay=relay,
+                store=self.store, binding=binding,
+                author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+            )
+        finally:
+            vault.close()
+
+        rows = {
+            e.relative_path: e
+            for e in self.store.list_local_entries(binding.binding_id)
+        }
+        self.assertIn("active.txt", rows)
+        # Revision must NOT have been demoted — this row was visited.
+        self.assertGreater(rows["active.txt"].last_synced_revision, 0)
+        self.assertEqual(
+            rows["active.txt"].content_fingerprint,
+            _keyed_fingerprint(b"active content"),
+        )
+
+    # ------------------------------------------------------------------
     # Validation: only `bound` + sync_mode == 'two-way' is accepted
     # ------------------------------------------------------------------
 

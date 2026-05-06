@@ -18,6 +18,7 @@ loop, watcher, and connect-folder UI sit on top of it.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import sqlite3
 import time
@@ -25,6 +26,9 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal
+
+
+log = logging.getLogger(__name__)
 
 
 def normalize_relative_path(path: str) -> str:
@@ -71,6 +75,18 @@ VALID_SYNC_MODES: frozenset[SyncMode] = frozenset(
     {"backup-only", "two-way", "download-only", "paused"}
 )
 VALID_OP_TYPES: frozenset[OpType] = frozenset({"upload", "delete", "rename"})
+
+# F-Y11 cross-type supersede map. Listed types are dropped from the
+# queue when the keying op_type is enqueued for the same path. Pairs
+# bidirectional: enqueueing a delete drops uploads; enqueueing an
+# upload drops deletes. ``rename`` is unmapped — only the watcher
+# (`upload` / `delete`) and the two-way sync produce queue rows
+# today; rename gets its own resolution rules when wired.
+_SUPERSEDED_OP_TYPES: dict[OpType, tuple[OpType, ...]] = {
+    "upload": ("delete",),
+    "delete": ("upload",),
+    "rename": (),
+}
 
 DEFAULT_SYNC_MODE: SyncMode = "backup-only"  # §gaps §20
 
@@ -410,39 +426,76 @@ class VaultBindingsStore:
         same path can show up many times in a short window. Coalescing
         at insert time keeps the queue O(distinct paths) instead of
         O(filesystem events).
-        """
-        normalized = normalize_relative_path(relative_path)
-        existing = self._first_pending_op_for_path(binding_id, op_type, normalized)
-        if existing is None:
-            return self.enqueue_pending_op(
-                binding_id=binding_id,
-                op_type=op_type,
-                relative_path=normalized,
-                now=now,
-            )
-        enqueued = int(now if now is not None else time.time())
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE vault_pending_operations SET enqueued_at = ? WHERE op_id = ?",
-                (enqueued, existing.op_id),
-            )
-            conn.commit()
-        existing.enqueued_at = enqueued
-        return existing
 
-    def _first_pending_op_for_path(
-        self, binding_id: str, op_type: OpType, relative_path: str,
-    ) -> VaultPendingOperation | None:
+        F-Y10: atomic. The unique constraint on
+        ``(binding_id, op_type, relative_path)`` plus
+        ``INSERT … ON CONFLICT DO UPDATE`` collapse the prior
+        SELECT-then-INSERT into a single statement, so the watcher
+        and sync threads can no longer interleave to produce
+        duplicate rows.
+
+        F-Y11: last-intent-wins across types. Enqueueing a
+        ``delete`` drops any pending ``upload`` for the same path
+        (the user deleted what we hadn't uploaded yet); enqueueing
+        an ``upload`` drops any pending ``delete`` (the user
+        recreated what we were about to tombstone). Without this
+        the queue would run both ops in series and the second
+        would overwrite the first's effect — at best wasted work,
+        at worst a tombstone-then-upload race the relay rejects.
+        ``rename`` does not currently fire any cross-type drop
+        because the only producers are the watcher (`upload` /
+        `delete`) and the two-way sync; if rename ever wires into
+        the queue it gets its own intent-resolution rules.
+        """
+        if op_type not in VALID_OP_TYPES:
+            raise ValueError(f"unknown op_type: {op_type!r}")
+        normalized = normalize_relative_path(relative_path)
+        enqueued = int(now if now is not None else time.time())
+
+        cross_types = _SUPERSEDED_OP_TYPES.get(op_type, ())
+
         with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM vault_pending_operations
-                WHERE binding_id = ? AND op_type = ? AND relative_path = ?
-                ORDER BY op_id ASC LIMIT 1
-                """,
-                (binding_id, op_type, normalize_relative_path(relative_path)),
-            ).fetchone()
-        return _row_to_pending_op(row) if row else None
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                # F-Y11: drop superseded cross-type rows first so the
+                # follow-up insert/update has nothing to race against.
+                # We log per dropped op_type rather than per row — the
+                # operator cares "a delete superseded an upload here",
+                # not the row count of the watcher's burst.
+                for stale_type in cross_types:
+                    cursor = conn.execute(
+                        "DELETE FROM vault_pending_operations "
+                        "WHERE binding_id = ? AND op_type = ? "
+                        "AND relative_path = ?",
+                        (binding_id, stale_type, normalized),
+                    )
+                    if cursor.rowcount:
+                        log.info(
+                            "vault.sync.queue_cross_type_superseded "
+                            "binding=%s path=%s superseded=%s by=%s rows=%d",
+                            binding_id, normalized, stale_type, op_type,
+                            int(cursor.rowcount),
+                        )
+                # F-Y10: atomic upsert. ON CONFLICT updates
+                # ``enqueued_at`` to the new value (matching the
+                # pre-F-Y10 "refresh on duplicate" semantic) without
+                # leaving an SELECT/INSERT window open.
+                row = conn.execute(
+                    """
+                    INSERT INTO vault_pending_operations (
+                        binding_id, op_type, relative_path, enqueued_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT (binding_id, op_type, relative_path)
+                    DO UPDATE SET enqueued_at = excluded.enqueued_at
+                    RETURNING *
+                    """,
+                    (binding_id, op_type, normalized, enqueued),
+                ).fetchone()
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return _row_to_pending_op(row)
 
     # ------------------------------------------------------------------
     # Internals

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat as _stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -260,9 +261,72 @@ def _latest_version(entry: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _walk_local(root: Path) -> Iterable[Path]:
+    """Yield regular files under ``root``.
+
+    F-Y17: ``upload_file`` (the single-file path) lstat-rejects
+    specials, but the baseline walker used to yield raw paths and the
+    extras-loop's later ``Path.stat()`` call would happily *follow* a
+    symlink and stat its target — leaking information about files
+    outside the binding root into ``vault_local_entries``. The walker
+    now classifies each leaf with ``os.lstat`` itself: non-regular
+    leaves are dropped here with ``vault.sync.special_file_skipped``
+    (matching the upload helper's emit shape), so callers see a
+    regular-files-only stream and don't need their own filter. lstat
+    failures (permission, dangling symlink, transient I/O) emit
+    ``vault.sync.file_walk_error`` per F-D13 and are skipped without
+    crashing the baseline.
+
+    ``os.walk(followlinks=False)`` is the default — we don't recurse
+    *through* a symlinked subdirectory either.
+    """
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
-            yield Path(dirpath) / name
+            absolute = Path(dirpath) / name
+            try:
+                st = os.lstat(absolute)
+            except OSError as exc:
+                log.warning(
+                    "vault.sync.file_walk_error path=%s errno=%s",
+                    absolute, getattr(exc, "errno", "unknown"),
+                )
+                continue
+            mode = st.st_mode
+            if _stat.S_ISREG(mode):
+                yield absolute
+                continue
+            kind = _classify_special_mode(mode)
+            if kind is None:
+                # Mode bits we don't know how to categorize —
+                # treat conservatively as a walk error so the operator
+                # has a breadcrumb if a new filetype shows up under
+                # the binding root.
+                log.warning(
+                    "vault.sync.file_walk_error path=%s "
+                    "errno=unknown_filetype mode=%o",
+                    absolute, mode,
+                )
+                continue
+            log.info(
+                "vault.sync.special_file_skipped path=%s reason=%s",
+                absolute, kind,
+            )
+
+
+def _classify_special_mode(mode: int) -> str | None:
+    """Return a short label for a non-regular ``st_mode``, or ``None``
+    if the mode bits don't match any known special-file kind.
+    """
+    if _stat.S_ISLNK(mode):
+        return "symlink"
+    if _stat.S_ISFIFO(mode):
+        return "fifo"
+    if _stat.S_ISSOCK(mode):
+        return "socket"
+    if _stat.S_ISCHR(mode):
+        return "char_device"
+    if _stat.S_ISBLK(mode):
+        return "block_device"
+    return None
 
 
 def _emit(

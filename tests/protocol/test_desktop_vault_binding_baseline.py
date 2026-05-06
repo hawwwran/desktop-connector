@@ -220,6 +220,39 @@ class VaultBaselineTests(unittest.TestCase):
         self.assertNotIn("ghost.txt", result.downloaded_files)
         self.assertIn("keep.txt", result.downloaded_files)
 
+    def test_specials_skipped_in_baseline_walk(self) -> None:
+        """F-Y17: ``_walk_local`` filters out symlinks / FIFOs / sockets
+        so the baseline's extras pass cannot stat-follow a symlink and
+        leak a file outside the binding root into vault_local_entries.
+        The single-file ``upload_file`` path was already lstat-protected;
+        this test pins the matching guard for the walker.
+        """
+        from src.vault_binding_baseline import _walk_local
+        # Regular file — yielded.
+        (self.local_root / "regular.txt").write_bytes(b"yes")
+        # Symlink that points outside the binding root. The pre-F-Y17
+        # walker would stat-follow this and report the *target's* size;
+        # the post-F-Y17 walker drops it entirely.
+        outside_target = self.tmpdir / "OUTSIDE_secret.txt"
+        outside_target.write_bytes(b"outside content the user never put under the binding")
+        try:
+            (self.local_root / "evil_link").symlink_to(outside_target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation unsupported on this filesystem")
+        # FIFO — must drop without error.
+        try:
+            os.mkfifo(self.local_root / "control_pipe")
+            mkfifo_supported = True
+        except (OSError, AttributeError):
+            mkfifo_supported = False
+        # Walk + collect names.
+        seen = sorted(p.name for p in _walk_local(self.local_root))
+        self.assertEqual(seen, ["regular.txt"])
+        # Negative assertions: the dangerous leaves were filtered.
+        self.assertNotIn("evil_link", seen)
+        if mkfifo_supported:
+            self.assertNotIn("control_pipe", seen)
+
     def test_unknown_remote_folder_raises_keyerror(self) -> None:
         relay, manifest = self._seed_remote({"x.txt": b"x"})
         binding = self.store.create_binding(
