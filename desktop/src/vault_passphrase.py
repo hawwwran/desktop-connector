@@ -7,17 +7,23 @@ passphrase the user can copy.
 Approach
 --------
 
-We use a homegrown ~520-word list of short, common English words.
+We use a homegrown 520-word list of short, common English words.
 Entropy budget at the default of **7 words**:
-    log2(520^7) ≈ 63.1 bits.
+    log2(520^7) ≈ 63.16 bits.
 
-That sits squarely in the industry comfort band (NIST SP 800-63B
-recommends ≥ 64 bits for memorized secrets gated behind a strong
-KDF). At our locked Argon2id params (m=128 MiB, t=4) each guess
-costs ~1 second on a 2026-era CPU, so 2^63 guesses is far beyond
-any practical brute-force budget — and the recovery-kit second
-factor (formats §12.3) means an attacker needs to compromise the
-kit file *separately* before they can even start guessing.
+That's just under NIST SP 800-63B's 64-bit floor for memorized
+secrets gated behind a strong KDF (F-C20 — the gap is ~0.84 bits,
+the kit-required second factor lifts the effective work). At our
+locked Argon2id params (m=128 MiB, t=4) each guess costs ~1 second
+on a 2026-era CPU, so 2^63 guesses is far beyond any practical
+brute-force budget — and the recovery-kit second factor (formats
+§12.3) means an attacker needs to compromise the kit file
+*separately* before they can even start guessing. A future bump
+to 8 words (≈ 72.2 bits) is the cheap way to lift cleanly above
+the 64-bit floor; it's deferred because changing
+``DEFAULT_WORD_COUNT`` alters every newly generated passphrase
+shape and the existing 7-word default is documented in the
+recovery flow.
 
 Six words (~54 bits) was the v0 default. Bumped to 7 (2026-05-03)
 after the user asked whether 54 was enough — kit-required model
@@ -46,7 +52,10 @@ DEFAULT_WORD_COUNT = 7
 DEFAULT_SEPARATOR = "-"
 
 
-# 512 short, common English words. Dedup'd, sorted, ASCII-only.
+# 520 short, common English words. Dedup'd, sorted, ASCII-only.
+# `assert len(WORDLIST) == 520` is below — the count is load-bearing
+# (it appears in the entropy-budget docstring), so a future contributor
+# who edits the list trips the assertion before it ships.
 WORDLIST: tuple[str, ...] = (
     "able", "acid", "acre", "across", "act", "add", "after", "again",
     "age", "air", "all", "alone", "along", "also", "always", "and",
@@ -115,7 +124,9 @@ WORDLIST: tuple[str, ...] = (
     "humid", "humor", "hunt", "hurry", "hurt", "hut", "ice", "icy",
 )
 assert len(set(WORDLIST)) == len(WORDLIST), "wordlist contains duplicates"
-assert len(WORDLIST) >= 256, "wordlist too small"
+# Frozen at 520 (F-C20). A change here also requires updating the
+# entropy-budget figure in the module docstring.
+assert len(WORDLIST) == 520, f"wordlist size has drifted: {len(WORDLIST)}"
 
 
 def generate_passphrase(words: int = DEFAULT_WORD_COUNT, separator: str = DEFAULT_SEPARATOR) -> str:

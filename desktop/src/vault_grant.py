@@ -84,6 +84,17 @@ class VaultGrant:
         return bytes(self._master_key)
 
     def zero(self) -> None:
+        """Best-effort overwrite of the in-memory master key + access secret.
+
+        Limitation (F-C16): ``to_json()`` and ``from_json()`` allocate
+        immutable ``bytes`` and ``str`` copies of the same material that
+        Python doesn't expose deterministic zeroing for. Calling
+        ``zero()`` after a serialization round-trip leaves those copies
+        live until garbage-collected. The OS-level memory boundary is
+        the real defence; zeroing what we own is still right but isn't
+        a complete scrub. A future ``with_master_key`` context-manager
+        API could avoid the round-trips entirely.
+        """
         for i in range(len(self._master_key)):
             self._master_key[i] = 0
         self._master_key = bytearray()

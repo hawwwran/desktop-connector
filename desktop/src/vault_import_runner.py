@@ -16,6 +16,7 @@ from typing import Any, Callable, Protocol
 
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from .vault_crypto import normalize_vault_id
 from .vault_export import (
     BundleContents,
     ExportError,
@@ -37,6 +38,29 @@ from .vault_manifest import merge_with_remote_head, normalize_manifest_plaintext
 
 log = logging.getLogger(__name__)
 CAS_MAX_RETRIES = 5
+
+
+def _assert_bundle_vault_id_matches(
+    *, bundle_vault_id: str, expected_vault_id: str
+) -> None:
+    """Defensive layering (F-C14) on top of the wrap-AAD vault_id binding.
+
+    ``read_export_bundle`` already binds the AEAD-decryption key to the
+    caller-supplied ``vault_id`` via the wrap AAD; if a future regression
+    relaxed that binding, this check would catch a bundle whose internal
+    header.vault_id disagrees with the active vault before any chunk
+    upload or manifest decryption happens. Raises ``ExportError`` with
+    the protocol's ``vault_export_vault_mismatch`` shape so the wizard
+    can surface a clear refusal.
+    """
+    bundle_canonical = normalize_vault_id(bundle_vault_id)
+    expected_canonical = normalize_vault_id(expected_vault_id)
+    if bundle_canonical != expected_canonical:
+        raise ExportError(
+            "vault_export_vault_mismatch",
+            f"bundle header vault_id {bundle_canonical} does not match "
+            f"active vault {expected_canonical}",
+        )
 
 
 @dataclass(frozen=True)
@@ -114,6 +138,10 @@ def open_bundle_for_preview(
         passphrase=passphrase,
         vault_id=vault.vault_id,
     )
+    _assert_bundle_vault_id_matches(
+        bundle_vault_id=contents.header.vault_id,
+        expected_vault_id=vault.vault_id,
+    )
     bundle_manifest = decrypt_manifest_envelope(vault, contents.manifest_envelope)
     preview = preview_import(
         bundle_manifest=bundle_manifest,
@@ -159,6 +187,11 @@ def run_import(
         bundle_path=bundle_path,
         passphrase=passphrase,
         vault_id=vault.vault_id,
+    )
+    # F-C14: defensive layering on top of the wrap-AAD vault_id binding.
+    _assert_bundle_vault_id_matches(
+        bundle_vault_id=contents.header.vault_id,
+        expected_vault_id=vault.vault_id,
     )
 
     # §D9 identity gate first — refuse exits before any chunk fetches

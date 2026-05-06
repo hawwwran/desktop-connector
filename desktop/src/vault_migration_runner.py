@@ -266,6 +266,38 @@ def run_migration(
     )
 
 
+def rollback_verified_migration(config_dir: Path) -> MigrationRecord | None:
+    """Drop a stuck ``verified`` migration back to ``idle`` (F-C21).
+
+    ``run_migration`` is idempotent — re-invoking with a record at
+    ``verified`` re-runs the verify step. When verify is deterministically
+    failing (e.g. the target relay is permanently corrupt or unreachable),
+    re-invocation just returns the same mismatch every time. There's no
+    other path from ``verified`` to ``idle`` exposed at the runner level.
+
+    Returns the rolled-back record (or ``None`` if no state file existed).
+    Raises ``ValueError`` when the persisted record is in any state other
+    than ``verified`` — explicit refusal so a caller can't quietly wipe
+    a ``copying`` / ``committed`` record.
+    """
+    record = load_state(config_dir)
+    if record is None:
+        return None
+    if record.state != "verified":
+        raise ValueError(
+            f"rollback_verified_migration only valid from state 'verified'; "
+            f"got '{record.state}'"
+        )
+    rolled = transition(record, to="idle")
+    clear_state(config_dir)
+    log.info(
+        "vault.migration.rollback_verified vault=%s target=%s",
+        record.vault_id,
+        record.target_relay_url,
+    )
+    return rolled
+
+
 # ---------------------------------------------------------------------------
 # Stage helpers
 # ---------------------------------------------------------------------------

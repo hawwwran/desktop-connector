@@ -22,6 +22,7 @@ from src.vault_manifest import make_manifest, make_remote_folder  # noqa: E402
 from src.vault_migration import load_state, save_state, MigrationRecord  # noqa: E402
 from src.vault_migration_runner import (  # noqa: E402
     MigrationVerifyOutcome,
+    rollback_verified_migration,
     run_migration,
 )
 from src.vault_upload import upload_file  # noqa: E402
@@ -432,6 +433,64 @@ def _empty_manifest() -> dict:
             )
         ],
     )
+
+
+class RollbackVerifiedMigrationTests(unittest.TestCase):
+    """F-C21 polish — explicit ``verified → idle`` rollback helper.
+
+    ``run_migration`` is idempotent: re-invoking on a record at
+    ``verified`` re-runs the verify step and lands the same mismatch
+    every time. There's no built-in path from ``verified`` back to
+    ``idle`` short of editing the JSON state file. This helper plugs
+    that gap so the user can abort cleanly when verify is permanently
+    failing.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_migration_rollback_"))
+        self.config_dir = self.tmpdir / "config"
+        self.config_dir.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_returns_None_when_no_state_file(self) -> None:
+        self.assertIsNone(rollback_verified_migration(self.config_dir))
+
+    def test_clears_state_when_at_verified(self) -> None:
+        record = MigrationRecord(
+            vault_id=VAULT_ID,
+            state="verified",
+            source_relay_url=SOURCE_URL,
+            target_relay_url=TARGET_URL,
+            started_at="2026-05-04T10:00:00.000Z",
+            verified_at="2026-05-04T10:01:00.000Z",
+        )
+        save_state(record, self.config_dir)
+
+        rolled = rollback_verified_migration(self.config_dir)
+
+        self.assertIsNotNone(rolled)
+        self.assertEqual(rolled.state, "idle")
+        # State file gone — a relaunch sees no in-flight migration.
+        self.assertIsNone(load_state(self.config_dir))
+
+    def test_rejects_non_verified_state(self) -> None:
+        record = MigrationRecord(
+            vault_id=VAULT_ID,
+            state="copying",
+            source_relay_url=SOURCE_URL,
+            target_relay_url=TARGET_URL,
+            started_at="2026-05-04T10:00:00.000Z",
+            migration_token="mig_v1_" + "x" * 30,
+        )
+        save_state(record, self.config_dir)
+        with self.assertRaises(ValueError):
+            rollback_verified_migration(self.config_dir)
+        # State file untouched on refusal.
+        persisted = load_state(self.config_dir)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "copying")
 
 
 if __name__ == "__main__":

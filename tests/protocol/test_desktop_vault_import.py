@@ -548,5 +548,41 @@ class VaultImportRunnerTests(unittest.TestCase):
         self.assertIsNone(result.published_manifest)
 
 
+class VaultImportRunnerVaultIdAssertTests(unittest.TestCase):
+    """F-C14 polish — defensive layering on top of the wrap-AAD vault_id
+    binding. ``read_export_bundle`` already binds the AEAD-decryption key
+    to the caller-supplied vault_id, so a bundle whose internal
+    ``header.vault_id`` disagrees can only show up if a future regression
+    weakens that binding. The helper catches that case explicitly with
+    ``vault_export_vault_mismatch`` instead of letting the merge step
+    proceed with a foreign manifest.
+    """
+
+    def test_passes_when_vault_ids_match_canonically(self) -> None:
+        from src.vault_import_runner import _assert_bundle_vault_id_matches
+        _assert_bundle_vault_id_matches(
+            bundle_vault_id="ABCD2345WXYZ",
+            expected_vault_id="ABCD2345WXYZ",
+        )  # no raise
+
+    def test_passes_when_only_dashing_differs(self) -> None:
+        from src.vault_import_runner import _assert_bundle_vault_id_matches
+        # normalize_vault_id strips dashes + uppercases.
+        _assert_bundle_vault_id_matches(
+            bundle_vault_id="ABCD-2345-WXYZ",
+            expected_vault_id="abcd2345wxyz",
+        )  # no raise
+
+    def test_raises_export_error_when_vault_ids_disagree(self) -> None:
+        from src.vault_import_runner import _assert_bundle_vault_id_matches
+        from src.vault_export import ExportError
+        with self.assertRaises(ExportError) as ctx:
+            _assert_bundle_vault_id_matches(
+                bundle_vault_id="AAAA2345WXYZ",
+                expected_vault_id="ABCD2345WXYZ",
+            )
+        self.assertEqual(ctx.exception.code, "vault_export_vault_mismatch")
+
+
 if __name__ == "__main__":
     unittest.main()
