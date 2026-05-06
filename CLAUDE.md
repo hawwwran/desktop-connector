@@ -67,6 +67,8 @@ The host has `python3-dogtail` + `accerciser` + `at-spi2-core` installed so Clau
 
 Intended use: confirm a window/dialog rendered, click "Send" / "Cancel" / "Pair" without a real pointer, read pairing codes and progress bars, regression-check after edits to `windows*.py` or `dialogs.py`. Pair with `gnome-screenshot -w` for visual evidence. Tray icon (`pystray`) is **not** AT-SPI-exposed — drive its menu via the underlying subprocess windows or by invoking `python3 -m src.windows {…}` directly. Setup script: `~/temp-scripts/048-install-at-spi-tooling.sh`.
 
+**Vault automation harness**: [`docs/testing/vault-tests.md`](docs/testing/vault-tests.md) is the chained-test guide for driving the vault flows interactively against an isolated dev twin (separate `--config-dir`, separate keyring namespace, separate local PHP relay on `127.0.0.1:4441`). Keyring isolation is automatic — `Config` derives the service name from `config_dir.name`, so `--config-dir=~/.config/desktop-connector-dev` writes to keyring service `desktop-connector-dev` rather than aliasing the user's real install. **Never set `GTK_A11Y=atspi`** on this host — it crashed the user's GNOME Wayland session in earlier runs; AT-SPI is already enabled system-wide.
+
 ## Installation (desktop)
 
 The release shape is a **signed AppImage** fetched from GitHub Releases — single self-contained file, no host apt/pip touched, in-app updates via the tray menu. The dev-tree apt+pip path stays available as `install-from-source.sh` for contributors.

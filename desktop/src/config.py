@@ -212,7 +212,24 @@ class Config:
         elif os.environ.get(_NO_KEYRING_ENV_VAR):
             self._secret_store = JsonFallbackStore(self._data, self.save)
         else:
-            self._secret_store = open_default_store(self._data, self.save)
+            # Per-Config keyring namespacing: derive service name from
+            # the config dir basename so a non-default --config-dir
+            # cannot share a keyring slot with a default-config-dir
+            # process running on the same user account. The vault
+            # automation harness (or any other process invoked with
+            # ``--config-dir=~/.config/desktop-connector-dev``) ends up
+            # at service ``desktop-connector-dev``, fully isolated from
+            # the user's real install at service ``desktop-connector``.
+            # The ``DC_KEYRING_SERVICE`` env var is a global override
+            # for callers that want to opt out of the auto-derivation.
+            service = (
+                os.environ.get("DC_KEYRING_SERVICE")
+                or self.config_dir.name
+                or "desktop-connector"
+            )
+            self._secret_store = open_default_store(
+                self._data, self.save, service_name=service,
+            )
         self._migrate_legacy_secrets_if_needed()
         self._migrate_receive_actions()
         self._migrate_receive_action_limits()

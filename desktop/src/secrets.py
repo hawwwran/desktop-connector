@@ -50,16 +50,18 @@ _PAIRING_SYMKEY_PREFIX = "pairing_symkey:"
 # of record (managed by :class:`crypto.KeyManager`, not this module).
 SECRET_KEY_PRIVATE_KEY_PEM = "private_key:pem"
 
-# Service name used as the libsecret / Secret Service collection
-# attribute. Shows up in seahorse / kwalletmanager next to each
-# entry, alongside the per-secret key (``auth_token`` /
+# Default service name used as the libsecret / Secret Service
+# collection attribute. Shows up in seahorse / kwalletmanager next to
+# each entry, alongside the per-secret key (``auth_token`` /
 # ``pairing_symkey:<device_id>``).
 #
-# Override with ``DC_KEYRING_SERVICE`` to namespace into a different
-# keyring collection — used by the vault automation harness so a
-# dev twin's keyring entries don't alias the user's real install.
-# Read at module import; one process = one service name. Default
-# unchanged so production behaviour is identical.
+# This is now only the **fallback** for callers that construct a
+# ``SecretServiceStore`` without an explicit ``service_name`` — chiefly
+# unit tests. Production goes through :class:`Config`, which derives a
+# per-``config_dir`` service name so a non-default ``--config-dir``
+# (e.g. the vault automation harness's dev twin) cannot alias the
+# user's real install's keyring slot. The ``DC_KEYRING_SERVICE`` env
+# var still acts as a global override for both paths.
 SERVICE_NAME = os.environ.get("DC_KEYRING_SERVICE") or "desktop-connector"
 
 
@@ -193,7 +195,12 @@ class SecretServiceStore:
     backend.
     """
 
-    def __init__(self, keyring_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        keyring_module: Any | None = None,
+        *,
+        service_name: str | None = None,
+    ) -> None:
         if keyring_module is None:
             try:
                 import keyring as keyring_module  # type: ignore[no-redef]
@@ -203,6 +210,13 @@ class SecretServiceStore:
                     "keyring package not available in this Python"
                 ) from exc
         self._keyring = keyring_module
+        # Per-instance service name. Defaults to the module-level
+        # SERVICE_NAME (env-overridable, "desktop-connector") so legacy
+        # call sites and unit tests keep working unchanged. Production
+        # plumbs a config-dir-derived name through Config so a
+        # non-default --config-dir cannot share a keyring slot with a
+        # default-config-dir process running on the same user account.
+        self._service_name = service_name or SERVICE_NAME
         # Cache the typed delete-missing exception; defensive about
         # fakes that don't expose .errors (tests use a complete fake;
         # real keyring always exposes it).
@@ -214,7 +228,7 @@ class SecretServiceStore:
         # backend init. None on missing entry is fine; failure
         # raises and we surface as SecretServiceUnavailable.
         try:
-            self._keyring.get_password(SERVICE_NAME, "_probe")
+            self._keyring.get_password(self._service_name, "_probe")
         except SecretServiceUnavailable:
             raise
         except Exception as exc:
@@ -222,12 +236,16 @@ class SecretServiceStore:
                 f"keyring probe failed: {exc}"
             ) from exc
 
+    @property
+    def service_name(self) -> str:
+        return self._service_name
+
     def is_secure(self) -> bool:
         return True
 
     def get(self, key: str) -> str | None:
         try:
-            return self._keyring.get_password(SERVICE_NAME, key)
+            return self._keyring.get_password(self._service_name, key)
         except Exception as exc:
             raise SecretServiceUnavailable(
                 f"keyring get failed for {key!r}: {exc}"
@@ -235,7 +253,7 @@ class SecretServiceStore:
 
     def set(self, key: str, value: str) -> None:
         try:
-            self._keyring.set_password(SERVICE_NAME, key, value)
+            self._keyring.set_password(self._service_name, key, value)
         except Exception as exc:
             raise SecretServiceUnavailable(
                 f"keyring set failed for {key!r}: {exc}"
@@ -243,7 +261,7 @@ class SecretServiceStore:
 
     def delete(self, key: str) -> None:
         try:
-            self._keyring.delete_password(SERVICE_NAME, key)
+            self._keyring.delete_password(self._service_name, key)
         except self._password_delete_error:
             # No such entry — match JsonFallbackStore.delete semantics.
             return
@@ -256,6 +274,8 @@ class SecretServiceStore:
 def open_default_store(
     fallback_data: dict,
     fallback_save_fn: Callable[[], None],
+    *,
+    service_name: str | None = None,
 ) -> SecretStore:
     """Return :class:`SecretServiceStore` if reachable, else
     :class:`JsonFallbackStore`.
@@ -267,10 +287,15 @@ def open_default_store(
     The ``fallback_data`` / ``fallback_save_fn`` parameters are only
     used if the secure backend is unreachable — they bind the
     fallback store to the caller's existing JSON dict + save path.
+
+    ``service_name`` namespaces the keyring writes. Production passes
+    a name derived from the ``Config`` instance's ``config_dir``; tests
+    and direct callers may omit it to fall back to the module-level
+    default (``SERVICE_NAME``).
     """
     try:
-        store = SecretServiceStore()
-        log.info("config.secrets.using_keyring service=%s", SERVICE_NAME)
+        store = SecretServiceStore(service_name=service_name)
+        log.info("config.secrets.using_keyring service=%s", store.service_name)
         return store
     except SecretServiceUnavailable as exc:
         log.warning(
