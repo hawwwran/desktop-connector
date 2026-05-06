@@ -227,8 +227,8 @@ class VaultCrypto
         if (strlen($canonical) !== 12) {
             throw new InvalidArgumentException("vault_id must canonicalize to 12 bytes");
         }
-        if (strlen($authorDeviceId) !== 32) {
-            throw new InvalidArgumentException("author_device_id must be 32 hex chars");
+        if (!preg_match('/^[a-f0-9]{32}$/', $authorDeviceId)) {
+            throw new InvalidArgumentException("author_device_id must be 32 lowercase hex chars");
         }
         return self::MANIFEST_AAD_SCHEMA
             . $canonical
@@ -445,8 +445,8 @@ class VaultCrypto
         if (strlen($grantId) !== 30) {
             throw new InvalidArgumentException("grant_id must be 30 bytes");
         }
-        if (strlen($claimantDeviceId) !== 32) {
-            throw new InvalidArgumentException("claimant_device_id must be 32 hex chars");
+        if (!preg_match('/^[a-f0-9]{32}$/', $claimantDeviceId)) {
+            throw new InvalidArgumentException("claimant_device_id must be 32 lowercase hex chars");
         }
         return self::DEVICE_GRANT_AAD_SCHEMA . $canonical . $grantId . $claimantDeviceId;
     }

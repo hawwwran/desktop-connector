@@ -380,6 +380,38 @@ final class VaultControllerTest extends TestCase
         }
     }
 
+    public function test_putHeader_400_on_url_safe_base64_encoded_header(): void
+    {
+        // F-S22: vault wire format pins RFC 4648 §4 alphabet (`+/`). A body
+        // that snuck through with URL-safe `-_` chars must 400 before
+        // base64_decode runs, so a future hash test that compares against
+        // the spec'd alphabet doesn't quietly diverge.
+        $standard = base64_encode($this->headerEnvelope(2));
+        // Mangle into URL-safe shape: replace any `+/` with `-_`. If the
+        // sample doesn't contain either, manually inject one URL-safe char.
+        $urlSafe = strtr($standard, ['+' => '-', '/' => '_']);
+        if ($urlSafe === $standard) {
+            // Force the divergence so the test is meaningful even when the
+            // sample bytes happened to avoid `+` and `/`.
+            $urlSafe = '-' . substr($standard, 1);
+        }
+        $body = [
+            'expected_header_revision' => 1,
+            'new_header_revision'      => 2,
+            'encrypted_header'         => $urlSafe,
+            'header_hash'              => str_repeat('a', 64),
+        ];
+
+        try {
+            VaultController::putHeader($this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body));
+            self::fail('expected VaultInvalidRequestError');
+        } catch (VaultInvalidRequestError $e) {
+            self::assertSame(400, $e->status);
+            self::assertSame('vault_invalid_request', $e->errorCode);
+            self::assertSame('encrypted_header', $e->details['field'] ?? null);
+        }
+    }
+
     // ===================================================================
     //  6.4 GET /api/vaults/{id}/manifest
     // ===================================================================

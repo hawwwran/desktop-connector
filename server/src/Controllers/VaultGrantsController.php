@@ -48,10 +48,18 @@ class VaultGrantsController
         return $stripped;
     }
 
-    /** base64-decode strict + length check. Throws VaultInvalidRequestError on either failure. */
+    /**
+     * base64-decode strict + length check. Throws VaultInvalidRequestError
+     * on either failure. Pre-check enforces RFC 4648 §4 alphabet (`+/`,
+     * padding kept) — URL-safe `-_` is rejected explicitly to match
+     * `formats §1` wire form.
+     */
     private static function decodeBase64Field(array $body, string $field, ?int $expectedLength = null): string
     {
         $b64 = Validators::requireNonEmptyString($body, $field);
+        if (!preg_match('#^[A-Za-z0-9+/]*={0,2}$#', $b64)) {
+            throw new VaultInvalidRequestError("{$field} is not valid base64", $field);
+        }
         $raw = base64_decode($b64, true);
         if ($raw === false) {
             throw new VaultInvalidRequestError("{$field} is not valid base64", $field);
