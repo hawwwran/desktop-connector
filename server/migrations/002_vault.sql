@@ -67,15 +67,20 @@ CREATE TABLE IF NOT EXISTS vault_chunks (
     PRIMARY KEY (vault_id, chunk_id)
 );
 
--- in-flight chunk uploads; orphan-collected after expires_at if unreferenced
--- by any retained manifest revision (vault-v1.md §10 — 24h TTL).
-CREATE TABLE IF NOT EXISTS vault_chunk_uploads (
-    vault_id    TEXT NOT NULL,
-    chunk_id    TEXT NOT NULL,
-    uploaded_at INTEGER NOT NULL,
-    expires_at  INTEGER NOT NULL,
-    PRIMARY KEY (vault_id, chunk_id)
-);
+-- F-S16: ``vault_chunk_uploads`` (in-flight upload TTL tracker per
+-- spec §10) + ``vault_audit_events`` (server-clocked audit log per
+-- T17.1) were declared at T1.1 but never wired:
+--   * §10's incomplete-upload reaper is still planned. The cleanup
+--     loop would INSERT on chunk PUT and DELETE on first reference;
+--     bringing the table back is part of that future work.
+--   * T17.1's encrypted activity timeline shipped instead via
+--     ``manifest.operation_log_tail`` (server stays blind; the
+--     desktop builds the timeline from manifest revisions). The
+--     server-side audit-events surface is therefore superseded.
+-- Migrations on existing devices ``DROP TABLE IF EXISTS`` both rows
+-- via :func:`Database::migrate` so the dead schema doesn't accumulate
+-- on production deployments. Re-creating either table later is a
+-- new migration's job; it'll come with the matching insert flow.
 
 -- QR-assisted device grant flow (T13, vault-v1.md §8)
 CREATE TABLE IF NOT EXISTS vault_join_requests (
@@ -96,15 +101,8 @@ CREATE TABLE IF NOT EXISTS vault_join_requests (
     rejected_at            INTEGER
 );
 
--- server-side audit log; backs the encrypted activity timeline (T17.1)
-CREATE TABLE IF NOT EXISTS vault_audit_events (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    vault_id   TEXT NOT NULL,
-    device_id  TEXT,                                                                 -- nullable for system events
-    event_type TEXT NOT NULL,                                                        -- e.g. 'vault.create', 'manifest.publish'
-    details    TEXT,                                                                 -- JSON-encoded context
-    created_at INTEGER NOT NULL
-);
+-- F-S16: ``vault_audit_events`` removed. See the comment block above
+-- for the rationale (superseded by ``manifest.operation_log_tail``).
 
 -- GC plans + scheduled hard-purge jobs (T14, vault-v1.md §6.12-§6.14).
 -- One table covers both because they share state machine + execute path.
@@ -142,10 +140,10 @@ CREATE TABLE IF NOT EXISTS vault_op_log_segments (
 CREATE INDEX IF NOT EXISTS idx_vault_chunks_state           ON vault_chunks(state, last_referenced_at);
 CREATE INDEX IF NOT EXISTS idx_vault_chunks_vault           ON vault_chunks(vault_id, state);
 CREATE INDEX IF NOT EXISTS idx_vault_manifests_vault        ON vault_manifests(vault_id, revision DESC);
-CREATE INDEX IF NOT EXISTS idx_vault_chunk_uploads_expires  ON vault_chunk_uploads(expires_at);
+-- F-S16: indexes on removed tables (vault_chunk_uploads,
+-- vault_audit_events) intentionally absent.
 CREATE INDEX IF NOT EXISTS idx_vault_join_requests_vault    ON vault_join_requests(vault_id, state);
 CREATE INDEX IF NOT EXISTS idx_vault_join_requests_expires  ON vault_join_requests(expires_at);
-CREATE INDEX IF NOT EXISTS idx_vault_audit_vault_time       ON vault_audit_events(vault_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_vault_gc_jobs_state_sched    ON vault_gc_jobs(state, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_vault_gc_jobs_vault          ON vault_gc_jobs(vault_id, state);
 CREATE INDEX IF NOT EXISTS idx_vault_op_log_segments_vault  ON vault_op_log_segments(vault_id, seq DESC);

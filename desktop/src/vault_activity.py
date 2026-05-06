@@ -2,13 +2,21 @@
 
 The Activity tab in Vault settings renders the timeline of "major
 ops" — create, upload, delete, restore, clear, device grant +
-revocation, migration, eviction, purge. The bytes live on the relay
-in two places: ``vault_audit_events`` (the live, server-clocked
-event stream) and ``vault_op_log_segments`` (archived encrypted
-segments per §D14).
+revocation, migration, eviction, purge. The current production
+source of truth is the encrypted ``manifest.operation_log_tail``
+(per §D14, the desktop builds the timeline from manifest revisions
+locally so the relay stays blind).
+
+F-S16 retired the server-side ``vault_audit_events`` table that was
+declared at T1.1 — it was never wired by any controller, and the
+encrypted op-log path superseded the design intent. The
+``normalize_audit_event`` helper below stays in the public surface
+for forward compatibility (a future migration that re-introduces
+the server-side audit stream can plug straight back in), but no
+production caller invokes it today.
 
 This module owns the read-only view: parse + normalize rows from
-both sources into :class:`ActivityRow`, sort them by timestamp, and
+the op-log into :class:`ActivityRow`, sort them by timestamp, and
 provide :func:`filter_timeline` for the type-filter + filename-
 search controls. The actual GTK ``Gtk.ListView`` lives in
 ``windows_vault.py`` and consumes whatever this module returns.
@@ -16,10 +24,9 @@ search controls. The actual GTK ``Gtk.ListView`` lives in
 Sensitive material never enters an ActivityRow: the row carries a
 display-name (sourced from the decrypted manifest cache, not the
 ciphertext blob), a timestamp, an event type, and an optional
-``device_name`` for the device that emitted the event. The relay's
-audit-events table doesn't have plaintext filenames; per §gaps §6
-they live in the encrypted op-log only, so the desktop side decodes
-them locally with the master key before display.
+``device_name`` for the device that emitted the event. Plaintext
+filenames live in the encrypted op-log only (per §gaps §6); the
+desktop side decodes them locally with the master key before display.
 """
 
 from __future__ import annotations

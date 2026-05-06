@@ -295,6 +295,181 @@ final class VaultGrantsControllerTest extends TestCase
         );
     }
 
+    public function test_claim_idempotent_for_repeat_from_same_caller(): void
+    {
+        // F-S13: spec §8.3 — a repeat ``claim`` from the same claimant
+        // device with byte-identical pubkey + device_name returns the
+        // existing row instead of 409. Mirrors the §A1 idempotency
+        // contract for retries on a flaky network.
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        $pubkey = random_bytes(32);
+        $body = json_encode([
+            'claimant_pubkey' => base64_encode($pubkey),
+            'device_name' => 'Stable Name',
+        ]);
+
+        $this->setAuth(self::CLAIMANT_DEVICE, self::CLAIMANT_TOKEN);
+        $first = $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId], $body),
+        ));
+        self::assertSame(200, $first['status']);
+        self::assertSame('claimed', $first['json']['data']['state']);
+
+        // Second call with same body — must NOT 409.
+        $second = $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId], $body),
+        ));
+        self::assertSame(200, $second['status']);
+        self::assertSame(
+            $first['json']['data']['claimant_device_id'],
+            $second['json']['data']['claimant_device_id'],
+        );
+    }
+
+    public function test_claim_repeat_from_different_pubkey_still_409(): void
+    {
+        // F-S13 negative: only the same pubkey + device qualifies as a
+        // retry. A second claimant attempting to grab the slot with a
+        // different pubkey keeps the 409 — that's a real cross-claim
+        // collision the spec wants to surface.
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        $this->setAuth(self::CLAIMANT_DEVICE, self::CLAIMANT_TOKEN);
+        $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'claimant_pubkey' => base64_encode(random_bytes(32)),
+                    'device_name' => 'First',
+                ])),
+        ));
+        // Different pubkey on the retry → 409.
+        $this->expectVaultError(
+            fn() => VaultGrantsController::claim(
+                $this->db,
+                $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                    json_encode([
+                        'claimant_pubkey' => base64_encode(random_bytes(32)),
+                        'device_name' => 'First',
+                    ])),
+            ),
+            'vault_join_request_state', 409,
+        );
+    }
+
+    public function test_approve_idempotent_for_repeat_from_same_admin(): void
+    {
+        // F-S13: spec §8.4 — repeat ``approve`` with byte-identical
+        // wrapped_vault_grant + same role returns the existing
+        // approved row. The grants table insert in the original
+        // approve path is idempotent for the same (vault, device,
+        // grant_id) tuple via INSERT OR IGNORE-style semantics; this
+        // test checks that the controller doesn't 409 first.
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        $this->setAuth(self::CLAIMANT_DEVICE, self::CLAIMANT_TOKEN);
+        $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'claimant_pubkey' => base64_encode(random_bytes(32)),
+                    'device_name' => 'C',
+                ])),
+        ));
+
+        $wrapped = random_bytes(80);
+        $approveBody = json_encode([
+            'approved_role' => 'sync',
+            'wrapped_vault_grant' => base64_encode($wrapped),
+        ]);
+
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $first = $this->invoke(fn() => VaultGrantsController::approve(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId], $approveBody),
+        ));
+        self::assertSame(200, $first['status']);
+        self::assertSame('approved', $first['json']['data']['state']);
+
+        $second = $this->invoke(fn() => VaultGrantsController::approve(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId], $approveBody),
+        ));
+        self::assertSame(200, $second['status']);
+        self::assertSame('approved', $second['json']['data']['state']);
+    }
+
+    public function test_approve_repeat_with_different_grant_still_409(): void
+    {
+        // F-S13 negative: a second approve from the same admin with a
+        // *different* wrapped_vault_grant is treated as a real conflict
+        // (likely two admins racing). Surface the 409.
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        $this->setAuth(self::CLAIMANT_DEVICE, self::CLAIMANT_TOKEN);
+        $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'claimant_pubkey' => base64_encode(random_bytes(32)),
+                    'device_name' => 'C',
+                ])),
+        ));
+
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $this->invoke(fn() => VaultGrantsController::approve(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'approved_role' => 'sync',
+                    'wrapped_vault_grant' => base64_encode(random_bytes(80)),
+                ])),
+        ));
+        // Second approve with a different wrap → 409.
+        $this->expectVaultError(
+            fn() => VaultGrantsController::approve(
+                $this->db,
+                $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                    json_encode([
+                        'approved_role' => 'sync',
+                        'wrapped_vault_grant' => base64_encode(random_bytes(80)),
+                    ])),
+            ),
+            'vault_join_request_state', 409,
+        );
+    }
+
     public function test_revoke_unknown_device_returns_404(): void
     {
         $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);

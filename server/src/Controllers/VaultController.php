@@ -224,7 +224,7 @@ class VaultController
     public static function getHeader(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
         Router::json([
             'ok' => true,
@@ -247,8 +247,8 @@ class VaultController
     public static function putHeader(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
-        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'admin');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -318,7 +318,7 @@ class VaultController
     public static function getManifest(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
         $manifestsRepo = new VaultManifestsRepository($db);
         $current = $manifestsRepo->getCurrent($vaultId);
@@ -354,7 +354,7 @@ class VaultController
             );
         }
         $revision = (int) $revisionRaw;
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
         $manifestsRepo = new VaultManifestsRepository($db);
         $row = $manifestsRepo->getByRevision($vaultId, $revision);
@@ -380,8 +380,8 @@ class VaultController
     public static function putManifest(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
-        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'browse-upload');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'browse-upload');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -409,12 +409,10 @@ class VaultController
         }
 
         $manifestsRepo = new VaultManifestsRepository($db);
-        $authorDeviceId = $ctx->deviceId ?? '';
-        // requireVaultAuth doesn't populate $ctx->deviceId (Router only does
-        // that for routes flagged requiresAuth=true). Recover via _SERVER.
-        if ($authorDeviceId === '') {
-            $authorDeviceId = VaultAuthService::callerDeviceId();
-        }
+        // F-S21: ``requireVaultAuth`` populates ``$ctx->deviceId`` from
+        // the validated AuthIdentity, so the controller no longer needs
+        // a fallback into ``$_SERVER`` via ``callerDeviceId()``.
+        $authorDeviceId = (string)($ctx->deviceId ?? '');
 
         // Authoritatively read (vault_id, revision, parent_revision,
         // author_device_id) from the envelope's deterministic 61-byte
@@ -491,8 +489,8 @@ class VaultController
         if (!VaultChunksRepository::isValidChunkId($chunkId)) {
             throw new VaultInvalidRequestError("chunk_id '{$chunkId}' fails ^ch_v1_[a-z2-7]{24}\$", 'chunk_id');
         }
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
-        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'browse-upload');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'browse-upload');
         self::guardReadOnly($vault);
 
         $bytes = $ctx->rawBody();
@@ -609,7 +607,7 @@ class VaultController
         if (!VaultChunksRepository::isValidChunkId($chunkId)) {
             throw new VaultInvalidRequestError('chunk_id format invalid', 'chunk_id');
         }
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
         $chunksRepo = new VaultChunksRepository($db);
         $row = $chunksRepo->get($vaultId, $chunkId);
@@ -640,7 +638,7 @@ class VaultController
         if (!VaultChunksRepository::isValidChunkId($chunkId)) {
             throw new VaultInvalidRequestError('chunk_id format invalid', 'chunk_id');
         }
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
         $chunksRepo = new VaultChunksRepository($db);
         $head = $chunksRepo->head($vaultId, $chunkId);
@@ -671,7 +669,7 @@ class VaultController
     public static function batchHead(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
         $body = $ctx->jsonBody();
         $ids = $body['chunk_ids'] ?? null;
@@ -719,8 +717,8 @@ class VaultController
     public static function gcPlan(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
-        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'sync');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'sync');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -795,7 +793,7 @@ class VaultController
     public static function gcExecute(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -844,7 +842,7 @@ class VaultController
         // §6.13: sync GC requires role=sync; scheduled_purge requires
         // role=admin AND a valid purge_secret (vault_purge_not_allowed
         // covers both the role gap and a wrong-secret).
-        $callerDevice = VaultAuthService::callerDeviceId();
+        $callerDevice = (string)($ctx->deviceId ?? "");
         if ($job['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE) {
             try {
                 VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
@@ -936,7 +934,7 @@ class VaultController
     public static function gcCancel(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
         $body = $ctx->jsonBody();
         $planId = isset($body['plan_id']) && is_string($body['plan_id']) && $body['plan_id'] !== ''
@@ -951,7 +949,7 @@ class VaultController
         // role=admin. Per-job lookup so a sync-role caller cancelling a
         // mix of sync_plan + scheduled_purge ids fails on the purge ids
         // rather than silently downgrading.
-        $callerDevice = VaultAuthService::callerDeviceId();
+        $callerDevice = (string)($ctx->deviceId ?? "");
         $jobsRepo = new VaultGcJobsRepository($db);
         $now = time();
         foreach (array_filter([$planId, $jobId]) as $id) {
@@ -993,8 +991,8 @@ class VaultController
     public static function migrationStart(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
-        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'admin');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
@@ -1066,8 +1064,8 @@ class VaultController
     public static function migrationVerifySource(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
-        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'admin');
 
         $intentsRepo = new VaultMigrationIntentsRepository($db);
         $intent = $intentsRepo->getIntent($vaultId);
@@ -1119,8 +1117,8 @@ class VaultController
     public static function migrationCommit(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
-        VaultAuthService::requireRole($db, $vaultId, VaultAuthService::callerDeviceId(), 'admin');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'admin');
 
         $body = $ctx->jsonBody();
         $target = self::vaultRequireNonEmptyString($body, 'target_relay_url');

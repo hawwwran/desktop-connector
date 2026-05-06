@@ -38,19 +38,37 @@ class VaultAuthService
      * the matched vault row on success so the caller doesn't need a
      * second SELECT. Throws on every failure so callers stay linear:
      *
-     *   $vault = VaultAuthService::requireVaultAuth($db, $vaultId);
+     *   $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+     *
+     * F-S21: when ``$ctx`` is supplied, the device id from the validated
+     * AuthIdentity is written to ``$ctx->deviceId`` so controllers can
+     * read it from the context object instead of reaching into
+     * ``$_SERVER`` via :func:`callerDeviceId`. Vault routes register
+     * with ``requiresAuth: false`` (they do their own envelope-shape
+     * translation) so the Router's built-in auth wiring doesn't run —
+     * this is the explicit hand-off that fills that gap.
+     *
+     * The ``$ctx`` parameter stays optional so existing call sites
+     * keep working through the migration; new code should always
+     * pass it.
      *
      * @return array The full `vaults` row (per VaultsRepository::getById).
      */
-    public static function requireVaultAuth(Database $db, string $vaultId): array
-    {
+    public static function requireVaultAuth(
+        Database $db,
+        string $vaultId,
+        ?RequestContext $ctx = null
+    ): array {
         // 1. Device auth. AuthService::requireAuth throws UnauthorizedError
         //    on legacy shape; vault endpoints want the vault_v1 envelope, so
         //    we translate.
         try {
-            AuthService::requireAuth($db);
+            $identity = AuthService::requireAuth($db);
         } catch (UnauthorizedError $e) {
             throw new VaultAuthFailedError('device');
+        }
+        if ($ctx !== null) {
+            $ctx->deviceId = $identity->deviceId;
         }
 
         // 2. The header-vs-path vault id sanity check (vault-v1.md §2).

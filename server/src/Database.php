@@ -147,10 +147,26 @@ class Database
         }
         $this->db->exec('CREATE INDEX IF NOT EXISTS idx_transfers_aborted ON transfers(aborted)');
 
-        // Vault schema (vault_v1). T1.1 — eight tables under server/migrations/002_vault.sql.
+        // Vault schema (vault_v1). T1.1 — six tables under server/migrations/002_vault.sql.
         // Idempotent: every CREATE uses IF NOT EXISTS, so re-running on an existing DB is a no-op.
         $vaultSql = file_get_contents(__DIR__ . '/../migrations/002_vault.sql');
         $this->db->exec($vaultSql);
+
+        // F-S16: reap two tables that were declared at T1.1 but never
+        // wired by any controller — leftover dead schema. The CREATE
+        // statements were dropped from the migration above so fresh
+        // installs no longer get them; this DROP path catches existing
+        // devices whose tables were created by an older migration. Both
+        // tables have always been empty (no INSERT site ever shipped),
+        // so DROP IF EXISTS is data-safe.
+        //   - vault_audit_events: superseded by
+        //     manifest.operation_log_tail (encrypted, client-built).
+        //   - vault_chunk_uploads: §10 incomplete-upload reaper still
+        //     planned; bringing the table back is part of that work.
+        $this->db->exec('DROP INDEX IF EXISTS idx_vault_chunk_uploads_expires');
+        $this->db->exec('DROP INDEX IF EXISTS idx_vault_audit_vault_time');
+        $this->db->exec('DROP TABLE IF EXISTS vault_chunk_uploads');
+        $this->db->exec('DROP TABLE IF EXISTS vault_audit_events');
 
         // T9.2 — relay-migration intent table (idempotent CREATE IF NOT EXISTS).
         $migrationSql = file_get_contents(__DIR__ . '/../migrations/003_vault_migration.sql');

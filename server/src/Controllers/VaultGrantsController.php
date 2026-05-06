@@ -139,7 +139,7 @@ class VaultGrantsController
     public static function createJoinRequest(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
         $deviceId = self::deviceIdHeader();
         self::requireAdmin($db, $vaultId, $deviceId);
 
@@ -202,7 +202,7 @@ class VaultGrantsController
 
         if (!$callerIsClaimant) {
             // Admin path: vault-bearer + admin role.
-            VaultAuthService::requireVaultAuth($db, $vaultId);
+            VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
             self::requireAdmin($db, $vaultId, $callerDevice);
         }
 
@@ -228,8 +228,8 @@ class VaultGrantsController
         if (!preg_match('/^jr_v1_[a-z2-7]{24}$/', $reqId)) {
             throw new VaultInvalidRequestError('malformed join_request_id', 'req_id');
         }
-        VaultAuthService::requireVaultAuth($db, $vaultId);
-        $callerDevice = VaultAuthService::callerDeviceId();
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        $callerDevice = (string)($ctx->deviceId ?? "");
         self::requireAdmin($db, $vaultId, $callerDevice);
 
         $repo = new VaultJoinRequestsRepository($db);
@@ -273,6 +273,34 @@ class VaultGrantsController
         if ($existing === null || (string)$existing['vault_id'] !== $vaultId) {
             throw new VaultJoinRequestStateError("unknown join-request: {$reqId}");
         }
+        // F-S13: spec §8.3 idempotency — a repeat call from the same
+        // claimant device with the same pubkey + device_name returns
+        // the existing row instead of 409. The retry path for the
+        // claimant flips a flaky network into a no-op rather than a
+        // user-visible "join-request not in pending state" failure.
+        // Any drift from the original claim (different device id,
+        // different pubkey bytes, different name) keeps the 409
+        // because that's a real cross-claim collision the spec wants
+        // to surface, not a retry.
+        if ((string)$existing['state'] === 'claimed') {
+            $existingPubkey = $existing['claimant_pubkey'] ?? null;
+            $existingPubkeyBytes = is_string($existingPubkey)
+                ? $existingPubkey : '';
+            $sameClaimant = (
+                (string)($existing['claimant_device_id'] ?? '') === $deviceId
+                && hash_equals($existingPubkeyBytes, $pubkey)
+                && (string)($existing['device_name'] ?? '') === $deviceName
+            );
+            if ($sameClaimant) {
+                Router::json([
+                    'ok' => true,
+                    'data' => self::joinRequestPayload(
+                        $existing, includeWrappedGrant: false,
+                    ),
+                ], 200);
+                return;
+            }
+        }
         if ((string)$existing['state'] !== 'pending') {
             throw new VaultJoinRequestStateError(
                 "join-request not in pending state: {$existing['state']}", 409
@@ -299,7 +327,7 @@ class VaultGrantsController
     public static function approve(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
         $reqId = (string)($ctx->params['req_id'] ?? '');
         if (!preg_match('/^jr_v1_[a-z2-7]{24}$/', $reqId)) {
             throw new VaultInvalidRequestError('malformed join_request_id', 'req_id');
@@ -325,6 +353,32 @@ class VaultGrantsController
         $existing = $repo->get($reqId);
         if ($existing === null || (string)$existing['vault_id'] !== $vaultId) {
             throw new VaultJoinRequestStateError("unknown join-request: {$reqId}");
+        }
+        // F-S13: spec §8.4 idempotency — repeat from the same admin
+        // with byte-identical wrapped material + same role returns
+        // the existing row. Without this an admin's flaky network
+        // turn-around between approve responses turns into a 409
+        // they can't retry past. Drift in any field (different role,
+        // different wrap, different approver) keeps the 409 because
+        // the differences mark a genuine race against another admin.
+        if ((string)$existing['state'] === 'approved') {
+            $existingGrant = $existing['wrapped_vault_grant'] ?? null;
+            $existingGrantBytes = is_string($existingGrant)
+                ? $existingGrant : '';
+            $sameApproval = (
+                (string)($existing['approved_role'] ?? '') === $role
+                && hash_equals($existingGrantBytes, $wrapped)
+                && (string)($existing['granted_by_device_id'] ?? '') === $approver
+            );
+            if ($sameApproval) {
+                Router::json([
+                    'ok' => true,
+                    'data' => self::joinRequestPayload(
+                        $existing, includeWrappedGrant: false,
+                    ),
+                ], 200);
+                return;
+            }
         }
         if ((string)$existing['state'] !== 'claimed') {
             throw new VaultJoinRequestStateError(
@@ -366,7 +420,7 @@ class VaultGrantsController
     public static function revokeDeviceGrant(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
         $caller = self::deviceIdHeader();
         self::requireAdmin($db, $vaultId, $caller);
 
@@ -425,7 +479,7 @@ class VaultGrantsController
     public static function listDeviceGrants(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
         $caller = self::deviceIdHeader();
         self::requireAdmin($db, $vaultId, $caller);
 
@@ -468,7 +522,7 @@ class VaultGrantsController
     public static function rotateAccessSecret(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        VaultAuthService::requireVaultAuth($db, $vaultId);
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
         $caller = self::deviceIdHeader();
         self::requireAdmin($db, $vaultId, $caller);
 
