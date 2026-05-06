@@ -138,6 +138,7 @@ def run_migration(
     config_dir: Path,
     sample_size: int = DEFAULT_VERIFY_SAMPLE_SIZE,
     progress: Callable[[MigrationProgress], None] | None = None,
+    on_committed: Callable[[MigrationRecord], None] | None = None,
     now: str | None = None,
 ) -> MigrationRunResult:
     """Drive a relay-to-relay migration end to end.
@@ -147,6 +148,17 @@ def run_migration(
     network op fires. A crash mid-run means the saved state still
     reflects the last successful transition; ``run_migration`` is
     idempotent — re-invoking from any state continues from there.
+
+    F-C15: ``on_committed(record)`` fires once the source relay has
+    committed but *before* ``clear_state`` deletes the state file.
+    The caller uses it to persist ``previous_relay_url`` (and any
+    matching expiry) into the app config so the §H2 7-day
+    "Switch back to previous relay" grace window survives a crash
+    of *this* process between commit and config-write. If the
+    callback raises, the state file stays at ``committed``; the
+    next ``run_migration`` invocation retries the callback. Without
+    this gate the runner would clear state immediately and a caller
+    crash mid-config-write would lose the rollback URL forever.
     """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
@@ -253,6 +265,40 @@ def run_migration(
         # the caller flips the active relay URL in config. We clear the
         # state file so a relaunch knows the migration's done — but the
         # config retains previous_relay_url for the §H2 7-day grace.
+        # F-C09: defense in depth — re-call ``migration_verify_source``
+        # before clearing local state so an operator-driven rollback
+        # on the source relay between runs leaves a forensic
+        # breadcrumb. The check is best-effort: a transient error or a
+        # cleared intent (the typical post-commit state) won't block
+        # the clear, but a returned ``target_relay_url`` that diverges
+        # from the one we committed to is loud-warned.
+        _audit_source_committed_to_target(
+            source_relay=source_relay,
+            vault=vault,
+            target_relay_url=target_relay_url,
+        )
+        # F-C15: persist ``previous_relay_url`` (and any caller-side
+        # config writes) BEFORE clearing the state file. If the
+        # callback raises we leave the state at ``committed`` so a
+        # later run retries; without the gate a caller crash between
+        # commit and config-write would silently lose the §H2 7-day
+        # "Switch back to previous relay" rollback URL.
+        if on_committed is not None:
+            try:
+                on_committed(record)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "vault.migration.committed_callback_failed "
+                    "vault=%s target=%s error=%s",
+                    vault.vault_id, target_relay_url, exc,
+                )
+                return MigrationRunResult(
+                    record=record,
+                    chunks_copied=copied,
+                    chunks_skipped=skipped,
+                    bytes_copied=bytes_copied,
+                    verify=verify,
+                )
         final_record = transition(record, to="idle", now=now)
         clear_state(config_dir)
         record = final_record
@@ -440,6 +486,18 @@ def _verify_migration(
     # mismatch here means the bytes drifted in transit.
     envelope = cached_manifest_envelope or tgt_manifest["manifest_ciphertext"]
     bundle_manifest = decrypt_manifest_envelope(vault, envelope)
+
+    # F-C06: explicit chunk-count comparison. The pre-fix proxy
+    # (`if src_chunks and sample_size_actual == 0`) only fired when
+    # the target manifest had zero chunks AND the source claimed any —
+    # it missed the realistic case where the target manifest had
+    # *some* chunks but fewer than the source claimed (e.g. a partial
+    # copy that crashed mid-stream). Compare unique chunk_ids in the
+    # target against the source's reported count directly.
+    tgt_chunks = _count_unique_chunks(bundle_manifest)
+    if src_chunks != tgt_chunks:
+        mismatches.append("chunk_count")
+
     sample_passed = 0
     sample_chunks = _pick_random_sample(bundle_manifest, sample_size)
     sample_size_actual = len(sample_chunks)
@@ -487,15 +545,92 @@ def _verify_migration(
         sample_passed += 1
     if sample_size_actual > 0 and sample_passed < sample_size_actual:
         mismatches.append("chunk_sample")
-    if src_chunks and sample_size_actual == 0:
-        # Source claims chunks but our sampler couldn't find any to test.
-        mismatches.append("chunk_count")
+    # The "chunk_count" mismatch is now decided up front via
+    # ``_count_unique_chunks`` (F-C06); the prior proxy here ran AFTER
+    # the AEAD sampling loop and only when ``sample_size_actual == 0``.
     return MigrationVerifyOutcome(
         matches=len(mismatches) == 0,
         mismatches=mismatches,
         sample_size=sample_size_actual,
         sample_passed=sample_passed,
     )
+
+
+def _audit_source_committed_to_target(
+    *,
+    source_relay: MigrationRelay,
+    vault: MigrationVault,
+    target_relay_url: str,
+) -> None:
+    """F-C09: forensic check before ``clear_state`` on
+    ``committed → idle``. Logs a warning if the source relay's
+    ``migration_verify_source`` view of the target diverges from the
+    one we just committed to.
+
+    Best-effort: never blocks the state clear. The "happy path" call
+    can return:
+
+    - ``target_relay_url`` matching ours → no drift; debug-level
+      breadcrumb.
+    - A different ``target_relay_url`` → operator-driven rollback or
+      relaunched migration; loud warning.
+    - Raise (intent was already cleared server-side after commit) →
+      expected — typical post-commit state on a relay that GCs intents.
+    - Other transient failure → debug-level breadcrumb so an outage
+      doesn't drown out real signals.
+    """
+    try:
+        verify = source_relay.migration_verify_source(
+            vault.vault_id, vault.vault_access_secret,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.info(
+            "vault.migration.committed_source_check_unreachable "
+            "vault=%s target=%s reason=%s",
+            vault.vault_id, target_relay_url, type(exc).__name__,
+        )
+        return
+    seen_target = str(verify.get("target_relay_url") or "")
+    if seen_target == target_relay_url:
+        log.debug(
+            "vault.migration.committed_source_aligned "
+            "vault=%s target=%s",
+            vault.vault_id, target_relay_url,
+        )
+        return
+    log.warning(
+        "vault.migration.committed_source_drift "
+        "vault=%s expected_target=%s observed_target=%s",
+        vault.vault_id, target_relay_url, seen_target or "<empty>",
+    )
+
+
+def _count_unique_chunks(manifest: dict[str, Any]) -> int:
+    """F-C06: count distinct ``chunk_id`` values across all live and
+    historical versions in the manifest. The source's ``chunk_count``
+    surface is the same de-duped count; this helper produces the
+    target-side number to compare against directly so a partial copy
+    (target has fewer chunks than the source claims) trips the verify
+    instead of relying on the random-sample loop to incidentally
+    catch it.
+    """
+    seen: set[str] = set()
+    for folder in manifest.get("remote_folders", []) or []:
+        if not isinstance(folder, dict):
+            continue
+        for entry in folder.get("entries", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            for version in entry.get("versions", []) or []:
+                if not isinstance(version, dict):
+                    continue
+                for chunk in version.get("chunks", []) or []:
+                    if not isinstance(chunk, dict):
+                        continue
+                    cid = str(chunk.get("chunk_id") or "")
+                    if cid:
+                        seen.add(cid)
+    return len(seen)
 
 
 def _pick_random_sample(

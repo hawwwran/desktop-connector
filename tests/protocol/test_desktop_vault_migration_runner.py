@@ -292,6 +292,339 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         self.assertEqual(set(target_relay.chunks), set(source_relay.chunks))
         self.assertEqual(source_relay.migrated_to, TARGET_URL)
 
+    def test_on_committed_callback_runs_before_clear_state(self) -> None:
+        """F-C15: ``on_committed`` lets the caller persist
+        ``previous_relay_url`` BEFORE the runner deletes the state
+        file. The callback receives the committed-state record so it
+        can read ``record.previous_relay_url`` and write the matching
+        config field atomically.
+        """
+        from src.vault_migration import load_state
+
+        source_relay, _ = self._populated_source(
+            files={"k.txt": b"committed callback test"},
+        )
+        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+
+        captured_records: list = []
+        # When the callback runs, the state file MUST still exist —
+        # this is the contract: callback first, clear_state second.
+        state_present_during_callback = {"flag": None}
+
+        def callback(record):
+            captured_records.append(record)
+            state_present_during_callback["flag"] = (
+                load_state(self.config_dir) is not None
+            )
+
+        vault = _vault()
+        try:
+            run_migration(
+                vault=vault,
+                source_relay=source_relay,
+                target_relay=target_relay,
+                source_relay_url=SOURCE_URL,
+                target_relay_url=TARGET_URL,
+                config_dir=self.config_dir,
+                on_committed=callback,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(len(captured_records), 1)
+        self.assertEqual(captured_records[0].state, "committed")
+        self.assertEqual(
+            captured_records[0].previous_relay_url, SOURCE_URL,
+        )
+        self.assertTrue(
+            state_present_during_callback["flag"],
+            "state file must still exist when on_committed runs",
+        )
+        # After return, the state file is cleared.
+        self.assertIsNone(load_state(self.config_dir))
+
+    def test_on_committed_callback_failure_keeps_state_for_retry(self) -> None:
+        """F-C15: if the callback raises, the state file stays at
+        ``committed`` so a later ``run_migration`` retries the
+        callback. Without this gate, a config-write crash would
+        silently lose the rollback URL forever.
+        """
+        from src.vault_migration import load_state
+
+        source_relay, _ = self._populated_source(
+            files={"k.txt": b"flaky callback test"},
+        )
+        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+
+        attempts = {"n": 0}
+
+        def flaky_callback(record):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("config write fell over")
+            # Second call succeeds.
+
+        vault = _vault()
+        try:
+            with self.assertLogs(
+                "src.vault_migration_runner", level="WARNING",
+            ) as captured:
+                run_migration(
+                    vault=vault,
+                    source_relay=source_relay,
+                    target_relay=target_relay,
+                    source_relay_url=SOURCE_URL,
+                    target_relay_url=TARGET_URL,
+                    config_dir=self.config_dir,
+                    on_committed=flaky_callback,
+                )
+        finally:
+            vault.close()
+
+        # First run: state survived because callback raised.
+        record_after_first = load_state(self.config_dir)
+        self.assertIsNotNone(record_after_first)
+        self.assertEqual(record_after_first.state, "committed")
+        self.assertTrue(
+            any(
+                "committed_callback_failed" in line
+                for line in captured.output
+            ),
+            f"missing callback_failed warning: {captured.output!r}",
+        )
+
+        # Re-run picks up at ``committed`` and the second-attempt
+        # callback succeeds, so state clears.
+        vault = _vault()
+        try:
+            run_migration(
+                vault=vault,
+                source_relay=source_relay,
+                target_relay=target_relay,
+                source_relay_url=SOURCE_URL,
+                target_relay_url=TARGET_URL,
+                config_dir=self.config_dir,
+                on_committed=flaky_callback,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(attempts["n"], 2)
+        self.assertIsNone(load_state(self.config_dir))
+
+    def test_committed_to_idle_warns_on_source_drift(self) -> None:
+        """F-C09: between two ``run_migration`` calls an operator can
+        rollback the migration on the source side. The desktop's
+        local state still says ``committed``; the next run drives
+        ``committed → idle`` and clears the state file. Without a
+        forensic check the drift is silent. The audit helper logs
+        ``vault.migration.committed_source_drift`` (warning) when the
+        source's ``migration_verify_source`` reports a different
+        target than the one we committed to.
+        """
+        from src.vault_migration import MigrationRecord, save_state
+
+        source_relay, _ = self._populated_source(
+            files={"k.txt": b"committed content"},
+        )
+        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+
+        # Drive the first run all the way through commit.
+        vault = _vault()
+        try:
+            run_migration(
+                vault=vault,
+                source_relay=source_relay,
+                target_relay=target_relay,
+                source_relay_url=SOURCE_URL,
+                target_relay_url=TARGET_URL,
+                config_dir=self.config_dir,
+            )
+        finally:
+            vault.close()
+
+        # Force the local state back to ``committed`` (the post-commit
+        # cleanup may have already advanced it to idle); also point
+        # the source's intent at a *different* URL to simulate an
+        # operator-driven rollback that re-pointed the migration at a
+        # different target between runs.
+        record = MigrationRecord(
+            vault_id=VAULT_ID, state="committed",
+            source_relay_url=SOURCE_URL, target_relay_url=TARGET_URL,
+            started_at="2026-05-04T10:00:00.000Z",
+            verified_at="2026-05-04T10:01:00.000Z",
+            committed_at="2026-05-04T10:02:00.000Z",
+        )
+        save_state(record, self.config_dir)
+        source_relay.migration_intents[VAULT_ID] = {
+            "target_relay_url": "https://different-target.example",
+            "started_at": "2026-05-04T11:00:00Z",
+            "token": "mig_v1_" + "y" * 30,
+        }
+
+        vault = _vault()
+        try:
+            with self.assertLogs(
+                "src.vault_migration_runner", level="WARNING",
+            ) as captured:
+                run_migration(
+                    vault=vault,
+                    source_relay=source_relay,
+                    target_relay=target_relay,
+                    source_relay_url=SOURCE_URL,
+                    target_relay_url=TARGET_URL,
+                    config_dir=self.config_dir,
+                )
+        finally:
+            vault.close()
+
+        self.assertTrue(
+            any(
+                "committed_source_drift" in line
+                and "different-target.example" in line
+                for line in captured.output
+            ),
+            f"missing committed_source_drift warning in: {captured.output!r}",
+        )
+        # The state still cleared (drift is observability, not blocking).
+        from src.vault_migration import load_state
+        self.assertIsNone(load_state(self.config_dir))
+
+    def test_committed_to_idle_silent_when_source_aligns(self) -> None:
+        """F-C09 negative case: when the source still reports the
+        same target we committed to, no drift warning fires.
+        """
+        source_relay, _ = self._populated_source(
+            files={"k.txt": b"aligned content"},
+        )
+        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        vault = _vault()
+        try:
+            with self.assertLogs(
+                "src.vault_migration_runner", level="DEBUG",
+            ) as captured:
+                run_migration(
+                    vault=vault,
+                    source_relay=source_relay,
+                    target_relay=target_relay,
+                    source_relay_url=SOURCE_URL,
+                    target_relay_url=TARGET_URL,
+                    config_dir=self.config_dir,
+                )
+        finally:
+            vault.close()
+        # No warning-level drift line.
+        self.assertFalse(
+            any("committed_source_drift" in line for line in captured.output),
+        )
+
+    def test_verify_detects_chunk_count_drift_directly(self) -> None:
+        """F-C06: a partial copy where the target's chunk count is
+        less than the source's must trip ``chunk_count`` in
+        ``mismatches`` even when the random AEAD sample passes.
+
+        Pre-fix the proxy ``if src_chunks and sample_size_actual == 0``
+        only fired when the *target manifest* had zero chunks, so a
+        target with N-1 chunks would pass quietly when sample_size <= N-1.
+        We exercise that by running the orchestrator and then deleting
+        one chunk from the target's relay state before the verify
+        pass.
+        """
+        from src.vault_migration import (
+            MigrationRecord, save_state,
+        )
+
+        source_relay, _ = self._populated_source(files={
+            "a.txt": b"alpha bytes",
+            "b.txt": b"beta bytes",
+            "c.txt": b"gamma bytes",
+        })
+        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+
+        vault = _vault()
+        try:
+            result1 = run_migration(
+                vault=vault,
+                source_relay=source_relay,
+                target_relay=target_relay,
+                source_relay_url=SOURCE_URL,
+                target_relay_url=TARGET_URL,
+                config_dir=self.config_dir,
+            )
+            self.assertTrue(result1.verify.matches)  # baseline run completes
+        finally:
+            vault.close()
+
+        # Drop one chunk from the target relay AND from the manifest's
+        # version that referenced it, so the target's
+        # ``_count_unique_chunks`` returns one less than the source's.
+        # We pop the first chunk_id from ``target_relay.chunks``; the
+        # source still claims all of them via ``migration_verify_source``
+        # because we don't touch the source's chunks dict.
+        dropped_cid = next(iter(target_relay.chunks))
+        del target_relay.chunks[dropped_cid]
+
+        # Re-publish the target's manifest with the dropped chunk
+        # excised from its referencing version. We need this so
+        # ``_count_unique_chunks`` (which walks the target manifest)
+        # reflects the deletion.
+        from src.vault_browser_model import decrypt_manifest
+        observer = _vault()
+        try:
+            target_manifest = decrypt_manifest(
+                observer, target_relay.current_envelope,
+            )
+        finally:
+            observer.close()
+        for folder in target_manifest.get("remote_folders", []):
+            for entry in folder.get("entries", []) or []:
+                for version in entry.get("versions", []) or []:
+                    version["chunks"] = [
+                        c for c in version.get("chunks", []) or []
+                        if str(c.get("chunk_id")) != dropped_cid
+                    ]
+        target_manifest["revision"] = int(target_manifest.get("revision", 0)) + 1
+        target_manifest["parent_revision"] = (
+            int(target_manifest["revision"]) - 1
+        )
+        target_manifest["created_at"] = "2026-05-04T10:30:00.000Z"
+        target_manifest["author_device_id"] = AUTHOR
+        vault = _vault()
+        try:
+            vault.publish_manifest(target_relay, target_manifest)
+        finally:
+            vault.close()
+
+        # Re-run from "verified" so verify is the only step that runs.
+        record = MigrationRecord(
+            vault_id=VAULT_ID, state="verified",
+            source_relay_url=SOURCE_URL, target_relay_url=TARGET_URL,
+            started_at="2026-05-04T10:00:00.000Z",
+            verified_at="2026-05-04T10:01:00.000Z",
+        )
+        save_state(record, self.config_dir)
+        source_relay.migrated_to = None
+        source_relay.migration_intents.setdefault(VAULT_ID, {
+            "target_relay_url": TARGET_URL,
+            "started_at": "2026-05-04T10:00:00Z",
+            "token": "mig_v1_" + "x" * 30,
+        })
+        vault = _vault()
+        try:
+            result2 = run_migration(
+                vault=vault,
+                source_relay=source_relay,
+                target_relay=target_relay,
+                source_relay_url=SOURCE_URL,
+                target_relay_url=TARGET_URL,
+                config_dir=self.config_dir,
+            )
+        finally:
+            vault.close()
+
+        self.assertFalse(result2.verify.matches)
+        self.assertIn("chunk_count", result2.verify.mismatches)
+        self.assertNotEqual(source_relay.migrated_to, TARGET_URL)
+
     def test_verify_failure_short_circuits_before_commit(self) -> None:
         """T9.4: tampered chunks on the target produce mismatches and
         prevent the commit transition."""

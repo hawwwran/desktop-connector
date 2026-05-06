@@ -429,6 +429,10 @@ relay log (filenames are local-only).
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
 | `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
 | `vault.migration.committed` | desktop | info | `vault`, `source`, `target` | F-510 — relay migration commit landed; Activity-tab "Relay migration committed" anchor |
+| `vault.migration.committed_callback_failed` | desktop | warning | `vault`, `target`, `error` | F-C15 — caller's ``on_committed`` persistence callback raised; state file kept at ``committed`` so the next run retries the callback before clearing |
+| `vault.migration.committed_source_aligned` | desktop | debug | `vault`, `target` | F-C09 — pre-clear audit: source still reports the same target as we committed to |
+| `vault.migration.committed_source_check_unreachable` | desktop | info | `vault`, `target`, `reason` | F-C09 — pre-clear audit raised; treat as best-effort (typical post-commit state when intent was GC'd) |
+| `vault.migration.committed_source_drift` | desktop | warning | `vault`, `expected_target`, `observed_target` | F-C09 — operator-driven rollback or migration relaunch detected; the source's view of the target diverged from the one we committed to |
 | `vault.migration.rollback_verified` | desktop | info | `vault`, `target` | F-C21 — `verified → idle` rollback helper invoked; state file cleared |
 | `vault.migration.verify.chunk_aead_failed` | desktop | warning | `chunk`, `error` | F-C05 — chunk failed AEAD during sample |
 | `vault.migration.verify.chunk_fetch_failed` | desktop | warning | `chunk`, `error` | F-C05 — relay get_chunk failed during sample |

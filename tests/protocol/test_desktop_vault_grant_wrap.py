@@ -197,5 +197,49 @@ class WrapUnwrapTests(unittest.TestCase):
             )
 
 
+class DeviceGrantV1VectorRoundTripTests(unittest.TestCase):
+    """F-C17: every happy-path vector in
+    ``tests/protocol/vault-v1/device_grant_v1.json`` must round-trip
+    through the runtime's ``_decode_payload`` (which requires
+    ``vault_access_secret`` per spec §14.2 v1 extension).
+
+    Pre-fix the vectors omitted ``vault_access_secret`` because the
+    cross-runtime harness skipped ``_decode_payload`` and exercised
+    only the AEAD primitives directly. The divergence was silent —
+    a real device-grant flow would have raised ``GrantWrapError``
+    at decode time. This test plugs that gap so a future regenerator
+    can't accidentally drop the field again.
+    """
+
+    def test_each_vector_decodes_with_vault_access_secret(self) -> None:
+        import json
+        import os
+        from pathlib import Path
+        from src.vault_grant_wrap import _decode_payload
+
+        vectors = Path(
+            os.path.dirname(__file__) or ".",
+        ).resolve().parent.parent / (
+            "tests/protocol/vault-v1/device_grant_v1.json"
+        )
+        cases = json.loads(vectors.read_text(encoding="utf-8"))
+        decoded = 0
+        for case in cases:
+            if "expected_error" in case["expected"]:
+                continue  # negative path; rejection happens before decode
+            with self.subTest(case=case["name"]):
+                plaintext = base64.b64decode(case["inputs"]["grant_plaintext"])
+                payload = _decode_payload(plaintext)
+                self.assertTrue(
+                    payload.vault_access_secret,
+                    "vault_access_secret must be a non-empty string",
+                )
+                decoded += 1
+        self.assertGreaterEqual(
+            decoded, 4,
+            "expected >= 4 happy-path device_grant vectors to round-trip",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
