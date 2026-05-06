@@ -61,5 +61,129 @@ class VaultDisconnectTests(unittest.TestCase):
             self.assertFalse((config_dir / "vault_pending_purges.json").exists())
 
 
+    def test_disconnect_purges_upload_resume_sessions_for_vault(self) -> None:
+        """F-D26: a stale upload session for the disconnecting vault is
+        deleted; sessions targeting *other* vaults survive untouched.
+        Without the purge, reconnecting to the same vault id (recovery
+        kit re-import, or a new vault that happens to mint the same id)
+        would resurrect a session that PUTs against a relay that no
+        longer holds the matching chunks.
+        """
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_root = Path(tmp) / "cache"
+            os.environ["XDG_CACHE_HOME"] = str(cache_root)
+            try:
+                resume_dir = (
+                    cache_root / "desktop-connector" / "vault" / "uploads"
+                )
+                resume_dir.mkdir(parents=True, exist_ok=True)
+                _write_resume_session(
+                    resume_dir, vault_id=VAULT_ID,
+                    session_id="ses_doomed",
+                )
+                other_vault = "ZYXW2345ABCD"
+                _write_resume_session(
+                    resume_dir, vault_id=other_vault,
+                    session_id="ses_other",
+                )
+
+                config_dir = Path(tmp) / "config"
+                config_dir.mkdir(parents=True)
+                config = Config(config_dir)
+                config._data["vault"] = {
+                    "active": True, "last_known_id": VAULT_ID,
+                }
+                config.save()
+
+                disconnect_local_vault(
+                    config,
+                    grant_deleter=lambda _c, _v: None,
+                )
+
+                surviving = sorted(p.name for p in resume_dir.glob("*.json"))
+                self.assertEqual(surviving, ["ses_other.json"])
+            finally:
+                os.environ.pop("XDG_CACHE_HOME", None)
+
+    def test_disconnect_purges_per_vault_chunk_cache(self) -> None:
+        """F-D26: the disconnected vault's chunk-cache subtree is
+        removed; sibling vault directories survive. The chunks are
+        AEAD-bound to the disconnected master key — a casual disk
+        read can't decrypt — but their existence still leaks size +
+        count of vault content over time, and a re-import via
+        recovery kit could pair with cached chunks the relay also
+        still carries.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_root = Path(tmp) / "cache"
+            os.environ["XDG_CACHE_HOME"] = str(cache_root)
+            try:
+                chunks_root = (
+                    cache_root / "desktop-connector" / "vault" / "chunks"
+                )
+                # Production paths are UPPER-case (`normalize_vault_id`
+                # canonicalizes) — mirror that in the test fixture.
+                doomed = chunks_root / VAULT_ID
+                doomed.mkdir(parents=True, exist_ok=True)
+                (doomed / "aa").mkdir(parents=True, exist_ok=True)
+                (doomed / "aa" / "ch_v1_a_data").write_bytes(b"x")
+
+                other = chunks_root / "ZYXW2345ABCD"
+                other.mkdir(parents=True, exist_ok=True)
+                (other / "bb").mkdir(parents=True, exist_ok=True)
+                (other / "bb" / "ch_v1_b").write_bytes(b"y")
+
+                config_dir = Path(tmp) / "config"
+                config_dir.mkdir(parents=True)
+                config = Config(config_dir)
+                config._data["vault"] = {
+                    "active": True, "last_known_id": VAULT_ID,
+                }
+                config.save()
+
+                disconnect_local_vault(
+                    config,
+                    grant_deleter=lambda _c, _v: None,
+                )
+
+                self.assertFalse(doomed.exists())
+                self.assertTrue(other.exists())
+                self.assertTrue((other / "bb" / "ch_v1_b").is_file())
+            finally:
+                os.environ.pop("XDG_CACHE_HOME", None)
+
+
+def _write_resume_session(
+    resume_dir: Path, *, vault_id: str, session_id: str,
+) -> None:
+    """Write a minimal UploadSession JSON to ``resume_dir``.
+
+    Mirrors the schema ``UploadSession.from_json`` accepts so the F-D26
+    purge helper can deserialize, read the ``vault_id`` field, and
+    decide whether the session belongs to the disconnecting vault.
+    """
+    import json
+    payload = {
+        "session_id": session_id,
+        "vault_id": vault_id,
+        "remote_folder_id": "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+        "remote_path": "doomed.txt",
+        "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+        "version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+        "author_device_id": "a" * 32,
+        "content_fingerprint": "",
+        "logical_size": 0,
+        "local_path": "/tmp/doomed.txt",
+        "chunk_size": 2 * 1024 * 1024,
+        "created_at": "2026-05-04T12:00:00.000Z",
+        "chunks": [],
+        "phase": "uploading",
+    }
+    (resume_dir / f"{session_id}.json").write_text(
+        json.dumps(payload), encoding="utf-8",
+    )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,9 @@ local state files.
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable
@@ -17,6 +19,108 @@ from .vault_grant import delete_local_grant_artifacts
 
 log = logging.getLogger(__name__)
 GrantDeleter = Callable[[Path, str], None]
+
+
+def _purge_cached_resume_state(vault_id: str) -> None:
+    """F-D26: drop upload resume sessions + per-vault chunk cache after
+    disconnect.
+
+    Without this, two failure modes survive:
+
+    1. **Stale upload sessions.** Resume metadata at
+       ``<XDG_CACHE_HOME>/desktop-connector/vault/uploads/<id>.json``
+       is keyed on ``session.vault_id``. Disconnect-then-reconnect to a
+       *different* vault leaves the old sessions intact. Worse:
+       reconnecting to a vault that happens to share the disconnected
+       one's id (re-import from a recovery kit, or another device
+       publishing under the same id after a relay-side wipe) would
+       resurrect the dead sessions and try to PUT chunks against the
+       new vault. The relay's ciphertext-CAS would catch the mismatch
+       at the per-chunk hash check, but the resumed upload would
+       still leak ``local_path`` and chunk-id metadata to disk that
+       no longer maps to anything reachable.
+    2. **Per-vault chunk cache drag.** ``vault_chunk_cache_path``
+       writes encrypted chunks to
+       ``<cache>/desktop-connector/vault/chunks/<vault_id_normalized>/``;
+       eviction never visits this directory after a disconnect. The
+       chunks are AEAD-bound to the disconnected vault's master key
+       (so a casual attacker with disk read can't decrypt) but the
+       leak surface is real: file sizes + counts reveal vault
+       activity over time, and a future re-import via recovery-kit
+       could pair with these chunks if the relay also still carried
+       them.
+
+    The purge is best-effort — failures log a warning but don't block
+    disconnect. The grant-artifacts deletion (`delete_local_grant_artifacts`)
+    is the load-bearing path; the cache cleanup is hygiene on top.
+    """
+    # Local imports keep ``vault_upload`` / ``vault_download`` out of
+    # the import graph for callers that just want disconnect — those
+    # modules pull in the AEAD + atomic-write helpers transitively.
+    from .vault_upload import default_upload_resume_dir, UploadSession
+    from .vault_download import (
+        default_vault_download_cache_dir, normalize_vault_id,
+    )
+
+    # 1. Per-vault upload resume sessions (filter by session.vault_id
+    # so we don't nuke another vault's sessions if both happen to be
+    # cached).
+    resume_dir = default_upload_resume_dir()
+    if resume_dir.exists():
+        try:
+            target_id = normalize_vault_id(vault_id)
+        except ValueError:
+            target_id = vault_id
+        for session_path in sorted(resume_dir.glob("*.json")):
+            try:
+                with open(session_path, "rb") as fh:
+                    data = json.loads(fh.read().decode("utf-8"))
+                session = UploadSession.from_json(data)
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                # Corrupt JSON or schema drift — leave it alone; the
+                # next list_resumable_sessions call will skip it too.
+                continue
+            try:
+                session_vault = normalize_vault_id(session.vault_id)
+            except ValueError:
+                session_vault = session.vault_id
+            if session_vault != target_id:
+                continue
+            try:
+                session_path.unlink()
+                log.info(
+                    "vault_local.disconnect_dropped_resume_session "
+                    "session=%s vault=%s",
+                    session.session_id, vault_id,
+                )
+            except OSError as exc:
+                log.warning(
+                    "vault_local.disconnect_resume_session_unlink_failed "
+                    "session=%s error=%s",
+                    session.session_id, exc,
+                )
+
+    # 2. Per-vault chunk cache. The path layout is
+    # ``<base>/chunks/<normalized_vault_id>/`` — one tree per vault.
+    cache_base = default_vault_download_cache_dir()
+    try:
+        normalized_id = normalize_vault_id(vault_id)
+    except ValueError:
+        normalized_id = vault_id
+    chunk_root = cache_base / "chunks" / normalized_id
+    if chunk_root.exists():
+        try:
+            shutil.rmtree(chunk_root)
+            log.info(
+                "vault_local.disconnect_chunk_cache_purged vault=%s",
+                vault_id,
+            )
+        except OSError as exc:
+            log.warning(
+                "vault_local.disconnect_chunk_cache_purge_failed "
+                "vault=%s error=%s",
+                vault_id, exc,
+            )
 
 
 @dataclass(frozen=True)
@@ -56,6 +160,18 @@ def disconnect_local_vault(
             pass
         except Exception as exc:
             log.warning("vault_local.disconnect_state_file_delete_failed file=%s error=%s", name, exc)
+
+    # F-D26: scrub upload resume sessions + per-vault chunk cache so a
+    # later reconnect (same id or different) doesn't resurrect dead
+    # state. Only runs when we knew about a vault to begin with.
+    if isinstance(vault_id, str) and vault_id:
+        try:
+            _purge_cached_resume_state(vault_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "vault_local.disconnect_cache_purge_failed vault=%s error=%s",
+                vault_id, exc,
+            )
 
     return vault_id if isinstance(vault_id, str) and vault_id else None
 

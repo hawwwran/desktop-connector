@@ -7,12 +7,47 @@ import logging
 import os
 import re
 import shutil
+import time
 import uuid
 
 log = logging.getLogger(__name__)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Protocol
+
+
+# F-D11: §6.9 retry budget for transient ``vault_chunk_missing`` (404)
+# from the relay. The relay can return 404 between PUT and replication
+# completion; the spec promises auto-retry within the transfer budget
+# before surfacing as terminal. 3 retries (4 attempts total) with
+# exponential backoff capped at 60 s — matches the F-Y06 delete retry
+# shape and stays well under the user-cancel patience window.
+_CHUNK_MISSING_MAX_RETRIES = 3
+_CHUNK_MISSING_BASE_BACKOFF_S = 1.0
+_CHUNK_MISSING_CAP_BACKOFF_S = 60.0
+
+# Test seam: replace this callable to skip real sleeps in tests. The
+# helpers below call ``_chunk_missing_sleep(seconds)`` instead of
+# ``time.sleep`` so a unit test can drop the wall-clock cost while
+# still exercising the retry counter + log emission. Production code
+# leaves the default in place.
+_chunk_missing_sleep: Callable[[float], None] = time.sleep
+
+
+def _missing_retry_delay_s(
+    exc: "VaultChunkMissingError",
+    attempt: int,
+) -> float:
+    """Pick a backoff duration: server hint wins, else exp backoff."""
+    server_hint_ms = exc.details.get("retry_after_ms") if exc.details else None
+    if isinstance(server_hint_ms, (int, float)) and server_hint_ms > 0:
+        return min(
+            float(server_hint_ms) / 1000.0, _CHUNK_MISSING_CAP_BACKOFF_S,
+        )
+    return min(
+        _CHUNK_MISSING_BASE_BACKOFF_S * (2 ** attempt),
+        _CHUNK_MISSING_CAP_BACKOFF_S,
+    )
 
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import get_file
@@ -82,6 +117,140 @@ class DownloadProgress:
     bytes_written: int = 0
 
 
+def _ensure_all_chunks_present(
+    *,
+    relay: ChunkRelay,
+    vault_id: str,
+    vault_access_secret: str,
+    chunk_ids: list[str],
+    should_continue: Callable[[], bool] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """F-D11: re-poll the relay's batch HEAD until every chunk reports
+    ``present=True`` or the §6.9 retry budget is exhausted.
+
+    The relay returns 404-style "not present" via the head dict
+    (``info["present"] == False``), not via an exception. We surface
+    that case as :class:`VaultChunkMissingError` after the budget
+    closes so callers see the same terminal type whether the miss
+    came from a head ping or a bytes fetch.
+
+    Empty ``chunk_ids`` short-circuits to ``{}`` so callers don't pay
+    a network round-trip for zero-version downloads.
+    """
+    if not chunk_ids:
+        return {}
+
+    last_missing: list[str] = []
+    last_exc: VaultChunkMissingError | None = None
+    for attempt in range(_CHUNK_MISSING_MAX_RETRIES + 1):
+        # Only cost a ``should_continue`` tick on retries — attempt 0 is
+        # the fast path that callers expect to be free, and the
+        # per-chunk loop downstream has its own cancellation check
+        # before each fetch. Without this carve-out a caller's gate
+        # like "True once, False after" would spend its single True on
+        # the head call and bail before any chunk fetched, regressing
+        # the F-U03 cancel-between-chunks contract.
+        if (
+            attempt > 0
+            and should_continue is not None
+            and not should_continue()
+        ):
+            raise SyncCancelledError(
+                f"download cancelled at chunk-presence check ({attempt}/"
+                f"{_CHUNK_MISSING_MAX_RETRIES} retries)",
+            )
+        heads = relay.batch_head_chunks(
+            vault_id, vault_access_secret, chunk_ids,
+        )
+        last_missing = [
+            cid for cid in chunk_ids
+            if not isinstance(heads.get(cid), dict)
+            or not heads.get(cid, {}).get("present")
+        ]
+        if not last_missing:
+            return heads
+        last_exc = VaultChunkMissingError(
+            f"vault chunk missing: {last_missing[0]}"
+            + (f" (+{len(last_missing) - 1} more)" if len(last_missing) > 1 else "")
+        )
+        if attempt == _CHUNK_MISSING_MAX_RETRIES:
+            log.warning(
+                "vault.download.chunk_missing_exhausted "
+                "vault=%s missing_count=%d first_missing=%s "
+                "attempts=%d",
+                vault_id, len(last_missing), last_missing[0],
+                _CHUNK_MISSING_MAX_RETRIES + 1,
+            )
+            raise last_exc
+        delay = _missing_retry_delay_s(last_exc, attempt)
+        log.info(
+            "vault.download.chunk_missing_retry "
+            "vault=%s missing_count=%d first_missing=%s "
+            "attempt=%d/%d delay_s=%.1f",
+            vault_id, len(last_missing), last_missing[0],
+            attempt + 1, _CHUNK_MISSING_MAX_RETRIES, delay,
+        )
+        _chunk_missing_sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+    return heads
+
+
+def _get_chunk_with_retry(
+    *,
+    relay: ChunkRelay,
+    vault_id: str,
+    vault_access_secret: str,
+    chunk_id: str,
+    should_continue: Callable[[], bool] | None = None,
+) -> bytes:
+    """F-D11: single-chunk GET with §6.9 retry on 404.
+
+    The pre-flight ``_ensure_all_chunks_present`` already filters out
+    chunks the relay knows are gone, but a chunk *can* be deleted
+    between head-success and bytes-fetch (concurrent eviction,
+    operator action). The same backoff budget covers that race.
+    """
+    last_exc: VaultChunkMissingError | None = None
+    for attempt in range(_CHUNK_MISSING_MAX_RETRIES + 1):
+        # Same first-attempt-is-free carve-out as
+        # ``_ensure_all_chunks_present``. The download loop already
+        # gates each chunk with ``should_continue`` before calling us;
+        # checking again here would double-spend the caller's gate.
+        if (
+            attempt > 0
+            and should_continue is not None
+            and not should_continue()
+        ):
+            raise SyncCancelledError(
+                f"download cancelled before chunk fetch (chunk={chunk_id})",
+            )
+        try:
+            return relay.get_chunk(vault_id, vault_access_secret, chunk_id)
+        except VaultChunkMissingError as exc:
+            last_exc = exc
+            if attempt == _CHUNK_MISSING_MAX_RETRIES:
+                log.warning(
+                    "vault.download.chunk_missing_exhausted "
+                    "vault=%s chunk=%s attempts=%d",
+                    vault_id, chunk_id,
+                    _CHUNK_MISSING_MAX_RETRIES + 1,
+                )
+                raise
+            delay = _missing_retry_delay_s(exc, attempt)
+            log.info(
+                "vault.download.chunk_missing_retry "
+                "vault=%s chunk=%s attempt=%d/%d delay_s=%.1f",
+                vault_id, chunk_id, attempt + 1,
+                _CHUNK_MISSING_MAX_RETRIES, delay,
+            )
+            _chunk_missing_sleep(delay)
+    # Loop only reaches here if it didn't return; re-raise last seen.
+    if last_exc is not None:
+        raise last_exc
+    raise VaultChunkMissingError(f"vault chunk missing: {chunk_id}")
+
+
 @dataclass(frozen=True)
 class _FolderFilePlan:
     display_path: str
@@ -134,11 +303,13 @@ def download_latest_file(
 
     chunk_ids = [chunk["chunk_id"] for chunk in chunks]
     _report(progress, "checking", 0, len(chunks))
-    heads = relay.batch_head_chunks(vault.vault_id, vault.vault_access_secret, chunk_ids)
-    for chunk in chunks:
-        info = heads.get(chunk["chunk_id"])
-        if not isinstance(info, dict) or not info.get("present"):
-            raise VaultChunkMissingError(f"vault chunk missing: {chunk['chunk_id']}")
+    heads = _ensure_all_chunks_present(
+        relay=relay,
+        vault_id=vault.vault_id,
+        vault_access_secret=vault.vault_access_secret,
+        chunk_ids=chunk_ids,
+        should_continue=should_continue,
+    )
 
     plaintext_parts: list[bytes] = []
     completed = 0
@@ -161,7 +332,13 @@ def download_latest_file(
             head=heads[chunk["chunk_id"]],
         )
         if encrypted is None:
-            encrypted = relay.get_chunk(vault.vault_id, vault.vault_access_secret, chunk["chunk_id"])
+            encrypted = _get_chunk_with_retry(
+                relay=relay,
+                vault_id=vault.vault_id,
+                vault_access_secret=vault.vault_access_secret,
+                chunk_id=chunk["chunk_id"],
+                should_continue=should_continue,
+            )
 
         plaintext = _decrypt_chunk(
             vault=vault,
@@ -238,15 +415,13 @@ def download_version(
 
     chunk_ids = [chunk["chunk_id"] for chunk in chunks]
     _report(progress, "checking", 0, len(chunks))
-    heads = (
-        relay.batch_head_chunks(vault.vault_id, vault.vault_access_secret, chunk_ids)
-        if chunk_ids
-        else {}
+    heads = _ensure_all_chunks_present(
+        relay=relay,
+        vault_id=vault.vault_id,
+        vault_access_secret=vault.vault_access_secret,
+        chunk_ids=chunk_ids,
+        should_continue=should_continue,
     )
-    for chunk in chunks:
-        info = heads.get(chunk["chunk_id"])
-        if not isinstance(info, dict) or not info.get("present"):
-            raise VaultChunkMissingError(f"vault chunk missing: {chunk['chunk_id']}")
 
     plaintext_parts: list[bytes] = []
     completed = 0
@@ -267,8 +442,12 @@ def download_version(
             head=heads[chunk["chunk_id"]],
         )
         if encrypted is None:
-            encrypted = relay.get_chunk(
-                vault.vault_id, vault.vault_access_secret, chunk["chunk_id"]
+            encrypted = _get_chunk_with_retry(
+                relay=relay,
+                vault_id=vault.vault_id,
+                vault_access_secret=vault.vault_access_secret,
+                chunk_id=chunk["chunk_id"],
+                should_continue=should_continue,
             )
 
         plaintext = _decrypt_chunk(
@@ -344,16 +523,12 @@ def download_folder(
     total_chunks = sum(len(plan.chunks) for plan in plans)
     chunk_ids = _unique_chunk_ids(plan.chunks for plan in plans)
     _report(progress, "checking", 0, total_chunks)
-    heads = (
-        relay.batch_head_chunks(vault.vault_id, vault.vault_access_secret, chunk_ids)
-        if chunk_ids
-        else {}
+    heads = _ensure_all_chunks_present(
+        relay=relay,
+        vault_id=vault.vault_id,
+        vault_access_secret=vault.vault_access_secret,
+        chunk_ids=chunk_ids,
     )
-    for plan in plans:
-        for chunk in plan.chunks:
-            info = heads.get(chunk["chunk_id"])
-            if not isinstance(info, dict) or not info.get("present"):
-                raise VaultChunkMissingError(f"vault chunk missing: {chunk['chunk_id']}")
 
     final_root.mkdir(parents=True, exist_ok=True)
     completed = 0
@@ -371,10 +546,11 @@ def download_folder(
                     head=heads[chunk["chunk_id"]],
                 )
                 if encrypted is None:
-                    encrypted = relay.get_chunk(
-                        vault.vault_id,
-                        vault.vault_access_secret,
-                        chunk["chunk_id"],
+                    encrypted = _get_chunk_with_retry(
+                        relay=relay,
+                        vault_id=vault.vault_id,
+                        vault_access_secret=vault.vault_access_secret,
+                        chunk_id=chunk["chunk_id"],
                     )
 
                 plaintext = _decrypt_chunk(
@@ -459,6 +635,72 @@ def default_vault_download_cache_dir() -> Path:
     return base / "desktop-connector" / "vault"
 
 
+# F-D04: per-vault chunk cache cap. Without a bound the cache grew
+# until the user's XDG_CACHE_HOME ran out of space — restoring 100 GiB
+# once left 100 GiB cached forever. 1 GiB ≈ 512 × 2 MiB chunks at the
+# canonical chunk size; the cache stays useful for repeat downloads
+# of the recently-touched files (matches Linux page-cache reuse
+# semantics) without unbounded growth.
+DEFAULT_VAULT_CHUNK_CACHE_MAX_BYTES = 1 * 1024 * 1024 * 1024
+
+
+def prune_vault_chunk_cache(
+    cache_dir: Path,
+    vault_id: str,
+    *,
+    max_bytes: int = DEFAULT_VAULT_CHUNK_CACHE_MAX_BYTES,
+) -> int:
+    """F-D04: cap the per-vault chunk cache at ``max_bytes``.
+
+    Walks ``<cache_dir>/chunks/<vault_id>/`` once, summing file sizes.
+    If under the cap it returns 0 immediately. Otherwise sorts by
+    ``st_atime`` ascending (oldest-touched first) and deletes until
+    the total drops below the cap. Per-file failures (permission,
+    file vanished mid-walk) are logged at debug and skipped — never
+    fatal so a partial prune still helps. Returns bytes freed.
+
+    The caller doesn't have to be the download path; tray /
+    eviction / disconnect can all invoke this helper to keep the
+    cache bounded. ``_store_cached_chunk`` calls it opportunistically
+    after every write so the cap is enforced lazily without an
+    explicit periodic job.
+    """
+    canonical = normalize_vault_id(vault_id) if vault_id else vault_id
+    root = Path(cache_dir) / "chunks" / canonical
+    if not root.exists():
+        return 0
+    entries: list[tuple[float, Path, int]] = []
+    total = 0
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        entries.append((st.st_atime, path, st.st_size))
+        total += st.st_size
+    if total <= max_bytes:
+        return 0
+    entries.sort(key=lambda t: t[0])
+    freed = 0
+    for _atime, path, size in entries:
+        if total <= max_bytes:
+            break
+        try:
+            path.unlink()
+            total -= size
+            freed += size
+        except OSError:
+            continue
+    log.info(
+        "vault.download.chunk_cache_pruned "
+        "vault=%s freed_bytes=%d remaining_bytes=%d max_bytes=%d",
+        vault_id, freed, total, max_bytes,
+    )
+    return freed
+
+
 def _decrypt_chunk(
     *,
     vault: DownloadVault,
@@ -509,6 +751,21 @@ def _load_cached_chunk(
         return None
     expected_size = _int_value(head.get("size"))
     expected_hash = str(head.get("hash") or "")
+    # F-D10: if the relay's batch HEAD didn't supply *either* a size
+    # or a hash there is nothing for us to validate the cached bytes
+    # against. AEAD catches ciphertext bit-flips at decrypt time, but
+    # a local attacker who swaps the cache file with bytes of a
+    # different size would otherwise sail past the size check too —
+    # forcing a fresh fetch closes that defense-in-depth gap. Servers
+    # always emit at least ``size`` for present chunks, so this branch
+    # only fires on an unusual relay bug or a feature-flag downgrade.
+    if not expected_size and not expected_hash:
+        log.info(
+            "vault.download.cache_validation_unavailable "
+            "vault=%s chunk=%s",
+            vault_id, chunk_id,
+        )
+        return None
     if expected_size and len(data) != expected_size:
         return None
     if expected_hash and hashlib.sha256(data).hexdigest() != expected_hash:
@@ -527,6 +784,20 @@ def _store_cached_chunk(
     path = vault_chunk_cache_path(chunk_cache_dir, vault_id, chunk_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_file(path, data)
+    # F-D04: opportunistic prune so the cap is enforced without a
+    # periodic job. The fast path is a single ``rglob`` + size sum;
+    # only when the per-vault subtree exceeds the cap do we sort
+    # by atime and delete oldest. At the 1 GiB default + 2 MiB chunks
+    # the prune touches ~512 stats per call — well under 10 ms on
+    # mid-tier disks. Failures are swallowed: never let cache
+    # bookkeeping break a download.
+    try:
+        prune_vault_chunk_cache(chunk_cache_dir, vault_id)
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "vault.download.chunk_cache_prune_failed vault=%s",
+            vault_id, exc_info=True,
+        )
 
 
 def _folder_for_display_path(manifest: dict[str, Any], path: str) -> dict[str, Any]:

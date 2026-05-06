@@ -770,8 +770,10 @@ def _merge_folder_entries(
                 out_folder["entries"].append(copy.deepcopy(local_entry))
             continue
 
-        # Same entry exists on both sides; append the new local versions
-        # and resolve latest_version_id deterministically per §D4.
+        # Same entry exists on both sides; append the new local versions.
+        # Per §D4 row 3 the local-side new versions still land as
+        # restorable history regardless of whether the server tombstoned
+        # the entry — a future "Restore" action needs them visible.
         existing_version_ids = {
             str(v.get("version_id", ""))
             for v in out_entry.get("versions", [])
@@ -781,12 +783,21 @@ def _merge_folder_entries(
             if str(v.get("version_id", "")) in existing_version_ids:
                 continue
             out_entry.setdefault("versions", []).append(copy.deepcopy(v))
-        out_entry["latest_version_id"] = _resolve_latest_version_id(
-            [v for v in out_entry.get("versions", []) if isinstance(v, dict)]
-        )
-        # If the server tombstoned this entry, the tombstone wins per §D4
-        # row 3: versions land as restorable history but `deleted` stays.
+
+        # F-D07: ``latest_version_id`` is re-resolved deterministically
+        # per §D4 *only* when the entry is still live. When the server's
+        # head carries ``deleted=True`` we keep the server's existing
+        # ``latest_version_id`` (typically the pre-tombstone latest, or
+        # empty if the entry was tombstoned at genesis). Re-resolving on
+        # a tombstoned entry would point at a freshly-uploaded version's
+        # chunks; those chunks would then look like the "current" content
+        # to ``vault_eviction``'s preserve-latest pass and survive forever
+        # even though the entry is logically dead, no UI can reach the
+        # version, and it isn't part of any restore plan.
         if not bool(out_entry.get("deleted")):
+            out_entry["latest_version_id"] = _resolve_latest_version_id(
+                [v for v in out_entry.get("versions", []) if isinstance(v, dict)]
+            )
             out_entry["deleted"] = False
 
 

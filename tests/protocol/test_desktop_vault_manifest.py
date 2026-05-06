@@ -362,6 +362,205 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         # Result satisfies the publish invariant.
         assert_publishable_revision(bumped)
 
+    @staticmethod
+    def _version(
+        *,
+        version_id: str,
+        modified_at: str,
+        author: str = AUTHOR,
+        chunk: str = "00" * 32,
+        size: int = 100,
+        sha: str = "aa" * 32,
+        fp: str = "cf-1",
+    ) -> dict:
+        return {
+            "version_id": version_id,
+            "modified_at": modified_at,
+            "created_at": modified_at,
+            "author_device_id": author,
+            "chunks": [{"chunk_id": chunk, "ciphertext_size": size}],
+            "logical_size": size,
+            "plaintext_sha256": sha,
+            "content_fingerprint": fp,
+        }
+
+    def test_merge_with_remote_head_preserves_tombstone_latest_version_id(self) -> None:
+        """F-D07: when the server head has ``deleted=True`` for an entry,
+        ``merge_with_remote_head`` keeps the server's ``latest_version_id``
+        even if the local side appended new versions. Re-resolving here
+        would point eviction's preserve-latest pass at freshly-uploaded
+        chunks belonging to a tombstoned entry — those chunks would
+        survive forever despite no UI being able to reach them.
+        """
+        from src.vault_manifest import (
+            add_or_append_file_version, merge_with_remote_head,
+            tombstone_file_entry,
+        )
+
+        # Step 1: parent has one entry with v1.
+        parent = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Docs",
+                    created_at="2026-05-04T12:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        parent_with_v1 = add_or_append_file_version(
+            parent,
+            remote_folder_id=DOCS_ID, path="report.txt",
+            version=self._version(
+                version_id="fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                modified_at="2026-05-04T12:00:00.000Z",
+            ),
+        )
+        parent_with_v1["revision"] = 2
+        parent_with_v1["parent_revision"] = 1
+
+        # Step 2: server tombstoned the entry → server head has
+        # ``deleted=True``, ``latest_version_id`` may still be v1's id
+        # (preserved as the "pre-tombstone latest").
+        server_head = tombstone_file_entry(
+            parent_with_v1, remote_folder_id=DOCS_ID, path="report.txt",
+            deleted_at="2026-05-04T13:00:00.000Z",
+            author_device_id=AUTHOR,
+        )
+        server_head["revision"] = 3
+        server_head["parent_revision"] = 2
+        server_head["created_at"] = "2026-05-04T13:00:00.000Z"
+        server_head["author_device_id"] = AUTHOR
+
+        # Snapshot the server's pre-merge fields for the assertion.
+        server_entry = server_head["remote_folders"][0]["entries"][0]
+        self.assertTrue(server_entry["deleted"])
+        server_latest_id_before_merge = server_entry["latest_version_id"]
+
+        # Step 3: locally we appended v2 (raced the server).
+        local_attempt = add_or_append_file_version(
+            parent_with_v1,
+            remote_folder_id=DOCS_ID, path="report.txt",
+            version=self._version(
+                version_id="fv_v1_bbbbbbbbbbbbbbbbbbbbbbbb",
+                modified_at="2026-05-04T12:30:00.000Z",
+                chunk="11" * 32, size=200, sha="bb" * 32, fp="cf-2",
+            ),
+        )
+        local_attempt["revision"] = 3
+        local_attempt["parent_revision"] = 2
+
+        # Step 4: merge.
+        merged = merge_with_remote_head(
+            parent=parent_with_v1,
+            local_attempt=local_attempt,
+            server_head=server_head,
+            author_device_id=AUTHOR,
+        )
+
+        merged_entry = merged["remote_folders"][0]["entries"][0]
+        # Tombstone preserved (§D4 row 3).
+        self.assertTrue(merged_entry["deleted"])
+        # F-D07: latest_version_id stayed at the server's pre-merge
+        # value — NOT re-resolved to v2 just because v2 was appended.
+        self.assertEqual(
+            merged_entry["latest_version_id"],
+            server_latest_id_before_merge,
+            "tombstoned entry's latest_version_id must not be re-resolved",
+        )
+        # Local v2 is still archived as restorable history.
+        version_ids = {
+            v["version_id"] for v in merged_entry["versions"]
+        }
+        self.assertEqual(len(version_ids), 2)
+
+    def test_merge_with_remote_head_resolves_latest_for_live_entry(self) -> None:
+        """F-D07 negative case: when the entry is still live (no
+        tombstone), ``merge_with_remote_head`` continues to re-resolve
+        ``latest_version_id`` per §D4. We pin this so the F-D07 fix
+        doesn't accidentally suppress the live-merge path.
+        """
+        from src.vault_manifest import (
+            add_or_append_file_version, merge_with_remote_head,
+        )
+
+        parent = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Docs",
+                    created_at="2026-05-04T12:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        # Both sides start with v1.
+        parent_with_v1 = add_or_append_file_version(
+            parent,
+            remote_folder_id=DOCS_ID, path="active.txt",
+            version=self._version(
+                version_id="fv_v1_cccccccccccccccccccccccc",
+                modified_at="2026-05-04T12:00:00.000Z",
+            ),
+        )
+        parent_with_v1["revision"] = 2
+        parent_with_v1["parent_revision"] = 1
+
+        # Server appends v_server with a strictly-later modified_at;
+        # local appends v_local with an older modified_at. Per §D4
+        # tie-break by (modified_at, sha256(author)) the merged
+        # latest_version_id should be v_server's.
+        server_head = add_or_append_file_version(
+            parent_with_v1,
+            remote_folder_id=DOCS_ID, path="active.txt",
+            version=self._version(
+                version_id="fv_v1_dddddddddddddddddddddddd",
+                modified_at="2026-05-04T15:00:00.000Z",
+                chunk="ee" * 32, size=300, sha="cc" * 32, fp="cf-server",
+            ),
+        )
+        server_head["revision"] = 3
+        server_head["parent_revision"] = 2
+
+        local_attempt = add_or_append_file_version(
+            parent_with_v1,
+            remote_folder_id=DOCS_ID, path="active.txt",
+            version=self._version(
+                version_id="fv_v1_eeeeeeeeeeeeeeeeeeeeeeee",
+                modified_at="2026-05-04T13:00:00.000Z",
+                chunk="ff" * 32, size=200, sha="dd" * 32, fp="cf-local",
+            ),
+        )
+        local_attempt["revision"] = 3
+        local_attempt["parent_revision"] = 2
+
+        merged = merge_with_remote_head(
+            parent=parent_with_v1,
+            local_attempt=local_attempt,
+            server_head=server_head,
+            author_device_id=AUTHOR,
+        )
+        merged_entry = merged["remote_folders"][0]["entries"][0]
+        self.assertFalse(merged_entry.get("deleted", False))
+        # Find the latest version's modified_at — should be the
+        # server's freshest one.
+        latest_id = merged_entry["latest_version_id"]
+        latest = next(
+            v for v in merged_entry["versions"]
+            if v["version_id"] == latest_id
+        )
+        self.assertEqual(latest["modified_at"], "2026-05-04T15:00:00.000Z")
+
     def test_publish_manifest_rejects_inherited_revision_pair(self) -> None:
         """Integration test for the publish-side enforcement. A
         manifest body with the *parent's* revision (i.e. forgot to

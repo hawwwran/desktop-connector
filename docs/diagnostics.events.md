@@ -403,8 +403,13 @@ relay log (filenames are local-only).
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
 | `vault.delete.cas_exhausted` | desktop | warning | `vault`, `retries` | F-D25 — delete retry budget exhausted; raised the CAS error to caller |
 | `vault.delete.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`/`path_prefix`, `tombstoned` (folder bulk) | F-510 — soft-delete or folder-clear published; Activity-tab "Deleted" anchor |
+| `vault.download.cache_validation_unavailable` | desktop | info | `vault`, `chunk` | F-D10 — relay batch HEAD didn't return size or hash for this chunk; cache treated as miss to avoid blind-trust on bytes that AEAD alone can't size-check |
 | `vault.download.cancelled` | desktop | info | `vault`, `path`, `chunks_done`, `total` | F-U03 — chunk-level cancel mid-download |
 | `vault.download.cancelled_pre_write` | desktop | info | `vault`, `path` | F-U03 — cancel landed after the last chunk fetch but before the atomic write |
+| `vault.download.chunk_cache_prune_failed` | desktop | warning | `vault` | F-D04 — opportunistic prune raised; download continues with the cache potentially over-cap |
+| `vault.download.chunk_cache_pruned` | desktop | info | `vault`, `freed_bytes`, `remaining_bytes`, `max_bytes` | F-D04 — per-vault chunk cache exceeded the cap; deleted oldest-touched chunks until under |
+| `vault.download.chunk_missing_exhausted` | desktop | warning | `vault`, `chunk`/`first_missing`, `missing_count`, `attempts` | F-D11 — §6.9 retry budget exhausted; surfacing `vault_chunk_missing` as terminal |
+| `vault.download.chunk_missing_retry` | desktop | info | `vault`, `chunk`/`first_missing`, `missing_count`, `attempt`, `delay_s` | F-D11 — relay reported chunk(s) missing; sleeping before retry |
 | `vault.download.duplicate_path` | desktop | warning | `path` | F-D09 — folder download saw two entries claiming the same relative path |
 | `vault.download.entry_has_no_version` | desktop | warning | `path` | F-D09 — folder download skipped a version-less entry |
 | `vault.download.skip_unsafe_path` | desktop | warning | `path`, `error` | F-D09 — folder download skipped a manifest path that escapes the root |
@@ -469,6 +474,7 @@ relay log (filenames are local-only).
 | `vault.sync.file_stability_hung` | desktop | warning | `path`, `waited` | T10.4 stability gate hung-after cap hit |
 | `vault.sync.file_walk_error` | desktop | warning | `path`, `errno` | F-D13 — folder walker hit `lstat()` failure (permission, dangling symlink, transient I/O); skipped distinct from special-file class |
 | `vault.sync.flush_skipped_paused` | desktop | info | `binding` | F-Y01 — sync now no-op for paused binding |
+| `vault.sync.ignore_pattern_unsupported_shape` | desktop | warning | `pattern`, `reason`, `hint` | F-D14 — caller-supplied ignore pattern uses `**` or starts with `/`; the v1 fnmatch matcher silently never matches those shapes (emitted once per process per pattern) |
 | `vault.sync.local_delete_unsynced_silent` | desktop | info | `binding`, `path` | T12.2 watcher gate dropped a delete on a never-synced path |
 | `vault.sync.previously_synced_check_failed` | desktop | warning | `binding`, `path` | The T12.2 predicate raised; treating as not-synced |
 | `vault.sync.progress_callback_failed` | desktop | error | exception traceback | UI progress callback raised; cycle continues |

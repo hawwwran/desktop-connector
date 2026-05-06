@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _paths import ensure_desktop_on_path  # noqa: E402
@@ -501,6 +502,99 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         self.assertEqual(result.chunks_skipped, 3)
         self.assertEqual(list_resumable_sessions(VAULT_ID, cache_dir), [])
 
+    def test_resume_seeks_past_already_done_chunks_instead_of_reading(self) -> None:
+        """F-D12: when both the session AND the relay agree a chunk is
+        already PUT, ``resume_upload`` advances the file pointer with
+        ``seek`` rather than reading + re-deriving the chunk_id.
+        Resuming the last 50 MB of a 2 GiB file no longer burns
+        1.95 GiB of disk reads.
+
+        We count bytes read from the local file during resume — the
+        count must equal the bytes of *only the chunks the relay
+        reports as missing* (the ones we actually need to PUT).
+        Chunks already on the relay get seeked, even when the local
+        session's ``done`` flag is stale.
+        """
+        local = self.tmpdir / "big.bin"
+        # 12 chunks @ 8 KiB = 96 KiB so the math is easy.
+        local.write_bytes(b"X" * (12 * 8 * 1024))
+
+        manifest = _empty_manifest()
+        # fail_after_n_puts=4 means 4 PUTs land on the relay; the 5th
+        # raises SimulatedCrashError. The session's ``done`` flag is
+        # written *after* a successful PUT, so on the crash window
+        # there's typically a 1-chunk gap between relay state and
+        # session state — the F-D12 mixed-signal branch is exercised
+        # naturally here without needing a contrived fixture.
+        relay = CrashingRelay(manifest=manifest, fail_after_n_puts=4)
+        cache_dir = self.tmpdir / "resume_cache"
+        vault = _vault()
+        try:
+            with self.assertRaises(SimulatedCrashError):
+                upload_file(
+                    vault=vault, relay=relay, manifest=manifest,
+                    local_path=local, remote_folder_id=DOCS_ID,
+                    remote_path="big.bin", author_device_id=AUTHOR,
+                    chunk_size=8 * 1024,
+                    resume_cache_dir=cache_dir,
+                )
+
+            sessions = list_resumable_sessions(VAULT_ID, cache_dir)
+            session = sessions[0]
+            relay.fail_after_n_puts = None
+            # Whatever is on the relay now will be seeked, not read.
+            chunks_on_relay_before_resume = len(relay.chunks)
+            chunks_to_read_during_resume = (
+                len(session.chunks) - chunks_on_relay_before_resume
+            )
+
+            real_open = open
+            bytes_read_total = {"n": 0}
+
+            class _CountingFile:
+                def __init__(self, fh):
+                    self._fh = fh
+                def read(self, n):
+                    out = self._fh.read(n)
+                    bytes_read_total["n"] += len(out)
+                    return out
+                def seek(self, offset, whence=0):
+                    return self._fh.seek(offset, whence)
+                def __enter__(self):
+                    return self
+                def __exit__(self, exc_type, exc, tb):
+                    self._fh.__exit__(exc_type, exc, tb)
+                def __getattr__(self, name):
+                    return getattr(self._fh, name)
+
+            def counting_open(path, mode="r", *args, **kwargs):
+                fh = real_open(path, mode, *args, **kwargs)
+                if str(path) == str(local):
+                    return _CountingFile(fh)
+                return fh
+
+            with mock.patch("src.vault_upload.open", counting_open):
+                resume_upload(
+                    vault=vault, relay=relay, manifest=manifest,
+                    session=session, resume_cache_dir=cache_dir,
+                )
+        finally:
+            vault.close()
+
+        # Bytes read must equal exactly the chunks the relay didn't
+        # already have — no read for chunks the seek-branch handled.
+        self.assertEqual(
+            bytes_read_total["n"],
+            chunks_to_read_during_resume * 8 * 1024,
+            "F-D12: resume must seek past chunks already on the "
+            "relay, not read + re-derive them",
+        )
+        self.assertGreater(
+            chunks_on_relay_before_resume, 0,
+            "test setup must leave at least one chunk on the relay so "
+            "F-D12's seek-branch is exercised",
+        )
+
     def test_upload_session_cleared_after_successful_publish(self) -> None:
         local = self.tmpdir / "tidy.txt"
         local.write_bytes(b"clean session contents")
@@ -561,6 +655,63 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         self.assertEqual(progress[-1].phase, "done")
         self.assertEqual(progress[-1].files_completed, 3)
+
+    def test_unsupported_ignore_pattern_logs_once_per_process(self) -> None:
+        """F-D14: ``**`` and rooted ``/foo`` patterns aren't supported by
+        the v1 fnmatch matcher — they silently never match. The matcher
+        now warns once per process per pattern so the user has a
+        breadcrumb explaining why their rule didn't match.
+        """
+        from src.vault_upload import (
+            _UNSUPPORTED_PATTERN_WARNED, _matches_ignore,
+        )
+        # Reset the per-process dedup so this test is deterministic.
+        _UNSUPPORTED_PATTERN_WARNED.clear()
+        with self.assertLogs("src.vault_upload", level="WARNING") as captured:
+            # Two passes with the same unsupported pattern: only the
+            # first should log.
+            _matches_ignore(
+                "main.py", "src/main.py", patterns=["**/*.tmp"], is_dir=False,
+            )
+            _matches_ignore(
+                "other.py", "src/other.py", patterns=["**/*.tmp"], is_dir=False,
+            )
+            # A different unsupported pattern: logs once more.
+            _matches_ignore(
+                "any.txt", "any.txt", patterns=["/rooted"], is_dir=False,
+            )
+        warnings = [
+            line for line in captured.output
+            if "ignore_pattern_unsupported_shape" in line
+        ]
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any("**/*.tmp" in line for line in warnings))
+        self.assertTrue(any("/rooted" in line for line in warnings))
+
+    def test_supported_ignore_patterns_do_not_warn(self) -> None:
+        """F-D14 negative: known-good patterns must not trip the
+        unsupported-shape warning.
+        """
+        import logging
+        from src.vault_upload import (
+            _UNSUPPORTED_PATTERN_WARNED, _matches_ignore,
+        )
+        _UNSUPPORTED_PATTERN_WARNED.clear()
+        # ``assertLogs`` requires at least one record; emit one of our
+        # own to satisfy that contract.
+        with self.assertLogs("src.vault_upload", level="WARNING") as captured:
+            _matches_ignore(
+                "main.py", "src/main.py", patterns=["*.pyc", ".git/", "node_modules/"],
+                is_dir=False,
+            )
+            logging.getLogger("src.vault_upload").warning(
+                "test_anchor_to_satisfy_assertLogs"
+            )
+        warnings = [
+            line for line in captured.output
+            if "ignore_pattern_unsupported_shape" in line
+        ]
+        self.assertEqual(warnings, [])
 
     def test_upload_folder_applies_default_ignore_patterns(self) -> None:
         root = self.tmpdir / "with_junk"

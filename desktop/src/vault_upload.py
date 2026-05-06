@@ -639,18 +639,37 @@ def resume_upload(
                     f"resume cancelled at chunk {completed}/{len(chunk_ids)} of "
                     f"{session.remote_path}"
                 )
-            plaintext = fh.read(int(session.chunk_size))
             chunk_id = str(record["chunk_id"])
             head = heads.get(chunk_id) if isinstance(heads, dict) else None
             already_done = bool(record.get("done"))
-            if (already_done or (isinstance(head, dict) and head.get("present"))):
+            head_present = isinstance(head, dict) and head.get("present")
+            # F-D12: if both the local session AND the relay agree this
+            # chunk is already uploaded, seek past the bytes instead of
+            # reading them. Resuming the last 50 MB of a 2 GiB file no
+            # longer requires re-reading 1.95 GiB just to skip them.
+            # The "file changed since the original upload" check
+            # naturally still fires for any chunk that needs to be
+            # re-PUT (the else branch), which is the only branch where
+            # plaintext mismatch would actually matter — the relay
+            # already has the old bytes for the seek-skip case.
+            if already_done and head_present:
+                fh.seek(int(session.chunk_size), os.SEEK_CUR)
                 chunks_skipped += 1
-                # Even if the local session said done=False, a present
-                # chunk on the relay means the PUT landed before the
-                # crash — flush the flag.
+            elif already_done or head_present:
+                # Mixed signal — relay says yes but session says no, or
+                # vice versa. Read past the bytes (the file pointer
+                # still advances under the original pre-F-D12 semantic
+                # of "any-true skips re-PUT") and flush the done flag
+                # so the next resume short-circuits via the seek-skip
+                # branch above. The plaintext is otherwise unused —
+                # re-deriving chunk_id here would trip on
+                # legitimately-changed-but-already-published files.
+                fh.seek(int(session.chunk_size), os.SEEK_CUR)
+                chunks_skipped += 1
                 session.chunks[index]["done"] = True
                 save_session(session, cache_dir)
             else:
+                plaintext = fh.read(int(session.chunk_size))
                 # Re-encrypt deterministically so the envelope bytes match
                 # whatever was stored before (or what would have been). The
                 # T6.1 chunk_id derivation already binds plaintext + version
@@ -1016,6 +1035,31 @@ def _walk_for_upload(
             )
 
 
+_UNSUPPORTED_PATTERN_WARNED: set[str] = set()
+
+
+def _warn_unsupported_pattern(pat: str) -> None:
+    """F-D14: surface unsupported pattern shapes once-per-process.
+
+    ``**`` and rooted ``/foo`` patterns silently fail the fnmatch
+    check; without a warning the user sees their pattern "not match
+    anything" with no breadcrumb. A future migration to ``pathspec``
+    (gitignore-compatible) would close this gap properly; for now we
+    at least make the limit visible.
+    """
+    if pat in _UNSUPPORTED_PATTERN_WARNED:
+        return
+    _UNSUPPORTED_PATTERN_WARNED.add(pat)
+    log.warning(
+        "vault.sync.ignore_pattern_unsupported_shape pattern=%r "
+        "reason=fnmatch-only "
+        "hint=\"**\" and rooted \"/foo\" patterns are not yet "
+        "supported — match the leaf name or include the relative "
+        "path explicitly",
+        pat,
+    )
+
+
 def _matches_ignore(
     name: str,
     rel_path: str,
@@ -1033,12 +1077,20 @@ def _matches_ignore(
 
     Negation, ``**`` and rooted ``/foo`` patterns are not yet supported
     — the §7 defaults don't need them and v1.5 can extend if a
-    user-written pattern requires more.
+    user-written pattern requires more. F-D14: emit
+    ``vault.sync.ignore_pattern_unsupported_shape`` once per process
+    when one of those patterns is encountered so the user has a
+    breadcrumb explaining why their rule didn't match.
     """
     rel_unix = str(rel_path).replace("\\", "/")
     for raw in patterns:
         pat = str(raw).strip()
         if not pat or pat.startswith("#"):
+            continue
+        if "**" in pat or pat.startswith("/"):
+            _warn_unsupported_pattern(pat)
+            # Don't try to match — fnmatch returns nonsense for these
+            # shapes; falling through would silently never match.
             continue
         is_dir_pat = pat.endswith("/")
         if is_dir_pat:
