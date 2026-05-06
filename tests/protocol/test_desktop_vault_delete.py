@@ -234,20 +234,27 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         manifest = _empty_manifest()
         relay = FakeUploadRelay(manifest=manifest)
         vault = _vault()
-        try:
-            uploaded = upload_file(
-                vault=vault, relay=relay, manifest=manifest, local_path=local,
-                remote_folder_id=DOCS_ID, remote_path="doomed.txt",
-                author_device_id=AUTHOR,
-            )
-            published = delete_file(
-                vault=vault, relay=relay, manifest=uploaded.manifest,
-                remote_folder_id=DOCS_ID, remote_path="doomed.txt",
-                author_device_id=AUTHOR,
-                deleted_at="2026-05-04T18:00:00.000Z",
-            )
-        finally:
-            vault.close()
+        # F-510: capture vault.delete.completed so the Activity tab has
+        # a real emit site to anchor on.
+        import logging as _logging
+        with self.assertLogs("src.vault_delete", level="INFO") as cm:
+            try:
+                uploaded = upload_file(
+                    vault=vault, relay=relay, manifest=manifest, local_path=local,
+                    remote_folder_id=DOCS_ID, remote_path="doomed.txt",
+                    author_device_id=AUTHOR,
+                )
+                published = delete_file(
+                    vault=vault, relay=relay, manifest=uploaded.manifest,
+                    remote_folder_id=DOCS_ID, remote_path="doomed.txt",
+                    author_device_id=AUTHOR,
+                    deleted_at="2026-05-04T18:00:00.000Z",
+                )
+            finally:
+                vault.close()
+        joined = "\n".join(cm.output)
+        self.assertIn("vault.delete.completed", joined)
+        self.assertIn("path=doomed.txt", joined)
 
         self.assertEqual(relay.current_revision, 3)  # bootstrap upload + delete
         entry = find_file_entry(published, DOCS_ID, "doomed.txt")

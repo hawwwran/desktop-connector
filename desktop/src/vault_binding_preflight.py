@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .vault_bytes_format import format_bytes_binary as _format_bytes
+
 
 @dataclass(frozen=True)
 class PreflightSummary:
@@ -169,20 +171,6 @@ def _walk_local(root: Path, ignore_dotfiles: bool) -> Iterable[Path]:
             if ignore_dotfiles and name.startswith("."):
                 continue
             yield Path(dirpath) / name
-
-
-def _format_bytes(value: int) -> str:
-    size = max(0, int(value))
-    units = ("B", "KB", "MB", "GB", "TB")
-    amount = float(size)
-    unit = units[0]
-    for unit in units:
-        if amount < 1024 or unit == units[-1]:
-            break
-        amount /= 1024
-    if unit == "B":
-        return f"{int(amount)} B"
-    return f"{amount:.1f} {unit}"
 
 
 __all__ = [

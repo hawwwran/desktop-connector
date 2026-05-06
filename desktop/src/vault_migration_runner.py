@@ -239,6 +239,13 @@ def run_migration(
         )
         record = transition(record, to="committed", now=now)
         save_state(record, config_dir)
+        # F-510: anchor the Activity tab "Relay migration committed" row.
+        log.info(
+            "vault.migration.committed vault=%s source=%s target=%s",
+            vault.vault_id,
+            source_relay_url,
+            target_relay_url,
+        )
 
     # ── idle (post-commit cleanup) ──────────────────────────────────────
     if record.state == "committed":

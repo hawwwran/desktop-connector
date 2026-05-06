@@ -14,6 +14,7 @@ ensure_desktop_on_path()
 from src.vault_export_reminder import (  # noqa: E402
     CADENCE_DAYS,
     DEFAULT_CADENCE,
+    compute_reminder_state,
     next_reminder_due,
     normalize_cadence,
     should_show_export_reminder,
@@ -49,8 +50,11 @@ class ShouldShowReminderTests(unittest.TestCase):
             cadence="off", now=NOW,
         ))
 
-    def test_no_export_ever_yields_reminder(self) -> None:
-        self.assertTrue(should_show_export_reminder(
+    def test_no_export_ever_does_not_fire_reminder(self) -> None:
+        # F-513: a never-exported vault is "first_run", not "due_again".
+        # The boolean predicate only fires for "due_again" so a freshly-
+        # created vault doesn't get a day-1 nag.
+        self.assertFalse(should_show_export_reminder(
             last_export_at=None, last_dismissed_at=None,
             cadence="monthly", now=NOW,
         ))
@@ -102,6 +106,61 @@ class ShouldShowReminderTests(unittest.TestCase):
         ))
 
 
+class ReminderStateTests(unittest.TestCase):
+    """F-513 — explicit state enum drives the UI's choice of copy."""
+
+    def test_off_cadence_returns_off(self) -> None:
+        self.assertEqual(
+            compute_reminder_state(
+                last_export_at=None, last_dismissed_at=None,
+                cadence="off", now=NOW,
+            ),
+            "off",
+        )
+
+    def test_fresh_vault_returns_first_run(self) -> None:
+        # The acceptance: a vault with no export history doesn't surface
+        # the reminder banner. The state is "first_run" so the UI can
+        # render a softer welcome surface if it wants to.
+        self.assertEqual(
+            compute_reminder_state(
+                last_export_at=None, last_dismissed_at=None,
+                cadence="monthly", now=NOW,
+            ),
+            "first_run",
+        )
+
+    def test_recently_exported_vault_returns_current(self) -> None:
+        self.assertEqual(
+            compute_reminder_state(
+                last_export_at="2026-04-29T12:00:00.000Z",  # 5 days ago
+                last_dismissed_at=None,
+                cadence="monthly", now=NOW,
+            ),
+            "current",
+        )
+
+    def test_lapsed_export_returns_due_again(self) -> None:
+        self.assertEqual(
+            compute_reminder_state(
+                last_export_at="2026-04-03T12:00:00.000Z",  # 31 days ago
+                last_dismissed_at=None,
+                cadence="monthly", now=NOW,
+            ),
+            "due_again",
+        )
+
+    def test_recent_dismissal_returns_snoozed(self) -> None:
+        self.assertEqual(
+            compute_reminder_state(
+                last_export_at="2026-03-05T12:00:00.000Z",
+                last_dismissed_at="2026-04-29T12:00:00.000Z",
+                cadence="monthly", now=NOW,
+            ),
+            "snoozed",
+        )
+
+
 class NextReminderDueTests(unittest.TestCase):
     def test_off_returns_none(self) -> None:
         self.assertIsNone(next_reminder_due(
@@ -109,12 +168,23 @@ class NextReminderDueTests(unittest.TestCase):
         ))
 
     def test_due_is_max_of_export_plus_cadence_and_dismiss_plus_cadence(self) -> None:
+        # F-525: output is per-second; no fake `.000` millisecond suffix.
         out = next_reminder_due(
             last_export_at="2026-04-03T12:00:00.000Z",       # +30 = May 3
             last_dismissed_at="2026-04-15T12:00:00.000Z",    # +30 = May 15 (later)
             cadence="monthly",
         )
-        self.assertEqual(out, "2026-05-15T12:00:00.000Z")
+        self.assertEqual(out, "2026-05-15T12:00:00Z")
+
+    def test_due_does_not_emit_hardcoded_millis_when_input_is_per_second(self) -> None:
+        # Input had no fractional second; output preserves that and
+        # doesn't fabricate `.000`.
+        out = next_reminder_due(
+            last_export_at="2026-04-15T08:30:42Z",
+            last_dismissed_at=None,
+            cadence="weekly",
+        )
+        self.assertEqual(out, "2026-04-22T08:30:42Z")
 
 
 if __name__ == "__main__":

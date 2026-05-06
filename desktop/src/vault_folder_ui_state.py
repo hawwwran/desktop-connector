@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .vault_bytes_format import format_bytes_binary
+
 
 DEFAULT_FOLDER_IGNORE_PATTERNS = [".git/", "node_modules/", "*.tmp"]
 FOLDER_COLUMNS = ["Name", "Binding", "Current", "Stored", "History", "Status"]
@@ -53,21 +55,12 @@ def folder_rows_from_cache(
             "remote_folder_id": remote_folder_id,
             "name": str(folder.get("display_name_enc") or remote_folder_id or "(unnamed)"),
             "binding": bindings.get(remote_folder_id, "Not bound"),
-            "current": _format_bytes(int(usage.get("current_bytes", 0))),
-            "stored": _format_bytes(int(usage.get("stored_bytes", 0))),
-            "history": _format_bytes(int(usage.get("history_bytes", 0))),
+            "current": format_bytes_binary(int(usage.get("current_bytes", 0))),
+            "stored": format_bytes_binary(int(usage.get("stored_bytes", 0))),
+            "history": format_bytes_binary(int(usage.get("history_bytes", 0))),
             "status": state[:1].upper() + state[1:] if state else "",
         })
     return rows
-
-
-def _format_bytes(value: int) -> str:
-    value = max(0, int(value))
-    if value < 1024:
-        return f"{value} B"
-    if value < 1024 * 1024:
-        return f"{value // 1024} KB"
-    return f"{value / (1024 * 1024):.1f} MB"
 
 
 BINDING_COLUMNS = ["Local path", "Remote folder", "State", "Sync mode", "Synced rev"]

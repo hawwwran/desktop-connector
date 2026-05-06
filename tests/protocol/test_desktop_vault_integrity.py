@@ -144,7 +144,7 @@ class FullCheckTests(unittest.TestCase):
         relay = _FakeRelay(present_chunks=("ch_v1_a", "ch_v1_b"))
 
         decrypted: list[str] = []
-        def decrypt(folder, entry, version, encrypted):
+        def decrypt(folder, entry, version, chunk, encrypted):
             decrypted.append(encrypted.decode())
             return b"plaintext"
         def fetch(vault_id, secret, cid):
@@ -157,13 +157,16 @@ class FullCheckTests(unittest.TestCase):
         self.assertTrue(report.ok, report.broken)
         self.assertEqual(report.scope, "full")
         self.assertEqual(sorted(decrypted), ["ch_v1_a", "ch_v1_b"])
+        # F-508: head-only walk reports a single revision_checked.
+        self.assertEqual(report.revisions_checked, 1)
 
     def test_full_check_reports_aead_failure_per_chunk(self) -> None:
         manifest = _manifest_with_chunks("ch_v1_a", "ch_v1_b", revision=2, parent_revision=1)
         vault = _FakeVault(manifest)
         relay = _FakeRelay(present_chunks=("ch_v1_a", "ch_v1_b"))
 
-        def decrypt(folder, entry, version, encrypted):
+        def decrypt(folder, entry, version, chunk, encrypted):
+            self.assertEqual(chunk["chunk_id"], encrypted.decode())
             if encrypted == b"ch_v1_b":
                 raise ValueError("aead tag mismatch")
             return b"ok"
@@ -179,12 +182,86 @@ class FullCheckTests(unittest.TestCase):
         self.assertEqual(report.broken[0].kind, "chunk_aead_failed")
         self.assertEqual(report.broken[0].target, "ch_v1_b")
 
+    def test_full_check_walks_every_retained_revision_when_envelope_decrypter_supplied(self) -> None:
+        # F-508: a chunk only referenced by an *older* retained revision
+        # (not the head) still gets verified when the caller passes an
+        # envelope decrypter. Head references ch_v1_head; revision 1
+        # references ch_v1_archived which the head no longer mentions.
+        head = _manifest_with_chunks("ch_v1_head", revision=2, parent_revision=1)
+        archived = _manifest_with_chunks("ch_v1_archived", revision=1, parent_revision=0)
+        vault = _FakeVault(head)
+        relay = _FakeRelay(present_chunks=("ch_v1_head", "ch_v1_archived"))
+        # `list_manifest_revisions` returns both revisions; the
+        # envelope_bytes are opaque to the test — we map them in the
+        # decrypter below.
+        relay._revisions = [
+            {"revision": 1, "manifest_ciphertext": b"<archived>"},
+            {"revision": 2, "manifest_ciphertext": b"<head>"},
+        ]
+
+        def decrypt_envelope(envelope: bytes) -> dict:
+            return {b"<archived>": archived, b"<head>": head}[envelope]
+
+        decrypted: list[str] = []
+
+        def decrypt(folder, entry, version, chunk, encrypted):
+            decrypted.append(chunk["chunk_id"])
+            return b"ok"
+
+        def fetch(vault_id, secret, cid):
+            return cid.encode()
+
+        report = run_full_check(
+            vault=vault, relay=relay,
+            decrypt_chunk=decrypt, fetch_chunk=fetch,
+            decrypt_manifest_envelope=decrypt_envelope,
+        )
+        self.assertTrue(report.ok, report.broken)
+        # Both head + archived chunks were decrypted — older revisions
+        # are no longer invisible.
+        self.assertEqual(sorted(decrypted), ["ch_v1_archived", "ch_v1_head"])
+        # 2 retained revisions (head dedup'd against the per-revision list).
+        self.assertEqual(report.revisions_checked, 2)
+
+    def test_full_check_reports_revision_aead_failure(self) -> None:
+        # F-508: a tampered older revision surfaces as
+        # `manifest_aead_failed` with the revision number as target.
+        head = _manifest_with_chunks("ch_v1_a", revision=3, parent_revision=2)
+        vault = _FakeVault(head)
+        relay = _FakeRelay(present_chunks=("ch_v1_a",))
+        relay._revisions = [
+            {"revision": 1, "manifest_ciphertext": b"<broken>"},
+            {"revision": 2, "manifest_ciphertext": b"<also_broken>"},
+            {"revision": 3, "manifest_ciphertext": b"<head>"},
+        ]
+
+        def decrypt_envelope(envelope: bytes) -> dict:
+            if envelope == b"<head>":
+                return head
+            raise ValueError(f"aead tag mismatch ({envelope!r})")
+
+        report = run_full_check(
+            vault=vault, relay=relay,
+            decrypt_chunk=lambda f, e, v, c, b: b"ok",
+            fetch_chunk=lambda vid, sec, cid: cid.encode(),
+            decrypt_manifest_envelope=decrypt_envelope,
+        )
+        # Two manifest_aead_failed issues, one per broken revision.
+        kinds = [issue.kind for issue in report.broken]
+        self.assertEqual(kinds.count("manifest_aead_failed"), 2)
+        targets = sorted(
+            issue.target
+            for issue in report.broken
+            if issue.kind == "manifest_aead_failed"
+        )
+        self.assertEqual(targets, ["1", "2"])
+
     def test_full_check_reports_chunk_fetch_failure(self) -> None:
         manifest = _manifest_with_chunks("ch_v1_x", revision=2, parent_revision=1)
         vault = _FakeVault(manifest)
         relay = _FakeRelay(present_chunks=("ch_v1_x",))
 
-        def decrypt(folder, entry, version, encrypted):
+        def decrypt(folder, entry, version, chunk, encrypted):
             return b""
         def fetch(vault_id, secret, cid):
             raise OSError("connection refused")

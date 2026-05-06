@@ -8,10 +8,13 @@ until eviction (T7.5) or retention (T7.6) reclaims it.
 from __future__ import annotations
 
 import copy
+import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+
+log = logging.getLogger(__name__)
 from .vault_manifest import (
     generate_file_version_id,
     normalize_manifest_path,
@@ -65,13 +68,22 @@ def delete_file(
             author_device_id=author_device_id,
         )
 
-    return _publish_with_retry(
+    published = _publish_with_retry(
         vault=vault,
         relay=relay,
         parent_manifest=manifest,
         op=op,
         local_index=local_index,
     )
+    # F-510: anchor the Activity tab "Deleted" timeline row.
+    log.info(
+        "vault.delete.completed vault=%s revision=%d remote_folder_id=%s path=%s",
+        vault.vault_id,
+        int(published.get("revision", 0)) if isinstance(published, dict) else 0,
+        remote_folder_id,
+        remote_path,
+    )
+    return published
 
 
 def delete_folder_contents(
@@ -120,6 +132,17 @@ def delete_folder_contents(
     # peer-added files that were tombstoned on retry). The first
     # attempt's list undercounts whenever a CAS retry happens.
     last_tombstoned = captured[-1] if captured else []
+    # F-510: anchor the Activity tab "Deleted" timeline row for bulk
+    # folder delete.
+    log.info(
+        "vault.delete.completed vault=%s revision=%d remote_folder_id=%s "
+        "path_prefix=%s tombstoned=%d",
+        vault.vault_id,
+        int(published.get("revision", 0)) if isinstance(published, dict) else 0,
+        remote_folder_id,
+        path_prefix,
+        len(last_tombstoned),
+    )
     return published, last_tombstoned
 
 
@@ -185,13 +208,24 @@ def restore_version_to_current(
             author_device_id=author_device_id,
         )
 
-    return _publish_with_retry(
+    published = _publish_with_retry(
         vault=vault,
         relay=relay,
         parent_manifest=manifest,
         op=op,
         local_index=local_index,
     )
+    # F-510: anchor the Activity tab "Restored" timeline row.
+    log.info(
+        "vault.restore.completed vault=%s revision=%d remote_folder_id=%s "
+        "path=%s source_version_id=%s",
+        vault.vault_id,
+        int(published.get("revision", 0)) if isinstance(published, dict) else 0,
+        remote_folder_id,
+        remote_path,
+        source_version_id[:12],
+    )
+    return published
 
 
 def _publish_with_retry(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import unittest
@@ -101,6 +102,86 @@ class VaultUsageTests(unittest.TestCase):
             "history_bytes": 2560,
         })
         self.assertEqual(usage.whole_vault_stored_bytes, 6680)
+
+
+class MalformedChunkWarningTests(unittest.TestCase):
+    """F-515 — surface a warning when a chunk's ciphertext_size is unusable."""
+
+    def _manifest_with_missing_size(self) -> dict:
+        return make_manifest(
+            vault_id=VAULT_ID,
+            revision=2,
+            parent_revision=1,
+            created_at="2026-05-06T10:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-06T10:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[{
+                        "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                        "path": "broken.bin",
+                        "type": "file",
+                        "deleted": False,
+                        "latest_version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                        "versions": [{
+                            "version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                            "logical_size": 4096,
+                            "ciphertext_size": 4120,
+                            # No ciphertext_size on the chunk dict.
+                            "chunks": [{
+                                "chunk_id": SHARED_CHUNK,
+                                "index": 0,
+                                "plaintext_size": 4096,
+                            }],
+                        }],
+                    }],
+                ),
+            ],
+        )
+
+    def test_missing_chunk_ciphertext_size_emits_warning(self) -> None:
+        with self.assertLogs("src.vault_usage", level="WARNING") as cm:
+            calculate_vault_usage(self._manifest_with_missing_size())
+        joined = "\n".join(cm.output)
+        self.assertIn("vault.usage.malformed_chunk_size_skipped", joined)
+        # The chunk_id should appear truncated to 12 chars to keep the
+        # log compact (matches the rest of the diagnostics catalog).
+        self.assertIn(SHARED_CHUNK[:12], joined)
+
+    def test_well_formed_manifest_does_not_warn(self) -> None:
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1,
+            parent_revision=0,
+            created_at="2026-05-06T10:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-06T10:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[_current_entry("clean.bin", 1024, SHARED_CHUNK, 1048)],
+                ),
+            ],
+        )
+        captured: list[logging.LogRecord] = []
+
+        class _Cap(logging.Handler):
+            def emit(self_inner, record: logging.LogRecord) -> None:
+                captured.append(record)
+
+        logger = logging.getLogger("src.vault_usage")
+        handler = _Cap(level=logging.WARNING)
+        logger.addHandler(handler)
+        try:
+            calculate_vault_usage(manifest)
+        finally:
+            logger.removeHandler(handler)
+        self.assertEqual(captured, [])
 
 
 def _current_entry(path: str, logical_size: int, chunk_id: str, ciphertext_size: int) -> dict:

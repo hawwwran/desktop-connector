@@ -399,8 +399,9 @@ relay log (filenames are local-only).
 | `vault.atomic.sweep_unlink_failed` | desktop | warning | `path`, `error` | Sweep matched a temp file but couldn't unlink it |
 | `vault.atomic.temp_unlink_failed` | desktop | warning | `path`, `error` | Live atomic-write couldn't clean up its own temp |
 | `vault.baseline.skip_unsafe` | desktop | warning | `path` | Baseline refused to write a path traversing outside the binding root |
+| `vault.browser.skip_unsafe` | desktop | warning | `path` | F-519 — manifest entry contained a `..` component the browser refused to walk |
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
-| `vault.delete.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands with the `vault.publish.ok` rename per F-510 |
+| `vault.delete.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`/`path_prefix`, `tombstoned` (folder bulk) | F-510 — soft-delete or folder-clear published; Activity-tab "Deleted" anchor |
 | `vault.download.cancelled` | desktop | info | `vault`, `path`, `chunks_done`, `total` | F-U03 — chunk-level cancel mid-download |
 | `vault.download.cancelled_pre_write` | desktop | info | `vault`, `path` | F-U03 — cancel landed after the last chunk fetch but before the atomic write |
 | `vault.download.duplicate_path` | desktop | warning | `path` | F-D09 — folder download saw two entries claiming the same relative path |
@@ -420,7 +421,7 @@ relay log (filenames are local-only).
 | `vault.import.cancelled_pre_publish` | desktop | info | `vault`, `chunks_done` | F-U03 — import cancelled after chunks but before merge publish |
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
 | `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
-| `vault.migration.committed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when migration commit logs through this surface (F-510) |
+| `vault.migration.committed` | desktop | info | `vault`, `source`, `target` | F-510 — relay migration commit landed; Activity-tab "Relay migration committed" anchor |
 | `vault.migration.verify.chunk_aead_failed` | desktop | warning | `chunk`, `error` | F-C05 — chunk failed AEAD during sample |
 | `vault.migration.verify.chunk_fetch_failed` | desktop | warning | `chunk`, `error` | F-C05 — relay get_chunk failed during sample |
 | `vault.migration.verify.chunk_truncated` | desktop | warning | `chunk` | F-C05 — chunk too short to be a valid envelope |
@@ -436,7 +437,7 @@ relay log (filenames are local-only).
 | `vault.recovery_test.*` | desktop | info | varies | Subsystem for the M1 recovery-test dialog (T3.5/T3.6) |
 | `vault.repair.marked_broken` | desktop | info | `count`, `author`, `revision` | T17.4 — broken-version markers committed |
 | `vault.restore.cancelled` | desktop | info | `vault`, `folder`, `files_done`, `total`, optional `cutoff` | F-U03 — restore cancelled between files |
-| `vault.restore.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when restore-folder logs through this surface (F-510) |
+| `vault.restore.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`, `source_version_id` (truncated) | F-510 — restore-version published; Activity-tab "Restored" anchor |
 | `vault.restore.skip_symlinked_dest` | desktop | warning | `path`, `reason` | F-D28 — refused to write through a symlink in destination |
 | `vault.restore.skip_unsafe` | desktop | warning | `path` | Restore refused a path traversing outside the destination |
 | `vault.revoke.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant revoke logs through this surface (F-510) |
@@ -513,6 +514,7 @@ relay log (filenames are local-only).
 | `vault.tray.sync_now.notify_failed` | desktop | error | exception traceback | Tray notification for stub Sync now failed |
 | `vault.tray.sync_now.stub` | desktop | info | — | Tray menu Sync now entry placeholder pre-T10.6 |
 | `vault.upload.completed` | desktop | info | `vault`, `revision`, `path` | A single-file upload completed (post-publish) |
+| `vault.usage.malformed_chunk_size_skipped` | desktop | warning | `chunk_id` (truncated) | F-515 — a manifest chunk had no usable `ciphertext_size`; usage rendered as 0 B for it |
 | `vault.vault.cleared` | desktop | info | `total_tombstoned`, `author` | T14.2 whole-vault bulk-soft-delete published |
 | `vault.vault_access_secret.encode` | desktop | info | — | Access-secret encoding helper invoked |
 

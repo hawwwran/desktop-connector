@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import unittest
@@ -15,6 +16,8 @@ ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
 from src.vault_browser_model import (  # noqa: E402
+    BrowserIndex,
+    _split_path,
     decrypt_manifest,
     get_file,
     list_folder,
@@ -124,6 +127,55 @@ class VaultBrowserTreeWalkTests(unittest.TestCase):
     def test_missing_display_folder_raises(self) -> None:
         with self.assertRaisesRegex(KeyError, "folder not found"):
             list_folder(_nested_manifest(), "Missing")
+
+
+class SplitPathSafetyTests(unittest.TestCase):
+    """F-519 — ``..`` components are dropped + a skip_unsafe warning fires."""
+
+    def test_dotdot_components_are_dropped(self) -> None:
+        # Mixed normal segments with a `..` component — `..` is silently
+        # filtered just like `.` is, so the browser never resolves
+        # something that "feels above" the current view.
+        self.assertEqual(_split_path("Documents/../etc/passwd"),
+                         ["Documents", "etc", "passwd"])
+
+    def test_dotdot_emits_skip_unsafe_warning(self) -> None:
+        with self.assertLogs("src.vault_browser_model", level="WARNING") as cm:
+            _split_path("Documents/../etc/passwd")
+        joined = "\n".join(cm.output)
+        self.assertIn("vault.browser.skip_unsafe", joined)
+        self.assertIn("path=", joined)
+
+    def test_clean_path_does_not_emit_warning(self) -> None:
+        logger = logging.getLogger("src.vault_browser_model")
+        # `assertLogs` requires at least one record — verify the clean
+        # path doesn't emit one by capturing through a manual handler.
+        captured: list[logging.LogRecord] = []
+
+        class _Cap(logging.Handler):
+            def emit(self_inner, record: logging.LogRecord) -> None:
+                captured.append(record)
+
+        handler = _Cap(level=logging.WARNING)
+        logger.addHandler(handler)
+        try:
+            _split_path("Documents/Invoices/2026/report.pdf")
+        finally:
+            logger.removeHandler(handler)
+        self.assertEqual(captured, [])
+
+    def test_get_file_with_traversal_in_lookup_input_falls_through(self) -> None:
+        # A user-supplied path with `..` collapses to the folder/file
+        # name at hand; the lookup either matches a real entry or
+        # raises KeyError. It must NOT silently match a parent.
+        manifest = _nested_manifest()
+        # `Documents/Invoices/2026/../2025/old.pdf` collapses to
+        # `Documents/Invoices/2026/2025/old.pdf` — which doesn't exist
+        # in the manifest, so KeyError is the correct outcome.
+        with self.assertRaises(KeyError):
+            get_file(manifest,
+                     "Documents/Invoices/2026/../2025/old.pdf",
+                     include_deleted=True)
 
 
 class VaultBrowserListVersionsTests(unittest.TestCase):
@@ -288,6 +340,76 @@ def _versioned_manifest() -> dict:
             ),
         ],
     )
+
+
+class BrowserIndexTests(unittest.TestCase):
+    """F-520 — indexed manifest view matches the bare helpers' output."""
+
+    def test_list_folder_matches_bare_helper(self) -> None:
+        manifest = _nested_manifest()
+        index = BrowserIndex(manifest)
+        for path in [
+            "",
+            "Documents",
+            "Documents/Invoices",
+            "Documents/Invoices/2026",
+            "Photos",
+        ]:
+            with self.subTest(path=path):
+                expected = list_folder(manifest, path)
+                actual = index.list_folder(path)
+                # Compare folders + files separately; rows may carry
+                # the same content but iteration order is sorted by
+                # name (case-folded) on both paths.
+                self.assertEqual(
+                    [(f["name"], f["path"]) for f in expected[0]],
+                    [(f["name"], f["path"]) for f in actual[0]],
+                )
+                self.assertEqual(
+                    [(f["name"], f["path"]) for f in expected[1]],
+                    [(f["name"], f["path"]) for f in actual[1]],
+                )
+
+    def test_index_caches_per_folder(self) -> None:
+        manifest = _nested_manifest()
+        index = BrowserIndex(manifest)
+        # Spy on _index_for_folder by counting builds via cache key.
+        index.list_folder("Documents")
+        # A second call into the same folder must hit the cache.
+        before_keys = set(index._folder_cache.keys())
+        index.list_folder("Documents/Invoices")
+        index.list_folder("Documents/Invoices/2026")
+        after_keys = set(index._folder_cache.keys())
+        # All three calls landed in the same Documents-folder bucket.
+        new_keys = after_keys - before_keys
+        self.assertEqual(new_keys, set())
+
+    def test_index_separates_include_deleted_buckets(self) -> None:
+        manifest = _nested_manifest()
+        index = BrowserIndex(manifest)
+        # Same folder, different include_deleted → different cache entries.
+        _, files_default = index.list_folder("Documents/Invoices/2025")
+        _, files_with_deleted = index.list_folder(
+            "Documents/Invoices/2025", include_deleted=True,
+        )
+        self.assertEqual(files_default, [])
+        self.assertEqual([f["name"] for f in files_with_deleted], ["old.pdf"])
+        # Two cache entries on the same folder id (one per
+        # include_deleted flag).
+        keys = list(index._folder_cache.keys())
+        flags = sorted(set(k[1] for k in keys))
+        self.assertEqual(flags, [False, True])
+
+    def test_revision_matches_manifest(self) -> None:
+        manifest = _nested_manifest()
+        self.assertEqual(BrowserIndex(manifest).revision, 11)
+
+    def test_get_file_via_index_matches_bare_helper(self) -> None:
+        manifest = _nested_manifest()
+        index = BrowserIndex(manifest)
+        bare = get_file(manifest, "Documents/Invoices/2026/report.pdf")
+        via_index = index.get_file("Documents/Invoices/2026/report.pdf")
+        self.assertEqual(bare, via_index)
 
 
 if __name__ == "__main__":

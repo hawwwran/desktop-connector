@@ -9,6 +9,8 @@ and manifest interpretation stay unit-testable.
 from __future__ import annotations
 
 import json
+import logging
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .vault_crypto import (
@@ -18,6 +20,8 @@ from .vault_crypto import (
     normalize_vault_id,
 )
 from .vault_manifest import normalize_manifest_plaintext
+
+log = logging.getLogger(__name__)
 
 
 class ManifestVault(Protocol):
@@ -202,6 +206,145 @@ def list_versions(
     return rows
 
 
+@dataclass
+class _ChildBucket:
+    """Immediate children of one parent-path inside one remote folder."""
+
+    subfolders: set[str] = field(default_factory=set)
+    files: list[dict[str, Any]] = field(default_factory=list)
+
+
+class BrowserIndex:
+    """O(K)-per-call view over a decrypted manifest (F-520).
+
+    The bare :func:`list_folder` walks every entry in a remote folder
+    on each call to figure out which paths are immediate children of
+    the requested prefix. With 100k entries that's 100k checks per
+    navigation step. ``BrowserIndex`` walks the manifest **once** per
+    ``(remote_folder, include_deleted)`` pair and groups entries by
+    parent-path so each subsequent ``list_folder`` is O(K) where K =
+    immediate children of that path.
+
+    Build order is lazy — folders are indexed the first time the user
+    opens them, so a vault with 100 remote folders only builds the
+    index for the ones actually browsed.
+
+    The index never mutates the input manifest. Caller invalidates by
+    constructing a fresh :class:`BrowserIndex` when the manifest
+    revision changes.
+    """
+
+    def __init__(self, manifest: dict[str, Any]) -> None:
+        self._manifest = normalize_manifest_plaintext(manifest)
+        # (remote_folder_id, include_deleted) → parent_path → bucket
+        self._folder_cache: dict[tuple[str, bool], dict[str, _ChildBucket]] = {}
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        return self._manifest
+
+    @property
+    def revision(self) -> int:
+        return int(self._manifest.get("revision", 0))
+
+    def list_folder(
+        self,
+        path: str,
+        *,
+        include_deleted: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Indexed counterpart to :func:`list_folder` — same return shape."""
+        parts = _split_path(path)
+        if not parts:
+            folders = [
+                _folder_row(
+                    name=_folder_name(folder),
+                    path=_folder_name(folder),
+                    folder=folder,
+                    relative_path="",
+                )
+                for folder in _active_remote_folders(self._manifest)
+            ]
+            return _sort_rows(folders), []
+
+        folder = _find_remote_folder(self._manifest, parts[0])
+        if folder is None:
+            raise KeyError(f"folder not found: {parts[0]}")
+
+        relative_parts = parts[1:]
+        index = self._index_for_folder(folder, include_deleted=include_deleted)
+        relative_key = "/".join(relative_parts)
+        bucket = index.get(relative_key)
+        if bucket is None:
+            return [], []
+
+        folder_rows = [
+            _folder_row(
+                name=name,
+                path="/".join([parts[0], *relative_parts, name]),
+                folder=folder,
+                relative_path="/".join([*relative_parts, name]),
+            )
+            for name in bucket.subfolders
+        ]
+        prefix = relative_key
+        prefix_with_slash = prefix + "/" if prefix else ""
+        files = [
+            _file_row(
+                folder, entry,
+                prefix_with_slash + _split_path(str(entry.get("path", "")))[-1],
+            )
+            for entry in bucket.files
+        ]
+        return _sort_rows(folder_rows), _sort_rows(files)
+
+    def get_file(
+        self,
+        path: str,
+        *,
+        include_deleted: bool = False,
+    ) -> dict[str, Any]:
+        """Convenience wrapper — kept O(N) per call; uncommon path."""
+        return get_file(self._manifest, path, include_deleted=include_deleted)
+
+    def list_versions(
+        self,
+        path: str,
+        *,
+        include_deleted: bool = False,
+    ) -> list[dict[str, Any]]:
+        return list_versions(self._manifest, path, include_deleted=include_deleted)
+
+    def _index_for_folder(
+        self,
+        folder: dict[str, Any],
+        *,
+        include_deleted: bool,
+    ) -> dict[str, _ChildBucket]:
+        folder_id = str(folder.get("remote_folder_id", "") or _folder_name(folder))
+        cache_key = (folder_id, include_deleted)
+        cached = self._folder_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        index: dict[str, _ChildBucket] = {}
+        for entry in _iter_entries(folder, include_deleted=include_deleted):
+            if str(entry.get("type", "file")) != "file":
+                continue
+            entry_parts = _split_path(str(entry.get("path", "")))
+            if not entry_parts:
+                continue
+            parent_path = "/".join(entry_parts[:-1])
+            bucket = index.setdefault(parent_path, _ChildBucket())
+            bucket.files.append(entry)
+            for depth in range(len(entry_parts) - 1):
+                ancestor_parent = "/".join(entry_parts[:depth])
+                ancestor_name = entry_parts[depth]
+                ancestor_bucket = index.setdefault(ancestor_parent, _ChildBucket())
+                ancestor_bucket.subfolders.add(ancestor_name)
+        self._folder_cache[cache_key] = index
+        return index
+
+
 def _active_remote_folders(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     folders = manifest.get("remote_folders", [])
     if not isinstance(folders, list):
@@ -311,7 +454,27 @@ def _versions(entry: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _split_path(path: str) -> list[str]:
-    return [part for part in str(path).replace("\\", "/").split("/") if part and part != "."]
+    """Split a display path into segments; drop ``.`` and ``..`` components.
+
+    F-519: rejecting ``..`` is defense-in-depth against a malicious
+    paired desktop emitting a manifest entry whose decrypted path tries
+    to escape the remote-folder root. The browser would then render a
+    folder named ``..`` containing files that *appear* to live above
+    the user's view. Master-key AEAD already gates this — only a
+    compromised paired device can land such bytes — but matching
+    ``vault_baseline.skip_unsafe`` / ``vault_restore.skip_unsafe``
+    keeps the browser surface consistent with the sync surface.
+    """
+    raw = str(path).replace("\\", "/")
+    parts: list[str] = []
+    for segment in raw.split("/"):
+        if not segment or segment == ".":
+            continue
+        if segment == "..":
+            log.warning("vault.browser.skip_unsafe path=%s", raw[:200])
+            continue
+        parts.append(segment)
+    return parts
 
 
 def _sort_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

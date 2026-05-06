@@ -70,9 +70,31 @@ class VaultFolderUiStateTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(rows[0]["current"], "1 KB")
-        self.assertEqual(rows[0]["stored"], "2.0 MB")
+        # F-514: shared binary formatter — KiB/MiB/GiB labels with /1024 math.
+        self.assertEqual(rows[0]["current"], "1.5 KiB")
+        self.assertEqual(rows[0]["stored"], "2.0 MiB")
         self.assertEqual(rows[0]["history"], "0 B")
+
+    def test_folder_row_renders_gigabytes_for_large_vaults(self) -> None:
+        # F-514: the previous folder-tab formatter capped at MB so a
+        # 5 GiB folder showed up as "5120.0 MB". With the unified
+        # formatter the GiB label kicks in at 1024 MiB.
+        rows = folder_rows_from_cache(
+            [{
+                "remote_folder_id": "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                "display_name_enc": "Big",
+                "state": "active",
+            }],
+            usage_by_folder={
+                "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa": {
+                    "current_bytes": 5 * 1024 * 1024 * 1024,
+                    "stored_bytes": 5 * 1024 * 1024 * 1024,
+                    "history_bytes": 0,
+                }
+            },
+        )
+        self.assertEqual(rows[0]["current"], "5.0 GiB")
+        self.assertEqual(rows[0]["stored"], "5.0 GiB")
 
 
 class BindingRowsTests(unittest.TestCase):

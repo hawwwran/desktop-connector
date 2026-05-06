@@ -137,13 +137,30 @@ def run_full_check(
     *,
     vault: IntegrityVault,
     relay: IntegrityRelay,
-    decrypt_chunk: Callable[[dict[str, Any], dict[str, Any], dict[str, Any], bytes], bytes],
+    decrypt_chunk: Callable[
+        [dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], bytes], bytes,
+    ],
     fetch_chunk: Callable[[str, str, str], bytes],
     decrypt_manifest_envelope: Callable[[bytes], dict[str, Any]] | None = None,
     deadline_seconds: float | None = None,
     cancel_event = None,
 ) -> IntegrityReport:
     """Quick check + decrypt every retained revision + decrypt every chunk.
+
+    F-508: when ``decrypt_manifest_envelope`` is supplied, every
+    retained revision is AEAD-decrypted and the chunk-walk unions the
+    chunk_ids referenced by *any* revision (not just the head). Older
+    revisions can reference chunks that the head no longer needs —
+    typically tombstoned versions retained for restore — and bit-rot
+    in those chunks would otherwise stay invisible to a head-only
+    walk. The old-versions-on-the-head observation
+    (``vault_eviction``) doesn't fully catch this because eviction may
+    have already pruned per-version state from the head while older
+    revisions still reference the broken bytes.
+
+    When ``decrypt_manifest_envelope`` is ``None`` the function walks
+    head-only. The :class:`IntegrityReport` then reports
+    ``revisions_checked = 1`` so callers can tell which scope ran.
 
     ``decrypt_chunk`` is a callable mirroring
     :func:`vault_download._decrypt_chunk`'s signature so tests can
@@ -159,110 +176,137 @@ def run_full_check(
         return report
 
     # Manifest revisions list — fall back to head-only if the relay
-    # doesn't expose per-revision listing on this build.
-    try:
-        revisions = relay.list_manifest_revisions(
-            vault.vault_id, vault.vault_access_secret,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.info(
-            "vault.integrity.list_revisions_unavailable vault=%s error=%s",
-            vault.vault_id, exc,
-        )
-        revisions = []
-
-    report.revisions_checked = max(1, len(revisions))
+    # doesn't expose per-revision listing on this build OR if the
+    # caller didn't supply an envelope decrypter (head-only mode).
+    revisions: list[dict[str, Any]] = []
     if decrypt_manifest_envelope is not None:
+        try:
+            revisions = list(relay.list_manifest_revisions(
+                vault.vault_id, vault.vault_access_secret,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            log.info(
+                "vault.integrity.list_revisions_unavailable vault=%s error=%s",
+                vault.vault_id, exc,
+            )
+
+    # Walk head + (optionally) every other revision to gather both
+    # decrypt-failure issues and the union of chunk_ids that need to
+    # be checked.
+    decoded_revisions: list[dict[str, Any]] = []
+    revision_decrypt_failed = False
+    if decrypt_manifest_envelope is not None and revisions:
         for entry in revisions:
             envelope = entry.get("manifest_ciphertext")
+            revision_id = str(entry.get("revision", "?"))
             if not isinstance(envelope, (bytes, bytearray)):
                 continue
             try:
-                decrypt_manifest_envelope(bytes(envelope))
+                decoded = decrypt_manifest_envelope(bytes(envelope))
             except Exception as exc:  # noqa: BLE001
                 report.add(IntegrityIssue(
                     kind="manifest_aead_failed",
-                    target=str(entry.get("revision", "?")),
+                    target=revision_id,
                     detail=str(exc),
                 ))
+                revision_decrypt_failed = True
+                continue
+            if isinstance(decoded, dict):
+                decoded_revisions.append(decoded)
 
-    # Decrypt every chunk referenced from any non-deleted version of
-    # the head manifest. We don't walk every revision's chunks because
-    # the head manifest already references the ones currently in use;
-    # older revisions reference subsets of these (CAS chain semantics).
-    folder_by_id = {
-        f.get("remote_folder_id"): f
-        for f in head.get("remote_folders", []) or []
-        if isinstance(f, dict)
-    }
+    # Always include the head plaintext (already decrypted via
+    # vault.fetch_manifest) so we still verify head-referenced chunks
+    # even when the relay doesn't expose per-revision history.
+    manifests_to_walk = [head]
+    if decoded_revisions:
+        # Skip duplicate of head when list_manifest_revisions echoes it.
+        head_revision = int(head.get("revision", 0))
+        for rev_manifest in decoded_revisions:
+            if int(rev_manifest.get("revision", 0)) == head_revision:
+                continue
+            manifests_to_walk.append(rev_manifest)
+
+    report.revisions_checked = len(manifests_to_walk)
+
     import time as _time
     started = _time.monotonic()
     aborted_for_deadline = False
     seen_chunks: set[str] = set()
-    for folder_id, folder in folder_by_id.items():
+
+    def _bail(kind: str, target: str, detail: str) -> None:
+        report.add(IntegrityIssue(kind=kind, target=target, detail=detail))
+
+    def _check_abort() -> bool:
+        nonlocal aborted_for_deadline
+        if cancel_event is not None and cancel_event.is_set():
+            _bail("full_check_cancelled", "<aborted>", "cancelled by caller")
+            aborted_for_deadline = True
+            return True
+        if (
+            deadline_seconds is not None
+            and _time.monotonic() - started >= float(deadline_seconds)
+        ):
+            _bail("full_check_aborted_deadline", "<deadline>",
+                  f"deadline of {deadline_seconds:.0f}s elapsed")
+            aborted_for_deadline = True
+            return True
+        return False
+
+    for manifest_view in manifests_to_walk:
         if aborted_for_deadline:
             break
-        for entry in folder.get("entries", []) or []:
+        for folder in manifest_view.get("remote_folders", []) or []:
             if aborted_for_deadline:
                 break
-            if not isinstance(entry, dict) or bool(entry.get("deleted")):
+            if not isinstance(folder, dict):
                 continue
-            for version in entry.get("versions", []) or []:
+            for entry in folder.get("entries", []) or []:
                 if aborted_for_deadline:
                     break
-                if not isinstance(version, dict):
+                if not isinstance(entry, dict) or bool(entry.get("deleted")):
                     continue
-                for chunk in version.get("chunks", []) or []:
-                    if not isinstance(chunk, dict):
-                        continue
-                    # F-506: bail when the deadline elapses or the
-                    # caller cancels — surface what was unchecked.
-                    if cancel_event is not None and cancel_event.is_set():
-                        report.add(IntegrityIssue(
-                            kind="full_check_cancelled",
-                            target="<aborted>",
-                            detail="cancelled by caller",
-                        ))
-                        aborted_for_deadline = True
+                for version in entry.get("versions", []) or []:
+                    if aborted_for_deadline:
                         break
-                    if (
-                        deadline_seconds is not None
-                        and _time.monotonic() - started >= float(deadline_seconds)
-                    ):
-                        report.add(IntegrityIssue(
-                            kind="full_check_aborted_deadline",
-                            target="<deadline>",
-                            detail=f"deadline of {deadline_seconds:.0f}s elapsed",
-                        ))
-                        aborted_for_deadline = True
-                        break
-                    cid = str(chunk.get("chunk_id", ""))
-                    if not cid or cid in seen_chunks:
+                    if not isinstance(version, dict):
                         continue
-                    seen_chunks.add(cid)
-                    try:
-                        encrypted = fetch_chunk(
-                            vault.vault_id, vault.vault_access_secret, cid,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        report.add(IntegrityIssue(
-                            kind="chunk_fetch_failed", target=cid,
-                            detail=str(exc),
-                        ))
-                        continue
-                    try:
-                        decrypt_chunk(folder, entry, version, encrypted)
-                    except Exception as exc:  # noqa: BLE001
-                        # F-507: keep the path on the issue so a UI can
-                        # show "your file <path> is corrupt".
-                        broken_path = str(entry.get("path", ""))
-                        report.add(IntegrityIssue(
-                            kind="chunk_aead_failed", target=cid,
-                            detail=str(exc), path=broken_path,
-                        ))
+                    for chunk in version.get("chunks", []) or []:
+                        if not isinstance(chunk, dict):
+                            continue
+                        # F-506: bail when the deadline elapses or the
+                        # caller cancels — surface what was unchecked.
+                        if _check_abort():
+                            break
+                        cid = str(chunk.get("chunk_id", ""))
+                        if not cid or cid in seen_chunks:
+                            continue
+                        seen_chunks.add(cid)
+                        try:
+                            encrypted = fetch_chunk(
+                                vault.vault_id, vault.vault_access_secret, cid,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            report.add(IntegrityIssue(
+                                kind="chunk_fetch_failed", target=cid,
+                                detail=str(exc),
+                            ))
+                            continue
+                        try:
+                            decrypt_chunk(folder, entry, version, chunk, encrypted)
+                        except Exception as exc:  # noqa: BLE001
+                            # F-507: keep the path on the issue so a UI can
+                            # show "your file <path> is corrupt".
+                            broken_path = str(entry.get("path", ""))
+                            report.add(IntegrityIssue(
+                                kind="chunk_aead_failed", target=cid,
+                                detail=str(exc), path=broken_path,
+                            ))
 
     report.chunks_checked = len(seen_chunks)
     report.scope = "full"
+    # Suppress an unused-variable warning while keeping the flag
+    # available for future logging.
+    _ = revision_decrypt_failed
     return report
 
 

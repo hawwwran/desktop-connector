@@ -97,14 +97,13 @@ class WizardCancelRuleTests(unittest.TestCase):
     :func:`vault_ui_state.wizard_cancel_rule` docstring for rationale.
     """
 
-    def test_cancel_with_no_vault_does_not_change_toggle(self) -> None:
+    def test_cancel_does_not_change_toggle(self) -> None:
         # Was "flip_toggle_off" pre-2026-05-03; intentionally relaxed
         # so a user who deliberately turned the toggle ON keeps it ON
-        # even after dismissing the wizard mid-flow.
-        self.assertEqual(wizard_cancel_rule(vault_exists=False), "no_change")
-
-    def test_cancel_with_existing_vault_does_nothing(self) -> None:
-        self.assertEqual(wizard_cancel_rule(vault_exists=True), "no_change")
+        # even after dismissing the wizard mid-flow. The rule is now a
+        # constant — no per-call inputs — so a single assertion is the
+        # whole truth table.
+        self.assertEqual(wizard_cancel_rule(), "no_change")
 
 
 class ConfigVaultActiveTests(unittest.TestCase):

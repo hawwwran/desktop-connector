@@ -13,7 +13,7 @@ ensure_desktop_on_path()
 
 from src.vault_activity import (  # noqa: E402
     ACTIVITY_KIND_PREFIXES, ActivityRow,
-    filter_timeline, merge_timeline,
+    filter_timeline, humanise_event_type, merge_timeline,
     normalize_audit_event, normalize_op_log_entry,
 )
 
@@ -106,6 +106,64 @@ class MergeTimelineTests(unittest.TestCase):
         self.assertEqual(merge_timeline(audit_rows=[], op_log_entries=[]), [])
 
 
+class TimelinePaginationTests(unittest.TestCase):
+    """F-524 — limit / before_ts cursor parameters on merge_timeline."""
+
+    def _audit(self, ts: int) -> dict:
+        return {
+            "event_type": "vault.upload.completed",
+            "created_at": ts,
+            "device_id": "a" * 32,
+            "revision": ts,
+        }
+
+    def test_limit_truncates_after_sort(self) -> None:
+        rows = merge_timeline(
+            audit_rows=[self._audit(1), self._audit(5), self._audit(3),
+                        self._audit(7)],
+            limit=2,
+        )
+        self.assertEqual([r.timestamp_epoch for r in rows], [7, 5])
+
+    def test_no_limit_returns_everything(self) -> None:
+        rows = merge_timeline(
+            audit_rows=[self._audit(1), self._audit(5), self._audit(3)],
+        )
+        self.assertEqual([r.timestamp_epoch for r in rows], [5, 3, 1])
+
+    def test_before_ts_paginates_strictly_less_than(self) -> None:
+        # Page 1: limit=2, before_ts=None → newest 2 (ts 7, 5).
+        # Page 2: limit=2, before_ts=5 → next 2 (ts 3, 1).
+        page1 = merge_timeline(
+            audit_rows=[self._audit(1), self._audit(3), self._audit(5),
+                        self._audit(7)],
+            limit=2,
+        )
+        self.assertEqual([r.timestamp_epoch for r in page1], [7, 5])
+        page2 = merge_timeline(
+            audit_rows=[self._audit(1), self._audit(3), self._audit(5),
+                        self._audit(7)],
+            limit=2, before_ts=page1[-1].timestamp_epoch,
+        )
+        self.assertEqual([r.timestamp_epoch for r in page2], [3, 1])
+
+    def test_before_ts_excludes_equal_timestamp(self) -> None:
+        rows = merge_timeline(
+            audit_rows=[self._audit(5), self._audit(5)],
+            before_ts=5,
+        )
+        # Both rows share ts=5 — strict-less-than excludes them. (After
+        # dedup on identical key the two collapse to one row anyway.)
+        self.assertEqual(rows, [])
+
+    def test_limit_zero_returns_empty(self) -> None:
+        rows = merge_timeline(
+            audit_rows=[self._audit(1), self._audit(3)],
+            limit=0,
+        )
+        self.assertEqual(rows, [])
+
+
 class FilterTimelineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.rows = [
@@ -150,6 +208,42 @@ class FilterTimelineTests(unittest.TestCase):
             filename_search="old.jpg",  # different category
         )
         self.assertEqual(out, [])
+
+
+class HumaniseEventTypeTests(unittest.TestCase):
+    """F-511 — UI labels live next to the data layer, not in the GTK file."""
+
+    def test_known_event_types_render_prose(self) -> None:
+        cases = {
+            "vault.upload.completed": "Uploaded",
+            "vault.delete.completed": "Deleted",
+            "vault.folder.cleared": "Folder cleared",
+            "vault.vault.cleared": "Vault cleared",
+            "vault.restore.completed": "Restored",
+            "vault.grant.created": "Device granted access",
+            "vault.revoke.completed": "Device access revoked",
+            "vault.rotation.completed": "Access secret rotated",
+            "vault.migration.committed": "Relay migration committed",
+            "vault.eviction.tombstone_purged_expired":
+                "Eviction (expired tombstone)",
+            "vault.eviction.version_purged": "Eviction (old version)",
+            "vault.purge.scheduled": "Hard purge scheduled",
+            "vault.purge.executed": "Hard purge executed",
+        }
+        for event_type, label in cases.items():
+            with self.subTest(event_type=event_type):
+                self.assertEqual(humanise_event_type(event_type), label)
+
+    def test_unknown_event_type_passes_through(self) -> None:
+        # Forward-compat fallback: a future event we haven't mapped
+        # still renders as something rather than blank.
+        self.assertEqual(
+            humanise_event_type("vault.unknown.something_new"),
+            "vault.unknown.something_new",
+        )
+
+    def test_blank_event_type_passes_through(self) -> None:
+        self.assertEqual(humanise_event_type(""), "")
 
 
 class CategoryCoverageTests(unittest.TestCase):

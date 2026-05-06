@@ -53,7 +53,7 @@ ACTIVITY_KIND_PREFIXES = (
 @dataclass
 class ActivityRow:
     timestamp_epoch: int
-    event_type: str            # the prose anchor — e.g. "vault.upload.completed"
+    event_type: str            # machine-readable id — render via :func:`humanise_event_type`
     display_path: str = ""     # plaintext path/folder name (decoded locally)
     device_id: str = ""        # 32-hex-char device id; truncate for UI display
     device_name: str = ""      # human-readable name when available
@@ -68,6 +68,41 @@ class ActivityRow:
         if len(parts) >= 2:
             return f"{parts[0]}.{parts[1]}"
         return parts[0] if parts else "other"
+
+
+# F-511: human-readable label for the Activity-tab "kind" column.
+# The activity row carries the machine-readable ``event_type`` so
+# downstream callers (filtering, grouping, telemetry) keep a stable
+# id; the UI renders this map. Unknown event types fall through to
+# the raw machine string so a developer can still investigate.
+_EVENT_TYPE_LABELS: dict[str, str] = {
+    "vault.upload.completed":               "Uploaded",
+    "vault.delete.completed":               "Deleted",
+    "vault.folder.cleared":                 "Folder cleared",
+    "vault.vault.cleared":                  "Vault cleared",
+    "vault.restore.completed":              "Restored",
+    "vault.grant.created":                  "Device granted access",
+    "vault.revoke.completed":               "Device access revoked",
+    "vault.rotation.completed":             "Access secret rotated",
+    "vault.migration.committed":            "Relay migration committed",
+    "vault.eviction.tombstone_purged_expired": "Eviction (expired tombstone)",
+    "vault.eviction.tombstone_purged_early":   "Eviction (early purge)",
+    "vault.eviction.version_purged":        "Eviction (old version)",
+    "vault.purge.scheduled":                "Hard purge scheduled",
+    "vault.purge.cancelled":                "Hard purge cancelled",
+    "vault.purge.executed":                 "Hard purge executed",
+}
+
+
+def humanise_event_type(event_type: str) -> str:
+    """Map a machine-readable event_type to a UI label.
+
+    Unknown event types fall through to the raw input so a developer
+    can still investigate; the UI should never treat the return as
+    structured. Pair with :class:`ActivityRow` so callers don't have
+    to look up the dict themselves.
+    """
+    return _EVENT_TYPE_LABELS.get(event_type, event_type)
 
 
 def normalize_audit_event(row: dict[str, Any]) -> ActivityRow | None:
@@ -123,6 +158,9 @@ def normalize_op_log_entry(entry: dict[str, Any]) -> ActivityRow | None:
 def merge_timeline(
     audit_rows: Iterable[dict[str, Any]] | None = None,
     op_log_entries: Iterable[dict[str, Any]] | None = None,
+    *,
+    limit: int | None = None,
+    before_ts: int | None = None,
 ) -> list[ActivityRow]:
     """Combine both sources into a timestamp-sorted timeline.
 
@@ -131,6 +169,19 @@ def merge_timeline(
     De-duplication: rows with the same (timestamp, event_type,
     device_id, path) tuple collapse onto whichever has the most fields
     populated.
+
+    F-524 pagination:
+
+    - ``before_ts``: drop rows whose ``timestamp_epoch >= before_ts``.
+      "Show more" affordances pass the *oldest* timestamp on the
+      currently-visible page so the next call returns the next page.
+    - ``limit``: cap the returned list. ``None`` (default) returns
+      everything — preserves the pre-F-524 behaviour for callers that
+      already cope with whatever volume the relay returns.
+
+    Both arguments operate after dedup + sort, so paging is stable
+    even when audit + op-log rows for the same event were both
+    present in the input.
     """
     out: list[ActivityRow] = []
     if audit_rows:
@@ -163,6 +214,11 @@ def merge_timeline(
 
     rows = list(bucketed.values())
     rows.sort(key=lambda r: r.timestamp_epoch, reverse=True)  # newest first
+
+    if before_ts is not None:
+        rows = [r for r in rows if r.timestamp_epoch < int(before_ts)]
+    if limit is not None and limit >= 0:
+        rows = rows[:int(limit)]
     return rows
 
 
@@ -197,6 +253,7 @@ __all__ = [
     "ACTIVITY_KIND_PREFIXES",
     "ActivityRow",
     "filter_timeline",
+    "humanise_event_type",
     "merge_timeline",
     "normalize_audit_event",
     "normalize_op_log_entry",

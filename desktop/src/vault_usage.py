@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from .vault_manifest import normalize_manifest_plaintext
+
+log = logging.getLogger(__name__)
 
 
 _NEAR_QUOTA_THRESHOLD = 0.9
@@ -128,7 +131,28 @@ def _add_version_chunks(
         if not isinstance(chunk, dict):
             continue
         chunk_id = str(chunk.get("chunk_id") or f"__anonymous_{id(version)}_{index}")
-        size = _int_value(chunk.get("ciphertext_size"))
+        raw_size = chunk.get("ciphertext_size")
+        size = _int_value(raw_size)
+        # F-515: a chunk dict without a usable ciphertext_size collapses
+        # to 0 in the totals — silent zero-bytes was the original bug.
+        # Log a warning so an integrator notices a malformed manifest
+        # in their pipeline; the byte total still reflects 0 because we
+        # don't know the real size, but the discrepancy now has an
+        # audit trail. We treat int(0) as legitimate and only flag
+        # truly missing / non-int payloads.
+        if raw_size is None or not isinstance(raw_size, (int, float, str)):
+            log.warning(
+                "vault.usage.malformed_chunk_size_skipped chunk_id=%s",
+                chunk_id[:12],
+            )
+        elif isinstance(raw_size, str):
+            try:
+                int(raw_size)
+            except ValueError:
+                log.warning(
+                    "vault.usage.malformed_chunk_size_skipped chunk_id=%s",
+                    chunk_id[:12],
+                )
         target.setdefault(chunk_id, size)
         whole_vault_chunks.setdefault(chunk_id, size)
 

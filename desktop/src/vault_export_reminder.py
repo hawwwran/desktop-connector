@@ -26,6 +26,15 @@ CADENCE_DAYS: dict[Cadence, int | None] = {
 }
 DEFAULT_CADENCE: Cadence = "monthly"
 
+# F-513: distinguish "the user has never exported" from "they exported,
+# the cadence has elapsed, time to nudge". The original boolean predicate
+# fired on day-1 of a fresh vault — paternalistic ("you haven't exported
+# this vault yet" the moment after they made it). The UI now reads the
+# state and chooses copy: ``due_again`` is the real nudge; ``first_run``
+# is a never-shown pre-state that callers can opt into with a separate
+# welcome surface if they want to.
+ReminderState = Literal["off", "first_run", "due_again", "snoozed", "current"]
+
 
 def normalize_cadence(value: str | None) -> Cadence:
     """Map config strings (case-insensitive) to a known cadence; falls back to default."""
@@ -37,6 +46,47 @@ def normalize_cadence(value: str | None) -> Cadence:
     return DEFAULT_CADENCE
 
 
+def compute_reminder_state(
+    *,
+    last_export_at: str | None,
+    last_dismissed_at: str | None,
+    cadence: str,
+    now: str,
+) -> ReminderState:
+    """Decide which export-reminder banner state applies.
+
+    Outcomes:
+
+    - ``off``:        cadence is ``off`` (or ``now`` couldn't be parsed).
+    - ``current``:    last export landed inside the cadence window.
+    - ``snoozed``:    a dismissal happened inside the cadence window.
+    - ``first_run``:  the vault has never been exported. The UI may
+                      surface a soft welcome rather than a nag — F-513.
+    - ``due_again``:  cadence elapsed since the most recent export AND
+                      the user hasn't dismissed inside that window.
+    """
+    cad = normalize_cadence(cadence)
+    days = CADENCE_DAYS[cad]
+    if days is None:
+        return "off"
+    now_dt = _parse_iso(now)
+    if now_dt is None:
+        return "off"
+    threshold = timedelta(days=days)
+
+    if last_export_at:
+        last_dt = _parse_iso(last_export_at)
+        if last_dt is not None and (now_dt - last_dt) < threshold:
+            return "current"
+    if last_dismissed_at:
+        last_dt = _parse_iso(last_dismissed_at)
+        if last_dt is not None and (now_dt - last_dt) < threshold:
+            return "snoozed"
+    if not last_export_at:
+        return "first_run"
+    return "due_again"
+
+
 def should_show_export_reminder(
     *,
     last_export_at: str | None,
@@ -46,31 +96,19 @@ def should_show_export_reminder(
 ) -> bool:
     """Return True iff the export reminder banner should be visible.
 
-    A reminder fires when **both** of these have been true for at least
-    one full cadence period:
-      1. No export has happened recently.
-      2. The user hasn't dismissed the reminder recently.
+    F-513: the banner only fires for the ``due_again`` state — a vault
+    that has been exported before and the cadence has elapsed. Fresh
+    vaults (``first_run``) don't trigger the banner; they get a
+    different surface if any.
 
     ``cadence == "off"`` disables the reminder unconditionally.
     """
-    cad = normalize_cadence(cadence)
-    days = CADENCE_DAYS[cad]
-    if days is None:
-        return False
-    now_dt = _parse_iso(now)
-    if now_dt is None:
-        return False
-    threshold = timedelta(days=days)
-
-    if last_export_at:
-        last_dt = _parse_iso(last_export_at)
-        if last_dt is not None and (now_dt - last_dt) < threshold:
-            return False
-    if last_dismissed_at:
-        last_dt = _parse_iso(last_dismissed_at)
-        if last_dt is not None and (now_dt - last_dt) < threshold:
-            return False
-    return True
+    return compute_reminder_state(
+        last_export_at=last_export_at,
+        last_dismissed_at=last_dismissed_at,
+        cadence=cadence,
+        now=now,
+    ) == "due_again"
 
 
 def next_reminder_due(
@@ -83,6 +121,9 @@ def next_reminder_due(
 
     Useful for "Reminder due in N days" copy without re-checking on
     every UI tick. Returns None when the cadence is ``off``.
+
+    Output precision is one second (``YYYY-MM-DDTHH:MM:SSZ``); the
+    cadence math operates in days so anything finer would be cosmetic.
     """
     cad = normalize_cadence(cadence)
     days = CADENCE_DAYS[cad]
@@ -97,7 +138,7 @@ def next_reminder_due(
     if not candidates:
         # Never exported, never dismissed → due immediately.
         return _now_rfc3339()
-    return max(candidates).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return max(candidates).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +163,15 @@ def _parse_iso(raw: str | None) -> datetime | None:
 
 
 def _now_rfc3339() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 __all__ = [
     "CADENCE_DAYS",
     "Cadence",
     "DEFAULT_CADENCE",
+    "ReminderState",
+    "compute_reminder_state",
     "next_reminder_due",
     "normalize_cadence",
     "should_show_export_reminder",

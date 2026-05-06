@@ -63,6 +63,12 @@ def mark_broken_in_next_revision(
     - A version whose ``chunks[]`` references *any* broken chunk_id is
       removed in its entirety. Reasoning: a partial chunk loss yields a
       corrupted plaintext, never a recoverable file.
+    - F-522: dropped versions are retained on the entry under a parallel
+      ``repaired_versions: list`` field. Each entry records the original
+      version dict augmented with ``repaired_at`` + ``repair_reason``.
+      The live tree (``versions``) only references survivable chunks
+      while the forensic record survives retention-purge of older CAS
+      revisions.
     - If an entry's remaining versions list is empty, the entry is
       tombstoned (deleted=True) so the path keeps history but the
       live tree no longer points at unrecoverable bytes.
@@ -92,6 +98,7 @@ def mark_broken_in_next_revision(
                 continue
             path = str(entry.get("path") or "")
             kept_versions: list[dict[str, Any]] = []
+            removed_versions: list[dict[str, Any]] = []
             removed_chunks: list[str] = []
             for version in entry.get("versions", []) or []:
                 if not isinstance(version, dict):
@@ -106,6 +113,7 @@ def mark_broken_in_next_revision(
                 ]
                 if hits:
                     removed_chunks.extend(hits)
+                    removed_versions.append(version)
                     continue
                 kept_versions.append(version)
 
@@ -131,13 +139,25 @@ def mark_broken_in_next_revision(
                     detail="every version referenced broken chunks",
                 ))
             else:
-                # Some versions survive — drop the broken ones, retain
-                # the rest, refresh latest_version_id.
+                # Some versions survive — drop the broken ones from the
+                # live tree but retain them under ``repaired_versions``
+                # so a future forensic walk can still see what was lost.
                 purged = copy.deepcopy(entry)
                 purged["versions"] = kept_versions
                 purged["latest_version_id"] = str(
                     kept_versions[-1].get("version_id", ""),
                 )
+                # F-522: append, don't overwrite — an entry that's been
+                # repaired before keeps the prior forensic rows alongside
+                # the new ones.
+                existing_repaired = list(entry.get("repaired_versions", []) or [])
+                augmented = []
+                for version in removed_versions:
+                    record = copy.deepcopy(version)
+                    record["repaired_at"] = repaired_at
+                    record["repair_reason"] = "broken_chunks"
+                    augmented.append(record)
+                purged["repaired_versions"] = existing_repaired + augmented
                 new_entries.append(purged)
                 plans.append(RepairPlan(
                     remote_folder_id=folder_id, path=path,
@@ -158,23 +178,46 @@ def mark_broken_in_next_revision(
 
 def plan_restore_from_export(
     *,
-    broken_paths: Iterable[tuple[str, str]],
+    broken_paths: Iterable[
+        tuple[str, str] | tuple[str, str, Iterable[str]]
+    ],
 ) -> list[RepairPlan]:
     """Compose a list of restore-from-export plans for the broken paths.
 
-    The caller passes ``(remote_folder_id, path)`` tuples — usually the
-    paths the integrity check flagged. Each becomes a RepairPlan with
-    ``action='restore_from_export'``; the actual byte-importing happens
-    in the T8 import flow, which the caller drives with these plans
-    pointing at a protected bundle the user supplies.
+    The caller passes either ``(remote_folder_id, path)`` 2-tuples or
+    ``(remote_folder_id, path, chunk_ids)`` 3-tuples — usually derived
+    from the integrity check by grouping ``IntegrityIssue.path``
+    +``IntegrityIssue.target`` rows by file path. Each becomes a
+    :class:`RepairPlan` with ``action='restore_from_export'``; the
+    actual byte-importing happens in the T8 import flow, which the
+    caller drives with these plans pointing at a protected bundle the
+    user supplies.
+
+    Passing the chunk-id set lets the repair UI tell the user *why*
+    each path is being restored ("X.txt: chunks A, B, C corrupted")
+    without re-walking the manifest. F-523.
     """
     out: list[RepairPlan] = []
-    for folder_id, path in broken_paths:
+    for row in broken_paths:
+        if len(row) == 3:
+            folder_id, path, chunk_ids = row
+            cid_tuple = tuple(str(c) for c in chunk_ids if c)
+        else:
+            folder_id, path = row
+            cid_tuple = ()
+        if cid_tuple:
+            detail = (
+                f"awaiting bytes from a protected bundle ({len(cid_tuple)} broken chunk"
+                f"{'s' if len(cid_tuple) != 1 else ''})"
+            )
+        else:
+            detail = "awaiting bytes from a protected bundle"
         out.append(RepairPlan(
             remote_folder_id=str(folder_id),
             path=str(path),
             action="restore_from_export",
-            detail="awaiting bytes from a protected bundle",
+            broken_chunk_ids=cid_tuple,
+            detail=detail,
         ))
     return out
 

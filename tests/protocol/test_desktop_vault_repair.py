@@ -146,6 +146,69 @@ class MarkBrokenTests(unittest.TestCase):
                          "fv_v1_222222222222222222222222")
         self.assertFalse(good_entry.get("deleted"))
 
+    def test_purge_preserves_dropped_versions_in_repaired_versions(self) -> None:
+        # F-522: dropped versions move from `versions` → `repaired_versions`
+        # so a future audit (after retention has trimmed older revisions
+        # from the CAS chain) can still see what got lost.
+        v1 = _version("fv_v1_111111111111111111111111", "ch_v1_a", "ch_v1_broken")
+        v2 = _version("fv_v1_222222222222222222222222", "ch_v1_b", "ch_v1_c")
+        manifest = _manifest_with_entries(
+            _entry_with_versions(v1, v2, path="alpha.txt"),
+        )
+        result = mark_broken_in_next_revision(
+            manifest, broken_chunk_ids={"ch_v1_broken"},
+            author_device_id=AUTHOR,
+            repaired_at="2026-05-05T00:00:00.000Z",
+        )
+        entry = result.manifest["remote_folders"][0]["entries"][0]
+        self.assertEqual(
+            [v["version_id"] for v in entry["repaired_versions"]],
+            ["fv_v1_111111111111111111111111"],
+        )
+        # Each preserved record carries the repair audit fields.
+        repaired = entry["repaired_versions"][0]
+        self.assertEqual(repaired["repaired_at"], "2026-05-05T00:00:00.000Z")
+        self.assertEqual(repaired["repair_reason"], "broken_chunks")
+        # Original chunk references survive on the preserved record so
+        # forensics can still see *which* chunks were bad.
+        chunk_ids = [c["chunk_id"] for c in repaired["chunks"]]
+        self.assertIn("ch_v1_broken", chunk_ids)
+
+    def test_repair_appends_to_existing_repaired_versions(self) -> None:
+        # F-522: re-running mark_broken on an entry that was already
+        # repaired before keeps the prior repair record next to the new
+        # one rather than overwriting it.
+        v1 = _version("fv_v1_111111111111111111111111", "ch_v1_a")
+        v2 = _version("fv_v1_222222222222222222222222", "ch_v1_b", "ch_v1_broken_2")
+        v3 = _version("fv_v1_333333333333333333333333", "ch_v1_c")
+        prior = {
+            "version_id": "fv_v1_000000000000000000000000",
+            "logical_size": 16,
+            "content_fingerprint": "fp_old",
+            "chunks": [{"chunk_id": "ch_v1_broken_1"}],
+            "repaired_at": "2026-04-01T00:00:00.000Z",
+            "repair_reason": "broken_chunks",
+        }
+        entry = _entry_with_versions(v1, v2, v3, path="alpha.txt")
+        entry["repaired_versions"] = [prior]
+        manifest = _manifest_with_entries(entry)
+        result = mark_broken_in_next_revision(
+            manifest, broken_chunk_ids={"ch_v1_broken_2"},
+            author_device_id=AUTHOR,
+            repaired_at="2026-05-05T00:00:00.000Z",
+        )
+        out = result.manifest["remote_folders"][0]["entries"][0]
+        # Prior record + new record coexist.
+        self.assertEqual(len(out["repaired_versions"]), 2)
+        self.assertEqual(
+            [r["version_id"] for r in out["repaired_versions"]],
+            ["fv_v1_000000000000000000000000", "fv_v1_222222222222222222222222"],
+        )
+        self.assertEqual(out["repaired_versions"][0]["repaired_at"],
+                         "2026-04-01T00:00:00.000Z")
+        self.assertEqual(out["repaired_versions"][1]["repaired_at"],
+                         "2026-05-05T00:00:00.000Z")
+
     def test_revision_chain_still_links(self) -> None:
         manifest = _manifest_with_entries(
             _entry_with_versions(
@@ -173,9 +236,34 @@ class PlanRestoreTests(unittest.TestCase):
         for p in plans:
             self.assertEqual(p.action, "restore_from_export")
             self.assertEqual(p.remote_folder_id, DOCS)
+            # 2-tuple input → no chunk ids carried.
+            self.assertEqual(p.broken_chunk_ids, ())
 
     def test_plan_restore_empty_input_returns_empty(self) -> None:
         self.assertEqual(plan_restore_from_export(broken_paths=[]), [])
+
+    def test_plan_restore_carries_chunk_ids_when_three_tuple(self) -> None:
+        # F-523: when the caller groups IntegrityIssue rows per path it
+        # passes the chunk-id set so the repair UI can explain *why*
+        # each path is in the plan.
+        plans = plan_restore_from_export(broken_paths=[
+            (DOCS, "broken.txt", ["ch_v1_a", "ch_v1_b", "ch_v1_c"]),
+            (DOCS, "another.txt", ["ch_v1_d"]),
+        ])
+        self.assertEqual(len(plans), 2)
+        self.assertEqual(plans[0].broken_chunk_ids,
+                         ("ch_v1_a", "ch_v1_b", "ch_v1_c"))
+        self.assertIn("3 broken chunks", plans[0].detail)
+        self.assertEqual(plans[1].broken_chunk_ids, ("ch_v1_d",))
+        self.assertIn("1 broken chunk", plans[1].detail)
+        # Singular form (no trailing 's') for one chunk.
+        self.assertNotIn("1 broken chunks", plans[1].detail)
+
+    def test_plan_restore_filters_blank_chunk_ids(self) -> None:
+        plans = plan_restore_from_export(broken_paths=[
+            (DOCS, "broken.txt", ["", "ch_v1_real", None]),  # type: ignore[list-item]
+        ])
+        self.assertEqual(plans[0].broken_chunk_ids, ("ch_v1_real",))
 
 
 if __name__ == "__main__":

@@ -101,7 +101,7 @@ def vault_submenu_entries(
     return ["open_vault", "sync_now", "export", "import", "settings"]
 
 
-def wizard_cancel_rule(*, vault_exists: bool) -> CancelRule:
+def wizard_cancel_rule() -> CancelRule:
     """What to do when the user cancels the create/import wizard.
 
     Always ``"no_change"``: the wizard wipes its own partial state
@@ -117,9 +117,5 @@ def wizard_cancel_rule(*, vault_exists: bool) -> CancelRule:
     might be reconsidering a passphrase, refreshing the generator,
     or just clicked too soon; auto-disabling the feature and hiding
     the entry point is confusing.
-
-    Argument signature kept for backward-compat with callers that
-    still pass ``vault_exists``; ignored.
     """
-    _ = vault_exists  # intentionally unused
     return "no_change"

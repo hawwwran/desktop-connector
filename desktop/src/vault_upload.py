@@ -540,6 +540,14 @@ def upload_file(
     clear_session(session.session_id, cache_dir)
     _report(progress, "done", total_chunks, total_chunks, bytes_uploaded)
 
+    # F-510: anchor the Activity tab's "Uploaded" timeline row.
+    log.info(
+        "vault.upload.completed vault=%s revision=%d path=%s",
+        vault.vault_id,
+        int(published.get("revision", 0)) if isinstance(published, dict) else 0,
+        normalized_remote_path,
+    )
+
     return UploadResult(
         manifest=published,
         entry_id=entry_id,

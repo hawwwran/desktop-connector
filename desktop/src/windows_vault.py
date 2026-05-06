@@ -227,6 +227,9 @@ def show_vault_main(config_dir: Path):
             now_iso = datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z"
             )
+            # F-513: only the "due_again" state surfaces the banner.
+            # ``first_run`` (never exported) is not a nag here — the
+            # Recovery tab already shows the "Export vault now" CTA.
             should = should_show_export_reminder(
                 last_export_at=config.vault_last_export_at,
                 last_dismissed_at=config.vault_export_reminder_last_dismissed_at,
@@ -236,19 +239,12 @@ def show_vault_main(config_dir: Path):
             if not should:
                 export_reminder_box.set_visible(False)
                 return
-            last_export = config.vault_last_export_at
-            if last_export:
-                export_reminder_label.set_label(
-                    f"Vault hasn't been exported since {last_export[:10]}. "
-                    f"Export now to keep your recovery kit current "
-                    f"(cadence: {cadence})."
-                )
-            else:
-                export_reminder_label.set_label(
-                    "You haven't exported this vault yet. Export now to "
-                    "create an offline backup of every file + the manifest "
-                    "history (cadence: {cadence}).".format(cadence=cadence)
-                )
+            last_export = config.vault_last_export_at or ""
+            export_reminder_label.set_label(
+                f"Vault hasn't been exported since {last_export[:10]}. "
+                f"Export now to keep your recovery kit current "
+                f"(cadence: {cadence})."
+            )
             export_reminder_box.set_visible(True)
 
         def on_dismiss_export_reminder(_btn) -> None:
@@ -503,6 +499,7 @@ def show_vault_main(config_dir: Path):
             ACTIVITY_KIND_PREFIXES,
             ActivityRow,
             filter_timeline,
+            humanise_event_type,
             merge_timeline,
         )
 
@@ -546,28 +543,6 @@ def show_vault_main(config_dir: Path):
 
         activity_state: dict[str, Any] = {"rows": []}
 
-        def _humanize_event_type(event_type: str) -> str:
-            # Quick prose map for the rendered list. F-511 follow-up
-            # asks for a richer humanizer in vault_activity itself; for
-            # now this matches what the user expects to see.
-            return {
-                "vault.upload.completed": "Uploaded",
-                "vault.delete.completed": "Deleted",
-                "vault.folder.cleared": "Folder cleared",
-                "vault.vault.cleared": "Vault cleared",
-                "vault.restore.completed": "Restored",
-                "vault.grant.created": "Device granted access",
-                "vault.revoke.completed": "Device access revoked",
-                "vault.rotation.completed": "Access secret rotated",
-                "vault.migration.committed": "Relay migration committed",
-                "vault.eviction.tombstone_purged_expired": "Eviction (expired tombstone)",
-                "vault.eviction.tombstone_purged_early": "Eviction (early purge)",
-                "vault.eviction.version_purged": "Eviction (old version)",
-                "vault.purge.scheduled": "Hard purge scheduled",
-                "vault.purge.cancelled": "Hard purge cancelled",
-                "vault.purge.executed": "Hard purge executed",
-            }.get(event_type, event_type)
-
         def _render_activity_rows(rows: list[ActivityRow]) -> None:
             child = activity_list_box.get_first_child()
             while child is not None:
@@ -593,7 +568,7 @@ def show_vault_main(config_dir: Path):
                 ts_lbl.set_size_request(140, -1)
                 row_box.append(ts_lbl)
                 kind_lbl = Gtk.Label(
-                    label=_humanize_event_type(row.event_type), xalign=0,
+                    label=humanise_event_type(row.event_type), xalign=0,
                 )
                 kind_lbl.set_size_request(220, -1)
                 row_box.append(kind_lbl)
@@ -846,7 +821,39 @@ def show_vault_main(config_dir: Path):
                     )
                     try:
                         if full:
-                            report = run_full_check(vault=vault, relay=relay)
+                            # F-508: wire the real chunk + manifest decrypters
+                            # so "Full check" actually walks bytes (the
+                            # earlier call was missing required kwargs and
+                            # the worker silently surfaced a TypeError).
+                            from .vault_browser_model import (
+                                decrypt_manifest as _decrypt_manifest_envelope,
+                            )
+                            from .vault_download import _decrypt_chunk
+
+                            def _full_decrypt_chunk(folder, entry, version, chunk, encrypted):
+                                return _decrypt_chunk(
+                                    vault=vault,
+                                    remote_folder_id=str(
+                                        folder.get("remote_folder_id") or ""
+                                    ),
+                                    file_id=str(entry.get("entry_id") or ""),
+                                    version_id=str(version.get("version_id") or ""),
+                                    chunk=chunk,
+                                    encrypted=encrypted,
+                                )
+
+                            def _full_fetch_chunk(vault_id, access_secret, chunk_id):
+                                return relay.get_chunk(vault_id, access_secret, chunk_id)
+
+                            def _full_decrypt_envelope(envelope):
+                                return _decrypt_manifest_envelope(vault, envelope)
+
+                            report = run_full_check(
+                                vault=vault, relay=relay,
+                                decrypt_chunk=_full_decrypt_chunk,
+                                fetch_chunk=_full_fetch_chunk,
+                                decrypt_manifest_envelope=_full_decrypt_envelope,
+                            )
                         else:
                             report = run_quick_check(vault=vault, relay=relay)
                     finally:
@@ -1521,7 +1528,6 @@ def show_vault_onboard(config_dir: Path):
     # non-secret but needed to run the real recovery test.
     state = {
         "step": "choose_path",        # → create_passphrase → success
-        "vault_existed_at_open": _local_vault_exists(config),
         "passphrase": "",
         "completed_successfully": False,
         "vault_id": None,
@@ -1602,7 +1608,7 @@ def show_vault_onboard(config_dir: Path):
         # The wizard's cancel rule (revised 2026-05-03) never changes
         # the toggle — the user's deliberate ON stays ON. Function
         # call kept for signature stability.
-        wizard_cancel_rule(vault_exists=state["vault_existed_at_open"])
+        wizard_cancel_rule()
 
         _zero_state_secrets()
         return False
