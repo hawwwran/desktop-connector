@@ -28,6 +28,8 @@ Canonical secret keys are defined here so all backends agree on
 the lookup namespace:
 
 - ``SECRET_KEY_AUTH_TOKEN`` — server bearer token
+- ``SECRET_KEY_DEVICE_ID`` — relay-issued device identity (paired
+  with ``auth_token`` so the two share storage and fate)
 - ``pairing_symkey_key(device_id)`` — per-pairing symmetric key
 """
 
@@ -41,6 +43,7 @@ log = logging.getLogger(__name__)
 
 
 SECRET_KEY_AUTH_TOKEN = "auth_token"
+SECRET_KEY_DEVICE_ID = "device_id"
 _PAIRING_SYMKEY_PREFIX = "pairing_symkey:"
 
 # H.7: long-term X25519 device private key (PEM-encoded). Lives only
@@ -133,6 +136,9 @@ class JsonFallbackStore:
         if key == SECRET_KEY_AUTH_TOKEN:
             value = self._data.get("auth_token")
             return value if isinstance(value, str) else None
+        if key == SECRET_KEY_DEVICE_ID:
+            value = self._data.get("device_id")
+            return value if isinstance(value, str) else None
         device_id = parse_pairing_symkey_key(key)
         if device_id is not None:
             paired = self._data.get("paired_devices", {})
@@ -144,6 +150,10 @@ class JsonFallbackStore:
     def set(self, key: str, value: str) -> None:
         if key == SECRET_KEY_AUTH_TOKEN:
             self._data["auth_token"] = value
+            self._save()
+            return
+        if key == SECRET_KEY_DEVICE_ID:
+            self._data["device_id"] = value
             self._save()
             return
         device_id = parse_pairing_symkey_key(key)
@@ -159,6 +169,11 @@ class JsonFallbackStore:
         if key == SECRET_KEY_AUTH_TOKEN:
             if "auth_token" in self._data:
                 del self._data["auth_token"]
+                self._save()
+            return
+        if key == SECRET_KEY_DEVICE_ID:
+            if "device_id" in self._data:
+                del self._data["device_id"]
                 self._save()
             return
         device_id = parse_pairing_symkey_key(key)

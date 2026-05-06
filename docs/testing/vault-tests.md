@@ -362,14 +362,41 @@ holds one vault and the dev config knows it.
 
 **Assertions**:
 - Wizard advanced from `choose_path` → `create_passphrase` →
-  `success` (per state machine in `windows_vault.py:1577,1697,2105`).
-- `sqlite3 server/data/connector.db 'SELECT count(*) FROM vaults'` = 1.
-- `~/.config/desktop-connector-dev/config.json` has a vault id field
-  populated (search for keys mentioning `vault`).
-- Dev server log contains a `vault.create.*` success event.
+  `success`. Verify by widget-tree mutation across the three steps:
+    - Step 1 has `push button 'Create a new vault'` and `push button 'Import from export…'`.
+    - Step 2 has `password text 'Recovery passphrase'`, `password text 'Confirm passphrase'`, and `push button 'Continue'`.
+    - Step 3 has `label 'Vault created'`, `label 'Your Vault ID:'`, the dashed `XXXX-XXXX-XXXX` text widget, and `push button 'Export and verify recovery kit…'`.
+  Use `mcp__gtk-a11y__wait_for_widget` to poll the tree for the `'Vault created'` label (≤ 15 s).
+- `sqlite3 server/data/connector.db 'SELECT count(*), substr(vault_id,1,12), header_revision FROM vaults;'`
+  → exactly **1** row, `header_revision=1`, with the same 12-char id
+  the wizard displayed (with dashes stripped).
+- `~/.config/desktop-connector-dev/config.json` carries the new vault
+  id at `vault.last_known_id` (matches the DB id) and has
+  `vault.recovery_envelope_meta` populated.
+- **Do not** assert on a `vault.create.*` event in
+  `server/data/logs/server.log` — the relay never emits one
+  (`grep -rn "vault\\." server/src/Controllers/Vault*.php` shows
+  only `vault.gc.unlink_failed`). The DB-row + config-id assertions
+  above are the proof that the publish was accepted.
 
-**Capture**: 3 screenshots, server-log excerpt with `vault.*` events
-filtered.
+**Preconditions** for the relay-publish step:
+- Device must be **fully** registered before launching the wizard:
+  `~/.config/desktop-connector-dev/config.json` has a `device_id` (or
+  the secret store does — post-2026-05-06 fix moves it to keyring),
+  AND keyring service `desktop-connector-dev` has a matching
+  `auth_token`. If either is missing, the wizard reaches the local
+  "Vault created" step but the relay rejects the publish with
+  *"Desktop Connector is not registered with the relay"* and a
+  "Retry publish" button. To put the harness into that good state,
+  start the headless dev twin briefly (test 02's command) so
+  registration completes; verify with
+  `python3 -c "import json; print('device_id' in json.load(open('/home/mhavranek/.config/desktop-connector-dev/config.json')))"`
+  or by checking the keyring entry. Stop the dev twin before
+  launching the wizard (the wizard owns the relay session for this
+  test).
+
+**Capture**: 3 screenshots + AT-SPI tree dump of the success step +
+DB row count before/after.
 
 ---
 

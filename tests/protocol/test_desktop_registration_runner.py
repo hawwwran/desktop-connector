@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -66,6 +67,82 @@ class RegistrationRunnerTests(unittest.TestCase):
         self.assertEqual(config.device_id, "new-device")
         self.assertEqual(config.auth_token, "new-token")
         self.assertEqual(config.paired_devices, {})
+
+    def test_device_id_persists_via_secret_store_through_reopen(self) -> None:
+        """Regression: the (device_id, auth_token) pair must share
+        storage so a kill between writes can't leave a half-state
+        where keyring has auth_token but config.json has no device_id.
+
+        Suite 0002 test 04 hit exactly that on 2026-05-06: the wizard
+        subprocess loaded a Config whose ``device_id`` was missing
+        from JSON (yet keyring still had ``auth_token``) and the
+        relay rejected publish with "Desktop Connector is not
+        registered with the relay." Fix: device_id now lives in the
+        secret store next to auth_token. Reopening the config has
+        to round-trip both fields together.
+        """
+        config = Config(self.config_dir)
+        config.device_id = "round-trip-device"
+        config.auth_token = "round-trip-token"
+
+        # Drop the in-memory instance and reload from disk.
+        del config
+        reopened = Config(self.config_dir)
+        self.assertEqual(reopened.device_id, "round-trip-device")
+        self.assertEqual(reopened.auth_token, "round-trip-token")
+        self.assertTrue(reopened.is_registered)
+
+    def test_legacy_device_id_in_config_json_migrates_to_secret_store(self) -> None:
+        """A pre-fix install carries ``device_id`` as plaintext in
+        ``config.json`` (alongside the legacy plaintext ``auth_token``
+        the H.4 migration was already moving). On the first boot
+        post-fix, the same migration pass walks ``device_id`` over
+        and deletes the JSON copy, just like ``auth_token``.
+        """
+        # Hand-write a legacy config.json with both secrets in
+        # plaintext, the way pre-H.4 / pre-this-fix installs looked.
+        legacy_config = {
+            "device_id": "legacy-device",
+            "auth_token": "legacy-token",
+            "server_url": "http://relay.example",
+        }
+        (self.config_dir / "config.json").write_text(
+            json.dumps(legacy_config, indent=2),
+        )
+
+        config = Config(self.config_dir)
+
+        # The active store on this host decides whether the
+        # migration ran. With the JSON fallback (test runner default
+        # via DESKTOP_CONNECTOR_NO_KEYRING=1), values stay where
+        # they are at rest but are reachable through the property
+        # API. With libsecret, they migrate to keyring and the
+        # JSON file no longer holds them. Either way, the property
+        # API returns the legacy values and ``is_registered`` is
+        # True.
+        self.assertEqual(config.device_id, "legacy-device")
+        self.assertEqual(config.auth_token, "legacy-token")
+        self.assertTrue(config.is_registered)
+
+        if config.is_secret_storage_secure():
+            on_disk = json.loads(
+                (self.config_dir / "config.json").read_text(),
+            )
+            self.assertNotIn("device_id", on_disk)
+            self.assertNotIn("auth_token", on_disk)
+            self.assertIn("secrets_migrated_at", on_disk)
+
+    def test_wipe_credentials_full_clears_both_identity_fields(self) -> None:
+        config = Config(self.config_dir)
+        config.device_id = "to-be-wiped"
+        config.auth_token = "to-be-wiped-token"
+        self.assertTrue(config.is_registered)
+
+        config.wipe_credentials("full")
+
+        self.assertIsNone(config.device_id)
+        self.assertIsNone(config.auth_token)
+        self.assertFalse(config.is_registered)
 
 
 if __name__ == "__main__":
