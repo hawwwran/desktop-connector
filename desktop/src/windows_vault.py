@@ -51,20 +51,6 @@ def _kv_row(label: str, value_widget: "Gtk.Widget") -> "Gtk.Box":
     return row
 
 
-def _local_vault_exists(config) -> bool:
-    """True iff this device thinks a vault already exists locally.
-
-    For T3 the heuristic is "has the wizard ever set
-    config['vault']['last_known_id']?". A keyring-backed grant store
-    (T3.2) provides a more authoritative answer once integration
-    lands; this is good enough for the wizard's cancel-rule input.
-    """
-    raw = config._data.get("vault")
-    if not isinstance(raw, dict):
-        return False
-    return bool(raw.get("last_known_id"))
-
-
 def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
     """Vault settings GTK window skeleton (T3.4).
 
@@ -282,17 +268,20 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
                 from .vault import recovery_envelope_meta_from_json, vault_id_dashed
                 from .vault_local import run_recovery_material_test
 
-                dialog = Adw.ApplicationWindow(
-                    application=app,
-                    title="Test recovery",
-                    default_width=560,
-                    default_height=420,
-                )
-                dialog.set_transient_for(win)
-                dialog.set_modal(True)
-                toolbar = Adw.ToolbarView()
-                dialog.set_content(toolbar)
-                toolbar.add_top_bar(Adw.HeaderBar())
+                # F-U17: ``Adw.Dialog`` (libadwaita 1.5+) replaces the
+                # old ``Adw.ApplicationWindow`` shape so the recovery
+                # tester:
+                #   * floats over the parent vault-settings window with
+                #     auto-handled transient ownership (no explicit
+                #     ``set_transient_for`` / ``set_modal`` needed); and
+                #   * auto-closes when the parent window closes, matching
+                #     the lifecycle the rest of the vault settings tabs
+                #     already give the user.
+                # The pattern mirrors ``vault_connect_folder_dialog``.
+                dialog = Adw.Dialog()
+                dialog.set_title("Test recovery")
+                dialog.set_content_width(560)
+                dialog.set_content_height(420)
 
                 extra = Gtk.Box(
                     orientation=Gtk.Orientation.VERTICAL,
@@ -302,8 +291,12 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
                     margin_start=16,
                     margin_end=16,
                 )
-                toolbar.set_content(extra)
-                extra.append(Gtk.Label(label="Test recovery", xalign=0, css_classes=["title-2"]))
+                dialog.set_child(extra)
+                # Adw.Dialog draws its own title bar with the dialog's
+                # ``title`` property; the inner title-2 label that used
+                # to sit at the top of the body is now redundant. The
+                # subhead below remains — it explains *what to do*,
+                # which the title doesn't.
                 extra.append(Gtk.Label(
                     label="Select the recovery kit file and enter the passphrase saved for this vault.",
                     xalign=0,
@@ -423,7 +416,12 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
                         kit_entry.set_text(path)
                         log.info("vault.recovery_test.file_choose.selected")
 
-                    file_dialog.open(parent=dialog, callback=on_file_chosen)
+                    # F-U17: ``Gtk.FileDialog.open`` wants a real
+                    # ``Gtk.Window``; ``Adw.Dialog`` is a widget, not a
+                    # window, so reach through to the parent settings
+                    # window instead. Functionally identical — the file
+                    # picker still floats over the recovery dialog.
+                    file_dialog.open(parent=win, callback=on_file_chosen)
 
                 browse_btn.connect("clicked", on_choose_file)
 
@@ -499,7 +497,9 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
                         set_status(result.message, "error")
 
                 test_btn.connect("clicked", on_test)
-                dialog.present()
+                # F-U17: ``Adw.Dialog.present(parent)`` ties the
+                # dialog's lifecycle to the vault settings window.
+                dialog.present(win)
                 log.info("vault.recovery_test.dialog.presented")
             except Exception:
                 log.exception("vault.recovery_test.dialog.exception")

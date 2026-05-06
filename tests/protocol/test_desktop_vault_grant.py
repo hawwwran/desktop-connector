@@ -23,6 +23,7 @@ from src.vault_grant import (  # noqa: E402
     VaultGrant,
     delete_local_grant_artifacts,
     fallback_grant_path,
+    local_vault_grant_exists,
     open_default_grant_store,
 )
 
@@ -250,6 +251,140 @@ class DeleteLocalGrantArtifactsTests(unittest.TestCase):
                 self.assertTrue(path.exists())
         finally:
             vault_grant.KeyringGrantStore.open_default = original
+
+
+class HasGrantProbeTests(unittest.TestCase):
+    """F-U15: cheap "is there an entry?" probe on each backend.
+
+    The probe must not require decoding/decryption — the tray calls
+    it on every menu refresh and shouldn't pay JSON-decode +
+    AEAD-decrypt cost just to know "is there anything here".
+    """
+
+    def test_keyring_has_grant_true_after_save(self) -> None:
+        fake = FakeKeyring()
+        store = KeyringGrantStore(fake)
+        store.save(VaultGrant.from_bytes(VAULT_ID, b"\x33" * 32, "bearer"))
+        self.assertTrue(store.has_grant(VAULT_ID))
+
+    def test_keyring_has_grant_false_for_unknown(self) -> None:
+        fake = FakeKeyring()
+        store = KeyringGrantStore(fake)
+        self.assertFalse(store.has_grant("UNKNOWNVAULT"))
+
+    def test_keyring_has_grant_normalizes_vault_id(self) -> None:
+        # F-C18 invariant — dashed / lowercase callers reach the
+        # same key as the canonical form.
+        fake = FakeKeyring()
+        store = KeyringGrantStore(fake)
+        store.save(VaultGrant.from_bytes(VAULT_ID, b"\x33" * 32, "bearer"))
+        self.assertTrue(store.has_grant("ABCD-2345-WXYZ"))
+        self.assertTrue(store.has_grant("abcd2345wxyz"))
+
+    def test_keyring_has_grant_returns_false_on_backend_error(self) -> None:
+        # If the keyring backend raises (locked session, busy bus,
+        # whatever), the probe must return False rather than
+        # propagating — the tray refresh shouldn't crash on transient
+        # backend hiccups.
+        class _BrokenKeyring:
+            def get_password(self, *_a, **_kw):
+                raise RuntimeError("keyring busy")
+
+        store = KeyringGrantStore(_BrokenKeyring())
+        self.assertFalse(store.has_grant(VAULT_ID))
+
+    def test_file_has_grant_true_after_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FileGrantStore(config_dir=tmp, device_seed=b"\x55" * 32)
+            store.save(VaultGrant.from_bytes(VAULT_ID, b"\x77" * 32, "bearer"))
+            self.assertTrue(store.has_grant(VAULT_ID))
+
+    def test_file_has_grant_false_for_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = FileGrantStore(config_dir=tmp, device_seed=b"\x55" * 32)
+            self.assertFalse(store.has_grant("UNKNOWNVAULT"))
+
+
+class LocalVaultGrantExistsTests(unittest.TestCase):
+    """F-U15: free-function probe that the tray uses to cross-check
+    ``last_known_id`` against the actual grant artifacts."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp(prefix="vault_grant_exists_")
+        # All tests in this class run with the keyring-unavailable
+        # branch so the file fallback path gets exercised; individual
+        # tests that need the keyring branch monkey-patch
+        # ``open_default`` themselves.
+        import src.vault_grant as vault_grant
+        self._original_open_default = vault_grant.KeyringGrantStore.open_default
+        vault_grant.KeyringGrantStore.open_default = classmethod(
+            lambda cls: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
+        )
+
+    def tearDown(self) -> None:
+        import src.vault_grant as vault_grant
+        vault_grant.KeyringGrantStore.open_default = self._original_open_default
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_returns_false_when_no_grant_anywhere(self) -> None:
+        self.assertFalse(local_vault_grant_exists(self.tmpdir, VAULT_ID))
+
+    def test_returns_true_when_file_grant_exists(self) -> None:
+        # File presence is enough — no decryption needed.
+        path = fallback_grant_path(self.tmpdir, VAULT_ID)
+        path.write_text("opaque envelope", encoding="utf-8")
+        self.assertTrue(local_vault_grant_exists(self.tmpdir, VAULT_ID))
+
+    def test_returns_true_when_keyring_has_grant(self) -> None:
+        # Re-route open_default to a fake keyring with the entry set.
+        import src.vault_grant as vault_grant
+        fake = FakeKeyring()
+        kr = KeyringGrantStore(fake)
+        kr.save(VaultGrant.from_bytes(VAULT_ID, b"\x44" * 32, "bearer"))
+        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls: kr)
+        self.assertTrue(local_vault_grant_exists(self.tmpdir, VAULT_ID))
+
+    def test_returns_true_when_keyring_has_grant_via_dashed_id(self) -> None:
+        # Tray reads ``last_known_id`` from config (canonical form) and
+        # passes it through; F-U14's --vault-id arg can also be dashed.
+        # Both forms must resolve to the same backend entry.
+        import src.vault_grant as vault_grant
+        fake = FakeKeyring()
+        kr = KeyringGrantStore(fake)
+        kr.save(VaultGrant.from_bytes(VAULT_ID, b"\x44" * 32, "bearer"))
+        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls: kr)
+        self.assertTrue(
+            local_vault_grant_exists(self.tmpdir, "ABCD-2345-WXYZ"),
+        )
+
+    def test_empty_vault_id_returns_false(self) -> None:
+        self.assertFalse(local_vault_grant_exists(self.tmpdir, ""))
+
+    def test_keyring_error_falls_back_to_file_check(self) -> None:
+        # Keyring open_default raises something other than
+        # KeyringUnavailable — should still fall through to the file
+        # check rather than propagate.
+        import src.vault_grant as vault_grant
+        vault_grant.KeyringGrantStore.open_default = classmethod(
+            lambda cls: (_ for _ in ()).throw(RuntimeError("dbus busy"))
+        )
+        path = fallback_grant_path(self.tmpdir, VAULT_ID)
+        path.write_text("opaque envelope", encoding="utf-8")
+        self.assertTrue(local_vault_grant_exists(self.tmpdir, VAULT_ID))
+
+    def test_dropped_grant_with_lingering_last_known_id(self) -> None:
+        """The F-U15 race scenario: ``last_known_id`` is set in config
+        but the grant artifact was deleted out from under it (manual
+        keyring purge / OS-keyring switch / half-published wizard run).
+
+        ``local_vault_grant_exists`` must report False so the tray's
+        Vault submenu flips back to Create / Import — that's the
+        right recovery affordance.
+        """
+        # No file at fallback path, no keyring entry -> False even
+        # though a caller "thought" the vault was real.
+        self.assertFalse(local_vault_grant_exists(self.tmpdir, VAULT_ID))
 
 
 if __name__ == "__main__":

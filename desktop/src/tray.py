@@ -952,20 +952,33 @@ class TrayApp:
         return should_show_vault_submenu(self.config.vault_active)
 
     def _local_vault_exists(self) -> bool:
-        """T3 heuristic: a vault exists locally iff the wizard recorded
-        its id under ``config['vault']['last_known_id']``. T3.2's grant
-        store provides the authoritative answer once integrated.
+        """F-U15: authoritative — a vault exists locally iff
+        ``config['vault']['last_known_id']`` is set **and** the grant
+        store actually has an unlock entry for that id.
+
+        The id-only heuristic (T3 era) admits a stale-config race: if
+        a grant artifact gets deleted out from under the config (manual
+        keyring purge, OS-keyring switch, edge-case wizard cleanup),
+        the tray would still show Open / Sync / Settings and the user
+        clicks into a doomed unlock flow. Cross-checking against the
+        grant store flips the submenu back to Create / Import — the
+        right recovery affordance.
 
         Calls ``self.config.reload()`` first because the wizard
         subprocess writes ``last_known_id`` and the tray needs to see
         it to flip its submenu from Create/Import to operating mode.
         Same propagation pattern as ``Config.vault_active``.
         """
+        from .vault_grant import local_vault_grant_exists
+
         self.config.reload()
         raw = self.config._data.get("vault")
         if not isinstance(raw, dict):
             return False
-        return bool(raw.get("last_known_id"))
+        vault_id = raw.get("last_known_id")
+        if not vault_id:
+            return False
+        return local_vault_grant_exists(self.config.config_dir, vault_id)
 
     def _build_vault_submenu(self) -> "pystray.Menu":
         """Build the Vault submenu items based on the §D16 routing rules.

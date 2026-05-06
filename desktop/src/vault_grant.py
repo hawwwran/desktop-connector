@@ -182,6 +182,23 @@ class KeyringGrantStore:
             # doesn't exist; idempotent delete is more useful.
             log.debug("vault_grant.keyring.delete_noop %s: %s", vault_id, exc)
 
+    def has_grant(self, vault_id: str) -> bool:
+        """F-U15: cheap probe — does an entry exist for ``vault_id``?
+
+        Avoids the JSON parse + ``VaultGrant.from_json`` allocation that
+        ``load`` performs; the tray calls this on every menu refresh
+        so it shouldn't pay decoding cost just to know "is there
+        anything here at all".
+        """
+        try:
+            return self._kr.get_password(
+                _KEYRING_SERVICE, self._key(vault_id),
+            ) is not None
+        except Exception:
+            # Any keyring backend hiccup → "no grant we can prove" is
+            # the safer answer; the file-fallback probe will still run.
+            return False
+
 
 class KeyringUnavailable(Exception):
     """Raised by :meth:`KeyringGrantStore.open_default` when the
@@ -269,6 +286,15 @@ class FileGrantStore:
         except FileNotFoundError:
             pass
 
+    def has_grant(self, vault_id: str) -> bool:
+        """F-U15: cheap probe — does the on-disk grant file exist?
+
+        File-existence is enough; we don't need to decrypt to know
+        "is there anything here". The wrap key probe still happens
+        on actual ``load``.
+        """
+        return self._path(vault_id).exists()
+
     def zero_wrap_key(self) -> None:
         """Best-effort overwrite of the in-memory wrap key. Call when
         shutting down the process — the OS-level memory is the real
@@ -316,6 +342,39 @@ def fallback_grant_path(config_dir: Path, vault_id: str) -> Path:
     same on-disk file (F-C18).
     """
     return Path(config_dir) / f"vault_grant_{normalize_vault_id(vault_id)}.json"
+
+
+def local_vault_grant_exists(config_dir: Path, vault_id: str) -> bool:
+    """F-U15: authoritative answer for "does this device have an unlock
+    grant for ``vault_id``?".
+
+    Used by the tray to decide whether the Vault submenu should show
+    Create / Import (no grant) or Open / Sync / Settings (grant
+    present). The previous heuristic checked only
+    ``config['vault']['last_known_id']`` — that admits a stale-config
+    race where the id stays in config but the grant artifact has been
+    deleted out from under it (manual keyring purge, OS-keyring
+    switch, half-published wizard run that left config rewritten but
+    the grant gone).
+
+    Probes the keyring first, falls back to the on-disk file's
+    presence — neither requires the device seed (so callers don't
+    need to plumb crypto.KeyManager through). Returns ``False`` on
+    any backend error: surfacing Create / Import on a "we can't
+    prove a grant exists" machine is the safer recovery affordance.
+    """
+    if not vault_id:
+        return False
+    canonical = normalize_vault_id(vault_id)
+    try:
+        store = KeyringGrantStore.open_default()
+    except KeyringUnavailable:
+        store = None
+    except Exception:
+        store = None
+    if store is not None and store.has_grant(canonical):
+        return True
+    return fallback_grant_path(config_dir, canonical).exists()
 
 
 def delete_local_grant_artifacts(config_dir: Path, vault_id: str) -> None:

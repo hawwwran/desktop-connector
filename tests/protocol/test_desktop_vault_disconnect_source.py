@@ -56,11 +56,19 @@ class VaultDisconnectSourceTests(unittest.TestCase):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")
 
     def test_recovery_test_button_opens_real_modal(self) -> None:
+        # F-U17: dialog migrated from ``Adw.ApplicationWindow`` to
+        # ``Adw.Dialog``. The new shape floats over the vault-settings
+        # window, auto-handles transient ownership, and auto-closes
+        # when the parent closes.
         for text in (
             'test_recovery_btn = Gtk.Button(label="Test recovery now"',
             'test_recovery_btn.connect("clicked", open_recovery_test_dialog)',
-            'title="Test recovery"',
-            "Adw.ApplicationWindow(",
+            "dialog = Adw.Dialog()",
+            'dialog.set_title("Test recovery")',
+            "dialog.set_content_width(560)",
+            "dialog.set_content_height(420)",
+            "dialog.set_child(extra)",
+            "dialog.present(win)",
             "Gtk.FileDialog()",
             "Gtk.PasswordEntry",
             "wipe_switch = Gtk.Switch",
@@ -68,6 +76,47 @@ class VaultDisconnectSourceTests(unittest.TestCase):
             "recovery_envelope_meta_from_json",
         ):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")
+
+    def test_recovery_dialog_no_longer_uses_application_window(self) -> None:
+        """F-U17 anti-regression: the recovery dialog must not be
+        rebuilt as an Adw.ApplicationWindow. The other three uses of
+        Adw.ApplicationWindow in this file (vault settings, wizard,
+        passphrase generator) are real top-level windows; the recovery
+        tester is a child dialog and belongs to its parent's lifecycle."""
+        marker = "def open_recovery_test_dialog(_btn):"
+        idx = self.source.index(marker)
+        # End at the test_recovery_btn.connect line that follows the
+        # inner function — stable boundary at the same outer indent.
+        end_marker = 'test_recovery_btn.connect("clicked", open_recovery_test_dialog)'
+        end = self.source.index(end_marker, idx)
+        body = self.source[idx:end]
+        # Strip comment lines (and the comment portion of mixed lines)
+        # so a future "F-U17 replaced Adw.ApplicationWindow…" comment
+        # explaining the migration doesn't trip the assertion.
+        code_lines = []
+        for line in body.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "  # " in line:
+                line = line.split("  # ", 1)[0]
+            code_lines.append(line)
+        code = "\n".join(code_lines)
+        self.assertNotIn(
+            "Adw.ApplicationWindow(",
+            code,
+            msg="F-U17: recovery test dialog regressed to Adw.ApplicationWindow",
+        )
+        # And the FileDialog must use the parent vault-settings window,
+        # not the dialog (Adw.Dialog isn't a Gtk.Window).
+        self.assertIn(
+            "file_dialog.open(parent=win, callback=on_file_chosen)",
+            code,
+        )
+        self.assertNotIn(
+            "file_dialog.open(parent=dialog,",
+            code,
+        )
 
     def test_update_recovery_material_is_not_left_as_a_dead_button(self) -> None:
         for text in (
