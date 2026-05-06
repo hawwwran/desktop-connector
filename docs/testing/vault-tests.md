@@ -483,69 +483,13 @@ line + keyring probe output.
 
 ---
 
-## Test 07 — Wrong-passphrase rejection (BLOCKED in current build)
-
-**Goal**: negative path. Verify a wrong passphrase against a
-stored AEAD envelope fails visibly.
-
-**Status**: **BLOCKED** — no automation-drivable wrong-passphrase
-surface exists in today's build. See
-`temp/automation-tests-results/0002/test-07/result.md` for the full
-analysis. Summary:
-
-- "Test recovery now" (vault-main → Recovery tab) needs a recovery
-  kit file on disk; the wizard's export step uses a native
-  `Gtk.FileDialog.save()` which AT-SPI dogtail can't reliably drive.
-- "Import from export…" in vault-onboard is disabled with the
-  literal label `(coming in T8)`.
-- `vault-import` handles `.dcvault` export bundles, not recovery
-  kits — different code path.
-- The onboard "Confirm passphrase" entry checks the two entries
-  match each other in memory, not against a stored AEAD envelope —
-  different invariant.
-
-**Unblock paths** (pick one; A is the right product fix):
-1. **A — add a "Re-export recovery kit" surface to vault-main.**
-   Closes a real product gap (a user who skipped Export at create
-   has no way to get a kit) AND unblocks this test.
-2. **B — land the T8 "Import from export…" / fresh-device-recovery
-   wizard.** Bigger scope.
-3. **C — harness-only `--export-recovery-kit=PATH` hook on the
-   onboard / settings entry.** Test-only surface gated by
-   `DESKTOP_CONNECTOR_TESTING=1`. Brittle (same shape as the
-   `DC_KEYRING_SERVICE` mistake).
-
-**When to revisit**: after option A or B lands. The test as
-written below was never run on the current build.
-
-~~**Preconditions**: Test 06 PASS. Stop the dev instance for this test
-— we drive `vault-import` directly.~~
-
-~~**Steps**:~~ (deferred — see unblock paths above)
-
-**Assertions**:
-- An error label/banner is visible (search dump tree for "Wrong",
-  "incorrect", "failed", or `EA7601` in CSS classes).
-- The keyring grant for the test-04 vault is **unchanged** —
-  `keyring.get_password('desktop-connector-dev', 'vault_grant:QRJCRIE7AXEU')`
-  still returns the same value as before this test (a botched
-  import attempt must not corrupt or replace an existing grant).
-- No Python tracebacks on stderr.
-- No new vault rows in `server/data/connector.db` (a wrong
-  passphrase must never reach the relay-publish step).
-
-**Capture**: screenshot + tree dump + before/after keyring probe.
-
----
-
-## Test 08 — Bind a folder to the vault
+## Test 07 — Bind a folder to the vault
 
 **Goal**: first state-creating action against an unlocked vault.
 
-**Preconditions**: Test 06 PASS (test 07 may be BLOCKED — see its
-notes). Restart the headless dev instance (test 06 step 1) so the
-keyring grant is loaded into the runtime; no passphrase prompt
-expected.
+**Preconditions**: Test 06 PASS. Restart the headless dev instance
+(test 06 step 1) so the keyring grant is loaded into the runtime;
+no passphrase prompt expected.
 
 **Steps**:
 1. Create a temp source folder:
@@ -572,11 +516,11 @@ expected.
 
 ---
 
-## Test 09 — Adding a small text file produces an upload
+## Test 08 — Adding a small text file produces an upload
 
 **Goal**: end-to-end encrypted write reaches the relay.
 
-**Preconditions**: Test 08 PASS. Headless dev instance running and
+**Preconditions**: Test 07 PASS. Headless dev instance running and
 unlocked (the watcher lives in the receiver process —
 `vault_filesystem_watcher.py`, `vault_runtime_watchers.py`).
 
@@ -603,12 +547,12 @@ unlocked (the watcher lives in the receiver process —
 
 ---
 
-## Test 10 — Locking the vault while the browser is open hides plaintext
+## Test 09 — Locking the vault while the browser is open hides plaintext
 
 **Goal**: locked-state UI invariant. No stale plaintext or filenames
 should remain visible after a lock event.
 
-**Preconditions**: Test 09 PASS. Browser is open showing
+**Preconditions**: Test 08 PASS. Browser is open showing
 `hello.txt`. Vault is unlocked.
 
 **Steps**:
@@ -637,12 +581,12 @@ should remain visible after a lock event.
 
 ## End of suite
 
-After test 10 (or whenever the user says "stop"):
+After test 09 (or whenever the user says "stop"):
 
 1. Run the **Teardown** commands.
 2. Write `temp/automation-tests-results/<NNNN>/SUITE.md` summarising
    pass/fail per test plus any cross-test observations.
-3. Confirm to the user: "Suite NNNN complete: X/10 pass. Results in
+3. Confirm to the user: "Suite NNNN complete: X/9 pass. Results in
    temp/automation-tests-results/NNNN/."
 
 The dev config dir and dev server DB are **left in place** so the

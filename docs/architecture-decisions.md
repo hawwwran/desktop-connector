@@ -74,6 +74,78 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-06 — Recovery secret is one-shot — kit re-export requires header rotation
+
+**Status:** accepted (formalises an existing constraint that wasn't
+written down).
+
+**Context.** The vault recovery flow uses two-of-two material: the
+user's passphrase AND a 32-byte ``recovery_secret`` generated at
+vault create time. The wrap key for the recovery envelope is
+``HKDF-SHA256(salt=argon2id(passphrase, argon_salt), ikm=recovery_secret)``
+(``vault_crypto.derive_recovery_wrap_key``, formats §12.3). Both
+inputs are required — compromise of either alone yields no wrap
+key. The recovery envelope (AEAD-encrypted ``master_key``) lives
+**inside the relay-side encrypted vault header**
+(``vaults.encrypted_header`` in the SQLite schema, served from
+``GET /api/vaults/{id}/header``). The kit file is the **only**
+copy of ``recovery_secret`` outside that envelope.
+
+This was implicit until suite 0002 test 07 made it operational: a
+user (or the harness) who clicked through the wizard without
+exporting the kit lands in a state where there is no way to produce
+a kit later from any combination of passphrase + cached grant +
+config metadata. Argon2id over the saved ``argon_salt`` produces an
+``argon_out`` that needs ``recovery_secret`` to mix in, and
+``recovery_secret`` is a 32-byte random value that lives only in
+the kit file.
+
+**Decision.** Document the constraint explicitly so future work
+treats it as a load-bearing security property, not an oversight:
+
+1. **There is no "re-export the same kit"** code path. Once a kit
+   exists, the only way to produce another one is to **rotate**
+   the recovery material — generate a fresh ``recovery_secret`` +
+   ``argon_salt``, re-wrap ``master_key``, and **re-publish the
+   relay-side header** at ``header_revision = current+1`` so a
+   fresh-device recovery sees the new envelope. ``master_key``
+   itself does not change; only the envelope that wraps it.
+2. **A rotation is a header-revision bump**, not a desktop-only
+   operation. Local rotation that doesn't touch the relay would
+   leave the old envelope on the relay, so any new kit produced
+   locally would fail fresh-device recovery (the device would pull
+   the old header and try to unwrap with the new ``recovery_secret``).
+3. **The "Update recovery material" UI surface remains disabled**
+   (``windows_vault.py:198``,
+   ``update_recovery_btn.set_sensitive(False)``,
+   tooltip "Recovery-material rotation is not implemented yet")
+   until both the local re-derivation **and** the
+   ``PUT /api/vaults/{id}/header`` rotation path land — a real
+   T-N feature, not a harness unblock.
+4. **Wizard copy already advertises this**: the success-step
+   warning "Your data is unrecoverable without BOTH the recovery
+   kit file AND your passphrase. There is no password reset."
+   matches the crypto.
+
+**Alternatives considered.** (a) Persist ``recovery_secret`` in
+keyring alongside the grant so it could be re-fetched — rejected:
+makes a single device's keyring compromise sufficient to forge a
+kit (defeats two-of-two). (b) Derive ``recovery_secret``
+deterministically from ``master_key`` — rejected: same reason,
+plus removes any independent factor. (c) Allow a
+"local-only rotation" that doesn't re-publish the header —
+rejected: produces a kit that works locally but fails on a fresh
+device, which is the scenario the kit is meant to cover.
+
+**Anchor.** Crypto: ``vault_crypto.derive_recovery_wrap_key``
+(line ~644), ``vault_crypto.build_recovery_envelope``
+(line ~680). Generation: ``vault.Vault._prepare_local`` /
+``Vault.create`` (line ~299, ``recovery_secret = secrets.token_bytes(32)``).
+Format spec: ``docs/protocol/vault-v1-formats.md`` §12. The
+constraint is what blocked harness suite 0002 test 07 (now removed
+from the guide); see ``temp/automation-tests-results/0002/test-07/result.md``
+for the full diagnosis trail.
+
 ### 2026-05-06 — Vault grant keyring service is per-config, not a hard-coded constant
 
 **Status:** accepted.
