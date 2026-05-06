@@ -368,7 +368,18 @@ def _publish_with_retry(
                 raise
             server_head = decrypt_manifest_envelope(vault, envelope)
             candidate = op(server_head)
-    return vault.publish_manifest(relay, candidate, local_index=local_index)
+    # F-D25: distinguish exhaustion from a first-attempt 409 so the
+    # activity log can flag eviction passes that gave up against a
+    # busy multi-device vault.
+    try:
+        return vault.publish_manifest(relay, candidate, local_index=local_index)
+    except VaultCASConflictError:
+        log.warning(
+            "vault.eviction.cas_exhausted vault=%s retries=%d",
+            getattr(vault, "vault_id", "?"),
+            max_retries,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------

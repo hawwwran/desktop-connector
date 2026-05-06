@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _paths import ensure_desktop_on_path  # noqa: E402
@@ -212,6 +213,41 @@ class DeleteLocalGrantArtifactsTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 delete_local_grant_artifacts(tmp, VAULT_ID)
                 self.assertIsNone(store.load(VAULT_ID))
+        finally:
+            vault_grant.KeyringGrantStore.open_default = original
+
+    def test_raises_runtime_error_when_file_unlink_fails(self) -> None:
+        """F-D20 — silent failure here would leave sensitive grant
+        material on disk while disconnect "succeeds". Aggregate the
+        errors and raise so the caller can surface a partial-disconnect
+        message to the user.
+        """
+        import src.vault_grant as vault_grant
+        original = vault_grant.KeyringGrantStore.open_default
+        vault_grant.KeyringGrantStore.open_default = classmethod(
+            lambda cls: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = fallback_grant_path(tmp, VAULT_ID)
+                path.write_text("encrypted envelope", encoding="utf-8")
+                # Force unlink to fail with a real OSError class so the
+                # outer except catches it and aggregates.
+                from unittest import mock as _mock
+                original_unlink = Path.unlink
+
+                def _raises_eacces(self_inner, *a, **kw):
+                    if str(self_inner) == str(path):
+                        raise PermissionError(13, "permission denied", str(path))
+                    return original_unlink(self_inner, *a, **kw)
+
+                with _mock.patch.object(Path, "unlink", _raises_eacces):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        delete_local_grant_artifacts(tmp, VAULT_ID)
+                self.assertIn("partial vault disconnect", str(ctx.exception))
+                self.assertIn(VAULT_ID, str(ctx.exception))
+                # File still on disk because the unlink raised.
+                self.assertTrue(path.exists())
         finally:
             vault_grant.KeyringGrantStore.open_default = original
 

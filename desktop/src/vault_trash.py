@@ -37,13 +37,24 @@ def can_use_trash() -> bool:
     return shutil.which("gio") is not None
 
 
-def trash_path(path: Path, *, log_event: str = "vault.sync.file_moved_to_trash") -> bool:
+def trash_path(
+    path: Path,
+    *,
+    log_event: str = "vault.sync.file_moved_to_trash",
+    allow_unlink_fallback: bool = True,
+) -> bool:
     """Move ``path`` to the OS trash. Returns True on success.
 
     Falls back to ``unlink`` if ``gio`` isn't available; emits a
     warning log line in that case so operators can spot the
     fallback. The fallback path is *not* recoverable — the caller
     should weigh that against just leaving the local file alone.
+
+    F-D18: ``allow_unlink_fallback=False`` lets the caller decline the
+    irreversible-delete fallback explicitly. Returns ``False``
+    (non-fatal) when ``gio`` is missing and the fallback is declined,
+    so the sync engine can leave the file in place and surface a
+    warning to the user instead.
     """
     target = Path(path)
     if not target.exists():
@@ -53,6 +64,12 @@ def trash_path(path: Path, *, log_event: str = "vault.sync.file_moved_to_trash")
             "vault.sync.trash_unavailable path=%s reason=gio-not-installed",
             target,
         )
+        if not allow_unlink_fallback:
+            log.warning(
+                "vault.sync.trash_unlink_fallback_declined path=%s",
+                target,
+            )
+            return False
         try:
             target.unlink()
             return True

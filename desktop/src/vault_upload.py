@@ -67,10 +67,18 @@ UploadMode = Literal["new_file_or_version", "new_file_only", "append_version_onl
 
 @dataclass(frozen=True)
 class FileSkipped:
-    """A file the folder walker decided not to upload."""
+    """A file the folder walker decided not to upload.
+
+    The ``error`` reason (F-D13) is reserved for ``lstat`` failures —
+    permission denied, dangling symlinks, transient I/O errors — so the
+    user can tell those apart from a deliberately-skipped symlink /
+    FIFO / socket / device. Pure stat-based classification of a
+    successfully-stat'd file remains ``special``.
+    """
     relative_path: str
-    reason: Literal["ignored", "too_large", "special"]
+    reason: Literal["ignored", "too_large", "special", "error"]
     size_bytes: int = 0
+    errno: int = 0
 
 
 @dataclass(frozen=True)
@@ -804,8 +812,19 @@ def upload_folder(
                 "ignored": "vault.sync.file_skipped_ignored",
                 "too_large": "vault.sync.file_skipped_too_large",
                 "special": "vault.sync.special_file_skipped",
+                "error": "vault.sync.file_walk_error",
             }[entry.reason]
-            log.info("%s path=%s size=%d", event, entry.relative_path, entry.size_bytes)
+            if entry.reason == "error":
+                # F-D13: errno surfaces "permission-denied" vs "dangling
+                # symlink" vs other I/O classes; without it the user sees
+                # a "skipped" line and can't tell why.
+                log.warning(
+                    "%s path=%s errno=%d", event, entry.relative_path, entry.errno,
+                )
+            else:
+                log.info(
+                    "%s path=%s size=%d", event, entry.relative_path, entry.size_bytes,
+                )
             continue
         plans.append(entry)
         files_total += 1
@@ -956,8 +975,13 @@ def _walk_for_upload(
             child_rel = f"{current_rel}/{child.name}" if current_rel else child.name
             try:
                 st = child.lstat()
-            except OSError:
-                yield FileSkipped(child_rel, "special", 0)
+            except OSError as exc:
+                # F-D13: lstat-failed paths (permission denied, dangling
+                # symlink, transient I/O) are an *error* class — distinct
+                # from a successfully-stat'd special file.
+                yield FileSkipped(
+                    child_rel, "error", 0, errno=int(getattr(exc, "errno", 0) or 0),
+                )
                 continue
             mode = st.st_mode
 
@@ -1188,7 +1212,19 @@ def _publish_batch_with_cas_retry(
                 author_device_id=author_device_id,
             )
             rebased_parent = server_head
-    return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+    # F-D25: same exhaustion log as the single-version helper, scoped
+    # to the batch path so a folder-upload's terminal CAS failure shows
+    # up with its own event tag.
+    try:
+        return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+    except VaultCASConflictError:
+        log.warning(
+            "vault.upload.batch_cas_exhausted vault=%s additions=%d retries=%d",
+            getattr(vault, "vault_id", "?"),
+            len(additions),
+            max_retries,
+        )
+        raise
 
 
 def _report_folder(
@@ -1352,7 +1388,19 @@ def _publish_with_cas_retry(
             rebased_parent = server_head
     # One more try after the final merge — no exception means success;
     # any 409 here propagates as the caller's terminal CAS error.
-    return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+    # F-D25: tag exhaustion separately from a first-attempt 409 so the
+    # activity log distinguishes "live CAS race the user retried" from
+    # "we ran out of retry budget against a busy multi-device vault".
+    try:
+        return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+    except VaultCASConflictError:
+        log.warning(
+            "vault.upload.cas_exhausted vault=%s path=%s retries=%d",
+            getattr(vault, "vault_id", "?"),
+            normalized_remote_path,
+            max_retries,
+        )
+        raise
 
 
 def _hash_file(local_path: Path) -> tuple[bytes, int]:

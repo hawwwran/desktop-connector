@@ -432,6 +432,7 @@ def resolve_folder_destination(destination: Path, policy: ExistingFilePolicy) ->
 
 
 from .vault_atomic import (
+    LOCAL_DISK_OVERHEAD_FACTOR,
     atomic_write_chunks as _atomic_write_chunks,
     atomic_write_file as _atomic_write_file,
     fsync_dir as _fsync_dir_helper,
@@ -661,7 +662,7 @@ def _version_chunks(version: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _preflight_disk_space(destination: Path, logical_size: int) -> None:
-    required = int(max(0, logical_size) * 1.25)
+    required = int(max(0, logical_size) * LOCAL_DISK_OVERHEAD_FACTOR)
     if required <= 0:
         return
     parent = Path(destination).parent
@@ -675,7 +676,7 @@ def _preflight_disk_space(destination: Path, logical_size: int) -> None:
 
 
 def _preflight_folder_disk_space(destination: Path, logical_size: int) -> None:
-    required = int(max(0, logical_size) * 1.25)
+    required = int(max(0, logical_size) * LOCAL_DISK_OVERHEAD_FACTOR)
     if required <= 0:
         return
     probe = _nearest_existing_parent(Path(destination))

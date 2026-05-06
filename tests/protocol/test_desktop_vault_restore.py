@@ -538,6 +538,41 @@ class RestoreAtDateTests(unittest.TestCase):
             (self.dest / conflict).read_bytes(), payloads["alpha.txt-v1"],
         )
 
+    def test_identical_skip_at_cutoff_logs_audit_event(self) -> None:
+        """F-D16 — restore-at-date is *deliberately* asking for the
+        snapshot bytes at ``cutoff``. Identical-bytes short-circuit is
+        still correct (idempotent), but the activity log must preserve
+        the "restored from snapshot" intent so an operator can later
+        confirm the operation ran. The non-date variant doesn't get the
+        same treatment — there the skip is just "we already have it",
+        not "the user asked for a specific point in time".
+        """
+        relay, manifest, payloads = self._seed_versions()
+        cutoff = datetime(2026, 2, 15, tzinfo=timezone.utc)
+        # Pre-place the v1 bytes so the cutoff-restore short-circuits.
+        (self.dest / "alpha.txt").write_bytes(payloads["alpha.txt-v1"])
+        vault = _vault()
+        try:
+            with self.assertLogs("src.vault_restore", level="INFO") as cm:
+                result = restore_remote_folder_at_date(
+                    vault=vault, relay=relay, manifest=manifest,
+                    remote_folder_id=DOCS_ID, destination=self.dest,
+                    device_name=DEVICE_NAME, when=WHEN, cutoff=cutoff,
+                )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.skipped_identical, ["alpha.txt"])
+        # The cutoff-specific event fires, not just the standard skip.
+        self.assertTrue(
+            any(
+                "vault.restore.skipped_identical_at_cutoff" in line
+                and "alpha.txt" in line
+                for line in cm.output
+            ),
+            cm.output,
+        )
+
 
 def _vault() -> Vault:
     return Vault(

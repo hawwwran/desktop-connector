@@ -142,6 +142,44 @@ class MakeConflictPathTests(unittest.TestCase):
         self.assertIn("synced", KNOWN_KINDS)
         self.assertIn("restored", KNOWN_KINDS)
 
+    def test_device_name_path_traversal_attempts_neutralized(self) -> None:
+        """F-D24 — `device_name` is user-set per device. Even adversarial
+        values must not produce a leaf with usable path separators or
+        an inserted parent-directory segment. Path separators (``/``,
+        ``\\``), NUL, and quote/escape characters all collapse to ``_``.
+        ``..`` survives as a literal token (period is a safe filename
+        character) but only inside the parens, with no adjacent
+        separators, so it can't form a traversal.
+        """
+        traversal = make_conflict_path(
+            original_path="report.docx", kind="uploaded",
+            device_name="../etc/passwd", when=WHEN,
+        )
+        # No `/` or `\` survives in the leaf.
+        leaf = traversal.split("/")[-1]
+        self.assertNotIn("/", leaf)
+        self.assertNotIn("\\", leaf)
+        # Periods are allowed (hostnames legitimately contain them); the
+        # adjacent path separators are each replaced by `_` so the
+        # `..` can't bracket a traversal — the resulting token is a
+        # single literal filename component.
+        self.assertIn(".._etc_passwd", leaf, leaf)
+
+        # NUL byte sanitization.
+        nul = make_conflict_path(
+            original_path="report.docx", kind="uploaded",
+            device_name="laptop\x00\x00rm-rf",
+            when=WHEN,
+        )
+        self.assertNotIn("\x00", nul)
+        # Backslashes (Windows separators) and other unsafe chars.
+        backslash = make_conflict_path(
+            original_path="report.docx", kind="uploaded",
+            device_name="C:\\Windows\\Bad", when=WHEN,
+        )
+        self.assertNotIn("\\", backslash)
+        self.assertNotIn(":", backslash.split("/")[-1])
+
 
 class ShortTimestampTests(unittest.TestCase):
     def test_datetime_round_trip(self) -> None:

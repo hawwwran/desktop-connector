@@ -678,6 +678,61 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             "vault.sync.special_file_skipped" in line for line in captured.output
         ))
 
+    def test_upload_folder_lstat_error_classifies_as_error_not_special(self) -> None:
+        """F-D13 — a permission-denied / dangling-symlink / transient I/O
+        path that fails ``lstat`` should be classified as ``"error"``
+        with the captured ``errno``, NOT silently rebranded as ``"special"``.
+        Otherwise the user sees "special" in the UI for files that were
+        meant to upload but couldn't be read.
+        """
+        from unittest import mock as _mock
+        import errno as errno_mod
+        from src import vault_upload as vault_upload_mod
+
+        root = self.tmpdir / "perms"
+        root.mkdir()
+        readable = root / "readable.txt"
+        readable.write_bytes(b"OK")
+        denied = root / "no-permission.txt"
+        denied.write_bytes(b"x")
+        original_lstat = Path.lstat
+
+        def _denied_lstat(self_inner):
+            if str(self_inner) == str(denied):
+                raise PermissionError(errno_mod.EACCES, "permission denied", str(denied))
+            return original_lstat(self_inner)
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault = _vault()
+        try:
+            with _mock.patch.object(Path, "lstat", _denied_lstat), \
+                 self.assertLogs("src.vault_upload", level="INFO") as captured:
+                result = upload_folder(
+                    vault=vault, relay=relay, manifest=manifest,
+                    local_root=root, remote_folder_id=DOCS_ID,
+                    remote_sub_path="", author_device_id=AUTHOR,
+                )
+        finally:
+            vault.close()
+
+        self.assertEqual([r.path for r in result.uploaded], ["readable.txt"])
+        skipped = [s for s in result.skipped if s.relative_path == "no-permission.txt"]
+        self.assertEqual(len(skipped), 1, result.skipped)
+        self.assertEqual(skipped[0].reason, "error")
+        self.assertEqual(skipped[0].errno, errno_mod.EACCES)
+        # Walk-error gets a WARNING-level log line, not the INFO-level
+        # "special_file_skipped" event.
+        self.assertTrue(any(
+            "vault.sync.file_walk_error" in line and "no-permission.txt" in line
+            and f"errno={errno_mod.EACCES}" in line
+            for line in captured.output
+        ), captured.output)
+        self.assertFalse(any(
+            "vault.sync.special_file_skipped" in line and "no-permission.txt" in line
+            for line in captured.output
+        ), "F-D13 regression: lstat-failed path classified as special")
+
     def test_upload_folder_idempotent_re_upload_zero_publishes(self) -> None:
         root = self.tmpdir / "stable"
         root.mkdir()

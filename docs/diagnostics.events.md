@@ -401,6 +401,7 @@ relay log (filenames are local-only).
 | `vault.baseline.skip_unsafe` | desktop | warning | `path` | Baseline refused to write a path traversing outside the binding root |
 | `vault.browser.skip_unsafe` | desktop | warning | `path` | F-519 — manifest entry contained a `..` component the browser refused to walk |
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
+| `vault.delete.cas_exhausted` | desktop | warning | `vault`, `retries` | F-D25 — delete retry budget exhausted; raised the CAS error to caller |
 | `vault.delete.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`/`path_prefix`, `tombstoned` (folder bulk) | F-510 — soft-delete or folder-clear published; Activity-tab "Deleted" anchor |
 | `vault.download.cancelled` | desktop | info | `vault`, `path`, `chunks_done`, `total` | F-U03 — chunk-level cancel mid-download |
 | `vault.download.cancelled_pre_write` | desktop | info | `vault`, `path` | F-U03 — cancel landed after the last chunk fetch but before the atomic write |
@@ -408,6 +409,7 @@ relay log (filenames are local-only).
 | `vault.download.entry_has_no_version` | desktop | warning | `path` | F-D09 — folder download skipped a version-less entry |
 | `vault.download.skip_unsafe_path` | desktop | warning | `path`, `error` | F-D09 — folder download skipped a manifest path that escapes the root |
 | `vault.eviction.cancelled` | desktop | info | `vault`, `before_stage`, `freed_bytes` | F-U03 — between-stage cancel; coherent state preserved |
+| `vault.eviction.cas_exhausted` | desktop | warning | `vault`, `retries` | F-D25 — eviction retry budget exhausted; raised the CAS error to caller |
 | `vault.eviction.no_more_candidates` | desktop | info | `vault_id` | Quota pressure ran out of evictable old versions |
 | `vault.eviction.tombstone_purged_early` | desktop | info | `vault_id`, `path` | Tombstone purged before retention horizon under quota pressure |
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal) |
@@ -441,6 +443,7 @@ relay log (filenames are local-only).
 | `vault.restore.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`, `source_version_id` (truncated) | F-510 — restore-version published; Activity-tab "Restored" anchor |
 | `vault.restore.skip_symlinked_dest` | desktop | warning | `path`, `reason` | F-D28 — refused to write through a symlink in destination |
 | `vault.restore.skip_unsafe` | desktop | warning | `path` | Restore refused a path traversing outside the destination |
+| `vault.restore.skipped_identical_at_cutoff` | desktop | info | `path`, `version` | F-D16 — restore-at-date short-circuited identical bytes; preserves "restored from snapshot" intent in the activity log |
 | `vault.revoke.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant revoke logs through this surface (F-510) |
 | `vault.rotation.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when access-secret rotation logs through this surface (F-510) |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
@@ -463,6 +466,7 @@ relay log (filenames are local-only).
 | `vault.sync.file_skipped_ignored` | desktop | info | `binding`, `path`, `pattern` | T6.4 ignore-pattern match |
 | `vault.sync.file_skipped_too_large` | desktop | warning | `binding`, `path`, `size`, `cap` | T6.4 size cap (default 2 GiB) |
 | `vault.sync.file_stability_hung` | desktop | warning | `path`, `waited` | T10.4 stability gate hung-after cap hit |
+| `vault.sync.file_walk_error` | desktop | warning | `path`, `errno` | F-D13 — folder walker hit `lstat()` failure (permission, dangling symlink, transient I/O); skipped distinct from special-file class |
 | `vault.sync.flush_skipped_paused` | desktop | info | `binding` | F-Y01 — sync now no-op for paused binding |
 | `vault.sync.local_delete_unsynced_silent` | desktop | info | `binding`, `path` | T12.2 watcher gate dropped a delete on a never-synced path |
 | `vault.sync.previously_synced_check_failed` | desktop | warning | `binding`, `path` | The T12.2 predicate raised; treating as not-synced |
@@ -481,6 +485,7 @@ relay log (filenames are local-only).
 | `vault.sync.trash_fallback_unlink_failed` | desktop | error | `path`, `error` | trash fallback `unlink` also failed |
 | `vault.sync.trash_invocation_failed` | desktop | error | `path`, `error` | `gio` could not be invoked at all |
 | `vault.sync.trash_unavailable` | desktop | warning | `path`, `reason` | `gio` not installed; falling back to unlink |
+| `vault.sync.trash_unlink_fallback_declined` | desktop | warning | `path` | F-D18 — caller passed `allow_unlink_fallback=False`; left the local file alone instead of irreversibly unlinking |
 | `vault.sync.twoway_cancelled_between_ops` | desktop | info | `binding`, `remaining` | F-Y08 — two-way Phase B bailed between ops |
 | `vault.sync.twoway_cancelled_between_phases` | desktop | info | `binding` | F-Y08 — two-way bailed between Phase A and Phase B |
 | `vault.sync.twoway_cancelled_pre_iteration` | desktop | info | `binding` | F-Y08 — two-way bailed before starting a new iteration |
@@ -517,6 +522,8 @@ relay log (filenames are local-only).
 | `vault.tray.import.stub` | desktop | info | — | Tray menu Import entry placeholder pre-T8 |
 | `vault.tray.sync_now.notify_failed` | desktop | error | exception traceback | Tray notification for stub Sync now failed |
 | `vault.tray.sync_now.stub` | desktop | info | — | Tray menu Sync now entry placeholder pre-T10.6 |
+| `vault.upload.batch_cas_exhausted` | desktop | warning | `vault`, `additions`, `retries` | F-D25 — folder-upload batch retry budget exhausted; raised the CAS error to caller |
+| `vault.upload.cas_exhausted` | desktop | warning | `vault`, `path`, `retries` | F-D25 — single-version upload retry budget exhausted; raised the CAS error to caller |
 | `vault.upload.completed` | desktop | info | `vault`, `revision`, `path` | A single-file upload completed (post-publish) |
 | `vault.usage.malformed_chunk_size_skipped` | desktop | warning | `chunk_id` (truncated) | F-515 — a manifest chunk had no usable `ciphertext_size`; usage rendered as 0 B for it |
 | `vault.vault.cleared` | desktop | info | `total_tombstoned`, `author` | T14.2 whole-vault bulk-soft-delete published |

@@ -325,17 +325,40 @@ def delete_local_grant_artifacts(config_dir: Path, vault_id: str) -> None:
     machine's unlock material but must not call the relay or delete the
     vault itself. Try both storage locations because a machine may have
     switched between keyring and file fallback over time.
+
+    F-D20: failures hit ``log.warning`` *and* are aggregated into a
+    final ``RuntimeError`` raised after the loop. Without the raise, a
+    read-only config dir (stale Docker volume, mis-mounted ZFS) lets
+    disconnect "succeed" while leaving sensitive grant material on
+    disk. The aggregation lets the caller surface a single
+    user-visible "partial disconnect" message instead of multiple.
+    Missing files (the normal case) are not errors.
     """
+    errors: list[tuple[str, BaseException]] = []
     try:
         KeyringGrantStore.open_default().delete(vault_id)
     except KeyringUnavailable:
         pass
-    except Exception as exc:
-        log.warning("vault_grant.keyring.disconnect_delete_failed vault=%s error=%s", vault_id, exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "vault_grant.keyring.disconnect_delete_failed vault=%s error=%s",
+            vault_id, exc,
+        )
+        errors.append(("keyring", exc))
 
     try:
         fallback_grant_path(config_dir, vault_id).unlink()
     except FileNotFoundError:
         pass
-    except Exception as exc:
-        log.warning("vault_grant.file.disconnect_delete_failed vault=%s error=%s", vault_id, exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "vault_grant.file.disconnect_delete_failed vault=%s error=%s",
+            vault_id, exc,
+        )
+        errors.append(("file", exc))
+
+    if errors:
+        details = "; ".join(f"{src}: {exc}" for src, exc in errors)
+        raise RuntimeError(
+            f"partial vault disconnect for {vault_id}: {details}"
+        )

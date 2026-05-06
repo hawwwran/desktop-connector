@@ -38,6 +38,15 @@ log = logging.getLogger(__name__)
 TEMP_SUFFIX = ".dc-temp-"
 DEFAULT_MAX_AGE_S = 24 * 60 * 60  # §gaps §11
 
+# F-D21: shared overhead multiplier for pre-flight disk-space checks.
+# Pre-rename atomic writes hold the temp file *and* the about-to-be
+# replaced file at the same time on most filesystems, plus filesystem
+# metadata, plus the chunk-cache copy that download/restore round-trips
+# through. 1.25× of the manifest's logical-size sum is conservative
+# without being wasteful, and centralizing the constant lets a future
+# tuning pass land in one spot.
+LOCAL_DISK_OVERHEAD_FACTOR = 1.25
+
 # `<original>.dc-temp-<lowercase hex>` — match conservatively so we
 # only sweep files we actually wrote.
 _TEMP_FILENAME_RE = re.compile(r"\.dc-temp-[0-9a-f]{1,64}$")

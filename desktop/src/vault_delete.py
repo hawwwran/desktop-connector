@@ -255,7 +255,18 @@ def _publish_with_retry(
                 raise
             server_head = decrypt_manifest_envelope(vault, envelope)
             candidate = op(server_head)
-    return vault.publish_manifest(relay, candidate, local_index=local_index)
+    # F-D25: tag exhaustion separately so the activity log can flag a
+    # delete that gave up its retry budget against a busy multi-device
+    # vault.
+    try:
+        return vault.publish_manifest(relay, candidate, local_index=local_index)
+    except VaultCASConflictError:
+        log.warning(
+            "vault.delete.cas_exhausted vault=%s retries=%d",
+            getattr(vault, "vault_id", "?"),
+            max_retries,
+        )
+        raise
 
 
 def _bump_revision(parent: dict[str, Any], *, author_device_id: str) -> dict[str, Any]:

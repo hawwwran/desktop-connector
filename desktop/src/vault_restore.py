@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterable, Protocol
 
 from datetime import datetime, timezone
 
+from .vault_atomic import LOCAL_DISK_OVERHEAD_FACTOR
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_conflict_naming import make_conflict_path
 from .vault_download import (
@@ -315,6 +316,16 @@ def restore_remote_folder_at_date(
                 vault=vault, relay=relay, version=version,
                 local_fingerprint=existing_fingerprint,
             ):
+                # F-D16: restore-at-date explicitly asked for the snapshot
+                # bytes at ``cutoff``. Identical bytes still get skipped
+                # (cheap idempotency), but the activity log preserves the
+                # "restored from snapshot" intent so a user can later
+                # confirm the operation ran.
+                log.info(
+                    "vault.restore.skipped_identical_at_cutoff "
+                    "path=%s version=%s",
+                    relative_path, str(version.get("version_id", ""))[:12],
+                )
                 result.skipped_identical.append(relative_path)
                 continue
 
@@ -562,7 +573,7 @@ def _preflight_disk_for_plan(
     plan: list[tuple[str, dict[str, Any], dict[str, Any]]],
 ) -> None:
     total = sum(_int(version.get("logical_size")) for _, _, version in plan)
-    required = int(total * 1.25)
+    required = int(total * LOCAL_DISK_OVERHEAD_FACTOR)
     if required <= 0:
         return
     free = shutil.disk_usage(destination).free
