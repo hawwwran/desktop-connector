@@ -46,8 +46,33 @@ from .vault_crypto import (
 log = logging.getLogger(__name__)
 
 
-_KEYRING_SERVICE = "desktop-connector"
+_DEFAULT_KEYRING_SERVICE = "desktop-connector"
 _KEYRING_KEY_PREFIX = "vault_grant:"
+
+
+def _resolve_keyring_service(config_dir: Path | None) -> str:
+    """Derive the keyring service name from ``config_dir``.
+
+    Mirrors the per-``config_dir`` derivation that ``Config.__init__``
+    does for ``auth_token`` / ``device_id``: a non-default
+    ``--config-dir`` (e.g. the vault automation harness's
+    ``~/.config/desktop-connector-dev``) lands in keyring service
+    ``desktop-connector-dev``, fully isolated from the canonical
+    install at ``desktop-connector``. Without this, a dev twin
+    saving a vault grant clobbers (or aliases) the user's real
+    keyring under the canonical service name.
+
+    The ``DC_KEYRING_SERVICE`` env var is still honoured as a global
+    override; otherwise the basename of the config dir wins, falling
+    back to the canonical name when no config dir is supplied.
+    """
+    override = os.environ.get("DC_KEYRING_SERVICE")
+    if override:
+        return override
+    if config_dir is None:
+        return _DEFAULT_KEYRING_SERVICE
+    name = Path(config_dir).name.strip()
+    return name or _DEFAULT_KEYRING_SERVICE
 
 _FILE_AAD_SCHEMA = b"dc-vault-grant-fallback-v1"
 _FILE_HKDF_INFO = b"dc-vault-v1/grant-fallback-wrap"
@@ -138,13 +163,27 @@ class KeyringGrantStore:
     Construct via :meth:`open_default` to probe the runtime backend at
     startup; raises :class:`KeyringUnavailable` if no usable backend is
     reachable so the caller can fall back to :class:`FileGrantStore`.
+
+    The ``service_name`` is the libsecret / Secret Service collection
+    attribute the entries land under. Production threads it from the
+    caller's ``config_dir.name`` (via :func:`_resolve_keyring_service`)
+    so a dev twin running with ``--config-dir=~/.config/desktop-connector-dev``
+    doesn't write into the canonical install's namespace.
     """
 
-    def __init__(self, keyring_module) -> None:
+    def __init__(
+        self,
+        keyring_module,
+        service_name: str = _DEFAULT_KEYRING_SERVICE,
+    ) -> None:
         self._kr = keyring_module
+        self._service = service_name
 
     @classmethod
-    def open_default(cls) -> "KeyringGrantStore":
+    def open_default(
+        cls,
+        service_name: str = _DEFAULT_KEYRING_SERVICE,
+    ) -> "KeyringGrantStore":
         try:
             import keyring as keyring_module
             from keyring.errors import NoKeyringError  # noqa: F401
@@ -154,11 +193,11 @@ class KeyringGrantStore:
         # Probe: getting a known-absent key on a working backend returns
         # None; on a non-functional backend raises.
         try:
-            keyring_module.get_password(_KEYRING_SERVICE, "_probe_no_such_key")
+            keyring_module.get_password(service_name, "_probe_no_such_key")
         except Exception as exc:
             raise KeyringUnavailable(f"keyring probe failed: {exc}") from exc
 
-        return cls(keyring_module)
+        return cls(keyring_module, service_name)
 
     @staticmethod
     def _key(vault_id: str) -> str:
@@ -166,17 +205,17 @@ class KeyringGrantStore:
         return _KEYRING_KEY_PREFIX + normalize_vault_id(vault_id)
 
     def save(self, grant: VaultGrant) -> None:
-        self._kr.set_password(_KEYRING_SERVICE, self._key(grant.vault_id), grant.to_json())
+        self._kr.set_password(self._service, self._key(grant.vault_id), grant.to_json())
 
     def load(self, vault_id: str) -> VaultGrant | None:
-        raw = self._kr.get_password(_KEYRING_SERVICE, self._key(vault_id))
+        raw = self._kr.get_password(self._service, self._key(vault_id))
         if raw is None:
             return None
         return VaultGrant.from_json(raw)
 
     def delete(self, vault_id: str) -> None:
         try:
-            self._kr.delete_password(_KEYRING_SERVICE, self._key(vault_id))
+            self._kr.delete_password(self._service, self._key(vault_id))
         except Exception as exc:
             # ``keyring`` raises PasswordDeleteError when the entry
             # doesn't exist; idempotent delete is more useful.
@@ -192,7 +231,7 @@ class KeyringGrantStore:
         """
         try:
             return self._kr.get_password(
-                _KEYRING_SERVICE, self._key(vault_id),
+                self._service, self._key(vault_id),
             ) is not None
         except Exception:
             # Any keyring backend hiccup → "no grant we can prove" is
@@ -322,10 +361,17 @@ def open_default_grant_store(
     only invoked when the keyring is unavailable, so the file backend's
     expensive provider (in production: PEM read + parse) doesn't run
     on happy-path startup.
+
+    The keyring service name is derived from ``config_dir.name`` so a
+    non-default ``--config-dir`` cannot leak its grant into the
+    canonical install's keyring namespace (suite 0002 test 04 spotted
+    this — the dev twin's vault grant landed under service
+    ``desktop-connector`` instead of ``desktop-connector-dev``).
     """
+    service = _resolve_keyring_service(config_dir)
     try:
-        store = KeyringGrantStore.open_default()
-        log.info("vault_grant.backend.keyring")
+        store = KeyringGrantStore.open_default(service_name=service)
+        log.info("vault_grant.backend.keyring service=%s", service)
         return store
     except KeyringUnavailable as exc:
         log.warning("vault_grant.backend.fallback reason=%s", exc)
@@ -366,8 +412,9 @@ def local_vault_grant_exists(config_dir: Path, vault_id: str) -> bool:
     if not vault_id:
         return False
     canonical = normalize_vault_id(vault_id)
+    service = _resolve_keyring_service(config_dir)
     try:
-        store = KeyringGrantStore.open_default()
+        store = KeyringGrantStore.open_default(service_name=service)
     except KeyringUnavailable:
         store = None
     except Exception:
@@ -394,8 +441,9 @@ def delete_local_grant_artifacts(config_dir: Path, vault_id: str) -> None:
     Missing files (the normal case) are not errors.
     """
     errors: list[tuple[str, BaseException]] = []
+    service = _resolve_keyring_service(config_dir)
     try:
-        KeyringGrantStore.open_default().delete(vault_id)
+        KeyringGrantStore.open_default(service_name=service).delete(vault_id)
     except KeyringUnavailable:
         pass
     except Exception as exc:  # noqa: BLE001

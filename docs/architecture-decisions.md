@@ -74,6 +74,63 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-06 — Vault grant keyring service is per-config, not a hard-coded constant
+
+**Status:** accepted.
+
+**Context.** Suite 0002 test 06 found that test 04's vault grant for
+`QRJCRIE7AXEU` (created by the dev twin running with
+`--config-dir=~/.config/desktop-connector-dev`) had landed in keyring
+service `desktop-connector` — the canonical user's namespace. Root
+cause: `desktop/src/vault_grant.py` had `_KEYRING_SERVICE = "desktop-connector"`
+hard-coded as a module-level constant; `KeyringGrantStore.save` /
+`load` / `delete` / `has_grant` all called the keyring API with that
+constant regardless of which `config_dir` the caller threaded in.
+
+This is the third instance of the same bug shape on 2026-05-06: the
+`auth_token` keyring (fixed earlier via `Config.config_dir.name`
+auto-derivation) and the file-manager XDG scripts dir (fixed via
+config-id markers) had the identical symptom — a non-default
+`--config-dir` reaching into a per-user shared OS resource without a
+per-install discriminator. `Config` was the obvious gateway, but it
+isn't the only place that talks to the keyring; `vault_grant.py`
+opens its own `KeyringGrantStore` independently.
+
+**Decision.** `vault_grant._resolve_keyring_service(config_dir)`
+derives the service name from `Path(config_dir).name`, mirroring
+`Config.__init__`'s logic byte-for-byte. The default install
+(`config_dir.name == "desktop-connector"`) keeps the historical
+service name, so existing user keyrings keep working without
+migration. Non-default config dirs (the harness's `…-dev`, any
+power-user multi-profile setup) get their own service slot. The
+`DC_KEYRING_SERVICE` env var is still honoured as a global override.
+All four free functions (`open_default_grant_store`,
+`local_vault_grant_exists`, `delete_local_grant_artifacts`, plus the
+disconnect path's direct `KeyringGrantStore.open_default()` call)
+thread the resolved service through. The leaked dev grant from
+test 04 was migrated out of `desktop-connector` into
+`desktop-connector-dev` by hand once the fix was in place.
+
+**Alternatives.** (a) Skip the keyring entirely on non-default
+config dirs and force the file fallback — simpler, but loses keyring
+benefits (auto-locking on screen lock, GNOME Keyring's per-app
+visibility) for legitimate multi-profile setups. (b) Take a
+`SecretStore` from `Config` and reuse it instead of opening an
+independent backend — cleaner long-term, but a bigger refactor (the
+two stores have different value shapes today, plus
+`vault_grant` ships a file fallback that `Config`'s store does not).
+(c) The chosen fix — minimal symmetry with the existing per-config
+keyring derivation in `Config`, no migration required for canonical
+installs.
+
+**Anchor.** `desktop/src/vault_grant.py`: `_DEFAULT_KEYRING_SERVICE`,
+`_resolve_keyring_service`, `KeyringGrantStore.__init__` /
+`open_default(service_name=…)`, the `service` argument threaded
+through `open_default_grant_store`, `local_vault_grant_exists`,
+`delete_local_grant_artifacts`. Tests:
+`tests/protocol/test_desktop_vault_grant.py`
+`GrantStoreKeyringServiceIsolationTests` (4 tests).
+
 ### 2026-05-06 — File-manager scripts carry a config-id marker for cross-install isolation
 
 **Status:** accepted.

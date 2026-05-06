@@ -170,7 +170,7 @@ class OpenDefaultGrantStoreTests(unittest.TestCase):
         import src.vault_grant as vault_grant
         original = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
-            lambda cls: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
+            lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
         )
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -188,7 +188,7 @@ class DeleteLocalGrantArtifactsTests(unittest.TestCase):
         import src.vault_grant as vault_grant
         original = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
-            lambda cls: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
+            lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
         )
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -209,7 +209,7 @@ class DeleteLocalGrantArtifactsTests(unittest.TestCase):
         grant = VaultGrant.from_bytes(VAULT_ID, b"\x22" * 32, "bearer")
         store.save(grant)
         original = vault_grant.KeyringGrantStore.open_default
-        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls: store)
+        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls, service_name=None: store)
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 delete_local_grant_artifacts(tmp, VAULT_ID)
@@ -226,7 +226,7 @@ class DeleteLocalGrantArtifactsTests(unittest.TestCase):
         import src.vault_grant as vault_grant
         original = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
-            lambda cls: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
+            lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
         )
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -318,7 +318,7 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         import src.vault_grant as vault_grant
         self._original_open_default = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
-            lambda cls: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
+            lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
         )
 
     def tearDown(self) -> None:
@@ -342,7 +342,7 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         fake = FakeKeyring()
         kr = KeyringGrantStore(fake)
         kr.save(VaultGrant.from_bytes(VAULT_ID, b"\x44" * 32, "bearer"))
-        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls: kr)
+        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls, service_name=None: kr)
         self.assertTrue(local_vault_grant_exists(self.tmpdir, VAULT_ID))
 
     def test_returns_true_when_keyring_has_grant_via_dashed_id(self) -> None:
@@ -353,7 +353,7 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         fake = FakeKeyring()
         kr = KeyringGrantStore(fake)
         kr.save(VaultGrant.from_bytes(VAULT_ID, b"\x44" * 32, "bearer"))
-        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls: kr)
+        vault_grant.KeyringGrantStore.open_default = classmethod(lambda cls, service_name=None: kr)
         self.assertTrue(
             local_vault_grant_exists(self.tmpdir, "ABCD-2345-WXYZ"),
         )
@@ -367,7 +367,7 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         # check rather than propagate.
         import src.vault_grant as vault_grant
         vault_grant.KeyringGrantStore.open_default = classmethod(
-            lambda cls: (_ for _ in ()).throw(RuntimeError("dbus busy"))
+            lambda cls, service_name=None: (_ for _ in ()).throw(RuntimeError("dbus busy"))
         )
         path = fallback_grant_path(self.tmpdir, VAULT_ID)
         path.write_text("opaque envelope", encoding="utf-8")
@@ -385,6 +385,136 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         # No file at fallback path, no keyring entry -> False even
         # though a caller "thought" the vault was real.
         self.assertFalse(local_vault_grant_exists(self.tmpdir, VAULT_ID))
+
+
+class GrantStoreKeyringServiceIsolationTests(unittest.TestCase):
+    """Cross-config isolation: a non-default ``--config-dir`` must
+    write its vault grant into a per-config keyring service so it
+    cannot leak into the canonical install's namespace.
+
+    Suite 0002 test 06 (2026-05-06) caught the dev twin saving
+    ``vault_grant:QRJCRIE7AXEU`` into keyring service
+    ``desktop-connector`` (the canonical user's namespace) instead
+    of ``desktop-connector-dev``. Same shape as the auth_token /
+    file-manager bugs from earlier the same day.
+    """
+
+    def setUp(self) -> None:
+        # Capture and clear any DC_KEYRING_SERVICE env var so the
+        # test exercises the auto-derivation path, not whatever the
+        # operator's shell happens to have set.
+        self._saved_env = os.environ.pop("DC_KEYRING_SERVICE", None)
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fake = FakeKeyring()
+
+        # Patch keyring import so KeyringGrantStore.open_default
+        # picks up our in-memory fake regardless of the host's real
+        # keyring backend. The test still exercises the real
+        # service-name derivation path.
+        import sys as _sys
+        from types import SimpleNamespace
+        from src.vault_grant import _resolve_keyring_service  # noqa: F401
+
+        self._real_keyring_module = _sys.modules.get("keyring")
+        # Fake errors module the import path expects.
+        fake_errors = SimpleNamespace(NoKeyringError=type("NoKeyringError", (Exception,), {}))
+        _sys.modules["keyring"] = self.fake
+        _sys.modules["keyring.errors"] = fake_errors
+
+    def tearDown(self) -> None:
+        import sys as _sys
+        if self._real_keyring_module is not None:
+            _sys.modules["keyring"] = self._real_keyring_module
+        else:
+            _sys.modules.pop("keyring", None)
+        _sys.modules.pop("keyring.errors", None)
+        self._tmp.cleanup()
+        if self._saved_env is not None:
+            os.environ["DC_KEYRING_SERVICE"] = self._saved_env
+
+    def _config_dir(self, name: str) -> Path:
+        d = Path(self._tmp.name) / name
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def test_dev_config_writes_to_dev_keyring_service(self) -> None:
+        canonical_dir = self._config_dir("desktop-connector")
+        dev_dir = self._config_dir("desktop-connector-dev")
+
+        canonical = open_default_grant_store(
+            config_dir=canonical_dir,
+            device_seed_provider=lambda: b"\x10" * 32,
+        )
+        dev = open_default_grant_store(
+            config_dir=dev_dir,
+            device_seed_provider=lambda: b"\x20" * 32,
+        )
+
+        canonical.save(VaultGrant.from_bytes(VAULT_ID, b"\x33" * 32, "canonical-bearer"))
+        dev.save(VaultGrant.from_bytes(VAULT_ID, b"\x44" * 32, "dev-bearer"))
+
+        canonical_keys = {k for (svc, k) in self.fake.store if svc == "desktop-connector"}
+        dev_keys = {k for (svc, k) in self.fake.store if svc == "desktop-connector-dev"}
+
+        self.assertIn(f"vault_grant:{VAULT_ID}", canonical_keys)
+        self.assertIn(f"vault_grant:{VAULT_ID}", dev_keys)
+        # The two services must NOT share a slot — that's the
+        # isolation invariant that broke on 2026-05-06.
+        self.assertEqual(
+            self.fake.store[("desktop-connector", f"vault_grant:{VAULT_ID}")],
+            VaultGrant.from_bytes(VAULT_ID, b"\x33" * 32, "canonical-bearer").to_json(),
+        )
+
+    def test_local_vault_grant_exists_is_per_config(self) -> None:
+        canonical_dir = self._config_dir("desktop-connector")
+        dev_dir = self._config_dir("desktop-connector-dev")
+
+        canonical = open_default_grant_store(
+            config_dir=canonical_dir,
+            device_seed_provider=lambda: b"\x10" * 32,
+        )
+        canonical.save(VaultGrant.from_bytes(VAULT_ID, b"\x33" * 32, "bearer"))
+
+        # Canonical sees its own grant.
+        self.assertTrue(local_vault_grant_exists(canonical_dir, VAULT_ID))
+        # Dev twin must NOT see the canonical install's grant just
+        # because they happen to coexist on the same host.
+        self.assertFalse(local_vault_grant_exists(dev_dir, VAULT_ID))
+
+    def test_delete_local_grant_artifacts_only_touches_own_service(self) -> None:
+        canonical_dir = self._config_dir("desktop-connector")
+        dev_dir = self._config_dir("desktop-connector-dev")
+        canonical = open_default_grant_store(
+            config_dir=canonical_dir,
+            device_seed_provider=lambda: b"\x10" * 32,
+        )
+        canonical.save(VaultGrant.from_bytes(VAULT_ID, b"\x33" * 32, "bearer"))
+
+        # Dev twin disconnects — must not delete the canonical
+        # install's grant out from under it.
+        delete_local_grant_artifacts(dev_dir, VAULT_ID)
+
+        self.assertTrue(
+            local_vault_grant_exists(canonical_dir, VAULT_ID),
+            "dev twin's disconnect deleted canonical's grant",
+        )
+
+    def test_dc_keyring_service_env_overrides_derivation(self) -> None:
+        os.environ["DC_KEYRING_SERVICE"] = "explicit-override"
+        try:
+            store = open_default_grant_store(
+                config_dir=self._config_dir("desktop-connector-dev"),
+                device_seed_provider=lambda: b"\x10" * 32,
+            )
+            store.save(VaultGrant.from_bytes(VAULT_ID, b"\x33" * 32, "bearer"))
+
+            services = {svc for (svc, _) in self.fake.store}
+            self.assertIn("explicit-override", services)
+            self.assertNotIn("desktop-connector", services)
+            self.assertNotIn("desktop-connector-dev", services)
+        finally:
+            os.environ.pop("DC_KEYRING_SERVICE", None)
 
 
 if __name__ == "__main__":
