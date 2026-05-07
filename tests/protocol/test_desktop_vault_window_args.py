@@ -297,13 +297,18 @@ class WindowSignatureSourceTests(unittest.TestCase):
         )
 
     def test_show_vault_browser_accepts_override(self) -> None:
-        source = self._read("desktop/src/windows_vault_browser.py")
+        # The browser is now a package; the entry-point lives in app.py.
+        source = self._read("desktop/src/windows_vault_browser/app.py")
         self.assertIn(
-            "def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -> None:",
+            "def show_vault_browser(\n    config_dir: Path,\n    vault_id_override: str | None = None,\n) -> None:",
             source,
         )
+        # v2 stores the override on the class and binds the resolver as
+        # an instance attribute via lambda, so the body reads
+        # ``self.config`` / ``self.vault_id_override`` instead of the
+        # closure-captured locals v1 used.
         self.assertIn(
-            "return resolve_active_vault_id(config, vault_id_override)",
+            "resolve_active_vault_id(self.config, self.vault_id_override)",
             source,
         )
 

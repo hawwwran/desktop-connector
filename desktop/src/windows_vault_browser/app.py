@@ -1,15 +1,11 @@
-"""v2 Vault browser — structural refactor of windows_vault_browser.py.
+"""Vault browser — structural refactor of the original windows_vault_browser.py.
 
-Closures from v1's ``on_activate`` are lifted onto a ``VaultBrowser``
-class so each piece of state is reachable via ``self.*`` instead of
-captured in a nested function. Pass 1 ports the window shell, the
-async manifest refresh, the breadcrumb, the back/forward stack, and
-the left tree pane. The center file list and right detail pane are
-placeholders until pass 2.
-
-The v1 module stays in place; this v2 entry point is wired through
-the tray's "Open Vault NEW" menu item so both can be exercised side
-by side until parity is verified.
+Closures from the original ``on_activate`` body are lifted onto a
+``VaultBrowser`` class so each piece of state is reachable via
+``self.*`` instead of captured in a nested function. Built up over
+five passes (introduction → file list → detail pane → downloads →
+uploads/delete/quota/resume) verified side-by-side against the
+original module before that module was removed.
 """
 
 from __future__ import annotations
@@ -52,15 +48,17 @@ from .state import BrowserState
 log = logging.getLogger(__name__)
 
 
-def show_vault_browser_v2(
+def show_vault_browser(
     config_dir: Path,
     vault_id_override: str | None = None,
 ) -> None:
-    """Run the v2 vault browser as a subprocess window.
+    """Run the vault browser as a subprocess window.
 
-    Mirrors :func:`show_vault_browser` (v1) so the dispatch in
-    ``windows.py`` and the tray menu can swap between them with no
-    other plumbing changes.
+    ``vault_id_override`` (F-U14): optional 12-char canonical vault id.
+    When present, every per-action ``self._resolve_vault_id()`` call
+    returns this instead of reading ``config['vault']['last_known_id']``.
+    Lets a future multi-vault tray repoint the browser at a specific
+    vault without rewriting config on disk.
     """
     from ..config import Config
 
@@ -148,7 +146,7 @@ class VaultBrowser:
 
         self.win = Adw.ApplicationWindow(
             application=app,
-            title="Vault (NEW)",
+            title="Vault",
             default_width=1040,
             default_height=680,
         )

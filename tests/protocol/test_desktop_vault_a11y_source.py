@@ -35,7 +35,7 @@ ensure_desktop_on_path()
 
 REPO_ROOT = Path(os.path.dirname(__file__) or ".").resolve().parent.parent
 WINDOWS_VAULT_PKG = REPO_ROOT / "desktop" / "src" / "windows_vault"
-WINDOWS_BROWSER = REPO_ROOT / "desktop" / "src" / "windows_vault_browser.py"
+WINDOWS_BROWSER = REPO_ROOT / "desktop" / "src" / "windows_vault_browser" / "app.py"
 WINDOWS_IMPORT = REPO_ROOT / "desktop" / "src" / "windows_vault_import.py"
 
 
