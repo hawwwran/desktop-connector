@@ -256,7 +256,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             poller,
             "_download_and_decrypt_chunk",
             return_value=b"image",
-        ), patch("desktop.src.poller.apply_receive_action", side_effect=record_action) as action:
+        ), patch("desktop.src.receive.flood_summary.apply_receive_action", side_effect=record_action) as action:
             poller._receive_file_transfer(
                 "tid-file",
                 "sender",
@@ -290,7 +290,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             poller,
             "_stream_download_chunk",
             return_value=("ok", b"video"),
-        ), patch("desktop.src.poller.apply_receive_action", side_effect=record_action) as action:
+        ), patch("desktop.src.receive.flood_summary.apply_receive_action", side_effect=record_action) as action:
             poller._receive_streaming_transfer(
                 "tid-stream",
                 "sender",
@@ -314,7 +314,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             poller,
             "_download_and_decrypt_chunk",
             return_value=None,
-        ), patch("desktop.src.poller.apply_receive_action") as action:
+        ), patch("desktop.src.receive.flood_summary.apply_receive_action") as action:
             poller._receive_file_transfer(
                 "tid-fail",
                 "sender",
@@ -339,7 +339,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             "_download_and_decrypt_chunk",
             return_value=b"image",
         ), patch(
-            "desktop.src.poller.apply_receive_action",
+            "desktop.src.receive.flood_summary.apply_receive_action",
             return_value=ReceiveActionResult(ok=False, action_ran=False),
         ):
             poller._receive_file_transfer(
@@ -366,7 +366,7 @@ class ReceiveActionsPollerTests(unittest.TestCase):
             poller,
             "_download_and_decrypt_chunk",
             return_value=b"archive",
-        ), patch("desktop.src.poller.apply_receive_action") as action:
+        ), patch("desktop.src.receive.flood_summary.apply_receive_action") as action:
             poller._receive_file_transfer(
                 "tid-archive",
                 "sender",
