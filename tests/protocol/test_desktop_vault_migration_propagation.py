@@ -97,12 +97,13 @@ class VaultSettingsMigrationTabSourceTests(unittest.TestCase):
     """T9.6 source-pin: settings UI exposes the Migration tab + switch-back."""
 
     def test_migration_tab_renders_current_relay_and_switch_back(self) -> None:
-        source = Path(REPO_ROOT, "desktop/src/windows_vault.py").read_text(
-            encoding="utf-8"
+        pkg = Path(REPO_ROOT, "desktop/src/windows_vault")
+        source = "\n".join(
+            p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py"))
         )
         for needle in (
             'add_tab("migration", "Migration"',
-            "from .vault_migration_propagation import can_switch_back",
+            "from ..vault_migration_propagation import can_switch_back",
             "Switch back to previous relay",
             "Migrate to another relay",
             "vault_previous_relay_url",

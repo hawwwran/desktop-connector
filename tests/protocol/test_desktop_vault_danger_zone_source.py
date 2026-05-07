@@ -34,15 +34,19 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 
-SOURCE = Path(
+PKG_DIR = Path(
     os.path.dirname(__file__) or "."
-).resolve().parent.parent / "desktop" / "src" / "windows_vault.py"
+).resolve().parent.parent / "desktop" / "src" / "windows_vault"
 
 
 class DangerZoneRowsPresentTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.text = SOURCE.read_text(encoding="utf-8")
+        # Post-split: the danger zone lives in tab_danger.py; concatenating
+        # the whole package keeps any cross-tab assertion intact.
+        cls.text = "\n".join(
+            p.read_text(encoding="utf-8") for p in sorted(PKG_DIR.glob("*.py"))
+        )
 
     def test_clear_folder_section_wired(self) -> None:
         """Clear-folder UI references the backend function + typed gate."""

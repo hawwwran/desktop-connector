@@ -34,9 +34,19 @@ ensure_desktop_on_path()
 
 
 REPO_ROOT = Path(os.path.dirname(__file__) or ".").resolve().parent.parent
-WINDOWS_VAULT = REPO_ROOT / "desktop" / "src" / "windows_vault.py"
+WINDOWS_VAULT_PKG = REPO_ROOT / "desktop" / "src" / "windows_vault"
 WINDOWS_BROWSER = REPO_ROOT / "desktop" / "src" / "windows_vault_browser.py"
 WINDOWS_IMPORT = REPO_ROOT / "desktop" / "src" / "windows_vault_import.py"
+
+
+def _read_windows_vault_pkg() -> str:
+    """Concatenate every module under ``windows_vault/`` into one string
+    for the source-pin greppers (the historical monolith was split into
+    a package on 2026-05-07)."""
+    return "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(WINDOWS_VAULT_PKG.glob("*.py"))
+    )
 
 
 class WipeSwitchLossWarningTests(unittest.TestCase):
@@ -44,7 +54,7 @@ class WipeSwitchLossWarningTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.text = WINDOWS_VAULT.read_text(encoding="utf-8")
+        cls.text = _read_windows_vault_pkg()
 
     def test_wipe_warning_uses_warning_css_class(self) -> None:
         """The warning Label belongs to the same CSS family as the
@@ -67,7 +77,7 @@ class AccessibilityLabelBindingTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.text = WINDOWS_VAULT.read_text(encoding="utf-8")
+        cls.text = _read_windows_vault_pkg()
 
     def test_widgets_use_accessible_property_label(self) -> None:
         """Each switch/entry that previously relied on placeholder text

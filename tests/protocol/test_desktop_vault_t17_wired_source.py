@@ -33,7 +33,13 @@ SRC_ROOT = Path(
 class T17DiagnosticsWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.windows_vault = (SRC_ROOT / "windows_vault.py").read_text(encoding="utf-8")
+        # Post-split: the vault settings window lives in a package; tests
+        # that grep the historical monolith now grep the concatenation
+        # of every sibling module.
+        pkg = SRC_ROOT / "windows_vault"
+        cls.windows_vault = "\n".join(
+            p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py"))
+        )
         cls.windows = (SRC_ROOT / "windows.py").read_text(encoding="utf-8")
 
     # ------------------------------------------------------------------

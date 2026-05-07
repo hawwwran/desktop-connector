@@ -286,7 +286,7 @@ class WindowSignatureSourceTests(unittest.TestCase):
         return Path(REPO_ROOT, rel).read_text(encoding="utf-8")
 
     def test_show_vault_main_accepts_override(self) -> None:
-        source = self._read("desktop/src/windows_vault.py")
+        source = self._read("desktop/src/windows_vault/main_window.py")
         self.assertIn(
             "def show_vault_main(config_dir: Path, vault_id_override: str | None = None):",
             source,

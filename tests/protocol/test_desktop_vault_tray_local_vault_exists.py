@@ -150,9 +150,10 @@ class TrayLocalVaultExistsSourcePins(unittest.TestCase):
         # The duplicate helper at windows_vault.py was unreferenced.
         # Asserting it stays gone keeps a future contributor from
         # re-adding it (and accidentally drifting the heuristic).
-        source = Path(
-            REPO_ROOT, "desktop/src/windows_vault.py"
-        ).read_text(encoding="utf-8")
+        pkg = Path(REPO_ROOT, "desktop/src/windows_vault")
+        source = "\n".join(
+            p.read_text(encoding="utf-8") for p in sorted(pkg.glob("*.py"))
+        )
         self.assertNotIn("def _local_vault_exists(config) -> bool:", source)
 
 

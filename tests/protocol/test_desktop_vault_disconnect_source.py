@@ -19,17 +19,25 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _vault_main_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows_vault.py").read_text()
-    start = source.index("def show_vault_main(")
-    end = source.index("def show_vault_onboard(", start)
-    return source[start:end]
+    """Concatenate every module under ``windows_vault/`` *except* the
+    onboarding wizard and the passphrase generator. The post-split
+    layout spreads the recovery / danger / activity / etc. tabs across
+    sibling tab modules; tests that used to grep one giant file now
+    grep the concatenation of those siblings.
+    """
+    pkg = Path(REPO_ROOT, "desktop/src/windows_vault")
+    parts = []
+    for path in sorted(pkg.glob("*.py")):
+        if path.name in ("onboard_window.py", "passphrase_generator.py"):
+            continue
+        parts.append(path.read_text(encoding="utf-8"))
+    return "\n".join(parts)
 
 
 def _vault_onboard_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows_vault.py").read_text()
-    start = source.index("def show_vault_onboard(")
-    end = source.index("def show_vault_passphrase_generator(", start)
-    return source[start:end]
+    return Path(
+        REPO_ROOT, "desktop/src/windows_vault/onboard_window.py",
+    ).read_text(encoding="utf-8")
 
 
 def _vault_runtime_source() -> str:

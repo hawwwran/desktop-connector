@@ -34,7 +34,7 @@ class VaultWizardOrderSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = Path(
-            REPO_ROOT, "desktop/src/windows_vault.py",
+            REPO_ROOT, "desktop/src/windows_vault/onboard_window.py",
         ).read_text()
 
     def test_wizard_uses_prepare_plus_publish_split(self) -> None:
@@ -93,7 +93,7 @@ class VaultWizardOrderSourceTests(unittest.TestCase):
         # exactly when grant_saved is true but published is false.
         for text in (
             "state.get(\"grant_saved\") and not state.get(\"published\")",
-            "from .vault_grant import delete_local_grant_artifacts",
+            "from ..vault_grant import delete_local_grant_artifacts",
             "delete_local_grant_artifacts(Path(config.config_dir), state[\"vault_id\"])",
         ):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")
