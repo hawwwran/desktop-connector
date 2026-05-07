@@ -29,7 +29,9 @@ from ..brand import (  # noqa: E402
     apply_pointer_cursors,
     apply_theme_mode_from_config_dir,
 )
+from ..vault_binding_lifecycle import SyncCancelledError  # noqa: E402
 from ..vault_browser_model import list_folder, list_versions  # noqa: E402
+from ..vault_download import previous_version_filename  # noqa: E402
 from ..vault_error_messages import humanize  # noqa: E402
 from ..vault_local_index import VaultLocalIndex  # noqa: E402
 from ..vault_runtime import (  # noqa: E402
@@ -102,11 +104,25 @@ class VaultBrowser:
         self.back_btn: Gtk.Button | None = None
         self.forward_btn: Gtk.Button | None = None
         self.refresh_btn: Gtk.Button | None = None
+        self.versions_btn: Gtk.Button | None = None
+        self.download_btn: Gtk.Button | None = None
+        self.show_deleted_toggle: Gtk.CheckButton | None = None
         self.breadcrumb: Gtk.Label | None = None
         self.status_label: Gtk.Label | None = None
+        self.progress_box: Gtk.Box | None = None
+        self.progress_bar: Gtk.ProgressBar | None = None
+        self.cancel_btn: Gtk.Button | None = None
         self.tree_box: Gtk.Box | None = None
         self.list_grid: Gtk.Grid | None = None
         self.detail_box: Gtk.Box | None = None
+
+        # F-U03: workers running long-flow operations (download / etc)
+        # register their ``threading.Event`` here before starting and
+        # clear it in their ``finally``. The Cancel button reads the
+        # slot at click time and sets the event; backend hooks observe
+        # ``should_continue() == False`` at the next checkpoint and
+        # raise ``SyncCancelledError``.
+        self._active_cancel: threading.Event | None = None
 
     # ------------------------------------------------------------------ run
     def run(self) -> None:
@@ -161,13 +177,40 @@ class VaultBrowser:
         self.back_btn = Gtk.Button(label="Back", css_classes=["pill"])
         self.forward_btn = Gtk.Button(label="Forward", css_classes=["pill"])
         self.refresh_btn = Gtk.Button(label="Refresh", css_classes=["pill"])
+        self.versions_btn = Gtk.Button(label="Versions", css_classes=["pill"])
+        self.download_btn = Gtk.Button(
+            label="Download", css_classes=["pill", "suggested-action"],
+        )
 
         self.back_btn.connect("clicked", self._on_back_clicked)
         self.forward_btn.connect("clicked", self._on_forward_clicked)
         self.refresh_btn.connect("clicked", lambda _btn: self._refresh_manifest_async())
+        self.download_btn.connect("clicked", self._choose_download_destination)
 
-        for button in (self.back_btn, self.forward_btn, self.refresh_btn):
+        self.versions_btn.set_sensitive(False)
+        self.versions_btn.set_tooltip_text("Choose a version below to download")
+        self.download_btn.set_sensitive(False)
+        self.download_btn.set_tooltip_text(
+            "Download selected file or current folder",
+        )
+
+        for button in (
+            self.back_btn,
+            self.forward_btn,
+            self.refresh_btn,
+            self.versions_btn,
+            self.download_btn,
+        ):
             self.action_bar.append(button)
+
+        self.show_deleted_toggle = Gtk.CheckButton(label="Show deleted")
+        self.show_deleted_toggle.set_tooltip_text(
+            "Reveal soft-deleted files; they stay until eviction or "
+            "retention claims them.",
+        )
+        self.show_deleted_toggle.connect("toggled", self._on_show_deleted_toggled)
+        self.action_bar.append(self.show_deleted_toggle)
+
         self._update_nav_buttons()
 
     def _build_breadcrumb_and_status(self) -> None:
@@ -178,6 +221,15 @@ class VaultBrowser:
 
         self.status_label = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
         self.outer.append(self.status_label)
+
+        self.progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.progress_box.set_visible(False)
+        self.progress_bar = Gtk.ProgressBar(show_text=True, hexpand=True)
+        self.progress_box.append(self.progress_bar)
+        self.cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
+        self.cancel_btn.connect("clicked", self._on_cancel_clicked)
+        self.progress_box.append(self.cancel_btn)
+        self.outer.append(self.progress_box)
 
     def _build_panes(self) -> None:
         assert self.outer is not None
@@ -280,9 +332,471 @@ class VaultBrowser:
         self._update_nav_buttons()
         self._render_tree()
         self._render_file_list()
+        # Download / Versions sensitivity is owned by ``_render_detail``
+        # itself (mirrors v1 lines 305 / 332 / 299 / 414) — calling
+        # render_detail here reapplies the right state for the current
+        # selection-or-folder context.
         self._render_detail(self.state.selected_file)
         if message is not None:
             self._set_status(message, css_class)
+
+    # ------------------------------------------------------------------ cancel + progress
+    def _arm_cancel(self, event: threading.Event) -> None:
+        """Worker calls this just before kicking off a long-running backend.
+
+        The Cancel button becomes clickable; on click it sets the
+        event and the backend's next ``should_continue`` checkpoint
+        raises ``SyncCancelledError``.
+        """
+        self._active_cancel = event
+        if self.cancel_btn is not None:
+            self.cancel_btn.set_label("Cancel")
+            self.cancel_btn.set_sensitive(True)
+            self.cancel_btn.set_visible(True)
+        if self.progress_box is not None:
+            self.progress_box.set_visible(True)
+
+    def _disarm_cancel(self) -> None:
+        """Worker calls this in its ``finally`` (via ``GLib.idle_add``)."""
+        self._active_cancel = None
+        if self.progress_box is not None:
+            self.progress_box.set_visible(False)
+        if self.cancel_btn is not None:
+            self.cancel_btn.set_label("Cancel")
+            self.cancel_btn.set_sensitive(True)
+            self.cancel_btn.set_visible(True)
+
+    def _on_cancel_clicked(self, _btn: Gtk.Button) -> None:
+        event = self._active_cancel
+        if event is None:
+            return
+        event.set()
+        if self.cancel_btn is not None:
+            self.cancel_btn.set_sensitive(False)
+            self.cancel_btn.set_label("Cancelling…")
+
+    def _on_show_deleted_toggled(self, button: Gtk.CheckButton) -> None:
+        self.state.show_deleted = bool(button.get_active())
+        # Re-render the file list to apply the deleted filter; tree
+        # pane stays unchanged (it only shows folders).
+        self._render_file_list()
+
+    # ------------------------------------------------------------------ download paths
+    @staticmethod
+    def _download_folder_name(path: str) -> str:
+        parts = [
+            part for part in str(path).replace("\\", "/").split("/")
+            if part and part != "."
+        ]
+        return parts[-1] if parts else "Vault"
+
+    def _choose_download_destination(self, _btn: Gtk.Button) -> None:
+        file_row = self.state.selected_file
+        if not file_row and not self.state.path:
+            self._set_status(
+                "Open a remote folder before downloading a folder.", "error",
+            )
+            return
+        if not file_row:
+            file_dialog = Gtk.FileDialog()
+            file_dialog.set_title("Download folder")
+
+            def on_folder_chosen(file_dialog, result) -> None:
+                try:
+                    gio_file = file_dialog.select_folder_finish(result)
+                except GLib.Error:
+                    return
+                if gio_file is None:
+                    return
+                path = gio_file.get_path()
+                if not path:
+                    self._set_status("Choose a local folder destination.", "error")
+                    return
+                destination = (
+                    Path(path) / self._download_folder_name(str(self.state.path))
+                )
+                if destination.exists():
+                    self._prompt_existing_destination(destination, is_folder=True)
+                else:
+                    self._start_download(destination, "fail")
+
+            file_dialog.select_folder(parent=self.win, callback=on_folder_chosen)
+            return
+
+        file_dialog = Gtk.FileDialog()
+        file_dialog.set_title("Download file")
+        file_dialog.set_initial_name(
+            str(file_row.get("name") or "vault-download"),
+        )
+
+        def on_destination_chosen(file_dialog, result) -> None:
+            try:
+                gio_file = file_dialog.save_finish(result)
+            except GLib.Error:
+                return
+            if gio_file is None:
+                return
+            path = gio_file.get_path()
+            if not path:
+                self._set_status("Choose a local file destination.", "error")
+                return
+            destination = Path(path)
+            if destination.exists():
+                self._prompt_existing_destination(destination)
+            else:
+                self._start_download(destination, "fail")
+
+        file_dialog.save(parent=self.win, callback=on_destination_chosen)
+
+    def _prompt_existing_destination(
+        self, destination: Path, *, is_folder: bool = False,
+    ) -> None:
+        dlg = Adw.AlertDialog(
+            heading="Folder exists" if is_folder else "File exists",
+            body=(
+                "A folder with this name already exists. Overwrite replaces matching "
+                "files but keeps unrelated local files."
+                if is_folder
+                else "Choose how to handle the selected destination."
+            ),
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("keep_both", "Keep both")
+        dlg.add_response(
+            "overwrite", "Overwrite matching files" if is_folder else "Overwrite",
+        )
+        dlg.set_default_response("keep_both")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("overwrite", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_dialog, response: str) -> None:
+            if response == "overwrite":
+                self._start_download(destination, "overwrite")
+            elif response == "keep_both":
+                self._start_download(destination, "keep_both")
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
+    def _start_download(self, destination: Path, existing_policy: str) -> None:
+        file_row = self.state.selected_file
+        folder_path = str(self.state.path)
+        is_folder_download = file_row is None
+        if is_folder_download and not folder_path:
+            self._set_status(
+                "Open a remote folder before downloading a folder.", "error",
+            )
+            return
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        selected_path = (
+            folder_path if is_folder_download else str(file_row.get("path", ""))
+        )
+        download_label = "folder" if is_folder_download else selected_path
+        if self.download_btn is not None:
+            self.download_btn.set_sensitive(False)
+        cancel_event = threading.Event()
+        self._arm_cancel(cancel_event)
+        if self.progress_bar is not None:
+            self.progress_bar.set_fraction(0.0)
+            self.progress_bar.set_text("Preparing download...")
+        self._set_status(f"Downloading {download_label}...")
+
+        def report_progress(progress) -> None:
+            def update_progress() -> bool:
+                if self.progress_bar is None:
+                    return False
+                total = max(1, int(progress.total_chunks))
+                fraction = (
+                    1.0 if progress.phase == "done"
+                    else progress.completed_chunks / total
+                )
+                self.progress_bar.set_fraction(max(0.0, min(1.0, fraction)))
+                self.progress_bar.set_text(
+                    f"{progress.completed_chunks}/{progress.total_chunks} chunks"
+                )
+                return False
+
+            GLib.idle_add(update_progress)
+
+        def worker() -> None:
+            try:
+                from ..vault_download import (
+                    default_vault_download_cache_dir,
+                    download_folder,
+                    download_latest_file,
+                )
+
+                self.config.reload()
+                relay = create_vault_relay(self.config)
+                vault = open_local_vault_from_grant(
+                    self.config_dir, self.config, vault_id,
+                )
+                try:
+                    current_manifest = vault.fetch_manifest(
+                        relay, local_index=self.local_index,
+                    )
+                    if is_folder_download:
+                        final_path = download_folder(
+                            vault=vault,
+                            relay=relay,
+                            manifest=current_manifest,
+                            path=selected_path,
+                            destination=destination,
+                            existing_policy=existing_policy,
+                            chunk_cache_dir=default_vault_download_cache_dir(),
+                            progress=report_progress,
+                        )
+                    else:
+                        final_path = download_latest_file(
+                            vault=vault,
+                            relay=relay,
+                            manifest=current_manifest,
+                            path=selected_path,
+                            destination=destination,
+                            existing_policy=existing_policy,
+                            chunk_cache_dir=default_vault_download_cache_dir(),
+                            progress=report_progress,
+                            should_continue=lambda: not cancel_event.is_set(),
+                        )
+                finally:
+                    vault.close()
+            except SyncCancelledError:
+                def cancelled() -> bool:
+                    self._disarm_cancel()
+                    if self.download_btn is not None:
+                        self.download_btn.set_sensitive(
+                            self.state.selected_file is not None,
+                        )
+                    self._set_status(f"Download cancelled: {download_label}.")
+                    return False
+                GLib.idle_add(cancelled)
+                return
+            except Exception as exc:
+                error_message = humanize(exc)
+
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    if self.download_btn is not None:
+                        self.download_btn.set_sensitive(
+                            bool(self.state.selected_file) or bool(self.state.path),
+                        )
+                    self._set_status(
+                        f"Download failed: {error_message}", "error",
+                    )
+                    return False
+
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                self.state.manifest = current_manifest
+                self._disarm_cancel()
+                if self.download_btn is not None:
+                    self.download_btn.set_sensitive(
+                        bool(self.state.selected_file) or bool(self.state.path),
+                    )
+                noun = "folder" if is_folder_download else "file"
+                self._set_status(f"Downloaded {noun} to {final_path}.", "success")
+                return False
+
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _choose_version_destination(self, file_row: dict, version: dict) -> None:
+        base_name = str(file_row.get("name") or "vault-download")
+        initial_name = previous_version_filename(base_name, version)
+
+        file_dialog = Gtk.FileDialog()
+        file_dialog.set_title("Download previous version")
+        file_dialog.set_initial_name(initial_name)
+
+        def on_destination_chosen(file_dialog, result) -> None:
+            try:
+                gio_file = file_dialog.save_finish(result)
+            except GLib.Error:
+                return
+            if gio_file is None:
+                return
+            path = gio_file.get_path()
+            if not path:
+                self._set_status("Choose a local file destination.", "error")
+                return
+            destination = Path(path)
+            if destination.exists():
+                self._prompt_existing_version_destination(file_row, version, destination)
+            else:
+                self._start_version_download(file_row, version, destination, "fail")
+
+        file_dialog.save(parent=self.win, callback=on_destination_chosen)
+
+    def _prompt_existing_version_destination(
+        self, file_row: dict, version: dict, destination: Path,
+    ) -> None:
+        dlg = Adw.AlertDialog(
+            heading="Version file exists",
+            body=(
+                "A file with this version's side-path name already exists. "
+                "Choose how to handle it — the current file is never overwritten."
+            ),
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("keep_both", "Keep both")
+        dlg.add_response("overwrite", "Overwrite")
+        dlg.set_default_response("keep_both")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("overwrite", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_dialog, response: str) -> None:
+            if response == "overwrite":
+                self._start_version_download(
+                    file_row, version, destination, "overwrite",
+                )
+            elif response == "keep_both":
+                self._start_version_download(
+                    file_row, version, destination, "keep_both",
+                )
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
+    def _start_version_download(
+        self,
+        file_row: dict,
+        version: dict,
+        destination: Path,
+        existing_policy: str,
+    ) -> None:
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        file_path = str(file_row.get("path") or "")
+        version_id = str(version.get("version_id") or "")
+        if not file_path or not version_id:
+            self._set_status("Cannot download this version.", "error")
+            return
+
+        label = file_row.get("name") or file_path
+        modified = format_local(version.get("modified")) or "?"
+        if self.download_btn is not None:
+            self.download_btn.set_sensitive(False)
+        if self.versions_btn is not None:
+            self.versions_btn.set_sensitive(False)
+        cancel_event = threading.Event()
+        self._arm_cancel(cancel_event)
+        if self.progress_bar is not None:
+            self.progress_bar.set_fraction(0.0)
+            self.progress_bar.set_text("Preparing version download...")
+        self._set_status(f"Downloading {label} (version {modified})...")
+
+        def report_progress(progress) -> None:
+            def update_progress() -> bool:
+                if self.progress_bar is None:
+                    return False
+                total = max(1, int(progress.total_chunks))
+                fraction = (
+                    1.0 if progress.phase == "done"
+                    else progress.completed_chunks / total
+                )
+                self.progress_bar.set_fraction(max(0.0, min(1.0, fraction)))
+                self.progress_bar.set_text(
+                    f"{progress.completed_chunks}/{progress.total_chunks} chunks"
+                )
+                return False
+
+            GLib.idle_add(update_progress)
+
+        def worker() -> None:
+            try:
+                from ..vault_download import (
+                    default_vault_download_cache_dir,
+                    download_version,
+                )
+
+                self.config.reload()
+                relay = create_vault_relay(self.config)
+                vault = open_local_vault_from_grant(
+                    self.config_dir, self.config, vault_id,
+                )
+                try:
+                    current_manifest = vault.fetch_manifest(
+                        relay, local_index=self.local_index,
+                    )
+                    final_path = download_version(
+                        vault=vault,
+                        relay=relay,
+                        manifest=current_manifest,
+                        path=file_path,
+                        version_id=version_id,
+                        destination=destination,
+                        existing_policy=existing_policy,
+                        chunk_cache_dir=default_vault_download_cache_dir(),
+                        progress=report_progress,
+                        should_continue=lambda: not cancel_event.is_set(),
+                    )
+                finally:
+                    vault.close()
+            except SyncCancelledError:
+                def cancelled() -> bool:
+                    self._disarm_cancel()
+                    if self.download_btn is not None:
+                        self.download_btn.set_sensitive(
+                            bool(self.state.selected_file) or bool(self.state.path),
+                        )
+                    if self.versions_btn is not None:
+                        self.versions_btn.set_sensitive(
+                            bool(self.state.selected_file),
+                        )
+                    self._set_status(f"Version download cancelled: {label}.")
+                    return False
+                GLib.idle_add(cancelled)
+                return
+            except Exception as exc:
+                error_message = humanize(exc)
+
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    if self.download_btn is not None:
+                        self.download_btn.set_sensitive(
+                            bool(self.state.selected_file) or bool(self.state.path),
+                        )
+                    if self.versions_btn is not None:
+                        self.versions_btn.set_sensitive(
+                            bool(self.state.selected_file),
+                        )
+                    self._set_status(
+                        f"Version download failed: {error_message}", "error",
+                    )
+                    return False
+
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                self.state.manifest = current_manifest
+                self._disarm_cancel()
+                if self.download_btn is not None:
+                    self.download_btn.set_sensitive(
+                        bool(self.state.selected_file) or bool(self.state.path),
+                    )
+                if self.versions_btn is not None:
+                    self.versions_btn.set_sensitive(
+                        bool(self.state.selected_file),
+                    )
+                self._set_status(
+                    f"Downloaded version to {final_path}.", "success",
+                )
+                return False
+
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _render_tree(self) -> None:
         if self.tree_box is None:
@@ -416,12 +930,19 @@ class VaultBrowser:
         if self.detail_box is None:
             return
         self._clear_box(self.detail_box)
+        # v1 line 299: clear Versions sensitivity at the top of every
+        # render; the versions section flips it back on if/when it
+        # finds history. Same shape preserved here.
+        if self.versions_btn is not None:
+            self.versions_btn.set_sensitive(False)
 
         if not file_row:
             self.detail_box.append(Gtk.Label(
                 label="Details", xalign=0, css_classes=["title-3"],
             ))
             current_path = str(self.state.path)
+            if self.download_btn is not None:
+                self.download_btn.set_sensitive(bool(current_path))
             if current_path:
                 self.detail_box.append(Gtk.Label(
                     label="Current folder",
@@ -448,6 +969,9 @@ class VaultBrowser:
                 css_classes=["dim-label"],
             ))
             return
+        # File row branch: download is always available (v1 line 332).
+        if self.download_btn is not None:
+            self.download_btn.set_sensitive(True)
 
         heading_label = Gtk.Label(
             label=str(file_row.get("name", "")) or "(unnamed)",
@@ -530,6 +1054,12 @@ class VaultBrowser:
             ))
             return
 
+        # v1 line 414: at least one version → enable the Versions
+        # toolbar button so its tooltip ("Choose a version below…")
+        # is reachable.
+        if self.versions_btn is not None:
+            self.versions_btn.set_sensitive(True)
+
         grid = Gtk.Grid(column_spacing=12, row_spacing=6)
         self.detail_box.append(grid)
         for col, header in enumerate(
@@ -542,14 +1072,18 @@ class VaultBrowser:
 
         entry_deleted = bool(file_row.get("deleted"))
         for row_index, version in enumerate(versions, start=1):
-            # Per-version action buttons (download icon + Restore as
-            # current) are placeholder-disabled in pass 3; pass 4
-            # wires them to ``choose_version_destination`` and
-            # ``_confirm_restore_version`` respectively.
+            # Per-version download icon — pass 4 wires this. Restore
+            # button below stays placeholder-disabled until pass 5.
             download_icon_btn = Gtk.Button.new_from_icon_name("document-save-symbolic")
             download_icon_btn.add_css_class("flat")
-            download_icon_btn.set_tooltip_text("Download — wired in v2 pass 4")
-            download_icon_btn.set_sensitive(False)
+            download_icon_btn.set_tooltip_text("Download this version")
+            download_icon_btn.connect(
+                "clicked",
+                lambda _b, v=dict(version), f=dict(file_row):
+                    self._choose_version_destination(f, v),
+            )
+            if version.get("is_current") and not entry_deleted:
+                download_icon_btn.set_sensitive(False)
             grid.attach(download_icon_btn, 0, row_index, 1, 1)
 
             modified = format_local(version.get("modified")) or "-"
