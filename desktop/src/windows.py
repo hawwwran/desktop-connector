@@ -34,6 +34,7 @@ from .windows_pairing import show_pairing
 from .windows_send import show_send_files
 from .windows_settings import show_settings
 from .windows_vault_browser import show_vault_browser
+from .windows_vault_browser_v2 import show_vault_browser_v2
 from .windows_vault_import import show_vault_import
 from .windows_vault import (
     show_vault_main,
@@ -50,7 +51,7 @@ def main():
             "send-files", "settings", "history", "pairing",
             "find-phone", "locate-alert", "onboarding",
             "secret-storage-warning",
-            "vault-main", "vault-browser", "vault-import",
+            "vault-main", "vault-browser", "vault-browser-v2", "vault-import",
             "vault-onboard", "vault-passphrase-generator",
         ],
     )
@@ -102,6 +103,8 @@ def main():
         show_vault_main(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-browser":
         show_vault_browser(config_dir, vault_id_override=vault_id_override)
+    elif args.window == "vault-browser-v2":
+        show_vault_browser_v2(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-import":
         show_vault_import(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-onboard":

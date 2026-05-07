@@ -91,6 +91,14 @@ class VaultSubmenuMixin:
                 self._spawn_vault_browser,
                 visible=lambda _: self._vault_submenu_entry_visible("open_vault"),
             ),
+            # Side-by-side v2 entry while we structurally refactor the
+            # browser. Both items appear together; we'll drop the v1
+            # one once the user signs off on parity.
+            pystray.MenuItem(
+                "Open Vault NEW…",
+                self._spawn_vault_browser_v2,
+                visible=lambda _: self._vault_submenu_entry_visible("open_vault"),
+            ),
             pystray.MenuItem(
                 "Sync now",
                 self._vault_sync_now_stub,
@@ -131,6 +139,9 @@ class VaultSubmenuMixin:
 
     def _spawn_vault_browser(self, *_) -> None:
         self._open_gtk4_window("vault-browser")
+
+    def _spawn_vault_browser_v2(self, *_) -> None:
+        self._open_gtk4_window("vault-browser-v2")
 
     def _vault_sync_now_stub(self, *_) -> None:
         # F-U20: surface where the real "Sync now" lives so the click
