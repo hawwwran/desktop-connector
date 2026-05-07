@@ -1,9 +1,8 @@
 """Vault domain class — desktop-side vault lifecycle.
 
-T3.1 deliverable: a single class that wraps the create / open / close
-flow on top of ``vault_crypto`` and a ``RelayProtocol`` abstraction.
-HTTP plumbing lives in ``api_client.py``; this module is decoupled so
-tests pass a fake relay.
+Wraps create / open / close on top of ``vault_crypto`` and a
+``RelayProtocol`` abstraction. HTTP plumbing lives in ``api_client``;
+this module is decoupled so tests pass a fake relay.
 
 Lifecycle
 ---------
@@ -46,11 +45,9 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import secrets
-from typing import Protocol
 
-from .vault_crypto import (
+from ..vault_crypto import (
     DefaultVaultCrypto,
     VaultCrypto,
     aead_decrypt,
@@ -60,21 +57,20 @@ from .vault_crypto import (
     build_manifest_aad,
     build_manifest_envelope,
     build_recovery_aad,
-    build_recovery_envelope,
     derive_recovery_wrap_key,
     derive_subkey,
     normalize_vault_id,
 )
-from .vault_manifest import (
-    add_remote_folder as manifest_add_remote_folder,
+from ..vault_manifest import (
     assert_publishable_revision,
     canonical_manifest_json,
-    generate_remote_folder_id,
     make_manifest,
-    make_remote_folder,
     normalize_manifest_plaintext,
-    rename_remote_folder as manifest_rename_remote_folder,
 )
+from .canonical import _canonical_json, _now_rfc3339
+from .ids import _generate_id_v1, _generate_vault_id, _genesis_fingerprint_hex
+from .protocols import RelayProtocol
+from .remote_folders import RemoteFoldersMixin
 
 log = logging.getLogger(__name__)
 
@@ -84,73 +80,8 @@ log = logging.getLogger(__name__)
 # we duplicate the constant. Mismatch with crypto.CHUNK_SIZE is a bug.
 VAULT_CHUNK_SIZE = 2 * 1024 * 1024
 
-# Reduced Argon2id cost for tests. Production defaults live in
-# vault_crypto.argon2id_kdf and the recovery flow (m=128 MiB, t=4).
-# Tests pass these via the cost overrides.
 
-# Random portions of the locked ID alphabets.
-_BASE32_LOWER = "abcdefghijklmnopqrstuvwxyz234567"
-_BASE32_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-
-
-class RelayProtocol(Protocol):
-    """Subset of the relay API surface that the Vault class needs.
-
-    Production wires this to ``api_client.ApiClient`` (or a thin
-    wrapper around it); tests pass a fake. Methods take primitive
-    types so the protocol stays agnostic to HTTP transport.
-    """
-
-    def create_vault(
-        self,
-        vault_id: str,
-        vault_access_token_hash: bytes,
-        encrypted_header: bytes,
-        header_hash: str,
-        initial_manifest_ciphertext: bytes,
-        initial_manifest_hash: str,
-    ) -> dict: ...
-
-    def get_header(
-        self,
-        vault_id: str,
-        vault_access_secret: str,
-    ) -> dict: ...
-
-    def get_manifest(
-        self,
-        vault_id: str,
-        vault_access_secret: str,
-    ) -> dict: ...
-
-    def put_manifest(
-        self,
-        vault_id: str,
-        vault_access_secret: str,
-        *,
-        expected_current_revision: int,
-        new_revision: int,
-        parent_revision: int,
-        manifest_hash: str,
-        manifest_ciphertext: bytes,
-    ) -> dict: ...
-
-    def batch_head_chunks(
-        self,
-        vault_id: str,
-        vault_access_secret: str,
-        chunk_ids: list[str],
-    ) -> dict: ...
-
-    def get_chunk(
-        self,
-        vault_id: str,
-        vault_access_secret: str,
-        chunk_id: str,
-    ) -> bytes: ...
-
-
-class Vault:
+class Vault(RemoteFoldersMixin):
     """Open vault state on the desktop side.
 
     Holds the master key in memory; ``close()`` zeros it. Construct
@@ -643,108 +574,6 @@ class Vault:
             local_index.refresh_remote_folders_cache(normalized)
         return normalized
 
-    def add_remote_folder(
-        self,
-        relay: RelayProtocol,
-        *,
-        display_name: str,
-        ignore_patterns: list[str],
-        author_device_id: str,
-        created_at: str | None = None,
-        remote_folder_id: str | None = None,
-        local_index=None,
-    ) -> dict:
-        """Fetch head, append one remote folder, and publish a new revision."""
-        name = str(display_name).strip()
-        if not name:
-            raise ValueError("folder name is required")
-
-        current = self.fetch_manifest(relay, local_index=local_index)
-        parent_revision = int(current["revision"])
-        timestamp = created_at or _now_rfc3339()
-        next_manifest = dict(current)
-        next_manifest["revision"] = parent_revision + 1
-        next_manifest["parent_revision"] = parent_revision
-        next_manifest["created_at"] = timestamp
-        next_manifest["author_device_id"] = str(author_device_id)
-
-        folder = make_remote_folder(
-            remote_folder_id=remote_folder_id or generate_remote_folder_id(),
-            display_name_enc=name,
-            created_at=timestamp,
-            created_by_device_id=str(author_device_id),
-            ignore_patterns=ignore_patterns,
-        )
-        updated = manifest_add_remote_folder(next_manifest, folder)
-        return self.publish_manifest(relay, updated, local_index=local_index)
-
-    def rename_remote_folder(
-        self,
-        relay: RelayProtocol,
-        *,
-        remote_folder_id: str,
-        new_display_name: str,
-        author_device_id: str,
-        created_at: str | None = None,
-        local_index=None,
-    ) -> dict:
-        """Fetch head, flip one folder's display_name_enc, CAS-publish (T4.5)."""
-        name = str(new_display_name).strip()
-        if not name:
-            raise ValueError("folder name is required")
-
-        current = self.fetch_manifest(relay, local_index=local_index)
-        parent_revision = int(current["revision"])
-        timestamp = created_at or _now_rfc3339()
-        next_manifest = dict(current)
-        next_manifest["revision"] = parent_revision + 1
-        next_manifest["parent_revision"] = parent_revision
-        next_manifest["created_at"] = timestamp
-        next_manifest["author_device_id"] = str(author_device_id)
-
-        updated = manifest_rename_remote_folder(next_manifest, remote_folder_id, name)
-        return self.publish_manifest(relay, updated, local_index=local_index)
-
-    def update_remote_folder_settings(
-        self,
-        relay: RelayProtocol,
-        *,
-        remote_folder_id: str,
-        author_device_id: str,
-        new_display_name: str | None = None,
-        ignore_patterns: list[str] | None = None,
-        created_at: str | None = None,
-        local_index=None,
-    ) -> dict:
-        """Fetch head, edit display_name_enc and/or ignore_patterns, CAS-publish.
-
-        Used by the Folders tab's Configure dialog so the user can
-        change the folder's name and ignore patterns after creation —
-        previously the patterns were locked in at first init.
-        """
-        from .vault_manifest import update_remote_folder_settings as _update
-
-        if new_display_name is None and ignore_patterns is None:
-            raise ValueError(
-                "update_remote_folder_settings: nothing to change",
-            )
-
-        current = self.fetch_manifest(relay, local_index=local_index)
-        parent_revision = int(current["revision"])
-        timestamp = created_at or _now_rfc3339()
-        next_manifest = dict(current)
-        next_manifest["revision"] = parent_revision + 1
-        next_manifest["parent_revision"] = parent_revision
-        next_manifest["created_at"] = timestamp
-        next_manifest["author_device_id"] = str(author_device_id)
-
-        updated = _update(
-            next_manifest, remote_folder_id,
-            new_display_name=new_display_name,
-            ignore_patterns=ignore_patterns,
-        )
-        return self.publish_manifest(relay, updated, local_index=local_index)
-
     # ---------------------------------------------------------------- decryption helpers
 
     def decrypt_manifest(self, *, local_index=None) -> dict:
@@ -753,7 +582,7 @@ class Vault:
 
         Raises ``ValueError`` if the vault is closed.
         """
-        from .vault_browser_model import decrypt_manifest
+        from ..vault_browser_model import decrypt_manifest
 
         manifest = decrypt_manifest(self, self._manifest_ciphertext)
         if local_index is not None:
@@ -795,367 +624,3 @@ class Vault:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
-
-
-# ---------------------------------------------------------------- helpers
-
-
-def _generate_vault_id() -> str:
-    """Random 12-char base32 (uppercase) vault id, undashed."""
-    raw = secrets.token_bytes(15)
-    out = []
-    bits = 0
-    buf = 0
-    for byte in raw:
-        buf = (buf << 8) | byte
-        bits += 8
-        while bits >= 5:
-            bits -= 5
-            out.append(_BASE32_UPPER[(buf >> bits) & 0x1f])
-    return "".join(out[:12])
-
-
-def _generate_id_v1(prefix: str) -> str:
-    """``<prefix>_v1_<24 base32 lowercase>`` per formats §3.3."""
-    raw = secrets.token_bytes(15)
-    out = []
-    bits = 0
-    buf = 0
-    for byte in raw:
-        buf = (buf << 8) | byte
-        bits += 8
-        while bits >= 5:
-            bits -= 5
-            out.append(_BASE32_LOWER[(buf >> bits) & 0x1f])
-    return f"{prefix}_v1_" + "".join(out[:24])
-
-
-def _genesis_fingerprint_hex(master_key: bytes) -> str:
-    """``HMAC-SHA256(master_key, "dc-vault-v1/genesis-fingerprint")[0:16]`` per formats §8.1."""
-    import hmac
-    mac = hmac.new(master_key, b"dc-vault-v1/genesis-fingerprint", hashlib.sha256).digest()
-    return mac[:16].hex()
-
-
-def _canonical_json(obj: dict) -> bytes:
-    """v1 stdlib-canonical JSON (formats §17): sorted keys, `(,:)`
-    separators, default ASCII-only `\\uXXXX` escaping for non-ASCII.
-    Strict subset of RFC 8785; chosen so the desktop and a PHP/etc.
-    re-implementer can round-trip without an external library. v1
-    plaintext uses no floats — see formats §17."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def _now_rfc3339() -> str:
-    """RFC 3339 ms-precision UTC timestamp."""
-    import datetime
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
-
-
-# ---------------------------------------------------------------- recovery kit
-
-
-def vault_id_dashed(vault_id_undashed: str) -> str:
-    """``ABCD2345WXYZ`` → ``ABCD-2345-WXYZ`` for display + filenames."""
-    v = vault_id_undashed
-    if len(v) == 12:
-        return f"{v[0:4]}-{v[4:8]}-{v[8:12]}"
-    return v
-
-
-def recovery_kit_path(config_dir, vault_id: str):
-    """Resolve the on-disk path for a vault's recovery kit per
-    formats §12.5: ``<vault-id-with-dashes>.dc-vault-recovery``.
-    """
-    from pathlib import Path
-    return Path(config_dir) / f"{vault_id_dashed(vault_id)}.dc-vault-recovery"
-
-
-def recovery_envelope_meta_to_json(meta: dict) -> dict:
-    """Serialize non-secret recovery-envelope metadata for config.json."""
-    return {
-        "envelope_id": str(meta["envelope_id"]),
-        "argon_salt_b64": base64.b64encode(meta["argon_salt"]).decode("ascii"),
-        "argon_memory_kib": int(meta["argon_memory_kib"]),
-        "argon_iterations": int(meta["argon_iterations"]),
-        "nonce_b64": base64.b64encode(meta["nonce"]).decode("ascii"),
-        "aead_ciphertext_and_tag_b64": base64.b64encode(
-            meta["aead_ciphertext_and_tag"]
-        ).decode("ascii"),
-    }
-
-
-def recovery_envelope_meta_from_json(data: dict) -> dict:
-    """Deserialize config.json recovery-envelope metadata."""
-    if not isinstance(data, dict):
-        raise ValueError("recovery test metadata is missing")
-    return {
-        "envelope_id": str(data["envelope_id"]),
-        "argon_salt": base64.b64decode(data["argon_salt_b64"]),
-        "argon_memory_kib": int(data["argon_memory_kib"]),
-        "argon_iterations": int(data["argon_iterations"]),
-        "nonce": base64.b64decode(data["nonce_b64"]),
-        "aead_ciphertext_and_tag": base64.b64decode(
-            data["aead_ciphertext_and_tag_b64"]
-        ),
-    }
-
-
-def write_recovery_kit_file(
-    path,
-    *,
-    vault_id: str,
-    recovery_secret: bytes,
-    vault_access_secret: str,
-    recovery_envelope_meta: dict | None = None,
-    created_at: str | None = None,
-) -> None:
-    """Persist the recovery kit per formats §12.5.
-
-    Writes a plaintext UTF-8 file (LF line endings, mode 0o600)
-    containing every piece of state a fresh device needs to recover:
-
-      - ``vault_id``         — which vault on the relay to fetch.
-      - ``recovery_secret``  — 32 random bytes; the "kit" half of the
-                                two-factor unlock (passphrase is the other).
-      - ``vault_access_secret`` — bearer for ``X-Vault-Authorization``,
-                                   needed to fetch the encrypted header
-                                   from the relay during recovery.
-      - ``argon_params``     — locked at v1 (argon2id-v1).
-
-    The file is **not encrypted at rest** — security comes from physical
-    custody (USB drive, password-manager attachment, paper in a safe)
-    *plus* the user's passphrase. An attacker who steals only the kit
-    file still has to brute-force the user's passphrase against
-    Argon2id (m=128 MiB, t=4) to derive the master key. An attacker
-    who steals the relay's bytes but not the kit gets nothing — the
-    relay never sees a kit file.
-
-    Caller must persist this BEFORE ``Vault.close()`` zeros the
-    in-memory ``recovery_secret`` buffer.
-    """
-    import base64
-    import os
-    from pathlib import Path
-
-    if len(recovery_secret) != 32:
-        raise ValueError(f"recovery_secret must be 32 bytes; got {len(recovery_secret)}")
-    if not vault_access_secret:
-        raise ValueError("vault_access_secret is required")
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    secret_b32 = base64.b32encode(recovery_secret).decode("ascii").lower().rstrip("=")
-    if created_at is None:
-        created_at = _now_rfc3339()
-
-    body = (
-        "# Desktop Connector — Vault Recovery Kit\n"
-        f"# Vault ID: {vault_id_dashed(vault_id)}\n"
-        f"# Created:  {created_at}\n"
-        "#\n"
-        "# This file PLUS your recovery passphrase can restore the vault\n"
-        "# on a new device. BOTH are required. Lose either, and the vault\n"
-        "# cannot be recovered — there is no password reset.\n"
-        "#\n"
-        "# Keep this file somewhere safe and offline — a USB drive, a password\n"
-        "# manager attachment, or printed and stored in a safe. The relay\n"
-        "# server is NOT a backup; if it's lost or wiped, this file is your\n"
-        "# only path back.\n"
-        "\n"
-        f"vault_id: {vault_id_dashed(vault_id)}\n"
-        f"created_at: {created_at}\n"
-        f"recovery_secret: {secret_b32}\n"
-        f"vault_access_secret: {vault_access_secret}\n"
-        "argon_params: argon2id-v1\n"
-    )
-    if recovery_envelope_meta is not None:
-        encoded_meta = recovery_envelope_meta_to_json(recovery_envelope_meta)
-        body += (
-            f"recovery_envelope_id: {encoded_meta['envelope_id']}\n"
-            f"recovery_argon_salt: {encoded_meta['argon_salt_b64']}\n"
-            f"recovery_argon_memory_kib: {encoded_meta['argon_memory_kib']}\n"
-            f"recovery_argon_iterations: {encoded_meta['argon_iterations']}\n"
-            f"recovery_envelope_nonce: {encoded_meta['nonce_b64']}\n"
-            "recovery_envelope_ciphertext: "
-            f"{encoded_meta['aead_ciphertext_and_tag_b64']}\n"
-        )
-    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-    try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(body)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
-def parse_recovery_kit_file(path) -> dict:
-    """Parse a kit file written by :func:`write_recovery_kit_file`.
-
-    Returns a dict with:
-        ``vault_id`` (str, 12-char canonical undashed),
-        ``vault_id_dashed`` (str, 4-4-4 display form),
-        ``recovery_secret`` (bytes, 32),
-        ``vault_access_secret`` (str),
-        ``argon_params`` (str — the ``argon2id-v1`` tag).
-
-    Raises ``ValueError`` if any required field is missing or malformed.
-    Tolerant to upper/lower case in ``recovery_secret`` per formats §12.5.
-    """
-    import base64
-
-    with open(path, "r", encoding="utf-8") as f:
-        text = f.read()
-    fields: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if ":" not in line:
-            raise ValueError(f"malformed kit line: {raw!r}")
-        key, value = line.split(":", 1)
-        fields[key.strip()] = value.strip()
-
-    for required in ("vault_id", "recovery_secret", "vault_access_secret", "argon_params"):
-        if required not in fields:
-            raise ValueError(f"recovery kit missing required field: {required}")
-
-    raw_b32 = fields["recovery_secret"].upper()
-    pad = (8 - len(raw_b32) % 8) % 8
-    try:
-        recovery_secret = base64.b32decode(raw_b32 + "=" * pad)
-    except Exception as exc:
-        raise ValueError(f"recovery_secret is not valid base32: {exc}") from exc
-    if len(recovery_secret) != 32:
-        raise ValueError(f"recovery_secret decodes to {len(recovery_secret)} bytes; expected 32")
-
-    parsed = {
-        "vault_id": normalize_vault_id(fields["vault_id"]),
-        "vault_id_dashed": vault_id_dashed(normalize_vault_id(fields["vault_id"])),
-        "recovery_secret": recovery_secret,
-        "vault_access_secret": fields["vault_access_secret"],
-        "argon_params": fields["argon_params"],
-    }
-    meta_fields = {
-        "recovery_envelope_id",
-        "recovery_argon_salt",
-        "recovery_argon_memory_kib",
-        "recovery_argon_iterations",
-        "recovery_envelope_nonce",
-        "recovery_envelope_ciphertext",
-    }
-    if meta_fields.intersection(fields):
-        missing = sorted(meta_fields - set(fields))
-        if missing:
-            raise ValueError(
-                "recovery kit has incomplete recovery test metadata: "
-                + ", ".join(missing)
-            )
-        parsed["recovery_envelope_meta"] = recovery_envelope_meta_from_json({
-            "envelope_id": fields["recovery_envelope_id"],
-            "argon_salt_b64": fields["recovery_argon_salt"],
-            "argon_memory_kib": fields["recovery_argon_memory_kib"],
-            "argon_iterations": fields["recovery_argon_iterations"],
-            "nonce_b64": fields["recovery_envelope_nonce"],
-            "aead_ciphertext_and_tag_b64": fields["recovery_envelope_ciphertext"],
-        })
-    return parsed
-
-
-def verify_recovery_kit(
-    kit_path,
-    *,
-    passphrase: str,
-    envelope_meta: dict,
-) -> tuple[bool, str]:
-    """Re-run the recovery flow against a saved kit + the user's
-    passphrase. Returns ``(ok, message)``.
-
-    This is the **real** recovery test the wizard runs after the user
-    exports their kit: it parses the kit file from disk, re-derives
-    ``wrap_key`` from passphrase + ``recovery_secret`` exactly the way
-    a future "I'm on a new device" recovery would, and tries to
-    AEAD-decrypt the recovery envelope (whose ciphertext we wrap the
-    master key inside at create time, exposed via
-    :attr:`Vault.recovery_envelope_meta`).
-
-    If the AEAD decryption succeeds, the kit + passphrase combination
-    can produce the master key — recovery will work. If Poly1305
-    verification fails (wrong passphrase typed, kit file edited,
-    bytes corrupted), AEAD raises and we return ``(False, …)``.
-    """
-    try:
-        parsed = parse_recovery_kit_file(kit_path)
-    except (OSError, ValueError) as exc:
-        return False, f"Could not parse kit file: {exc}"
-
-    try:
-        wrap_key = derive_recovery_wrap_key(
-            passphrase=passphrase,
-            recovery_secret=parsed["recovery_secret"],
-            argon_salt=envelope_meta["argon_salt"],
-            memory_kib=int(envelope_meta["argon_memory_kib"]),
-            iterations=int(envelope_meta["argon_iterations"]),
-        )
-        from .vault_crypto import build_recovery_aad as _build_recovery_aad
-        aad = _build_recovery_aad(
-            parsed["vault_id"],
-            envelope_meta["envelope_id"],
-        )
-        aead_decrypt(
-            envelope_meta["aead_ciphertext_and_tag"],
-            wrap_key,
-            envelope_meta["nonce"],
-            aad,
-        )
-    except Exception as exc:
-        # Catches CryptoError (Poly1305 failure → wrong passphrase or
-        # corrupted kit), KeyError on missing envelope_meta fields, etc.
-        return False, f"Recovery test failed: {type(exc).__name__}"
-
-    return True, "kit + passphrase produce the correct master key"
-
-
-def shred_file(path) -> bool:
-    """Best-effort secure delete: overwrite the file with random bytes,
-    fsync, then unlink.
-
-    Returns ``True`` if the file was overwritten + removed, ``False`` if
-    it didn't exist or the operation hit an OSError. Intentionally
-    swallows IO errors so the wizard's Done button can't fail because
-    the user moved the file between Export and Done.
-
-    Caveat — on modern SSDs with wear leveling, the OS may have written
-    copies to spare blocks we can't reach. This is best-effort cleanup
-    suitable for "I already copied it into a password manager, now make
-    sure it's not just sitting in Downloads"; users who need true
-    deletion should rely on full-disk encryption + secure-erase at
-    decommission time.
-    """
-    import os
-    from pathlib import Path
-
-    p = Path(path)
-    if not p.exists() or not p.is_file():
-        return False
-    try:
-        size = p.stat().st_size
-        # Two passes: random, then zeros. More is theatre on SSD; this
-        # at least covers the obvious filesystem-cache + on-disk paths.
-        with open(p, "r+b") as f:
-            for fill in (os.urandom(size), b"\x00" * size):
-                f.seek(0)
-                f.write(fill)
-                f.flush()
-                os.fsync(f.fileno())
-        p.unlink()
-        return True
-    except OSError:
-        return False
