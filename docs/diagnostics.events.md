@@ -402,6 +402,7 @@ relay log (filenames are local-only).
 | `vault.atomic.sweep_unlink_failed` | desktop | warning | `path`, `error` | Sweep matched a temp file but couldn't unlink it |
 | `vault.atomic.temp_unlink_failed` | desktop | warning | `path`, `error` | Live atomic-write couldn't clean up its own temp |
 | `vault.baseline.skip_unsafe` | desktop | warning | `path` | Baseline refused to write a path traversing outside the binding root |
+| `vault.browser.resume_cancel.clear_session_failed` | desktop | warning | `session_id` | Resume-banner Cancel button couldn't unlink the on-disk session JSON; the session will reappear on the next manifest refresh and the user can retry |
 | `vault.browser.skip_unsafe` | desktop | warning | `path` | F-519 — manifest entry contained a `..` component the browser refused to walk |
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
 | `vault.delete.cas_exhausted` | desktop | warning | `vault`, `retries` | F-D25 — delete retry budget exhausted; raised the CAS error to caller |

@@ -38,6 +38,7 @@ from ..vault_runtime import (  # noqa: E402
 )
 from ..vault_time_format import format_local  # noqa: E402
 from ..vault_upload import (  # noqa: E402
+    clear_session,
     default_upload_resume_dir,
     describe_quota_exceeded,
     list_resumable_sessions,
@@ -115,7 +116,14 @@ class VaultBrowser:
         self.versions_btn: Gtk.Button | None = None
         self.download_btn: Gtk.Button | None = None
         self.show_deleted_toggle: Gtk.CheckButton | None = None
-        self.resume_banner: Adw.Banner | None = None
+        # Resume "banner" is a custom horizontal Gtk.Box (not Adw.Banner)
+        # because Adw.Banner only supports a single action button. Users
+        # need both Resume (continue the interrupted upload) and Cancel
+        # (discard the saved session, banner goes away).
+        self.resume_banner_box: Gtk.Box | None = None
+        self.resume_banner_label: Gtk.Label | None = None
+        self.resume_resume_btn: Gtk.Button | None = None
+        self.resume_cancel_btn: Gtk.Button | None = None
         self.quota_banner: Adw.Banner | None = None
         self.breadcrumb: Gtk.Label | None = None
         self.status_label: Gtk.Label | None = None
@@ -264,15 +272,63 @@ class VaultBrowser:
 
     def _build_breadcrumb_and_status(self) -> None:
         assert self.outer is not None
-        # Resume + quota banners sit above the breadcrumb (v1 lines
-        # 129–136). Both start hidden; ``_refresh_resume_banner`` and
-        # ``_handle_quota_exceeded`` reveal them when their state
-        # actually fires.
-        self.resume_banner = Adw.Banner.new("")
-        self.resume_banner.set_button_label("Resume")
-        self.resume_banner.set_revealed(False)
-        self.resume_banner.connect("button-clicked", self._start_resume_pending)
-        self.outer.append(self.resume_banner)
+        # Resume "banner" — a custom horizontal box that pairs the
+        # message with both Resume and Cancel actions. Adw.Banner is
+        # single-action by design, so we roll our own to surface the
+        # Cancel branch alongside Resume. The box uses the "card" CSS
+        # class for a subtle visual treatment that distinguishes it
+        # from the surrounding content without painting it as a
+        # warning. Hidden until ``_refresh_resume_banner`` reveals it.
+        # The ``card`` CSS class paints the rounded white background but
+        # adds no internal padding — children sit flush with the
+        # border by default. Set margins on each child instead; GTK4
+        # grows the parent's allocation to include child margins, which
+        # gives the visual "interior padding" effect (the card paints
+        # around the gap).
+        self.resume_banner_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+        self.resume_banner_box.add_css_class("card")
+        self.resume_banner_box.set_visible(False)
+
+        self.resume_banner_label = Gtk.Label(
+            xalign=0, hexpand=True, wrap=True,
+            margin_top=12,
+            margin_bottom=12,
+            margin_start=16,
+            margin_end=4,
+        )
+        self.resume_banner_box.append(self.resume_banner_label)
+
+        self.resume_cancel_btn = Gtk.Button(
+            label="Cancel",
+            css_classes=["pill", "destructive-action"],
+            margin_top=8,
+            margin_bottom=8,
+        )
+        self.resume_cancel_btn.set_tooltip_text(
+            "Discard the saved session(s). The local file is unchanged "
+            "— start a fresh upload anytime.",
+        )
+        self.resume_cancel_btn.connect(
+            "clicked", self._on_resume_cancel_clicked,
+        )
+        self.resume_banner_box.append(self.resume_cancel_btn)
+
+        self.resume_resume_btn = Gtk.Button(
+            label="Resume",
+            css_classes=["pill", "suggested-action"],
+            margin_top=8,
+            margin_bottom=8,
+            margin_end=12,
+        )
+        self.resume_resume_btn.connect(
+            "clicked", lambda _b: self._start_resume_pending(),
+        )
+        self.resume_banner_box.append(self.resume_resume_btn)
+
+        self.outer.append(self.resume_banner_box)
 
         self.quota_banner = Adw.Banner.new("")
         self.quota_banner.set_revealed(False)
@@ -2114,19 +2170,56 @@ class VaultBrowser:
         except Exception:
             sessions = []
         self.state.resume_sessions = sessions
-        if self.resume_banner is None:
+        if self.resume_banner_box is None or self.resume_banner_label is None:
             return
         if not sessions:
-            self.resume_banner.set_revealed(False)
+            self.resume_banner_box.set_visible(False)
             return
         count = len(sessions)
         label = (
-            "1 upload was interrupted — click Resume to finish it."
+            "1 upload was interrupted — click Resume to finish it, "
+            "or Cancel to discard."
             if count == 1
-            else f"{count} uploads were interrupted — click Resume to finish them."
+            else f"{count} uploads were interrupted — click Resume to "
+                 "finish them, or Cancel to discard."
         )
-        self.resume_banner.set_title(label)
-        self.resume_banner.set_revealed(True)
+        self.resume_banner_label.set_label(label)
+        self.resume_banner_box.set_visible(True)
+
+    def _on_resume_cancel_clicked(self, _btn: Gtk.Button) -> None:
+        """Discard the saved upload sessions so the banner stops appearing.
+
+        The on-disk session JSON is removed via ``clear_session``;
+        the local source file is untouched and the relay-side chunks
+        the upload had already PUT stay until eviction or retention
+        claims them. Re-uploading the same file later is a fresh
+        ``upload_file`` call — the relay's hash-equality dedup means
+        any chunks already stored come back as 200 OK no-ops.
+        """
+        sessions = list(self.state.resume_sessions or [])
+        if not sessions:
+            return
+        cache_dir = default_upload_resume_dir()
+        cleared = 0
+        for session in sessions:
+            try:
+                clear_session(session.session_id, cache_dir)
+                cleared += 1
+            except Exception:
+                log.exception(
+                    "vault.browser.resume_cancel.clear_session_failed "
+                    "session_id=%s",
+                    getattr(session, "session_id", "?"),
+                )
+        self.state.resume_sessions = []
+        if self.resume_banner_box is not None:
+            self.resume_banner_box.set_visible(False)
+        if cleared:
+            noun = "session" if cleared == 1 else "sessions"
+            self._set_status(
+                f"Discarded {cleared} interrupted upload {noun}.",
+                "dim-label",
+            )
 
     def _start_resume_pending(self, _btn=None) -> None:
         sessions = list(self.state.resume_sessions or [])
@@ -2143,8 +2236,8 @@ class VaultBrowser:
             self.upload_btn.set_sensitive(False)
         if self.upload_folder_btn is not None:
             self.upload_folder_btn.set_sensitive(False)
-        if self.resume_banner is not None:
-            self.resume_banner.set_revealed(False)
+        if self.resume_banner_box is not None:
+            self.resume_banner_box.set_visible(False)
         cancel_event = threading.Event()
         self._arm_cancel(cancel_event)
         if self.progress_bar is not None:
