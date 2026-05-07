@@ -43,6 +43,7 @@ require_once __DIR__ . '/../src/Repositories/VaultDeviceGrantsRepository.php';
 
 require_once __DIR__ . '/../src/VaultStorage.php';
 require_once __DIR__ . '/../src/VaultCapabilities.php';
+require_once __DIR__ . '/../src/Crypto/VaultCrypto.php';
 require_once __DIR__ . '/../src/Router.php';
 
 // --- Controllers ---
