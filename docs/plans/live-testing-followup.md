@@ -1,0 +1,298 @@
+# Live testing — follow-up backlog
+
+Items observed while driving the dev twin against the local PHP relay.
+Each entry is one self-contained UX/correctness fix worth a focused
+commit. Order is rough priority; not a milestone plan.
+
+Items 1–6 below were addressed on 2026-05-07 (`tresor-vault` branch).
+Status notes appear at the bottom of each section.
+
+---
+
+## 1. Async Argon2id during vault create — show progress
+
+**Symptom**: clicking **Continue** on the create-passphrase step of the
+onboarding wizard freezes the window for many seconds. The user reported
+"the onboarding window froze after I clicked Continue. Only after very
+long time it continues."
+
+**Cause**: `Vault.prepare_new()` runs Argon2id key derivation
+synchronously on the GTK main thread (`desktop/src/windows_vault.py`
+~line 2111, inside `perform_create()` which is called from `on_pp_next`).
+Argon2id is intentionally memory-hard / slow; on this machine the
+default parameters block the UI loop long enough that the window stops
+repainting and looks crashed.
+
+**Fix shape**:
+
+- Move `Vault.prepare_new` (and any follow-on `save_local_vault_grant`
+  + `publish_initial` work the wizard does inline) into a worker
+  thread. Use the same `threading.Thread` + `GLib.idle_add` pattern
+  the Folders tab already uses for `add_remote_folder` etc. — there
+  are several worked examples in `desktop/src/vault_folders_tab.py`.
+- While the worker runs, the wizard must visibly explain *why* it's
+  waiting. Don't just disable the button; users read a frozen window
+  as broken.
+  - Switch the visible child to a transient "Deriving key…" panel
+    with a `Gtk.Spinner` + a one-line explanation:
+    *"Stretching your passphrase with Argon2id. This is intentional —
+    it's what stops attackers from brute-forcing your vault."*
+  - Optional: show the Argon2id memory + iteration parameters so the
+    UX matches the security-narrative ethos ("64 MiB, 3 iterations").
+- On success → swap to the existing success screen as today.
+- On failure → swap back to the passphrase step with `pp_status` set
+  to the error (today's failure path).
+
+**Why visible progress matters**: per memory `feedback_no_fake_tests.md`
+and `feedback_security_ux.md`, the project's stance is that
+security-critical waits should be honest about what's happening — a
+spinner without context is theatre. The Argon2id wait is real work
+that *protects* the user; the UI should say so.
+
+**Acceptance**:
+
+- Window stays responsive during create; can be moved / minimised /
+  resized while derivation runs.
+- A new "Deriving key…" panel appears immediately on Continue and
+  disappears when the success screen lands.
+- No regression in the existing failure paths (phase-2 grant save
+  failure, phase-3 relay publish failure with Retry publish).
+- Worker exception → main thread idle_add → user-visible error on the
+  passphrase step (no swallowed traceback).
+
+**Test surface**:
+
+- Source pin in `tests/protocol/test_desktop_vault_a11y_source.py` (or
+  similar) for the new `Gtk.Spinner` + the worker-thread shape.
+- Existing wizard logic stays decoupled from GTK: the
+  `Vault.prepare_new` call doesn't change. Easy to verify the worker
+  body behaves identically.
+
+**Status (2026-05-07): done**. `windows_vault.py:perform_create` now
+runs phases 1–4 in a worker thread; the wizard shows a "Deriving key…"
+panel with a spinner while Argon2id stretches. F-LT01 marker.
+
+---
+
+## 2. Single-threaded PHP test relay starves UI requests
+
+**Symptom**: clicking "Add" in Vault Settings against the local
+`php -S 127.0.0.1:4441` relay took ~50 seconds. PHP access log showed
+the manifest GET landing exactly 25 seconds after the click and the
+PUT another 25 seconds after that — both exactly the
+`/api/transfers/notify` long-poll timeout.
+
+**Cause**: `php -S` is single-threaded. The headless dev twin's poller
+sits in a 25-second long-poll on `/api/transfers/notify`; every other
+request (including the vault settings window's manifest GET/PUT)
+queues behind it. CLAUDE.md already calls this out for the dashboard.
+
+**Fix shape**:
+
+- For local testing, document in `docs/testing/vault-tests.md` that
+  the headless dev twin must NOT run while exercising vault UI flows
+  on the same `php -S` relay. The receiver only matters for transfer
+  tests; vault tests can do without it.
+- Optional belt-and-braces: the vault automation harness could spawn
+  a second PHP worker on a separate port for the receiver, leaving
+  the first port free for UI traffic. Not worth it unless we need
+  both halves running simultaneously.
+
+**Acceptance**: harness guide explicitly carves vault tests as
+"vault-only" (no headless receiver) so a future test session doesn't
+re-discover this on a 50-second add-folder click.
+
+**Status (2026-05-07): done (doc-only)**. Added "Vault UI tests run
+**without** the headless dev twin" callout to
+`docs/testing/vault-tests.md` between the GTK4 window command block
+and the per-test artefact section.
+
+---
+
+## 3. Onboarding leaves orphan vault rows on retry
+
+**Symptom**: dev twin server DB ended up with two `vaults` rows after
+a single completed onboarding session — `7HUYW3AIGUHD` (abandoned
+first attempt) and `AQMJFDLP7Y62` (the keeper, what `config.json`
+points at). The user only saw one onboarding flow finish; the orphan
+came from an aborted first attempt.
+
+**Cause**: `Vault.prepare_new` + `publish_initial` writes the new
+vault row to the relay before `config.save` records the
+`last_known_id` on disk. If the user closes the wizard or re-runs
+onboarding before the success path commits, the relay keeps the row
+and config never references it. Next attempt creates a fresh
+`vault_id` → orphan.
+
+**Fix shape**:
+
+- Strict-mode: don't `publish_initial` until the user has acknowledged
+  the recovery-kit panel; or alternatively, on subsequent prepare in
+  the same session, reuse the in-memory `_pending_publish` payload
+  (already idempotent) instead of generating new vault material. This
+  is the cleaner option because it preserves the "first publish is
+  retryable" property.
+- Lenient mode: a `DELETE /api/vaults/{vault_id}` endpoint scoped to
+  "vault-author-on-this-device-only" so the wizard can clean up an
+  abandoned vault on retry. Big surface change; not worth it unless
+  we add a server-side GC story too.
+- UI: show a "Resume previous attempt" affordance if `state["vault"]`
+  has `has_pending_publish=True` when the wizard re-opens.
+
+**Acceptance**: completing a single onboarding session leaves exactly
+one row in the relay's `vaults` table.
+
+**Status (2026-05-07): partial**. F-LT03 in
+`windows_vault.py:perform_create` now folds phases 3 (publish) + 4
+(config commit) into a single worker call so the orphan window
+between "row on relay" and "id in config.json" is microseconds rather
+than the full duration of the success-screen-render path. Worker
+also honours a `wizard_cancelled` `threading.Event` set by `on_close`
+so a window dismissed during Argon2id derivation never advances to
+keyring or relay writes. Cross-session orphans (a row from a prior
+abandoned wizard run that already published) still need either a
+scoped relay DELETE or a "Resume previous attempt" UI affordance —
+both deferred per the original fix-shape options; not in this pass.
+
+---
+
+## 4. Vault Browser doesn't auto-refresh after a sync
+
+**Symptom**: after dropping a file into a bound folder and clicking
+"Sync now" successfully (toast: "1 uploaded"), the Vault Browser
+window still shows the pre-sync manifest. Closing and reopening the
+browser shows the new file. Same will happen for any background-sync
+event — the open Browser stays frozen on whatever revision it loaded
+at open time.
+
+**Cause**: the Vault Browser fetches the manifest once at open and
+doesn't subscribe to manifest revision changes. The Sync now publish
+that bumped the revision happens in a different process (the Vault
+Settings subprocess); even if Browser were to listen for events it
+would need cross-process notification.
+
+**Fix shape options** (rough preference order):
+
+- **Pull on focus**: re-fetch the manifest when the Browser window
+  regains focus (`Gtk.Window.notify::is-active` or
+  `Gdk.Surface::enter-monitor`). Cheap, reactive, no IPC.
+- **Pull on a timer**: 5–10 second poll while the window is visible;
+  cheaper than a watcher but burns idle requests.
+- **Cross-process signal**: Settings publishes a "manifest-changed"
+  marker file or D-Bus signal; Browser listens. Most "correct" but
+  the most plumbing.
+
+**Acceptance**: drop a file, click Sync now in Settings, glance back
+at an already-open Browser → file appears within a few seconds with
+no manual refresh.
+
+**Status (2026-05-07): done**. F-LT04: `windows_vault_browser.py`
+connects `notify::is-active` on the browser window and re-runs
+`refresh_manifest_async()` whenever the window regains focus, gated
+on `refresh_btn` being sensitive so we don't queue a second refresh
+behind an in-flight one.
+
+---
+
+## 5. Vault Browser detail panel + file list layout
+
+**Symptom**: the right-side **Details** panel in the Vault Browser
+(`desktop/src/windows_vault_browser.py`, around line 299) renders as
+a 2-column label/value grid where labels are right-aligned in a
+narrow column and long values (filename, full path, version id,
+fingerprint) are crammed into the rest of the strip. Long file paths
+and the `fv_v1_…` version id wrap or get truncated mid-word. The
+file's name itself is rendered as one of the rows (`Name | <value>`)
+rather than as a heading for the whole panel.
+
+The file list grid on the left has the same flavour of bug we already
+fixed in the Folders tab: a `Gtk.Grid` whose columns let cells like
+the Modified ISO timestamp wrap char-by-char into a tall narrow
+column, which in turn makes the row height balloon.
+
+**Wanted shape** (per user feedback while testing 2026-05-07):
+
+- Selected file's **name** at the top of the panel as a bold heading
+  on its own row — not a label/value pair.
+- Each detail underneath is a stacked pair: **label** (bold, dim
+  caption font, on its own line) → **value** on the next line,
+  selectable / monospace where appropriate (paths, version ids,
+  fingerprints), with a small bottom margin before the next pair.
+- Fields in order: Path, Logical size, Remote stored size, Modified,
+  Current version, Versions, Status.
+- Use `Gtk.Box` (vertical) of pair-boxes instead of a `Gtk.Grid`.
+- Long values (path, version id) get `set_ellipsize(MIDDLE)` plus
+  a tooltip with the full string, like the bindings card path.
+
+**Also fix the file list grid** in the same pass: the Modified column
+needs the same ellipsize/tooltip treatment OR a fixed display format
+that doesn't wrap (e.g. `2026-05-07 11:00`).
+
+**Acceptance**: a long path / long version id no longer wraps into a
+tall narrow column; the file name is visually distinct as the panel
+heading instead of a label/value row.
+
+**Status (2026-05-07): done**. `windows_vault_browser.py:render_detail`
+now leads with a bold ellipsize-middle heading carrying the file's
+name and tooltip; underneath, each detail is a stacked
+label-then-value `Gtk.Box` pair, with `EllipsizeMode.MIDDLE` +
+tooltip on long values (path, version id) and `selectable=True`
+throughout for copy-out. The file-list grid's wrap-into-tall-column
+issue resolves naturally with the 19-char fixed timestamps from item
+6.
+
+---
+
+## 6. Display timestamps in local timezone, fixed-width format
+
+**Symptom**: every timestamp the user sees in the Vault Browser
+(Modified column in the file list, Modified field in the details
+panel, Modified column in the Versions table) is rendered as the raw
+RFC-3339 string from the manifest — e.g. `2026-05-07T11:00:47.000Z`.
+That's the wire format; users have to do timezone math in their head
+and the trailing `.000Z` is noise.
+
+**Wanted**: render every user-facing timestamp in the device's local
+timezone, in `YYYY-MM-DD HH:MM:SS` form (24-hour, no fractional
+seconds, no timezone suffix).
+
+**Fix shape**:
+
+- Single helper module — e.g. `desktop/src/vault_time_format.py` —
+  with `format_local(rfc3339: str) -> str` and a fallback that
+  passes the original string through unchanged when parsing fails
+  (defensive: a malformed manifest entry shouldn't blank a row).
+- Use `datetime.fromisoformat` (Python 3.11+ accepts the trailing
+  `Z`); fall back to `dateutil` only if we hit pre-3.11 support
+  needs, which we don't on this codebase.
+- Apply at every timestamp render site:
+  - `windows_vault_browser.py` — file list `modified`, details
+    panel `Modified`, Versions table `Modified`.
+  - Any other vault window showing manifest/version timestamps
+    (audit Activity tab, version history dialogs, etc.).
+- The wire format stays RFC-3339 UTC — display-only transform.
+
+**Why fixed-width**: the file-list grid currently wraps the long
+ISO string char-by-char (item 5); switching to
+`YYYY-MM-DD HH:MM:SS` (19 chars, no wrap) plus a non-wrapping label
+fixes the layout without needing a tooltip.
+
+**Acceptance**: file list, details panel, and Versions table all show
+e.g. `2026-05-07 13:00:47` for a UTC `2026-05-07T11:00:47.000Z`
+manifest entry on a `+02:00` host. No `T`, no `Z`, no fractional
+seconds visible to the user anywhere.
+
+**Status (2026-05-07): done**. New helper
+`desktop/src/vault_time_format.py:format_local()` parses RFC-3339
+(including trailing `Z`), converts to the device's local timezone,
+and renders `YYYY-MM-DD HH:MM:SS`. Defensive: empty/None → `""`,
+unparsable → original string. Wired at every browser timestamp
+render site: file list `modified`, details `Modified`, deleted/
+recoverable-until tombstone label, status-strip "Deleted —
+recoverable until …" suffix, Versions table `modified`, version
+download status, restore-confirm heading. Activity-tab timestamps
+use a different epoch path and were not in the listed scope.
+
+---
+
+## Add new items below as live testing surfaces them.
