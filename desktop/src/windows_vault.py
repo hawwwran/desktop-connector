@@ -105,42 +105,52 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
             default_height=560,
         )
         toolbar = Adw.ToolbarView()
+        # Hairline separator under the header bar so the chrome is
+        # visually delimited from the content below.
+        toolbar.set_top_bar_style(Adw.ToolbarStyle.RAISED_BORDER)
         win.set_content(toolbar)
-        toolbar.add_top_bar(Adw.HeaderBar())
 
-        outer = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=16,
-            margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
-        )
-        toolbar.set_content(outer)
+        # ---- header bar: window title centered, Vault ID cluster on
+        # the start edge so the ID + its actions live in the chrome
+        # (no dead-space row inside the body for them).
+        header_bar = Adw.HeaderBar()
 
-        # ---- header: Vault ID + copy button ----
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        outer.append(header)
-
+        id_cluster = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         id_label = Gtk.Label(label="Vault ID:", xalign=0)
         id_label.add_css_class("dim-label")
-        header.append(id_label)
+        id_cluster.append(id_label)
 
-        id_value = Gtk.Label(label=vault_id_dashed(), xalign=0, hexpand=True)
+        id_value = Gtk.Label(label=vault_id_dashed(), xalign=0)
         id_value.add_css_class("monospace")
-        id_value.add_css_class("title-4")
-        header.append(id_value)
+        id_cluster.append(id_value)
 
         def on_copy(_btn):
             display = win.get_display()
             if display is not None:
                 display.get_clipboard().set(vault_id_dashed())
-        copy_btn = Gtk.Button(label="Copy")
-        copy_btn.add_css_class("pill")
+        copy_btn = Gtk.Button.new_from_icon_name("edit-copy-symbolic")
+        copy_btn.add_css_class("flat")
+        copy_btn.set_tooltip_text("Copy Vault ID to clipboard")
         copy_btn.connect("clicked", on_copy)
-        header.append(copy_btn)
+        id_cluster.append(copy_btn)
 
-        qr_btn = Gtk.Button(label="QR")
-        qr_btn.add_css_class("pill")
+        # ``view-grid-symbolic`` is the closest reliable Adwaita
+        # equivalent to a QR glyph; ``qr-code-symbolic`` isn't in the
+        # freedesktop set so it rendered as a missing-icon stub.
+        qr_btn = Gtk.Button.new_from_icon_name("view-grid-symbolic")
+        qr_btn.add_css_class("flat")
         qr_btn.set_tooltip_text("Show Vault ID as a QR code (post-v1)")
         qr_btn.set_sensitive(False)
-        header.append(qr_btn)
+        id_cluster.append(qr_btn)
+
+        header_bar.pack_start(id_cluster)
+        toolbar.add_top_bar(header_bar)
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=16,
+            margin_top=0, margin_bottom=16, margin_start=16, margin_end=16,
+        )
+        toolbar.set_content(outer)
 
         # ---- sidebar + stack pane ----
         # Vertical sidebar on the left, page content on the right. Uses
@@ -1627,6 +1637,13 @@ def show_vault_onboard(config_dir: Path):
         "vault": None,                # prepared Vault held until publish
         "grant_saved": False,
         "published": False,
+        # F-LT03: set by on_close so any in-flight perform_create worker
+        # checks it between phases and stops before touching the
+        # keyring or the relay. The on_close cleanup paths still run as
+        # before — the flag just shortens the worker so it doesn't
+        # *start* new side-effects after the user has closed the
+        # window.
+        "wizard_cancelled": threading.Event(),
     }
 
     app = _make_app()
@@ -1648,6 +1665,13 @@ def show_vault_onboard(config_dir: Path):
         state["passphrase"] = ""
 
     def on_close(win):
+        # F-LT03: short any in-flight perform_create worker before it
+        # advances to the next phase. The cleanup branches below still
+        # run for whatever already landed (saved grant, published row).
+        cancel_event = state.get("wizard_cancelled")
+        if cancel_event is not None:
+            cancel_event.set()
+
         # If "Safely delete after close" is on AND a kit file was
         # exported during this wizard session, shred it now.
         if state.get("delete_after_close") and state.get("exported_kit_path"):
@@ -1791,6 +1815,39 @@ def show_vault_onboard(config_dir: Path):
         pp_next = Gtk.Button(label="Continue", css_classes=["pill", "suggested-action"])
         pp.append(pp_next)
         body.add_named(pp, "create_passphrase")
+
+        # Step 2.5 — "deriving key" panel shown while Argon2id stretches
+        # the passphrase. Argon2id is intentionally memory-hard (~1–10 s
+        # depending on the host); on the GTK main thread it would block
+        # repaints and look like a crash, so the worker runs it off-thread
+        # and this panel stays visible until phase 3 hands us either the
+        # success screen or a phase-1/2 failure that throws us back to
+        # the passphrase step.
+        deriving = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=16,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        deriving.append(Gtk.Label(
+            label="Deriving key…", xalign=0, css_classes=["title-2"],
+        ))
+        deriving_spinner_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+        )
+        deriving_spinner = Gtk.Spinner()
+        deriving_spinner_row.append(deriving_spinner)
+        deriving_spinner_row.append(Gtk.Label(
+            label="Stretching your passphrase with Argon2id.",
+            xalign=0,
+        ))
+        deriving.append(deriving_spinner_row)
+        deriving.append(Gtk.Label(
+            label=(
+                "This is intentional — it's what stops attackers from "
+                "brute-forcing your vault. Hold on for a few seconds."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        body.add_named(deriving, "deriving_key")
 
         # (Step 3 — vestigial "recovery test prompt" with Test/Skip
         # buttons that did the same thing has been removed. The real
@@ -2102,57 +2159,42 @@ def show_vault_onboard(config_dir: Path):
             auto-save would hide the act of "you have a thing you must
             back up", and per design feedback users rarely go look for
             files they didn't choose to save.
+
+            F-LT01: phases 1–3 run in a worker thread so the GTK main
+            loop keeps repainting during Argon2id derivation and the
+            relay POST. The "deriving_key" panel stays visible until
+            we either swap to success (phase 3 ok) or back to the
+            passphrase step (phase 1/2 failure).
+
+            F-LT03 (orphan-row protection): phase 3 + the config commit
+            run in the same worker call so the window between "vault on
+            relay" and "vault recorded in config.json" closes
+            sub-millisecond. If the user shuts the wizard during
+            derivation, ``state["wizard_cancelled"]`` shorts the worker
+            before it touches the keyring or the relay; the existing
+            on_close cleanup reaps any partial state that already
+            landed.
             """
             from .vault import Vault
             from .vault_runtime import create_vault_relay, save_local_vault_grant
 
-            # Phase 1 — prepare in memory only.
-            try:
-                vault = Vault.prepare_new(
-                    recovery_passphrase=state["passphrase"],
-                )
-            except Exception as exc:
-                pp_status.set_text(f"Could not prepare vault: {exc}")
-                return
+            body.set_visible_child_name("deriving_key")
+            deriving_spinner.start()
+            pp_next.set_sensitive(False)
+            passphrase = state["passphrase"]
+            cancelled: threading.Event = state["wizard_cancelled"]
 
-            state["vault"] = vault
-            state["vault_id"] = vault.vault_id
-            state["recovery_secret_bytes"] = vault.recovery_secret
-            state["vault_access_secret"] = vault.vault_access_secret
-            state["recovery_envelope_meta"] = vault.recovery_envelope_meta
+            def back_to_passphrase(message: str) -> bool:
+                deriving_spinner.stop()
+                pp_next.set_sensitive(True)
+                pp_status.set_text(message)
+                body.set_visible_child_name("create_passphrase")
+                return False
 
-            # Phase 2 — local grant, before any relay write. A failure
-            # here means the keyring/file fallback couldn't store the
-            # unlock material on this machine; retrying the wizard is
-            # safe because no relay vault exists yet.
-            try:
-                save_local_vault_grant(config_dir, config, vault)
-                state["grant_saved"] = True
-            except Exception as exc:
-                try:
-                    vault.close()
-                except Exception:
-                    pass
-                state["vault"] = None
-                pp_status.set_text(
-                    f"Could not save the local unlock material: {exc}. "
-                    "Install a Secret Service backend (gnome-keyring / "
-                    "kwallet) or re-launch and try again."
-                )
-                return
-
-            # Phase 3 — first relay POST. From here on the body lives on
-            # the success screen so the user can retry / see what
-            # happened. body switches even on failure because the export
-            # workflow needs to be reachable once publish succeeds.
-            body.set_visible_child_name("success")
-            ok_id_entry.set_text(vault.vault_id_dashed)
-
-            try:
-                relay = create_vault_relay(config)
-                vault.publish_initial(relay)
-                state["published"] = True
-            except Exception as exc:
+            def handle_phase3_failure(vault, exc: Exception) -> bool:
+                deriving_spinner.stop()
+                body.set_visible_child_name("success")
+                ok_id_entry.set_text(vault.vault_id_dashed)
                 _set_export_status_error(
                     f"Vault prepared locally but the relay rejected the "
                     f"first publish: {exc}. Click Retry publish to try "
@@ -2160,12 +2202,30 @@ def show_vault_onboard(config_dir: Path):
                 )
                 export_btn.set_sensitive(False)
                 retry_publish_btn.set_visible(True)
-                return
+                return False
 
-            # Phase 4 — record the connection on this machine.
-            try:
-                _commit_after_publish(vault)
-            except Exception as exc:
+            def handle_success_ui(vault) -> bool:
+                deriving_spinner.stop()
+                body.set_visible_child_name("success")
+                ok_id_entry.set_text(vault.vault_id_dashed)
+                export_status.remove_css_class("error")
+                export_status.add_css_class("dim-label")
+                export_status.set_label("")
+                retry_publish_btn.set_visible(False)
+                export_btn.set_sensitive(True)
+                # Master key + recovery secret aren't needed beyond this
+                # point (the export flow reads them from wizard state, not
+                # from the live Vault instance).
+                try:
+                    vault.close()
+                except Exception:
+                    pass
+                state["vault"] = None
+                return False
+
+            def handle_commit_failure(exc: Exception) -> bool:
+                deriving_spinner.stop()
+                body.set_visible_child_name("success")
                 _set_export_status_error(
                     f"Vault published, but config.json could not be "
                     f"updated: {exc}. Restart the app — the vault is "
@@ -2173,6 +2233,95 @@ def show_vault_onboard(config_dir: Path):
                     "it locally."
                 )
                 export_btn.set_sensitive(False)
+                return False
+
+            def worker() -> None:
+                from .vault import recovery_envelope_meta_to_json
+
+                if cancelled.is_set():
+                    return
+
+                # Phase 1 — prepare in memory only (Argon2id-heavy).
+                try:
+                    vault = Vault.prepare_new(recovery_passphrase=passphrase)
+                except Exception as exc:
+                    GLib.idle_add(
+                        back_to_passphrase, f"Could not prepare vault: {exc}",
+                    )
+                    return
+
+                if cancelled.is_set():
+                    try:
+                        vault.close()
+                    except Exception:
+                        pass
+                    return
+
+                state["vault"] = vault
+                state["vault_id"] = vault.vault_id
+                state["recovery_secret_bytes"] = vault.recovery_secret
+                state["vault_access_secret"] = vault.vault_access_secret
+                state["recovery_envelope_meta"] = vault.recovery_envelope_meta
+
+                # Phase 2 — local grant, before any relay write. A failure
+                # here means the keyring/file fallback couldn't store the
+                # unlock material on this machine; retrying the wizard is
+                # safe because no relay vault exists yet.
+                try:
+                    save_local_vault_grant(config_dir, config, vault)
+                    state["grant_saved"] = True
+                except Exception as exc:
+                    try:
+                        vault.close()
+                    except Exception:
+                        pass
+                    state["vault"] = None
+                    GLib.idle_add(
+                        back_to_passphrase,
+                        f"Could not save the local unlock material: {exc}. "
+                        "Install a Secret Service backend (gnome-keyring / "
+                        "kwallet) or re-launch and try again.",
+                    )
+                    return
+
+                if cancelled.is_set():
+                    # The grant is on disk; on_close's existing
+                    # grant_saved-and-not-published branch will reap it.
+                    return
+
+                # Phases 3 + 4 — relay POST then config commit, both in
+                # the worker so the orphan window between them is
+                # whatever ``config.save()`` takes (microseconds on a
+                # local disk). If cancellation lands between these two
+                # we still complete the commit: a published vault that
+                # is NOT in config.json is the orphan we're trying to
+                # avoid.
+                try:
+                    relay = create_vault_relay(config)
+                    vault.publish_initial(relay)
+                    state["published"] = True
+                except Exception as exc:
+                    GLib.idle_add(handle_phase3_failure, vault, exc)
+                    return
+
+                try:
+                    if "vault" not in config._data or not isinstance(
+                        config._data.get("vault"), dict
+                    ):
+                        config._data["vault"] = {}
+                    config._data["vault"]["last_known_id"] = vault.vault_id
+                    config._data["vault"]["recovery_envelope_meta"] = (
+                        recovery_envelope_meta_to_json(vault.recovery_envelope_meta)
+                    )
+                    config.save()
+                    state["completed_successfully"] = True
+                except Exception as exc:
+                    GLib.idle_add(handle_commit_failure, exc)
+                    return
+
+                GLib.idle_add(handle_success_ui, vault)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def on_retry_publish(_btn) -> None:
             """User-triggered retry after a phase-3 failure.

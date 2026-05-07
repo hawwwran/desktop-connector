@@ -705,6 +705,46 @@ class Vault:
         updated = manifest_rename_remote_folder(next_manifest, remote_folder_id, name)
         return self.publish_manifest(relay, updated, local_index=local_index)
 
+    def update_remote_folder_settings(
+        self,
+        relay: RelayProtocol,
+        *,
+        remote_folder_id: str,
+        author_device_id: str,
+        new_display_name: str | None = None,
+        ignore_patterns: list[str] | None = None,
+        created_at: str | None = None,
+        local_index=None,
+    ) -> dict:
+        """Fetch head, edit display_name_enc and/or ignore_patterns, CAS-publish.
+
+        Used by the Folders tab's Configure dialog so the user can
+        change the folder's name and ignore patterns after creation —
+        previously the patterns were locked in at first init.
+        """
+        from .vault_manifest import update_remote_folder_settings as _update
+
+        if new_display_name is None and ignore_patterns is None:
+            raise ValueError(
+                "update_remote_folder_settings: nothing to change",
+            )
+
+        current = self.fetch_manifest(relay, local_index=local_index)
+        parent_revision = int(current["revision"])
+        timestamp = created_at or _now_rfc3339()
+        next_manifest = dict(current)
+        next_manifest["revision"] = parent_revision + 1
+        next_manifest["parent_revision"] = parent_revision
+        next_manifest["created_at"] = timestamp
+        next_manifest["author_device_id"] = str(author_device_id)
+
+        updated = _update(
+            next_manifest, remote_folder_id,
+            new_display_name=new_display_name,
+            ignore_patterns=ignore_patterns,
+        )
+        return self.publish_manifest(relay, updated, local_index=local_index)
+
     # ---------------------------------------------------------------- decryption helpers
 
     def decrypt_manifest(self, *, local_index=None) -> dict:

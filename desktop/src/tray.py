@@ -39,6 +39,15 @@ _DESKTOP_DIR = Path(__file__).parent.parent
 # short enough that a truly offline phone registers within a minute.
 REMOTE_FRESH_WINDOW_S = 60
 
+# F-LT06: how often the tray drives a vault autosync pass — drains the
+# watcher debouncer + runs flush_and_sync_binding for each active
+# binding. Short enough that a file dropped into a bound folder feels
+# "auto", long enough that an idle desktop doesn't burn CPU walking
+# the binding tree. The loop also wakes early when something signals
+# ``_vault_autosync_kick`` (e.g. just-started watcher runtime → run
+# the offline-catch-up scan immediately).
+VAULT_AUTOSYNC_INTERVAL_S = 15.0
+
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
 _BRAND_DIR = _ASSETS_DIR / "brand"
@@ -212,6 +221,23 @@ class TrayApp:
         # verdicts it pauses the binding via the lifecycle helper. F-Y13.
         self._vault_watcher_runtime = None  # type: ignore[assignment]
         self._vault_watcher_lock = threading.Lock()
+        # F-LT06: tray-side autosync loop. Without this the watchdog
+        # observer's events sit in the in-memory debouncer forever:
+        # WatcherCoordinator.tick() drains debounced events into the
+        # store's pending-ops queue, and flush_and_sync_binding consumes
+        # those ops + does a catch-up directory walk for changes that
+        # landed while no watcher was up. Both were only triggered by
+        # manual Sync now before this loop existed. Set on first
+        # _ensure_vault_watcher_runtime success; the daemon thread
+        # ticks every VAULT_AUTOSYNC_INTERVAL_S until shutdown.
+        self._vault_autosync_runtime = None  # type: ignore[assignment]
+        self._vault_autosync_started = False
+        self._vault_autosync_kick = threading.Event()
+        # F-LT07: set while a flush_and_sync_binding call is actively
+        # uploading chunks / publishing the manifest, so the tray icon
+        # paints the yellow-with-blue-border "uploading" sparkle the
+        # transfer pipeline already uses for outgoing transfers.
+        self._vault_autosync_active = False
 
     def run(self) -> None:
         try:
@@ -386,9 +412,11 @@ class TrayApp:
                 changed = False
 
                 # "Outgoing" = uploading OR delivering. Covers the full
-                # uploading → delivering → delivered arc.
+                # uploading → delivering → delivered arc, plus a vault
+                # autosync flush actively writing to the relay (F-LT07).
                 outgoing = (self._upload_status_file.exists()
-                            or self.poller.has_live_outgoing())
+                            or self.poller.has_live_outgoing()
+                            or self._vault_autosync_active)
                 if outgoing != self._was_uploading:
                     self._was_uploading = outgoing
                     self._update_icon()
@@ -1074,11 +1102,13 @@ class TrayApp:
                 if self._vault_watcher_runtime is not None:
                     self._vault_watcher_runtime.stop_all()
                     self._vault_watcher_runtime = None
+                self._vault_autosync_runtime = None
                 return
             try:
                 from .vault_runtime_watchers import VaultWatcherRuntime
                 from .vault_bindings import VaultBindingsStore
                 from .vault_local_index import VaultLocalIndex
+                from .vault_folder_runtime import VaultRuntime
                 vault_id = str(
                     self.config._data.get("vault", {}).get("last_known_id") or ""
                 )
@@ -1091,9 +1121,143 @@ class TrayApp:
                         vault_id=vault_id,
                         store=store,
                     )
+                    # F-LT06: hold the GTK-free VaultRuntime alongside
+                    # the watcher runtime so the autosync loop can call
+                    # flush_and_sync_binding without re-deriving the
+                    # serialization story.
+                    self._vault_autosync_runtime = VaultRuntime(
+                        config_dir=self.config.config_dir,
+                        config=self.config,
+                        vault_id=vault_id,
+                        local_index=local_index,
+                    )
                 self._vault_watcher_runtime.start_for_active_bindings()
             except Exception:  # noqa: BLE001
                 log.exception("vault.sync.watcher_runtime_init_failed")
+                return
+
+            # Start the autosync loop on first success; subsequent calls
+            # just kick it so a newly-bound folder gets a catch-up scan
+            # without waiting up to VAULT_AUTOSYNC_INTERVAL_S.
+            if not self._vault_autosync_started:
+                self._vault_autosync_started = True
+                threading.Thread(
+                    target=self._vault_autosync_loop,
+                    name="vault-autosync",
+                    daemon=True,
+                ).start()
+            self._vault_autosync_kick.set()
+
+    def _vault_autosync_loop(self) -> None:
+        """Background driver for vault binding autosync (F-LT06).
+
+        One pass:
+          1. ``WatcherCoordinator.tick()`` — drain debounced events
+             into the pending-ops queue.
+          2. ``flush_and_sync_binding(...)`` — runs the catch-up
+             directory scan (handles "files placed while no watcher
+             was up", which covers app-restart scenarios) and then
+             dispatches the pending-ops queue.
+
+        The loop runs every ``VAULT_AUTOSYNC_INTERVAL_S`` and wakes
+        early when ``_vault_autosync_kick`` is set (e.g. on first
+        watcher start so the offline-catch-up scan runs immediately,
+        not 15 s later).
+
+        Failures per-binding are logged and don't break the loop —
+        the manual Sync now button still works as a backstop, and
+        a CAS conflict from a concurrent settings-subprocess publish
+        will resolve itself on the next tick.
+        """
+        from .vault_bindings import VaultBindingsStore
+        from .vault_local_index import VaultLocalIndex
+
+        log.info(
+            "vault.sync.autosync.started interval_s=%.1f",
+            VAULT_AUTOSYNC_INTERVAL_S,
+        )
+
+        while not self._should_quit.is_set():
+            # Kick takes priority over the periodic delay; if neither
+            # fires we wait the full interval. Cleared after wake so
+            # a single kick doesn't fire twice.
+            woke_on_kick = self._vault_autosync_kick.wait(
+                timeout=VAULT_AUTOSYNC_INTERVAL_S,
+            )
+            self._vault_autosync_kick.clear()
+            if self._should_quit.is_set():
+                return
+
+            with self._vault_watcher_lock:
+                watcher_runtime = self._vault_watcher_runtime
+                autosync_runtime = self._vault_autosync_runtime
+
+            if watcher_runtime is None or autosync_runtime is None:
+                # Vault closed (or never opened on this boot); skip
+                # this tick. Re-opening will set the kick again.
+                continue
+
+            try:
+                watcher_runtime.tick_all()
+            except Exception:  # noqa: BLE001
+                log.exception("vault.sync.autosync_tick_failed")
+
+            try:
+                local_index = VaultLocalIndex(self.config.config_dir)
+                store = VaultBindingsStore(local_index.db_path)
+                bindings = store.list_bindings(vault_id=autosync_runtime.vault_id)
+            except Exception:  # noqa: BLE001
+                log.exception("vault.sync.autosync_list_bindings_failed")
+                continue
+
+            active_bindings = [
+                b for b in bindings
+                if b.state == "bound" and b.sync_mode != "paused"
+            ]
+            log.info(
+                "vault.sync.autosync.tick reason=%s active_bindings=%d",
+                "kick" if woke_on_kick else "interval",
+                len(active_bindings),
+            )
+
+            author_device_id = self.config.device_id or ("0" * 32)
+            device_name = (
+                str(self.config.device_name or "").strip() or "this device"
+            )
+
+            for binding in active_bindings:
+                if self._should_quit.is_set():
+                    return
+                # F-LT07: paint the "uploading" sparkle for the
+                # duration of each flush. Most no-op ticks finish
+                # within ~100 ms (just a directory walk) and the
+                # icon-poll's 2 s cadence won't even register them;
+                # real uploads stretch over seconds and flip the
+                # icon yellow until they finish.
+                self._vault_autosync_active = True
+                result = None
+                try:
+                    result = autosync_runtime.flush_and_sync_binding(
+                        binding_id=binding.binding_id,
+                        author_device_id=author_device_id,
+                        device_name=device_name,
+                        should_continue=lambda: not self._should_quit.is_set(),
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "vault.sync.autosync_flush_failed binding=%s",
+                        binding.binding_id,
+                    )
+                finally:
+                    self._vault_autosync_active = False
+                if result is None:
+                    continue
+                outcomes = getattr(result, "outcomes", []) or []
+                if outcomes:
+                    log.info(
+                        "vault.sync.autosync.flushed binding=%s ops=%d",
+                        binding.binding_id, len(outcomes),
+                    )
 
     def _vault_export_stub(self, *_) -> None:
         log.info("vault.tray.export.stub")

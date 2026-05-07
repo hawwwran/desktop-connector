@@ -8,6 +8,15 @@ result forwarding. The runtime owns the per-tab serialization lock
 (``fetch_manifest``, ``add_remote_folder``, ``rename_remote_folder``,
 ``flush_and_sync_binding``, ``run_initial_baseline``) so worker
 threads don't reach into ``Vault.*`` directly.
+
+F-LT09: master/detail redesign — replaced the old single-grid +
+shared bindings-list layout with an :class:`Adw.NavigationSplitView`.
+The sidebar lists every remote folder; the content pane shows the
+selected folder's details + bindings + per-folder actions
+(Rename, Delete, Connect local folder). Per-binding actions
+(Sync now / Pause / Resume / Disconnect / Browse) live next to each
+binding inside the same pane. Scales to many folders without
+crowding a horizontal toolbar with global buttons.
 """
 
 from __future__ import annotations
@@ -18,7 +27,7 @@ from pathlib import Path
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib, Pango
+from gi.repository import Gtk, Adw, GLib, Gio, Pango
 
 from .vault_binding_lifecycle import BindingCancellationRegistry
 from .vault_binding_sync import format_sync_outcome_toast
@@ -33,8 +42,6 @@ from .vault_folder_actions import (
 )
 from .vault_folder_runtime import VaultRuntime
 from .vault_folder_ui_state import (
-    BINDING_COLUMNS,
-    FOLDER_COLUMNS,
     binding_rows_for_render,
     default_ignore_patterns_text,
     folder_rows_from_cache,
@@ -94,139 +101,380 @@ def build_vault_folders_tab(
     config,
     vault_id: str,
 ) -> Gtk.Widget:
-    """Build the Vault settings Folders tab."""
+    """Build the Vault settings Folders tab (master/detail).
+
+    The returned widget is an :class:`Adw.NavigationSplitView`. Sidebar
+    lists every remote folder and a "+" header button to add new ones.
+    Content pane shows the selected folder's details + bindings +
+    per-folder actions, rebuilt from scratch on every refresh so no
+    stale references survive a sync/pause/disconnect cycle.
+    """
     local_index = VaultLocalIndex(config_dir)
     usage_by_folder_state = {"value": {}}
+    selection_state: dict[str, str | None] = {"folder_id": None}
+    sync_in_flight: dict[str, bool] = {}
+    action_in_flight: dict[str, bool] = {}
+    cancellation_registry = BindingCancellationRegistry()
 
     # F-518: VaultRuntime owns the per-tab vault lock + named ops.
-    # Worker threads call into ``runtime.add_remote_folder`` etc.
-    # rather than ``open_local_vault_from_grant`` + raw ``vault.*``
-    # calls. The runtime is GTK-free so its tests don't need
-    # libadwaita on the path.
     runtime = VaultRuntime(
         config_dir=config_dir,
         config=config,
         vault_id=vault_id,
         local_index=local_index,
     )
-    folders = Gtk.Box(
-        orientation=Gtk.Orientation.VERTICAL, spacing=12,
-        margin_top=16, margin_bottom=16, margin_start=16, margin_end=16,
-    )
-    folders.append(Gtk.Label(label="Remote folders", xalign=0, css_classes=["title-3"]))
 
-    folder_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-    folders.append(folder_actions)
-    add_folder_btn = Gtk.Button(label="Add", css_classes=["pill", "suggested-action"])
+    # F-LT05: surface "real-time detection silently inactive" when the
+    # optional watchdog dep is missing. Without it,
+    # ``vault_filesystem_watcher.start_watchdog_observer`` returns None
+    # and we lose event-driven (sub-second) detection. The tray's
+    # autosync loop (F-LT06) still picks files up via a periodic
+    # directory scan, so syncing isn't fully dead — just sluggish.
+    try:
+        import watchdog  # noqa: F401
+        watchdog_available = True
+    except ImportError:
+        watchdog_available = False
+
+    # ----------------------------------------------------------------
+    # Top-level layout: NavigationSplitView (sidebar + content).
+    # ----------------------------------------------------------------
+    split = Adw.NavigationSplitView()
+    split.set_min_sidebar_width(240)
+    split.set_max_sidebar_width(420)
+    split.set_sidebar_width_fraction(0.32)
+
+    # ---- sidebar ----
+    sidebar_toolbar = Adw.ToolbarView()
+    sidebar_header = Adw.HeaderBar()
+    # Embedded header bars (inside an outer Adw.ApplicationWindow) must
+    # not paint their own window-control buttons, otherwise we get
+    # duplicate min/max/close on every inner pane.
+    sidebar_header.set_show_start_title_buttons(False)
+    sidebar_header.set_show_end_title_buttons(False)
+    add_folder_btn = Gtk.Button.new_from_icon_name("list-add-symbolic")
+    add_folder_btn.set_tooltip_text("Add a new remote folder to this vault")
     add_folder_btn.set_sensitive(bool(vault_id))
-    rename_folder_btn = Gtk.Button(label="Rename", css_classes=["pill"])
-    rename_folder_btn.set_sensitive(bool(vault_id))
-    connect_local_btn = Gtk.Button(label="Connect local folder…", css_classes=["pill"])
-    connect_local_btn.set_sensitive(False)
-    connect_local_btn.set_tooltip_text(
-        "Bind this remote folder to a local path. Default sync mode is "
-        "Backup only (uploads local changes; remote changes never come down)."
+    sidebar_header.pack_end(add_folder_btn)
+    sidebar_toolbar.add_top_bar(sidebar_header)
+
+    sidebar_body = Gtk.Box(
+        orientation=Gtk.Orientation.VERTICAL, spacing=4,
+        margin_top=4, margin_bottom=8, margin_start=4, margin_end=4,
     )
-    delete_folder_btn = Gtk.Button(label="Delete", css_classes=["pill", "destructive-action"])
-    delete_folder_btn.set_sensitive(False)
-    delete_folder_btn.set_tooltip_text("Folder delete is implemented in T7/T14")
-    folder_actions.append(add_folder_btn)
-    folder_actions.append(rename_folder_btn)
-    folder_actions.append(connect_local_btn)
-    folder_actions.append(delete_folder_btn)
+    sidebar_toolbar.set_content(sidebar_body)
 
-    folders_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
-    folders.append(folders_status)
+    if not watchdog_available:
+        sidebar_body.append(Adw.Banner.new(
+            "Real-time file detection is off — install the "
+            "python3-watchdog package. Files are still picked up by "
+            "the periodic auto-sync."
+        ))
 
-    folders_grid = Gtk.Grid(column_spacing=16, row_spacing=8, hexpand=True)
-    folders.append(folders_grid)
+    folder_list = Gtk.ListBox()
+    folder_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+    folder_list.add_css_class("navigation-sidebar")
+    folder_list_scroll = Gtk.ScrolledWindow(vexpand=True)
+    folder_list_scroll.set_child(folder_list)
+    sidebar_body.append(folder_list_scroll)
 
-    folders.append(Gtk.Label(
-        label="Local bindings", xalign=0, css_classes=["title-3"],
-        margin_top=12,
-    ))
-    bindings_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
-    folders.append(bindings_status)
-    bindings_grid = Gtk.Grid(column_spacing=16, row_spacing=8, hexpand=True)
-    folders.append(bindings_grid)
+    sidebar_status = Gtk.Label(
+        xalign=0, wrap=True,
+        css_classes=["dim-label", "caption"],
+        margin_start=8, margin_end=8,
+    )
+    sidebar_body.append(sidebar_status)
 
-    def clear_folders_grid() -> None:
-        child = folders_grid.get_first_child()
+    sidebar_page = Adw.NavigationPage(child=sidebar_toolbar, title="Folders")
+    split.set_sidebar(sidebar_page)
+
+    # ---- content ----
+    # Skip the per-page Adw.HeaderBar: in wide-window mode it would
+    # render an empty 46-px strip above the folder card (the sidebar
+    # selection + outer window header already name the folder). On
+    # narrow windows users still get keyboard / swipe-back navigation
+    # via NavigationSplitView's collapsed mode.
+    content_scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+    content_box = Gtk.Box(
+        orientation=Gtk.Orientation.VERTICAL, spacing=12,
+        margin_top=4, margin_bottom=16, margin_start=20, margin_end=20,
+    )
+    content_scroll.set_child(content_box)
+
+    content_page = Adw.NavigationPage(child=content_scroll, title="Folder")
+    split.set_content(content_page)
+
+    # ``content_status`` survives detail rebuilds — it's appended to the
+    # content_box on each render so toast-style messages from in-flight
+    # ops persist even as the body is repopulated.
+    content_status = Gtk.Label(
+        xalign=0, wrap=True, css_classes=["dim-label"],
+    )
+
+    # ----------------------------------------------------------------
+    # Tiny widget helpers.
+    # ----------------------------------------------------------------
+    def clear_box(box: Gtk.Box) -> None:
+        child = box.get_first_child()
         while child is not None:
             next_child = child.get_next_sibling()
-            folders_grid.remove(child)
+            box.remove(child)
             child = next_child
 
-    def attach_folder_cell(text: str, col: int, row: int, *, header: bool = False) -> None:
-        label = Gtk.Label(label=text, xalign=0, hexpand=(col == 0))
-        label.set_wrap(True)
-        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        if header:
-            label.add_css_class("dim-label")
-        folders_grid.attach(label, col, row, 1, 1)
+    def clear_listbox(box: Gtk.ListBox) -> None:
+        child = box.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            box.remove(child)
+            child = next_child
 
-    def refresh_folders_table(message: str | None = None) -> None:
-        clear_folders_grid()
-        for col, title in enumerate(FOLDER_COLUMNS):
-            attach_folder_cell(title, col, 0, header=True)
+    def set_sidebar_status(message: str, css_class: str = "dim-label") -> None:
+        for klass in ("dim-label", "error", "success"):
+            sidebar_status.remove_css_class(klass)
+        sidebar_status.add_css_class(css_class)
+        sidebar_status.set_label(message)
 
-        rows = []
-        if vault_id:
-            try:
-                rows = folder_rows_from_cache(
-                    local_index.list_remote_folders(vault_id),
-                    usage_by_folder=usage_by_folder_state["value"],
-                )
-            except Exception as exc:
-                folders_status.set_label(f"Could not load the local folder cache: {exc}")
-        for index, row in enumerate(rows, start=1):
-            attach_folder_cell(row["name"], 0, index)
-            attach_folder_cell(row["binding"], 1, index)
-            attach_folder_cell(row["current"], 2, index)
-            attach_folder_cell(row["stored"], 3, index)
-            attach_folder_cell(row["history"], 4, index)
-            attach_folder_cell(row["status"], 5, index)
+    def set_content_status(message: str, css_class: str = "dim-label") -> None:
+        for klass in ("dim-label", "error", "success"):
+            content_status.remove_css_class(klass)
+        content_status.add_css_class(css_class)
+        content_status.set_label(message)
 
-        if not rows:
-            empty = "No remote folders yet." if vault_id else "Open a vault before adding folders."
-            attach_folder_cell(empty, 0, 1)
-
-        if message is not None:
-            folders_status.set_label(message)
-        elif vault_id:
-            folders_status.set_label(f"{len(rows)} remote folder(s).")
-        else:
-            folders_status.set_label("No local vault is connected.")
-
-    def refresh_folders_usage_async(message: str | None = None) -> None:
+    # ----------------------------------------------------------------
+    # Data lookups.
+    # ----------------------------------------------------------------
+    def list_folders() -> list[dict]:
+        """Return render-ready folder rows for the sidebar."""
         if not vault_id:
+            return []
+        try:
+            cached = local_index.list_remote_folders(vault_id)
+        except Exception as exc:  # noqa: BLE001
+            set_sidebar_status(f"Could not load folder cache: {exc}", "error")
+            return []
+        return folder_rows_from_cache(
+            cached, usage_by_folder=usage_by_folder_state["value"] or {},
+        )
+
+    def list_bindings_for_folder(remote_folder_id: str) -> list[dict]:
+        """Return render-ready binding rows scoped to one remote folder."""
+        if not vault_id or not remote_folder_id:
+            return []
+        try:
+            store = VaultBindingsStore(local_index.db_path)
+            all_bindings = store.list_bindings(vault_id=vault_id)
+        except Exception as exc:  # noqa: BLE001
+            set_content_status(f"Could not load bindings: {exc}", "error")
+            return []
+        binding_records = [
+            b for b in all_bindings
+            if b.state != "unbound" and b.remote_folder_id == remote_folder_id
+        ]
+        try:
+            cached = local_index.list_remote_folders(vault_id)
+        except Exception:  # noqa: BLE001
+            cached = []
+        names = {
+            str(f.get("remote_folder_id", "")):
+                str(f.get("display_name_enc") or "")
+            for f in cached
+        }
+        return binding_rows_for_render(
+            binding_records, folder_names_by_id=names,
+        )
+
+    # ----------------------------------------------------------------
+    # Per-binding action runners — same shape as before, only the
+    # post-completion refresh now drives ``refresh_all`` instead of the
+    # old per-table refresh helpers.
+    # ----------------------------------------------------------------
+    def run_sync_now(binding_id: str, button: Gtk.Button) -> None:
+        if sync_in_flight.get(binding_id):
             return
-        folders_status.set_label("Refreshing folder usage...")
+        sync_in_flight[binding_id] = True
+        button.set_sensitive(False)
+        set_content_status("Sync now: running…")
 
         def worker() -> None:
             try:
-                manifest = runtime.fetch_manifest()
-                usage = calculate_vault_usage(manifest).by_folder
-            except Exception as exc:
+                author_device_id = config.device_id or ("0" * 32)
+                device_name = (
+                    str(config.device_name or "").strip() or "this device"
+                )
+                event = cancellation_registry.register(binding_id)
+                try:
+                    result = runtime.flush_and_sync_binding(
+                        binding_id=binding_id,
+                        author_device_id=author_device_id,
+                        device_name=device_name,
+                        should_continue=lambda: not event.is_set(),
+                    )
+                finally:
+                    cancellation_registry.clear(binding_id)
+                toast_text = format_sync_outcome_toast(result)
+            except Exception as exc:  # noqa: BLE001
                 error_message = humanize(exc)
 
                 def fail() -> bool:
-                    refresh_folders_table(f"Folder usage unavailable: {error_message}")
+                    sync_in_flight[binding_id] = False
+                    button.set_sensitive(True)
+                    set_content_status(
+                        f"Sync now failed: {error_message}", "error",
+                    )
                     return False
 
                 GLib.idle_add(fail)
                 return
 
             def succeed() -> bool:
-                usage_by_folder_state["value"] = usage
-                refresh_folders_table(message)
+                sync_in_flight[binding_id] = False
+                button.set_sensitive(True)
+                set_content_status(toast_text, "success")
+                refresh_all()
                 return False
 
             GLib.idle_add(succeed)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def open_add_folder_dialog(_btn) -> None:
+    def _idle_finish(toast: str | None, error: str | None, prefix: str) -> None:
+        def apply() -> bool:
+            if error:
+                set_content_status(error, "error")
+            else:
+                set_content_status(toast or f"{prefix} done.", "success")
+            refresh_all()
+            return False
+
+        GLib.idle_add(apply)
+
+    def run_pause(binding_id: str) -> None:
+        if action_in_flight.get(binding_id):
+            return
+        action_in_flight[binding_id] = True
+        set_content_status("Pause: running…")
+
+        def worker() -> None:
+            try:
+                store = VaultBindingsStore(local_index.db_path)
+                toast, error = dispatch_pause(
+                    store=store, binding_id=binding_id,
+                    cancellation=cancellation_registry,
+                )
+                _idle_finish(toast, error, "Pause")
+            finally:
+                action_in_flight[binding_id] = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_resume(binding_id: str) -> None:
+        if action_in_flight.get(binding_id):
+            return
+        action_in_flight[binding_id] = True
+        set_content_status("Resume: running…")
+
+        def worker() -> None:
+            try:
+                store = VaultBindingsStore(local_index.db_path)
+
+                def flush(_binding) -> object:
+                    # Resume reuses the Sync-now plumbing — same vault
+                    # open, same registry registration, same
+                    # should_continue gate so a fresh Pause arriving
+                    # during the post-resume flush still aborts within
+                    # ~1 chunk.
+                    event = cancellation_registry.register(binding_id)
+                    try:
+                        return runtime.flush_and_sync_binding(
+                            binding_id=binding_id,
+                            author_device_id=config.device_id or ("0" * 32),
+                            device_name=(
+                                str(config.device_name or "").strip()
+                                or "this device"
+                            ),
+                            should_continue=lambda: not event.is_set(),
+                        )
+                    finally:
+                        cancellation_registry.clear(binding_id)
+
+                toast, error = dispatch_resume(
+                    store=store, binding_id=binding_id, flush=flush,
+                )
+                _idle_finish(toast, error, "Resume")
+            finally:
+                action_in_flight[binding_id] = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_disconnect(binding_id: str) -> None:
+        if action_in_flight.get(binding_id):
+            return
+        action_in_flight[binding_id] = True
+        set_content_status("Disconnect: confirming…")
+
+        decision: dict[str, bool] = {}
+        cv = threading.Condition()
+
+        def show_dialog() -> bool:
+            dialog = Adw.AlertDialog(
+                heading="Disconnect this folder?",
+                body=(
+                    "Pending sync operations for this binding will be "
+                    "dropped. Local files and the remote vault are not "
+                    "touched. You can re-connect the folder later."
+                ),
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("disconnect", "Disconnect")
+            dialog.set_response_appearance(
+                "disconnect", Adw.ResponseAppearance.DESTRUCTIVE,
+            )
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+
+            def on_response(_d, response: str) -> None:
+                with cv:
+                    decision["confirmed"] = (response == "disconnect")
+                    cv.notify_all()
+
+            dialog.connect("response", on_response)
+            dialog.present(parent_window)
+            return False
+
+        GLib.idle_add(show_dialog)
+
+        def worker() -> None:
+            try:
+                with cv:
+                    while "confirmed" not in decision:
+                        cv.wait()
+                confirmed = decision["confirmed"]
+                store = VaultBindingsStore(local_index.db_path)
+                toast, error = dispatch_disconnect(
+                    store=store, binding_id=binding_id,
+                    confirm=lambda: confirmed,
+                    cancellation=cancellation_registry,
+                )
+                _idle_finish(toast, error, "Disconnect")
+            finally:
+                action_in_flight[binding_id] = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def open_browse_local(local_path: str) -> None:
+        """Open the binding's local directory in the system file manager."""
+        try:
+            uri = Path(local_path).as_uri()
+            Gio.AppInfo.launch_default_for_uri(uri, None)
+        except Exception as exc:  # noqa: BLE001
+            set_content_status(
+                f"Could not open file manager: {exc}", "error",
+            )
+
+    # ----------------------------------------------------------------
+    # Folder-level action dialogs.
+    # ----------------------------------------------------------------
+    def open_add_folder_dialog(_btn=None) -> None:
         dialog = Adw.Dialog()
         dialog.set_title("Add folder")
         dialog.set_content_width(540)
@@ -243,14 +491,20 @@ def build_vault_folders_tab(
             margin_end=16,
         )
         dialog_toolbar.set_content(body_box)
-        body_box.append(Gtk.Label(label="Add remote folder", xalign=0, css_classes=["title-2"]))
+        body_box.append(Gtk.Label(
+            label="Add remote folder", xalign=0, css_classes=["title-2"],
+        ))
 
-        body_box.append(Gtk.Label(label="Name", xalign=0, css_classes=["dim-label"]))
+        body_box.append(Gtk.Label(
+            label="Name", xalign=0, css_classes=["dim-label"],
+        ))
         name_entry = Gtk.Entry(hexpand=True)
         name_entry.set_placeholder_text("Folder name")
         body_box.append(name_entry)
 
-        body_box.append(Gtk.Label(label="Ignore patterns", xalign=0, css_classes=["dim-label"]))
+        body_box.append(Gtk.Label(
+            label="Ignore patterns", xalign=0, css_classes=["dim-label"],
+        ))
         ignore_buffer = Gtk.TextBuffer()
         ignore_buffer.set_text(default_ignore_patterns_text())
         ignore_view = Gtk.TextView(buffer=ignore_buffer, monospace=True)
@@ -284,7 +538,9 @@ def build_vault_folders_tab(
         dialog_details_state: dict[str, str] = {"text": ""}
 
         def on_details_clicked(_btn) -> None:
-            _present_response_details_dialog(dialog, dialog_details_state["text"])
+            _present_response_details_dialog(
+                dialog, dialog_details_state["text"],
+            )
 
         dialog_details_btn.connect("clicked", on_details_clicked)
 
@@ -299,7 +555,9 @@ def build_vault_folders_tab(
         )
         dialog_toolbar.add_bottom_bar(dialog_buttons)
         cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
-        confirm_btn = Gtk.Button(label="Add", css_classes=["pill", "suggested-action"])
+        confirm_btn = Gtk.Button(
+            label="Add", css_classes=["pill", "suggested-action"],
+        )
         dialog_buttons.append(cancel_btn)
         dialog_buttons.append(confirm_btn)
 
@@ -325,7 +583,9 @@ def build_vault_folders_tab(
         def read_ignore_patterns() -> list[str]:
             start = ignore_buffer.get_start_iter()
             end = ignore_buffer.get_end_iter()
-            return parse_ignore_patterns_text(ignore_buffer.get_text(start, end, False))
+            return parse_ignore_patterns_text(
+                ignore_buffer.get_text(start, end, False),
+            )
 
         def on_confirm(_button) -> None:
             folder_name = name_entry.get_text().strip()
@@ -350,7 +610,7 @@ def build_vault_folders_tab(
                         author_device_id=author_device_id,
                     )
                     usage = calculate_vault_usage(manifest).by_folder
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     error_message = humanize(exc)
                     error_details = getattr(exc, "response_text", None) or None
 
@@ -370,7 +630,16 @@ def build_vault_folders_tab(
                 def succeed() -> bool:
                     usage_by_folder_state["value"] = usage
                     dialog.close()
-                    refresh_folders_table(f"Added {folder_name}.")
+                    # Auto-select the freshly-added folder so the user
+                    # lands on its detail pane and can immediately wire
+                    # up a binding without a second navigation step.
+                    for f in (manifest.get("remote_folders") or []):
+                        if str(f.get("display_name_enc") or "") == folder_name:
+                            selection_state["folder_id"] = str(
+                                f.get("remote_folder_id") or ""
+                            )
+                            break
+                    refresh_all(f"Added {folder_name}.")
                     return False
 
                 GLib.idle_add(succeed)
@@ -380,27 +649,42 @@ def build_vault_folders_tab(
         confirm_btn.connect("clicked", on_confirm)
         dialog.present(parent_window)
 
-    def open_rename_folder_dialog(_btn) -> None:
+    def _lookup_folder_settings(
+        remote_folder_id: str,
+    ) -> tuple[str, list[str]]:
+        """Pull the folder's current display name + ignore patterns out
+        of the local manifest cache. Returns ("", []) if missing.
+        """
         if not vault_id:
-            return
+            return "", []
         try:
             cached = local_index.list_remote_folders(vault_id)
-        except Exception as exc:
-            folders_status.set_label(f"Could not load the local folder cache: {exc}")
-            return
-        if not cached:
-            folders_status.set_label("No remote folders to rename.")
+        except Exception:  # noqa: BLE001
+            return "", []
+        for f in cached:
+            if str(f.get("remote_folder_id") or "") == remote_folder_id:
+                return (
+                    str(f.get("display_name_enc") or ""),
+                    [str(p) for p in (f.get("ignore_patterns") or [])],
+                )
+        return "", []
+
+    def open_configure_folder_dialog(remote_folder_id: str) -> None:
+        """Edit the remote folder's name + ignore patterns post-create.
+
+        F-LT12: replaces the rename-only dialog with a single Configure
+        dialog so users can fix up ignore patterns after the initial
+        Add — before this, those patterns were locked in at creation
+        time with no later editing path.
+        """
+        if not vault_id or not remote_folder_id:
             return
 
-        choices: list[tuple[str, str]] = [
-            (str(f.get("display_name_enc", "")), str(f.get("remote_folder_id", "")))
-            for f in cached
-            if f.get("remote_folder_id")
-        ]
+        current_name, current_patterns = _lookup_folder_settings(remote_folder_id)
 
         dialog = Adw.Dialog()
-        dialog.set_title("Rename folder")
-        dialog.set_content_width(480)
+        dialog.set_title("Configure folder")
+        dialog.set_content_width(540)
         dialog_toolbar = Adw.ToolbarView()
         dialog.set_child(dialog_toolbar)
         dialog_toolbar.add_top_bar(Adw.HeaderBar())
@@ -408,98 +692,115 @@ def build_vault_folders_tab(
         body_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=12,
-            margin_top=16,
-            margin_bottom=16,
-            margin_start=16,
-            margin_end=16,
+            margin_top=16, margin_bottom=16,
+            margin_start=16, margin_end=16,
         )
         dialog_toolbar.set_content(body_box)
-        body_box.append(Gtk.Label(label="Rename remote folder", xalign=0, css_classes=["title-2"]))
+        body_box.append(Gtk.Label(
+            label="Configure folder",
+            xalign=0, css_classes=["title-2"],
+        ))
 
-        body_box.append(Gtk.Label(label="Folder", xalign=0, css_classes=["dim-label"]))
-        folder_dropdown = Gtk.DropDown.new_from_strings(
-            [name for name, _ in choices],
-        )
-        folder_dropdown.set_hexpand(True)
-        body_box.append(folder_dropdown)
-
-        body_box.append(Gtk.Label(label="New name", xalign=0, css_classes=["dim-label"]))
+        body_box.append(Gtk.Label(
+            label="Name", xalign=0, css_classes=["dim-label"],
+        ))
         name_entry = Gtk.Entry(hexpand=True)
-        name_entry.set_text(choices[0][0])
+        name_entry.set_text(current_name)
         body_box.append(name_entry)
 
-        dialog_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        body_box.append(Gtk.Label(
+            label="Ignore patterns", xalign=0, css_classes=["dim-label"],
+        ))
+        ignore_buffer = Gtk.TextBuffer()
+        ignore_buffer.set_text(
+            "\n".join(current_patterns) + ("\n" if current_patterns else "")
+        )
+        ignore_view = Gtk.TextView(buffer=ignore_buffer, monospace=True)
+        ignore_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        ignore_scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        ignore_scroller.set_min_content_height(140)
+        ignore_scroller.set_child(ignore_view)
+        body_box.append(ignore_scroller)
+
+        dialog_status = Gtk.Label(
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        )
         body_box.append(dialog_status)
 
         dialog_buttons = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=8,
             halign=Gtk.Align.END,
-            margin_top=8,
-            margin_bottom=12,
-            margin_start=16,
-            margin_end=16,
+            margin_top=8, margin_bottom=12,
+            margin_start=16, margin_end=16,
         )
         dialog_toolbar.add_bottom_bar(dialog_buttons)
         cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
-        confirm_btn = Gtk.Button(label="Save", css_classes=["pill", "suggested-action"])
+        confirm_btn = Gtk.Button(
+            label="Save", css_classes=["pill", "suggested-action"],
+        )
         dialog_buttons.append(cancel_btn)
         dialog_buttons.append(confirm_btn)
 
         cancel_btn.connect("clicked", lambda _button: dialog.close())
 
-        def set_dialog_status(message: str, css_class: str = "dim-label") -> None:
+        def set_dialog_status(
+            message: str, css_class: str = "dim-label",
+        ) -> None:
             for klass in ("dim-label", "error", "success"):
                 dialog_status.remove_css_class(klass)
             dialog_status.add_css_class(css_class)
             dialog_status.set_label(message)
 
-        def selected_folder() -> tuple[str, str]:
-            i = folder_dropdown.get_selected()
-            if 0 <= i < len(choices):
-                return choices[i]
-            return choices[0]
-
-        def on_dropdown_changed(_combo, _pspec) -> None:
-            current_name, _rfid = selected_folder()
-            name_entry.set_text(current_name)
-
-        folder_dropdown.connect("notify::selected", on_dropdown_changed)
+        def read_ignore_patterns() -> list[str]:
+            start = ignore_buffer.get_start_iter()
+            end = ignore_buffer.get_end_iter()
+            return parse_ignore_patterns_text(
+                ignore_buffer.get_text(start, end, False),
+            )
 
         def on_confirm(_button) -> None:
-            current_name, rfid = selected_folder()
             new_name = name_entry.get_text().strip()
             if not new_name:
                 set_dialog_status("Enter a folder name.", "error")
                 return
-            if new_name == current_name:
-                set_dialog_status("Name is unchanged.", "error")
+            new_patterns = read_ignore_patterns()
+            name_changed = new_name != current_name
+            patterns_changed = new_patterns != current_patterns
+            if not name_changed and not patterns_changed:
+                set_dialog_status("Nothing to save.", "error")
                 return
 
             confirm_btn.set_sensitive(False)
             cancel_btn.set_sensitive(False)
-            folder_dropdown.set_sensitive(False)
             name_entry.set_sensitive(False)
-            set_dialog_status("Renaming folder...", "dim-label")
+            ignore_view.set_sensitive(False)
+            set_dialog_status("Saving folder configuration…", "dim-label")
 
             def worker() -> None:
                 try:
                     author_device_id = config.device_id or ("0" * 32)
-                    manifest = runtime.rename_remote_folder(
-                        remote_folder_id=rfid,
-                        new_display_name=new_name,
+                    manifest = runtime.update_remote_folder_settings(
+                        remote_folder_id=remote_folder_id,
                         author_device_id=author_device_id,
+                        new_display_name=new_name if name_changed else None,
+                        ignore_patterns=(
+                            new_patterns if patterns_changed else None
+                        ),
                     )
                     usage = calculate_vault_usage(manifest).by_folder
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     error_message = humanize(exc)
 
                     def fail() -> bool:
                         confirm_btn.set_sensitive(True)
                         cancel_btn.set_sensitive(True)
-                        folder_dropdown.set_sensitive(True)
                         name_entry.set_sensitive(True)
-                        set_dialog_status(f"Could not rename folder: {error_message}", "error")
+                        ignore_view.set_sensitive(True)
+                        set_dialog_status(
+                            f"Could not save folder: {error_message}",
+                            "error",
+                        )
                         return False
 
                     GLib.idle_add(fail)
@@ -508,7 +809,7 @@ def build_vault_folders_tab(
                 def succeed() -> bool:
                     usage_by_folder_state["value"] = usage
                     dialog.close()
-                    refresh_folders_table(f"Renamed to {new_name}.")
+                    refresh_all(f"Saved {new_name}.")
                     return False
 
                 GLib.idle_add(succeed)
@@ -518,26 +819,20 @@ def build_vault_folders_tab(
         confirm_btn.connect("clicked", on_confirm)
         dialog.present(parent_window)
 
-    add_folder_btn.connect("clicked", open_add_folder_dialog)
-    rename_folder_btn.connect("clicked", open_rename_folder_dialog)
-
-    def open_connect_local_dialog(_btn) -> None:
+    def open_connect_local_dialog(remote_folder_id: str | None = None) -> None:
         if not vault_id:
             return
-        # Fetch the live manifest in a worker so the UI thread stays
-        # responsive while the relay round-trip resolves.
-        connect_local_btn.set_sensitive(False)
 
         def worker() -> None:
             try:
                 manifest = runtime.fetch_manifest()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 error_message = humanize(exc)
 
                 def fail() -> bool:
-                    connect_local_btn.set_sensitive(True)
-                    folders_status.set_label(
-                        f"Could not load manifest for connect: {error_message}"
+                    set_content_status(
+                        f"Could not load manifest for connect: "
+                        f"{error_message}", "error",
                     )
                     return False
 
@@ -545,29 +840,39 @@ def build_vault_folders_tab(
                 return
 
             def show() -> bool:
-                connect_local_btn.set_sensitive(True)
-                choices = [
+                all_choices = [
                     (str(f.get("display_name_enc", "")),
                      str(f.get("remote_folder_id", "")))
                     for f in manifest.get("remote_folders", []) or []
                     if isinstance(f, dict)
                     and str(f.get("state", "active")) == "active"
                 ]
-                if not choices:
-                    folders_status.set_label(
-                        "No remote folders yet — create one before connecting a "
-                        "local folder."
+                if not all_choices:
+                    set_content_status(
+                        "No remote folders yet — create one before "
+                        "connecting a local folder.", "error",
                     )
                     return False
+                # When invoked from a per-folder card we narrow the
+                # dropdown to that folder; otherwise we expose the
+                # whole list.
+                if remote_folder_id:
+                    choices = [
+                        c for c in all_choices if c[1] == remote_folder_id
+                    ]
+                    if not choices:
+                        choices = all_choices
+                else:
+                    choices = all_choices
+
                 store = VaultBindingsStore(local_index.db_path)
 
                 def on_dialog_confirmed(record) -> None:
-                    # Binding row was just written with state="needs-preflight";
-                    # baseline below drives it to "bound" once the remote folder
-                    # is materialized locally.
-                    folders_status.set_label(
-                        "Binding created — running initial baseline…"
+                    set_content_status(
+                        "Binding created — running initial baseline…",
                     )
+                    selection_state["folder_id"] = record.remote_folder_id
+                    refresh_all()
                     threading.Thread(
                         target=lambda: _run_baseline_for_record(record),
                         daemon=True,
@@ -580,18 +885,21 @@ def build_vault_folders_tab(
                         msg = str(exc)
 
                         def fail() -> bool:
-                            folders_status.set_label(
-                                f"Initial baseline failed: {msg}"
+                            set_content_status(
+                                f"Initial baseline failed: {msg}", "error",
                             )
+                            refresh_all()
                             return False
 
                         GLib.idle_add(fail)
                         return
 
                     def succeed() -> bool:
-                        folders_status.set_label(
-                            "Binding ready — initial baseline complete."
+                        set_content_status(
+                            "Binding ready — initial baseline complete.",
+                            "success",
                         )
+                        refresh_all()
                         return False
 
                     GLib.idle_add(succeed)
@@ -610,67 +918,473 @@ def build_vault_folders_tab(
 
         threading.Thread(target=worker, daemon=True).start()
 
-    connect_local_btn.set_sensitive(bool(vault_id))
-    connect_local_btn.connect("clicked", open_connect_local_dialog)
+    # ----------------------------------------------------------------
+    # Card builders.
+    # ----------------------------------------------------------------
+    def _make_flat_action_button(
+        label: str,
+        icon_name: str,
+        callback,
+        *,
+        tooltip: str | None = None,
+        css_classes: list[str] | None = None,
+    ) -> Gtk.Button:
+        """Flat icon-plus-label button. Lighter than a pill for cards."""
+        button = Gtk.Button(css_classes=["flat", *(css_classes or [])])
+        if tooltip:
+            button.set_tooltip_text(tooltip)
+        content = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            margin_start=4, margin_end=4,
+        )
+        content.append(Gtk.Image.new_from_icon_name(icon_name))
+        content.append(Gtk.Label(label=label))
+        button.set_child(content)
+        button.connect("clicked", lambda _b: callback())
+        return button
 
-    # ----------------------- Bindings panel (T10.6) -----------------------
+    def _make_overflow_button(
+        actions: list[tuple[str, str, callable, list[str]]],
+    ) -> Gtk.MenuButton:
+        """Return a flat ``view-more-symbolic`` button whose popover holds
+        the supplied secondary actions.
 
-    sync_in_flight: dict[str, bool] = {}
-    # F-Y08: per-binding cancellation registry. The Sync-now worker
-    # registers an event before each cycle so a future Pause /
-    # Disconnect button can call ``cancellation_registry.cancel(id)``
-    # to abort an in-flight chunk loop. F-Y15 adds the buttons; the
-    # registry plumbing here is the backbone they hook into.
-    cancellation_registry = BindingCancellationRegistry()
+        Each action is ``(label, icon_name, callback, css_classes)``;
+        css_classes is applied to the popover button so destructive ops
+        can render in the warning tone. The popover dismisses itself
+        after a click so the user gets immediate feedback.
+        """
+        button = Gtk.MenuButton()
+        button.set_icon_name("view-more-symbolic")
+        button.add_css_class("flat")
+        button.set_tooltip_text("More actions")
 
-    def clear_bindings_grid() -> None:
-        child = bindings_grid.get_first_child()
-        while child is not None:
-            next_child = child.get_next_sibling()
-            bindings_grid.remove(child)
-            child = next_child
+        popover = Gtk.Popover()
+        popover_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=2,
+            margin_top=6, margin_bottom=6,
+            margin_start=6, margin_end=6,
+        )
+        popover.set_child(popover_box)
+        button.set_popover(popover)
 
-    def attach_binding_cell(text: str, col: int, row: int, *, header: bool = False) -> Gtk.Label:
-        label = Gtk.Label(label=text, xalign=0, hexpand=(col == 0))
-        label.set_wrap(True)
-        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        if header:
-            label.add_css_class("dim-label")
-        bindings_grid.attach(label, col, row, 1, 1)
-        return label
+        for label, icon_name, callback, css_classes in actions:
+            row = Gtk.Button()
+            row.add_css_class("flat")
+            for klass in css_classes:
+                row.add_css_class(klass)
+            content = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+                margin_top=4, margin_bottom=4,
+                margin_start=4, margin_end=4,
+            )
+            if icon_name:
+                content.append(Gtk.Image.new_from_icon_name(icon_name))
+            content.append(Gtk.Label(label=label, xalign=0, hexpand=True))
+            row.set_child(content)
 
-    def run_sync_now(binding_id: str, button: Gtk.Button) -> None:
-        if sync_in_flight.get(binding_id):
+            def _on_click(_b, cb=callback) -> None:
+                popover.popdown()
+                cb()
+
+            row.connect("clicked", _on_click)
+            popover_box.append(row)
+        return button
+
+    def _build_binding_row(row: dict) -> Gtk.Widget:
+        """Render one binding as an ``Adw.ActionRow`` with a primary
+        action button + an overflow popover for the rest. Lighter than
+        the old card-of-pills shape and follows the libadwaita idiom for
+        per-row controls.
+        """
+        bid = row["binding_id"]
+        state = row["state"]
+        sync_mode = row["sync_mode"]
+        local_path = row["local_path"]
+
+        path_basename = Path(local_path).name or local_path
+        action_row = Adw.ActionRow(
+            title=path_basename,
+            subtitle=local_path,
+            tooltip_text=local_path,
+        )
+        action_row.set_subtitle_lines(1)
+        action_row.set_title_lines(1)
+        action_row.set_use_markup(False)
+        # Adw.ActionRow's default natural width forces the whole
+        # NavigationSplitView's content pane to stay wide — even though
+        # the long path is already ellipsized. Override the minimum so
+        # the binding row can shrink with the window.
+        action_row.set_size_request(150, -1)
+
+        # Meta strip: don't echo "bound" — every row that survives the
+        # ``state != "unbound"`` filter and isn't paused is bound, so
+        # the word is dead weight. Paused / needs-preflight surface
+        # implicitly through the primary action (Resume / no action).
+        meta_parts: list[str] = []
+        if sync_mode and sync_mode != "paused":
+            meta_parts.append(sync_mode)
+        meta_parts.append(f"rev {row['last_synced_revision']}")
+        meta_label = Gtk.Label(
+            label="  ·  ".join(meta_parts),
+            xalign=1,
+            css_classes=["dim-label", "caption"],
+            valign=Gtk.Align.CENTER,
+        )
+        action_row.add_suffix(meta_label)
+
+        # Primary action — flat icon, not a pill. Keeps the row visually
+        # quiet next to the section header. Tooltips carry the verb.
+        if state == "bound" and sync_mode != "paused":
+            primary = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+            primary.add_css_class("flat")
+            primary.set_valign(Gtk.Align.CENTER)
+            primary.set_tooltip_text(
+                "Sync now — drain pending local changes and push them to "
+                "the vault.",
+            )
+            primary.connect(
+                "clicked",
+                lambda _b, btn=primary: run_sync_now(bid, btn),
+            )
+            action_row.add_suffix(primary)
+
+            secondary_actions: list[tuple[str, str, callable, list[str]]] = []
+            if local_path:
+                secondary_actions.append((
+                    "Open in file manager",
+                    "folder-open-symbolic",
+                    lambda p=local_path: open_browse_local(p),
+                    [],
+                ))
+            secondary_actions.append((
+                "Pause sync",
+                "media-playback-pause-symbolic",
+                lambda: run_pause(bid),
+                [],
+            ))
+            secondary_actions.append((
+                "Disconnect",
+                "user-trash-symbolic",
+                lambda: run_disconnect(bid),
+                ["destructive-action"],
+            ))
+            action_row.add_suffix(_make_overflow_button(secondary_actions))
+
+        elif state == "paused" or sync_mode == "paused":
+            primary = Gtk.Button.new_from_icon_name(
+                "media-playback-start-symbolic",
+            )
+            primary.add_css_class("flat")
+            primary.set_valign(Gtk.Align.CENTER)
+            primary.set_tooltip_text(
+                "Resume syncing and drain anything the watcher queued.",
+            )
+            primary.connect(
+                "clicked", lambda _b: run_resume(bid),
+            )
+            action_row.add_suffix(primary)
+
+            secondary_actions = []
+            if local_path:
+                secondary_actions.append((
+                    "Open in file manager",
+                    "folder-open-symbolic",
+                    lambda p=local_path: open_browse_local(p),
+                    [],
+                ))
+            secondary_actions.append((
+                "Disconnect",
+                "user-trash-symbolic",
+                lambda: run_disconnect(bid),
+                ["destructive-action"],
+            ))
+            action_row.add_suffix(_make_overflow_button(secondary_actions))
+
+        else:
+            # ``needs-preflight`` and other transitional states — only
+            # the browse affordance makes sense.
+            if local_path:
+                browse_btn = Gtk.Button.new_from_icon_name(
+                    "folder-open-symbolic",
+                )
+                browse_btn.add_css_class("flat")
+                browse_btn.set_tooltip_text("Open in file manager")
+                browse_btn.set_valign(Gtk.Align.CENTER)
+                browse_btn.connect(
+                    "clicked",
+                    lambda _b, p=local_path: open_browse_local(p),
+                )
+                action_row.add_suffix(browse_btn)
+        return action_row
+
+    def _build_sidebar_row(row: dict) -> Gtk.Widget:
+        rfid = row["remote_folder_id"]
+        bindings = list_bindings_for_folder(rfid)
+
+        # Outer horizontal layout: text cluster on the left, overflow
+        # menu icon on the right (so the user can configure the folder
+        # without opening the detail pane).
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            margin_top=8, margin_bottom=8,
+            margin_start=12, margin_end=8,
+        )
+
+        text_cluster = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=2,
+            hexpand=True, valign=Gtk.Align.CENTER,
+        )
+        outer.append(text_cluster)
+
+        title = Gtk.Label(
+            label=row["name"], xalign=0,
+            ellipsize=Pango.EllipsizeMode.END,
+            css_classes=["heading"],
+        )
+        text_cluster.append(title)
+
+        sub_parts: list[str] = []
+        if not bindings:
+            sub_parts.append("Not bound")
+        elif len(bindings) == 1:
+            b = bindings[0]
+            base = Path(b["local_path"]).name or b["local_path"]
+            sub_parts.append(base)
+            if b["state"] == "paused" or b["sync_mode"] == "paused":
+                sub_parts.append("paused")
+            elif b["state"] == "needs-preflight":
+                sub_parts.append("setting up")
+        else:
+            sub_parts.append(f"{len(bindings)} bindings")
+
+        subtitle = Gtk.Label(
+            label="  ·  ".join(sub_parts),
+            xalign=0,
+            ellipsize=Pango.EllipsizeMode.END,
+            css_classes=["dim-label", "caption"],
+        )
+        text_cluster.append(subtitle)
+
+        # F-LT12: per-row overflow menu so Configure / Delete are
+        # reachable without first selecting the folder. The menu
+        # button intercepts the click so it doesn't trigger row
+        # selection.
+        overflow_btn = _make_overflow_button([
+            (
+                "Configure folder",
+                "document-edit-symbolic",
+                lambda r=rfid: open_configure_folder_dialog(r),
+                [],
+            ),
+            (
+                "Delete folder",
+                "user-trash-symbolic",
+                lambda: None,
+                ["destructive-action"],
+            ),
+        ])
+        overflow_btn.set_valign(Gtk.Align.CENTER)
+        outer.append(overflow_btn)
+
+        listbox_row = Gtk.ListBoxRow(child=outer)
+        listbox_row.set_activatable(True)
+        return listbox_row
+
+    # ----------------------------------------------------------------
+    # Detail pane builder.
+    # ----------------------------------------------------------------
+    def _build_empty_state() -> Gtk.Widget:
+        empty = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10,
+            valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER,
+            hexpand=True, vexpand=True,
+        )
+        icon = Gtk.Image.new_from_icon_name("folder-symbolic")
+        icon.set_pixel_size(64)
+        icon.add_css_class("dim-label")
+        empty.append(icon)
+        empty.append(Gtk.Label(
+            label="Select a folder",
+            css_classes=["title-2"],
+        ))
+        empty.append(Gtk.Label(
+            label="Pick a folder from the list, or click + to add a new one.",
+            css_classes=["dim-label"],
+            wrap=True, justify=Gtk.Justification.CENTER,
+        ))
+        return empty
+
+    def render_detail() -> None:
+        clear_box(content_box)
+        rfid = selection_state["folder_id"]
+        folder_row = folder_rows_by_id.get(rfid) if rfid else None
+
+        if folder_row is None:
+            content_page.set_title("Folders")
+            content_box.append(_build_empty_state())
+            content_box.append(content_status)
             return
-        sync_in_flight[binding_id] = True
-        button.set_sensitive(False)
-        bindings_status.set_label("Sync now: running…")
+
+        name = folder_row["name"]
+        content_page.set_title(name)
+
+        # F-LT11: stat tiles instead of a one-line caption-sized
+        # "Status · Current · Stored · History" string. Each pair sits
+        # in a Gtk.FlowBox child so a narrow window wraps the trailing
+        # tiles onto a second / third row instead of squashing all four
+        # into unreadable column widths. No card chrome — the values
+        # are content-level information, not a separate object.
+        stats_flow = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE,
+            homogeneous=True,
+            min_children_per_line=1,
+            max_children_per_line=3,
+            column_spacing=24,
+            row_spacing=12,
+        )
+        # Status tile dropped: every remote folder is currently
+        # "active" (no soft-delete / archive flow yet) so the column
+        # was always identical and just stole space. Re-introduce it
+        # alongside the state-machine work when those values can vary.
+        for caption, value in (
+            ("Current size", folder_row["current"]),
+            ("Remote stored", folder_row["stored"]),
+            ("History", folder_row["history"]),
+        ):
+            tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            caption_label = Gtk.Label(
+                label=caption, xalign=0,
+                css_classes=["dim-label", "caption"],
+            )
+            value_label = Gtk.Label(
+                label=value, xalign=0,
+                css_classes=["title-4"],
+            )
+            value_label.set_ellipsize(Pango.EllipsizeMode.END)
+            tile.append(caption_label)
+            tile.append(value_label)
+            stats_flow.append(tile)
+        content_box.append(stats_flow)
+
+        # Binding section (singular — only one binding per remote folder
+        # is allowed in practice). When no binding exists yet, the
+        # primary call-to-action is "Connect with local folder" and it
+        # belongs right under the heading; once a binding exists the
+        # action is meaningless (the user already bound this folder)
+        # so we hide it instead of leaving a dead button around.
+        bindings_heading = Gtk.Label(
+            label="Local binding", xalign=0,
+            css_classes=["title-3"], margin_top=10,
+        )
+        content_box.append(bindings_heading)
+
+        bindings = list_bindings_for_folder(rfid)
+        if not bindings:
+            connect_btn = Gtk.Button(
+                label="Connect with local folder",
+                css_classes=["pill", "suggested-action"],
+                halign=Gtk.Align.START,
+                margin_top=4,
+            )
+            connect_btn.set_tooltip_text(
+                "Bind this remote folder to a local path. Default sync "
+                "mode is Backup only (uploads local changes; remote "
+                "changes never come down).",
+            )
+            connect_btn.connect(
+                "clicked",
+                lambda _b: open_connect_local_dialog(remote_folder_id=rfid),
+            )
+            content_box.append(connect_btn)
+        else:
+            bindings_listbox = Gtk.ListBox(
+                selection_mode=Gtk.SelectionMode.NONE,
+                css_classes=["boxed-list"],
+            )
+            bindings_listbox.set_size_request(150, -1)
+            for row in bindings:
+                bindings_listbox.append(_build_binding_row(row))
+            content_box.append(bindings_listbox)
+
+        content_box.append(content_status)
+
+    # ----------------------------------------------------------------
+    # Sidebar render + selection.
+    # ----------------------------------------------------------------
+    folder_rows_by_id: dict[str, dict] = {}
+    suspend_selection_signal = {"value": False}
+
+    def refresh_sidebar() -> None:
+        suspend_selection_signal["value"] = True
+        try:
+            clear_listbox(folder_list)
+            folder_rows_by_id.clear()
+            rows = list_folders()
+            for row in rows:
+                folder_rows_by_id[row["remote_folder_id"]] = row
+                folder_list.append(_build_sidebar_row(row))
+
+            if not vault_id:
+                set_sidebar_status("No local vault is connected.")
+            elif not rows:
+                set_sidebar_status("No remote folders yet — use + to add one.")
+            else:
+                set_sidebar_status(f"{len(rows)} folder(s).")
+
+            # Reselect previous selection if still present, else pick the
+            # first row so the detail pane is never empty when there are
+            # folders to choose from.
+            target = selection_state["folder_id"]
+            if target not in folder_rows_by_id:
+                target = next(iter(folder_rows_by_id), None)
+                selection_state["folder_id"] = target
+            if target is not None:
+                row_index = list(folder_rows_by_id).index(target)
+                list_row = folder_list.get_row_at_index(row_index)
+                if list_row is not None:
+                    folder_list.select_row(list_row)
+        finally:
+            suspend_selection_signal["value"] = False
+
+    def refresh_all(message: str | None = None) -> None:
+        refresh_sidebar()
+        render_detail()
+        if message is not None:
+            set_content_status(message)
+
+    def on_row_selected(_listbox, row) -> None:
+        if suspend_selection_signal["value"]:
+            return
+        if row is None:
+            selection_state["folder_id"] = None
+            render_detail()
+            return
+        idx = row.get_index()
+        ids = list(folder_rows_by_id)
+        if 0 <= idx < len(ids):
+            selection_state["folder_id"] = ids[idx]
+        render_detail()
+
+    folder_list.connect("row-selected", on_row_selected)
+    add_folder_btn.connect("clicked", lambda _b: open_add_folder_dialog())
+
+    def refresh_folders_usage_async(message: str | None = None) -> None:
+        if not vault_id:
+            return
+        set_sidebar_status("Refreshing folder usage…")
 
         def worker() -> None:
             try:
-                author_device_id = config.device_id or ("0" * 32)
-                device_name = (
-                    str(config.device_name or "").strip() or "this device"
-                )
-                event = cancellation_registry.register(binding_id)
-                try:
-                    result = runtime.flush_and_sync_binding(
-                        binding_id=binding_id,
-                        author_device_id=author_device_id,
-                        device_name=device_name,
-                        should_continue=lambda: not event.is_set(),
-                    )
-                finally:
-                    cancellation_registry.clear(binding_id)
-                toast_text = format_sync_outcome_toast(result)
+                manifest = runtime.fetch_manifest()
+                usage = calculate_vault_usage(manifest).by_folder
             except Exception as exc:  # noqa: BLE001
                 error_message = humanize(exc)
 
                 def fail() -> bool:
-                    sync_in_flight[binding_id] = False
-                    button.set_sensitive(True)
-                    bindings_status.set_label(
-                        f"Sync now failed: {error_message}"
+                    set_sidebar_status(
+                        f"Folder usage unavailable: {error_message}", "error",
                     )
                     return False
 
@@ -678,277 +1392,14 @@ def build_vault_folders_tab(
                 return
 
             def succeed() -> bool:
-                sync_in_flight[binding_id] = False
-                button.set_sensitive(True)
-                bindings_status.set_label(toast_text)
-                refresh_bindings_table(toast_text)
+                usage_by_folder_state["value"] = usage
+                refresh_all(message)
                 return False
 
             GLib.idle_add(succeed)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ----------------------- F-Y15: Pause / Resume / Disconnect ------
-
-    action_in_flight: dict[str, bool] = {}
-
-    def _set_inflight(binding_id: str, value: bool) -> None:
-        action_in_flight[binding_id] = value
-
-    def _idle_finish(
-        toast: str | None,
-        error: str | None,
-        binding_id: str,
-        prefix: str,
-    ) -> None:
-        def apply() -> bool:
-            _set_inflight(binding_id, False)
-            if error:
-                bindings_status.set_label(error)
-                refresh_bindings_table(error)
-            else:
-                bindings_status.set_label(toast or f"{prefix} done.")
-                refresh_bindings_table(toast)
-            return False
-        GLib.idle_add(apply)
-
-    def run_pause(binding_id: str) -> None:
-        if action_in_flight.get(binding_id):
-            return
-        _set_inflight(binding_id, True)
-        bindings_status.set_label("Pause: running…")
-
-        def worker() -> None:
-            store = VaultBindingsStore(local_index.db_path)
-            toast, error = dispatch_pause(
-                store=store, binding_id=binding_id,
-                cancellation=cancellation_registry,
-            )
-            _idle_finish(toast, error, binding_id, "Pause")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def run_resume(binding_id: str) -> None:
-        if action_in_flight.get(binding_id):
-            return
-        _set_inflight(binding_id, True)
-        bindings_status.set_label("Resume: running…")
-
-        def worker() -> None:
-            store = VaultBindingsStore(local_index.db_path)
-
-            def flush(_binding) -> object:
-                # Resume reuses the Sync-now plumbing — same vault open,
-                # same registry registration, same should_continue gate
-                # so a fresh Pause arriving during the post-resume flush
-                # still aborts within ~1 chunk. The runtime re-fetches
-                # the binding row inside its locked vault scope so we
-                # don't pass a stale snapshot back into the loop.
-                event = cancellation_registry.register(binding_id)
-                try:
-                    return runtime.flush_and_sync_binding(
-                        binding_id=binding_id,
-                        author_device_id=config.device_id or ("0" * 32),
-                        device_name=(
-                            str(config.device_name or "").strip()
-                            or "this device"
-                        ),
-                        should_continue=lambda: not event.is_set(),
-                    )
-                finally:
-                    cancellation_registry.clear(binding_id)
-
-            toast, error = dispatch_resume(
-                store=store, binding_id=binding_id, flush=flush,
-            )
-            _idle_finish(toast, error, binding_id, "Resume")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def run_disconnect(binding_id: str) -> None:
-        if action_in_flight.get(binding_id):
-            return
-        _set_inflight(binding_id, True)
-        bindings_status.set_label("Disconnect: confirming…")
-
-        # Dialog runs on GTK main thread; worker waits via Condition.
-        decision: dict[str, bool] = {}
-        cv = threading.Condition()
-
-        def show_dialog() -> bool:
-            dialog = Adw.AlertDialog(
-                heading="Disconnect this folder?",
-                body=(
-                    "Pending sync operations for this binding will be "
-                    "dropped. Local files and the remote vault are not "
-                    "touched. You can re-connect the folder later."
-                ),
-            )
-            dialog.add_response("cancel", "Cancel")
-            dialog.add_response("disconnect", "Disconnect")
-            dialog.set_response_appearance(
-                "disconnect", Adw.ResponseAppearance.DESTRUCTIVE,
-            )
-            dialog.set_default_response("cancel")
-            dialog.set_close_response("cancel")
-
-            def on_response(_d, response: str) -> None:
-                with cv:
-                    decision["confirmed"] = (response == "disconnect")
-                    cv.notify_all()
-
-            dialog.connect("response", on_response)
-            dialog.present(parent_window)
-            return False
-
-        GLib.idle_add(show_dialog)
-
-        def worker() -> None:
-            with cv:
-                while "confirmed" not in decision:
-                    cv.wait()
-            confirmed = decision["confirmed"]
-            store = VaultBindingsStore(local_index.db_path)
-            toast, error = dispatch_disconnect(
-                store=store, binding_id=binding_id,
-                confirm=lambda: confirmed,
-                cancellation=cancellation_registry,
-            )
-            _idle_finish(toast, error, binding_id, "Disconnect")
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def refresh_bindings_table(message: str | None = None) -> None:
-        clear_bindings_grid()
-        # Header row + Action column
-        for col, title in enumerate(BINDING_COLUMNS):
-            attach_binding_cell(title, col, 0, header=True)
-        attach_binding_cell("Action", len(BINDING_COLUMNS), 0, header=True)
-
-        store = VaultBindingsStore(local_index.db_path)
-        try:
-            binding_records = (
-                store.list_bindings(vault_id=vault_id) if vault_id else []
-            )
-        except Exception as exc:  # noqa: BLE001
-            bindings_status.set_label(f"Could not load bindings: {exc}")
-            binding_records = []
-
-        try:
-            cached_folders = (
-                local_index.list_remote_folders(vault_id) if vault_id else []
-            )
-        except Exception:
-            cached_folders = []
-        folder_names = {
-            str(f.get("remote_folder_id", "")): str(f.get("display_name_enc") or "")
-            for f in cached_folders
-        }
-
-        rows = binding_rows_for_render(
-            binding_records, folder_names_by_id=folder_names,
-        )
-
-        if not rows:
-            empty = (
-                "No local bindings yet. Use 'Connect local folder…' above."
-                if vault_id else
-                "Open a vault before connecting bindings."
-            )
-            attach_binding_cell(empty, 0, 1)
-        else:
-            for row_index, row in enumerate(rows, start=1):
-                attach_binding_cell(row["local_path"], 0, row_index)
-                attach_binding_cell(row["remote_folder"], 1, row_index)
-                attach_binding_cell(row["state"], 2, row_index)
-                attach_binding_cell(row["sync_mode"], 3, row_index)
-                attach_binding_cell(row["last_synced_revision"], 4, row_index)
-                # F-Y15: action cluster keyed on state. ``bound`` shows
-                # Sync now / Pause / Disconnect; ``paused`` swaps Sync
-                # now → Resume; ``unbound`` is read-only.
-                action_box = Gtk.Box(
-                    orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
-                )
-                bid = row["binding_id"]
-                state = row["state"]
-
-                if state == "bound":
-                    sync_btn = Gtk.Button(label="Sync now", css_classes=["pill"])
-                    sync_btn.set_tooltip_text(
-                        "Drain pending local changes and push them to the vault now."
-                    )
-                    sync_btn.connect(
-                        "clicked",
-                        lambda _b, bid=bid, btn=sync_btn: run_sync_now(bid, btn),
-                    )
-                    action_box.append(sync_btn)
-
-                    pause_btn = Gtk.Button(label="Pause", css_classes=["pill"])
-                    pause_btn.set_tooltip_text(
-                        "Pause syncing. The watcher keeps queuing ops; "
-                        "Resume picks up where you left off."
-                    )
-                    pause_btn.connect(
-                        "clicked", lambda _b, bid=bid: run_pause(bid),
-                    )
-                    action_box.append(pause_btn)
-
-                    disconnect_btn = Gtk.Button(
-                        label="Disconnect",
-                        css_classes=["pill", "destructive-action"],
-                    )
-                    disconnect_btn.set_tooltip_text(
-                        "Stop syncing this folder. Pending ops are dropped; "
-                        "local files and the remote vault are not touched."
-                    )
-                    disconnect_btn.connect(
-                        "clicked", lambda _b, bid=bid: run_disconnect(bid),
-                    )
-                    action_box.append(disconnect_btn)
-                elif state == "paused":
-                    resume_btn = Gtk.Button(
-                        label="Resume",
-                        css_classes=["pill", "suggested-action"],
-                    )
-                    resume_btn.set_tooltip_text(
-                        "Resume syncing and drain anything the watcher queued."
-                    )
-                    resume_btn.connect(
-                        "clicked", lambda _b, bid=bid: run_resume(bid),
-                    )
-                    action_box.append(resume_btn)
-
-                    disconnect_btn = Gtk.Button(
-                        label="Disconnect",
-                        css_classes=["pill", "destructive-action"],
-                    )
-                    disconnect_btn.set_tooltip_text(
-                        "Stop syncing this folder. Pending ops are dropped; "
-                        "local files and the remote vault are not touched."
-                    )
-                    disconnect_btn.connect(
-                        "clicked", lambda _b, bid=bid: run_disconnect(bid),
-                    )
-                    action_box.append(disconnect_btn)
-                else:
-                    # ``unbound`` / ``needs-preflight`` etc. — render an
-                    # empty cell so the column width stays stable.
-                    pass
-
-                bindings_grid.attach(
-                    action_box, len(BINDING_COLUMNS), row_index, 1, 1,
-                )
-
-        if message is not None:
-            bindings_status.set_label(message)
-        elif rows:
-            bindings_status.set_label(f"{len(rows)} binding(s).")
-        elif vault_id:
-            bindings_status.set_label("No bindings yet.")
-        else:
-            bindings_status.set_label("")
-
-    refresh_folders_table()
+    refresh_all()
     refresh_folders_usage_async()
-    refresh_bindings_table()
-    return folders
+    return split

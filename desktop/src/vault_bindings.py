@@ -164,11 +164,46 @@ class VaultBindingsStore:
         binding_id: str | None = None,
         now: str | None = None,
     ) -> VaultBinding:
+        """Insert a new binding, or revive an existing ``unbound`` row in place.
+
+        Disconnect leaves a tombstone row (``state="unbound"``) so the
+        preserved ``vault_local_entries`` survive for fast reconnect (see
+        ``vault_binding_lifecycle.disconnect_binding``). Without this
+        revive path, reconnecting the same ``(vault_id, remote_folder_id,
+        local_path)`` triple would hit the schema's UNIQUE constraint.
+        Reviving updates the existing row's ``state`` / ``sync_mode`` so
+        the local-entries cache is immediately useful again.
+        """
         _validate_state(state)
         _validate_sync_mode(sync_mode)
-        binding_id = binding_id or generate_binding_id()
         timestamp = now or _now_rfc3339()
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT * FROM vault_bindings "
+                "WHERE vault_id = ? AND remote_folder_id = ? AND local_path = ?",
+                (vault_id, remote_folder_id, str(local_path)),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["state"]) != "unbound":
+                    raise ValueError(
+                        "binding already exists for this (vault, folder, path)"
+                    )
+                conn.execute(
+                    """
+                    UPDATE vault_bindings
+                    SET state = ?, sync_mode = ?, updated_at = ?
+                    WHERE binding_id = ?
+                    """,
+                    (state, sync_mode, timestamp, existing["binding_id"]),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM vault_bindings WHERE binding_id = ?",
+                    (existing["binding_id"],),
+                ).fetchone()
+                return _row_to_binding(row)
+
+            new_id = binding_id or generate_binding_id()
             conn.execute(
                 """
                 INSERT INTO vault_bindings (
@@ -178,13 +213,13 @@ class VaultBindingsStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
-                    binding_id, vault_id, remote_folder_id, str(local_path),
+                    new_id, vault_id, remote_folder_id, str(local_path),
                     state, sync_mode, timestamp, timestamp,
                 ),
             )
             conn.commit()
         return VaultBinding(
-            binding_id=binding_id,
+            binding_id=new_id,
             vault_id=vault_id,
             remote_folder_id=remote_folder_id,
             local_path=str(local_path),

@@ -232,6 +232,38 @@ def rename_remote_folder(
     raise ValueError(f"remote folder not found: {remote_folder_id}")
 
 
+def update_remote_folder_settings(
+    manifest: dict[str, Any],
+    remote_folder_id: str,
+    *,
+    new_display_name: str | None = None,
+    ignore_patterns: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return a manifest copy with the folder's editable settings updated.
+
+    Updates ``display_name_enc`` and/or ``ignore_patterns`` for the
+    targeted folder. ``None`` for a parameter means "leave that field
+    alone" — this lets the configure dialog apply both edits in a
+    single CAS publish, while a downstream rename-only call path still
+    works (just passes the name).
+    """
+    out = normalize_manifest_plaintext(manifest)
+    if new_display_name is not None:
+        name = unicodedata.normalize("NFC", str(new_display_name)).strip()
+        if not name:
+            raise ValueError("folder name is required")
+    else:
+        name = None
+    for folder in out["remote_folders"]:
+        if folder.get("remote_folder_id") == remote_folder_id:
+            if name is not None:
+                folder["display_name_enc"] = name
+            if ignore_patterns is not None:
+                folder["ignore_patterns"] = list(ignore_patterns)
+            return out
+    raise ValueError(f"remote folder not found: {remote_folder_id}")
+
+
 def canonical_manifest_json(manifest: dict[str, Any]) -> bytes:
     """Canonical JSON bytes for manifest AEAD plaintext."""
     normalized = normalize_manifest_plaintext(manifest)

@@ -164,6 +164,30 @@ class VaultRuntime:
                 local_index=self._local_index,
             )
 
+    def update_remote_folder_settings(
+        self,
+        *,
+        remote_folder_id: str,
+        author_device_id: str,
+        new_display_name: str | None = None,
+        ignore_patterns: list[str] | None = None,
+    ) -> dict:
+        """Update editable remote-folder settings (name + ignore patterns)
+        via a single manifest CAS. Lets the Folders tab's Configure
+        dialog change patterns after creation, which the rename-only
+        path didn't allow.
+        """
+        relay = self._relay_factory(self._config)
+        with self._open_serialized() as vault:
+            return vault.update_remote_folder_settings(
+                relay,
+                remote_folder_id=remote_folder_id,
+                author_device_id=author_device_id,
+                new_display_name=new_display_name,
+                ignore_patterns=ignore_patterns,
+                local_index=self._local_index,
+            )
+
     def flush_and_sync_binding(
         self,
         *,

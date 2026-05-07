@@ -60,7 +60,7 @@ def present_connect_folder_dialog(
 ) -> Adw.Dialog:
     """Build and present the connect-folder dialog."""
     dialog = Adw.Dialog()
-    dialog.set_title("Connect local folder")
+    dialog.set_title("Connect with local folder")
     dialog.set_content_width(560)
 
     container = Gtk.Box(
@@ -75,12 +75,27 @@ def present_connect_folder_dialog(
     ))
 
     # ---- remote folder dropdown -----------------------------------------
-    folder_row = Adw.ActionRow(title="Remote folder")
+    # When the caller passed a single folder (e.g. the new master/detail
+    # Folders tab launching the dialog from a per-folder card), there's
+    # nothing to choose — render the folder as a static row instead of a
+    # one-item dropdown so it doesn't look like an unresolved choice.
     folder_dropdown = Gtk.DropDown.new_from_strings(
         [name for name, _rfid in folder_choices] or ["(no remote folders yet)"],
     )
     folder_dropdown.set_hexpand(True)
-    folder_row.add_suffix(folder_dropdown)
+    if len(folder_choices) <= 1:
+        folder_name = (
+            folder_choices[0][0] if folder_choices else "(no remote folders yet)"
+        )
+        folder_row = Adw.ActionRow(
+            title="Remote folder",
+            subtitle=folder_name,
+        )
+        # Dropdown stays in memory for ``selected_remote()`` below; not
+        # added to the UI tree.
+    else:
+        folder_row = Adw.ActionRow(title="Remote folder")
+        folder_row.add_suffix(folder_dropdown)
     container.append(folder_row)
 
     # ---- local path picker ---------------------------------------------

@@ -296,19 +296,25 @@ class DisconnectTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             disconnect_binding(self.store, "rb_v1_nope")
 
-    def test_disconnect_then_reconnect_blocked_by_unique_constraint(self) -> None:
-        """A stale unbound row blocks a fresh binding to the same path —
-        callers must reuse the existing row (re-preflight) rather than
-        racing a duplicate.
+    def test_disconnect_then_reconnect_revives_unbound_row_in_place(self) -> None:
+        """Reconnecting after disconnect reuses the tombstone row.
+
+        Disconnect leaves an ``unbound`` row so the preserved
+        ``vault_local_entries`` survive for fast reconnect. Calling
+        ``create_binding`` for the same ``(vault, folder, path)`` triple
+        must flip the tombstone back to ``needs-preflight`` rather than
+        hitting the schema's UNIQUE constraint.
         """
-        import sqlite3
         bid = self._make_bound_with_state()
         disconnect_binding(self.store, bid)
-        with self.assertRaises(sqlite3.IntegrityError):
-            self.store.create_binding(
-                vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
-                local_path=str(self.local_root),
-            )
+        revived = self.store.create_binding(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+            sync_mode="two-way",
+        )
+        self.assertEqual(revived.binding_id, bid)
+        self.assertEqual(revived.state, "needs-preflight")
+        self.assertEqual(revived.sync_mode, "two-way")
 
 
 # ---------------------------------------------------------------------------

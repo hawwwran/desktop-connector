@@ -170,6 +170,18 @@ def flush_and_sync_binding(
                 "vault.sync.watcher_flush_failed binding=%s",
                 binding.binding_id,
             )
+    # Catch-up filesystem scan: handles changes that landed while no
+    # watcher was up (settings subprocess just created the binding,
+    # daemon restart, etc.) so "Sync now" can actually find them.
+    # No-op when disk == local-entries cache.
+    if binding.sync_mode != "paused":
+        try:
+            from .vault_binding_scan import scan_for_local_changes
+            scan_for_local_changes(store=store, binding=binding)
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "vault.sync.scan_failed binding=%s", binding.binding_id,
+            )
     if binding.sync_mode == "paused":
         log.info(
             "vault.sync.flush_skipped_paused binding=%s",

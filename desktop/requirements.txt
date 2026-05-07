@@ -10,3 +10,10 @@ qrcode>=7.4
 # desktop/src/secrets.py so dev trees without it can still import
 # the module — only SecretServiceStore() construction triggers it.
 keyring>=24.0.0
+# Vault binding auto-sync needs filesystem-event notifications so a
+# new file dropped into a bound folder is detected without the user
+# clicking "Sync now". `vault_filesystem_watcher.start_watchdog_observer`
+# imports lazily and silently no-ops when watchdog is missing — that
+# silent no-op shipped a "the app didn't notice the file" bug, so
+# this dep is now mandatory for vault auto-sync to function.
+watchdog>=3.0.0

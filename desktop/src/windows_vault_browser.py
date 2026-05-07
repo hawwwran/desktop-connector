@@ -22,6 +22,7 @@ from .vault_local_index import VaultLocalIndex
 from .vault_download import previous_version_filename
 from .vault_error_messages import humanize
 from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError
+from .vault_time_format import format_local
 from .vault_upload import (
     default_upload_resume_dir,
     describe_quota_exceeded,
@@ -296,8 +297,10 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
         def render_detail(file_row: dict | None) -> None:
             clear_box(detail_box)
             versions_btn.set_sensitive(False)
-            detail_box.append(Gtk.Label(label="Details", xalign=0, css_classes=["title-3"]))
             if not file_row:
+                detail_box.append(Gtk.Label(
+                    label="Details", xalign=0, css_classes=["title-3"],
+                ))
                 current_path = str(state["path"])
                 download_btn.set_sensitive(bool(current_path))
                 if current_path:
@@ -328,24 +331,40 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
                 return
             download_btn.set_sensitive(True)
 
-            rows = [
-                ("Name", str(file_row.get("name", ""))),
-                ("Path", str(file_row.get("path", ""))),
-                ("Logical size", _format_bytes(int(file_row.get("size", 0)))),
-                ("Remote stored size", _format_bytes(int(file_row.get("stored_size", 0)))),
-                ("Modified", str(file_row.get("modified", "")) or "-"),
-                ("Current version", str(file_row.get("latest_version_id", "")) or "-"),
-                ("Versions", str(file_row.get("versions", 0))),
-                ("Status", str(file_row.get("status", ""))),
+            heading_label = Gtk.Label(
+                label=str(file_row.get("name", "")) or "(unnamed)",
+                xalign=0,
+                css_classes=["title-3"],
+            )
+            heading_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            heading_label.set_tooltip_text(str(file_row.get("name", "")))
+            detail_box.append(heading_label)
+
+            pairs = [
+                ("Path", str(file_row.get("path", "")) or "-", True, True),
+                ("Logical size", _format_bytes(int(file_row.get("size", 0))), False, False),
+                ("Remote stored size", _format_bytes(int(file_row.get("stored_size", 0))), False, False),
+                ("Modified", format_local(file_row.get("modified")) or "-", False, False),
+                ("Current version", str(file_row.get("latest_version_id", "")) or "-", True, True),
+                ("Versions", str(file_row.get("versions", 0)), False, False),
+                ("Status", str(file_row.get("status", "")), False, False),
             ]
-            grid = Gtk.Grid(column_spacing=12, row_spacing=6)
-            detail_box.append(grid)
-            for row_index, (label, value) in enumerate(rows):
-                key = Gtk.Label(label=label, xalign=0, css_classes=["dim-label"])
-                val = Gtk.Label(label=value, xalign=0, wrap=True)
-                val.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-                grid.attach(key, 0, row_index, 1, 1)
-                grid.attach(val, 1, row_index, 1, 1)
+            for label_text, value_text, ellipsize, monospace in pairs:
+                pair = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                pair.set_margin_bottom(6)
+                key = Gtk.Label(label=label_text, xalign=0, css_classes=["dim-label", "caption"])
+                val_classes = ["monospace"] if monospace else []
+                val = Gtk.Label(label=value_text, xalign=0, css_classes=val_classes)
+                val.set_selectable(True)
+                if ellipsize:
+                    val.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                    val.set_tooltip_text(value_text)
+                else:
+                    val.set_wrap(True)
+                    val.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                pair.append(key)
+                pair.append(val)
+                detail_box.append(pair)
 
             render_versions_section(file_row)
 
@@ -368,12 +387,14 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
                 css_classes=["title-3"],
             ))
             if bool(file_row.get("deleted")):
+                deleted_at_local = format_local(file_row.get("deleted_at"))
+                recoverable_local = format_local(file_row.get("recoverable_until"))
                 tombstone_label = Gtk.Label(
                     label=(
-                        f"Deleted {file_row.get('deleted_at') or ''}".strip()
+                        f"Deleted {deleted_at_local}".strip()
                         + (
-                            f" — recoverable until {file_row.get('recoverable_until')}"
-                            if file_row.get("recoverable_until") else ""
+                            f" — recoverable until {recoverable_local}"
+                            if recoverable_local else ""
                         )
                     ),
                     xalign=0,
@@ -395,7 +416,7 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
             grid = Gtk.Grid(column_spacing=12, row_spacing=6)
             detail_box.append(grid)
             for col, header in enumerate(
-                ("Modified", "Device", "Size", "Status", "", "")
+                ("", "Modified", "Device", "Size", "Status", "")
             ):
                 grid.attach(
                     Gtk.Label(label=header, xalign=0, css_classes=["dim-label"]),
@@ -404,34 +425,33 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
 
             entry_deleted = bool(file_row.get("deleted"))
             for row_index, version in enumerate(versions, start=1):
-                modified = str(version.get("modified") or "-")
-                grid.attach(Gtk.Label(label=modified, xalign=0), 0, row_index, 1, 1)
+                download_icon_btn = Gtk.Button.new_from_icon_name("document-save-symbolic")
+                download_icon_btn.add_css_class("flat")
+                download_icon_btn.set_tooltip_text("Download this version")
+                download_icon_btn.connect(
+                    "clicked",
+                    lambda _b, v=dict(version), f=dict(file_row): choose_version_destination(f, v),
+                )
+                if version.get("is_current") and not entry_deleted:
+                    download_icon_btn.set_sensitive(False)
+                grid.attach(download_icon_btn, 0, row_index, 1, 1)
+
+                modified = format_local(version.get("modified")) or "-"
+                grid.attach(Gtk.Label(label=modified, xalign=0), 1, row_index, 1, 1)
                 device = str(version.get("author_device_id") or "")
                 grid.attach(
                     Gtk.Label(label=device[:12] if device else "-", xalign=0),
-                    1, row_index, 1, 1,
+                    2, row_index, 1, 1,
                 )
                 size_label = _format_bytes(int(version.get("size", 0) or 0))
-                grid.attach(Gtk.Label(label=size_label, xalign=0), 2, row_index, 1, 1)
+                grid.attach(Gtk.Label(label=size_label, xalign=0), 3, row_index, 1, 1)
                 if entry_deleted and version.get("is_current"):
                     status_label = "Latest (deleted)"
                 elif version.get("is_current"):
                     status_label = "Current"
                 else:
                     status_label = "Previous"
-                grid.attach(Gtk.Label(label=status_label, xalign=0), 3, row_index, 1, 1)
-
-                download_btn_inline = Gtk.Button(label="Download…", css_classes=["pill"])
-                download_btn_inline.set_tooltip_text(
-                    "Save this version to a side path — the current file is never overwritten."
-                )
-                download_btn_inline.connect(
-                    "clicked",
-                    lambda _b, v=dict(version), f=dict(file_row): choose_version_destination(f, v),
-                )
-                if version.get("is_current") and not entry_deleted:
-                    download_btn_inline.set_sensitive(False)
-                grid.attach(download_btn_inline, 4, row_index, 1, 1)
+                grid.attach(Gtk.Label(label=status_label, xalign=0), 4, row_index, 1, 1)
 
                 # Restore makes sense for any non-current version, plus
                 # the latest version of a tombstoned entry (T7.4 shortcut).
@@ -509,11 +529,11 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
                 attach_cell(button, 0, row)
                 size_label = _format_bytes(int(file_row.get("size", 0)))
                 attach_label(size_label, 1, row)
-                attach_label(str(file_row.get("modified", "")) or "-", 2, row)
+                attach_label(format_local(file_row.get("modified")) or "-", 2, row)
                 attach_label(str(file_row.get("versions", 0)), 3, row)
                 status_label = str(file_row.get("status", ""))
                 if deleted:
-                    recoverable = str(file_row.get("recoverable_until") or "").strip()
+                    recoverable = format_local(file_row.get("recoverable_until"))
                     if recoverable:
                         status_label = f"Deleted — recoverable until {recoverable}"
                 attach_label(status_label, 4, row)
@@ -1061,7 +1081,7 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
                 return
 
             label = file_row.get("name") or file_path
-            modified = str(version.get("modified") or "?")
+            modified = format_local(version.get("modified")) or "?"
             download_btn.set_sensitive(False)
             versions_btn.set_sensitive(False)
             cancel_event = threading.Event()
@@ -1753,7 +1773,7 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
                 return
 
             display_path = str(file_row.get("path") or relative_path)
-            modified = str(version.get("modified") or "?")
+            modified = format_local(version.get("modified")) or "?"
             heading = f"Restore {display_path} to {modified}?"
             body = (
                 "A new version will be added on top, pointing at this version's "
@@ -1825,6 +1845,20 @@ def show_vault_browser(config_dir: Path, vault_id_override: str | None = None) -
         delete_btn.connect("clicked", confirm_and_delete)
         download_btn.connect("clicked", choose_download_destination)
         show_deleted_toggle.connect("toggled", on_show_deleted_toggled)
+
+        # F-LT04: pull the manifest when the window regains focus so a
+        # publish from another process (Sync now in Settings, background
+        # filesystem watcher) shows up without a manual Refresh click.
+        # We skip if the in-flight refresh has the Refresh button
+        # disabled — that path will land its own re-render.
+        def _refresh_on_focus(window: Adw.ApplicationWindow, _pspec) -> None:
+            if not window.get_property("is-active"):
+                return
+            if not refresh_btn.get_sensitive():
+                return
+            refresh_manifest_async()
+
+        win.connect("notify::is-active", _refresh_on_focus)
 
         render_all("Open or refresh a vault to browse files.")
         refresh_manifest_async()

@@ -126,6 +126,21 @@ cmdline). No env-var bypass strictly needed for windows, but the
 keyring-service override is still required so the window doesn't
 read the user's real device key.
 
+### Vault UI tests run **without** the headless dev twin
+
+`php -S` is single-threaded. The headless dev twin's poller sits in a
+25-second long-poll on `/api/transfers/notify`; while it's parked,
+**every** other request — including the vault UI's manifest GET / PUT
+— queues behind it. A live test run hit a ~50-second wait on a
+single "Add folder" click because the GET landed at the 25 s timeout
+and the PUT at +25 s after that.
+
+Vault is account-less and the receiver only matters for transfer
+tests. **Never run the headless dev twin during a vault UI test on the
+same `php -S` relay.** If a future test needs both halves running,
+spawn a second PHP worker on a different port (e.g. `4442`) for the
+receiver and leave `:4441` free for UI traffic.
+
 ### ⛔ HARD RULE: never set `GTK_A11Y=atspi`
 
 **Do not, under any circumstances, set the `GTK_A11Y=atspi`

@@ -495,6 +495,11 @@ relay log (filenames are local-only).
 | `vault.sync.refetch_for_next_iter_failed` | desktop | warning | `binding` | Two-way next-iter re-fetch failed |
 | `vault.sync.resume_cancelled` | desktop | info | `vault`, `session`, `chunks_done`, `total` | F-Y08 — resume_upload bailed mid-chunk-loop |
 | `vault.sync.resume_cancelled_pre_publish` | desktop | info | `vault`, `session` | F-Y08 — resume_upload bailed before CAS publish |
+| `vault.sync.scan_enqueued` | desktop | info | `binding`, `count` | "Sync now" catch-up scan enqueued upload/delete ops the watcher missed |
+| `vault.sync.scan_failed` | desktop | error | exception traceback | "Sync now" catch-up scan threw before queue drain (cycle still proceeds with whatever is already pending) |
+| `vault.sync.scan_list_entries_failed` | desktop | error | `binding` | Catch-up scan couldn't list `vault_local_entries`; tombstone detection skipped this pass |
+| `vault.sync.scan_lookup_failed` | desktop | error | `binding`, `path` | Catch-up scan couldn't read a `vault_local_entries` row; treated as missing for upload-needed check |
+| `vault.sync.scan_skip_missing_root` | desktop | warning | `binding`, `path` | Catch-up scan: binding root vanished |
 | `vault.sync.special_file_skipped` | desktop | info | `binding`, `path`, `kind` | T6.4 skipped a symlink/FIFO/socket/device |
 | `vault.sync.trash_failed` | desktop | warning | `path`, `exit`, `stderr` | `gio trash` returned non-zero |
 | `vault.sync.trash_fallback_unlink_failed` | desktop | error | `path`, `error` | trash fallback `unlink` also failed |
