@@ -382,10 +382,17 @@ class VaultRuntimeSourcePins(unittest.TestCase):
         )
 
     def test_tab_dispatches_through_runtime_methods(self) -> None:
+        # F-LT12: rename folded into a single Configure dialog that
+        # dispatches through ``update_remote_folder_settings`` (which
+        # can carry a name change AND ignore-pattern edits in one CAS).
+        # The legacy ``rename_remote_folder`` runtime method still
+        # exists for programmatic callers but the tab no longer invokes
+        # it directly — see ``test_desktop_vault_folders_rename_source``
+        # for the Configure-dialog pin.
         for needle in (
             "runtime.fetch_manifest()",
             "runtime.add_remote_folder(",
-            "runtime.rename_remote_folder(",
+            "runtime.update_remote_folder_settings(",
             "runtime.flush_and_sync_binding(",
             "runtime.run_initial_baseline(",
         ):

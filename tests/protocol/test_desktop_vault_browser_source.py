@@ -231,7 +231,8 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             "download_version",
             "render_versions_section",
             "Download previous version",
-            "side path",
+            # Hyphenated in the conflict-banner copy ("side-path name").
+            "side-path",
             "Version file exists",
         ):
             with self.subTest(text=text):

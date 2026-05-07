@@ -180,6 +180,14 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
     """T10.2 source-pin: dialog + folders-tab wiring."""
 
     def test_folders_tab_offers_connect_local_folder_button(self) -> None:
+        # F-LT09 redesign moved the connect entry-point from a global
+        # Folders-tab button to a per-folder card action that's only
+        # rendered when the selected folder has zero bindings (so users
+        # can't double-bind the same folder by accident). The pin
+        # tracks the new shape: per-folder ``connect_btn`` labelled
+        # "Connect with local folder", invoked through
+        # ``open_connect_local_dialog`` with the ``rfid`` already
+        # known.
         from _paths import REPO_ROOT
         source = Path(REPO_ROOT, "desktop/src/vault_folders_tab.py").read_text(
             encoding="utf-8"
@@ -187,7 +195,8 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
         for needle in (
             "from .vault_connect_folder_dialog import present_connect_folder_dialog",
             "from .vault_bindings import VaultBindingsStore",
-            'connect_local_btn = Gtk.Button(label="Connect local folder…"',
+            "connect_btn = Gtk.Button(",
+            'label="Connect with local folder"',
             "open_connect_local_dialog",
             "needs-preflight",
         ):
@@ -204,7 +213,8 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
             "compute_preflight",
             "render_preflight_text",
             "DEFAULT_MODE_INDEX",
-            "Connect local folder",
+            # Title copy aligned with the per-folder button.
+            "Connect with local folder",
             'state="needs-preflight"',
             'on_cancel',
         ):
