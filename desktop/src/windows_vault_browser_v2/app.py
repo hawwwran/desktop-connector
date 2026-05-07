@@ -36,7 +36,8 @@ from ..vault_runtime import (  # noqa: E402
     create_vault_relay,
     open_local_vault_from_grant,
 )
-from ..windows_common import _make_app  # noqa: E402
+from ..vault_time_format import format_local  # noqa: E402
+from ..windows_common import _format_bytes, _make_app  # noqa: E402
 from .state import BrowserState
 
 log = logging.getLogger(__name__)
@@ -278,7 +279,7 @@ class VaultBrowser:
             self.breadcrumb.set_label(self._current_path_label())
         self._update_nav_buttons()
         self._render_tree()
-        self._render_file_list_placeholder()
+        self._render_file_list()
         self._render_detail_placeholder()
         if message is not None:
             self._set_status(message, css_class)
@@ -320,22 +321,99 @@ class VaultBrowser:
 
         walk("", 1)
 
-    # Placeholders — replaced in passes 2 / 3.
-    def _render_file_list_placeholder(self) -> None:
+    # ------------------------------------------------------------------ file list (center pane)
+    def _attach_cell(self, widget: Gtk.Widget, col: int, row: int) -> None:
+        assert self.list_grid is not None
+        self.list_grid.attach(widget, col, row, 1, 1)
+
+    def _attach_label(
+        self, text: str, col: int, row: int, *, header: bool = False,
+    ) -> None:
+        label = Gtk.Label(label=text, xalign=0, hexpand=(col == 0))
+        label.set_wrap(True)
+        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        if header:
+            label.add_css_class("dim-label")
+        self._attach_cell(label, col, row)
+
+    def _select_file(self, file_row: dict) -> None:
+        self.state.selected_file = file_row
+        # Detail pane is still placeholder in pass 2; pass 3 will
+        # replace this with the real render_detail. Re-render the
+        # placeholder so the selected-row state is at least visible
+        # in self.state for the next pass.
+        self._render_detail_placeholder()
+
+    def _render_file_list(self) -> None:
         if self.list_grid is None:
             return
         self._clear_grid(self.list_grid)
-        for col, title in enumerate(("Name", "Size", "Modified", "Versions", "Status")):
-            label = Gtk.Label(label=title, xalign=0, hexpand=(col == 0))
-            label.add_css_class("dim-label")
-            self.list_grid.attach(label, col, 0, 1, 1)
-        info = Gtk.Label(
-            label="Center pane lands in v2 pass 2 — file rows + selection.",
-            xalign=0,
-            wrap=True,
-            css_classes=["dim-label"],
-        )
-        self.list_grid.attach(info, 0, 1, 5, 1)
+        for col, title in enumerate(
+            ("Name", "Size", "Modified", "Versions", "Status"),
+        ):
+            self._attach_label(title, col, 0, header=True)
+
+        manifest = self.state.manifest
+        if not manifest:
+            self._attach_label("Open or refresh a vault to browse files.", 0, 1)
+            return
+
+        include_deleted = self.state.show_deleted
+        try:
+            folders, files = list_folder(
+                manifest, str(self.state.path), include_deleted=include_deleted,
+            )
+        except Exception as exc:
+            self._attach_label(f"Could not list this folder: {exc}", 0, 1)
+            return
+
+        row = 1
+        for folder in folders:
+            button = Gtk.Button(
+                label=str(folder["name"]), halign=Gtk.Align.START,
+            )
+            button.add_css_class("flat")
+            button.connect(
+                "clicked", lambda _btn, p=folder["path"]: self._navigate_to(str(p)),
+            )
+            self._attach_cell(button, 0, row)
+            self._attach_label("-", 1, row)
+            self._attach_label("-", 2, row)
+            self._attach_label("-", 3, row)
+            self._attach_label("Folder", 4, row)
+            row += 1
+
+        for file_row in files:
+            deleted = str(file_row.get("status", "")) == "Deleted"
+            button = Gtk.Button(
+                label=str(file_row["name"]), halign=Gtk.Align.START,
+            )
+            button.add_css_class("flat")
+            if deleted:
+                button.add_css_class("dim-label")
+            button.connect(
+                "clicked", lambda _btn, f=file_row: self._select_file(dict(f)),
+            )
+            self._attach_cell(button, 0, row)
+            size_label = _format_bytes(int(file_row.get("size", 0)))
+            self._attach_label(size_label, 1, row)
+            self._attach_label(format_local(file_row.get("modified")) or "-", 2, row)
+            self._attach_label(str(file_row.get("versions", 0)), 3, row)
+            status_label = str(file_row.get("status", ""))
+            if deleted:
+                recoverable = format_local(file_row.get("recoverable_until"))
+                if recoverable:
+                    status_label = f"Deleted — recoverable until {recoverable}"
+            self._attach_label(status_label, 4, row)
+            row += 1
+
+        if row == 1:
+            if self.state.path:
+                self._attach_label(
+                    "Folder is empty — drag files here or click Upload", 0, 1,
+                )
+            else:
+                self._attach_label("No remote folders yet.", 0, 1)
 
     def _render_detail_placeholder(self) -> None:
         if self.detail_box is None:
