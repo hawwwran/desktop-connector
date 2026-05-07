@@ -459,6 +459,12 @@ relay log (filenames are local-only).
 | `vault.revoke.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant revoke logs through this surface (F-510) |
 | `vault.rotation.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when access-secret rotation logs through this surface (F-510) |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
+| `vault.sync.autosync.flushed` | desktop | info | `binding`, `ops` | F-LT06 — per-binding flush applied N ops in this tick |
+| `vault.sync.autosync.started` | desktop | info | `interval_s` | F-LT06 — tray-side autosync loop entered (one per app launch) |
+| `vault.sync.autosync.tick` | desktop | info | `reason`, `active_bindings` | F-LT06 — tick fired (`reason ∈ {kick, interval}`) with N bindings to drain |
+| `vault.sync.autosync_flush_failed` | desktop | error | `binding`, exception traceback | F-LT06 — `flush_and_sync_binding` raised; loop continues, manual Sync now still works |
+| `vault.sync.autosync_list_bindings_failed` | desktop | error | exception traceback | F-LT06 — bindings store query raised; tick skipped, retried on next interval |
+| `vault.sync.autosync_tick_failed` | desktop | error | exception traceback | F-LT06 — `watcher_runtime.tick_all()` raised; flush attempt still proceeds |
 | `vault.sync.binding_disconnect_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — disconnect cancelled an in-flight cycle via the registry |
 | `vault.sync.binding_disconnect_dropping_op` | desktop | info | `binding`, `op_type`, `path`, `attempts` | F-Y30 — per-op audit trail emitted before disconnect drops a pending op |
 | `vault.sync.binding_disconnect_dropping_op_truncated` | desktop | info | `binding`, `logged`, `total` | F-Y30 — per-op audit log capped; summary follows on `binding_disconnected` |
