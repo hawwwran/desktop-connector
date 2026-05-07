@@ -573,7 +573,10 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                     return _CountingFile(fh)
                 return fh
 
-            with mock.patch("src.vault_upload.open", counting_open):
+            # Patch ``open`` in the module that owns the function reading
+            # the file (``resume``); patching the shim's namespace would be
+            # silently ineffective post-split.
+            with mock.patch("src.vault_upload.resume.open", counting_open):
                 resume_upload(
                     vault=vault, relay=relay, manifest=manifest,
                     session=session, resume_cache_dir=cache_dir,
