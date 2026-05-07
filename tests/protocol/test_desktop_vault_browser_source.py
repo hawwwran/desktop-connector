@@ -50,7 +50,9 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
         )
 
     def test_tray_open_vault_launches_browser_not_settings(self) -> None:
-        source = Path(REPO_ROOT, "desktop/src/tray.py").read_text(encoding="utf-8")
+        # tray.py is now a package; the vault submenu lives in
+        # tray/vault_submenu.py.
+        source = Path(REPO_ROOT, "desktop/src/tray/vault_submenu.py").read_text(encoding="utf-8")
 
         self.assertIn('"Open Vault…",\n                self._spawn_vault_browser', source)
         self.assertIn('self._open_gtk4_window("vault-browser")', source)

@@ -25,7 +25,12 @@ class FindDeviceWindowSourceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.full_source = Path(REPO_ROOT, "desktop/src/windows_find_phone.py").read_text()
         cls.source = _find_device_window_source()
-        cls.tray_source = Path(REPO_ROOT, "desktop/src/tray.py").read_text()
+        # tray.py is now a package; concatenate every submodule so
+        # source pins continue to match wherever the string lives.
+        tray_pkg = Path(REPO_ROOT, "desktop/src/tray")
+        cls.tray_source = "\n".join(
+            sorted(p.read_text() for p in tray_pkg.glob("*.py"))
+        )
 
     def test_window_uses_device_wording(self):
         self.assertIn('title="Find my Device"', self.source)

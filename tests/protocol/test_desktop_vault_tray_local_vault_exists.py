@@ -133,14 +133,15 @@ class TrayLocalVaultExistsSourcePins(unittest.TestCase):
     to the bare ``last_known_id`` heuristic."""
 
     def test_tray_imports_local_vault_grant_exists(self) -> None:
-        source = Path(REPO_ROOT, "desktop/src/tray.py").read_text(encoding="utf-8")
+        # tray.py is now a package; the helper lives in tray/vault_submenu.py.
+        source = Path(REPO_ROOT, "desktop/src/tray/vault_submenu.py").read_text(encoding="utf-8")
         self.assertIn(
-            "from .vault_grant import local_vault_grant_exists",
+            "from ..vault_grant import local_vault_grant_exists",
             source,
         )
 
     def test_tray_threads_vault_id_through_helper(self) -> None:
-        source = Path(REPO_ROOT, "desktop/src/tray.py").read_text(encoding="utf-8")
+        source = Path(REPO_ROOT, "desktop/src/tray/vault_submenu.py").read_text(encoding="utf-8")
         self.assertIn(
             "return local_vault_grant_exists(self.config.config_dir, vault_id)",
             source,
