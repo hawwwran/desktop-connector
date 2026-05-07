@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
+from typing import Callable
 
 import gi
 
@@ -34,11 +35,17 @@ from ..vault_browser_model import list_folder, list_versions  # noqa: E402
 from ..vault_download import previous_version_filename  # noqa: E402
 from ..vault_error_messages import humanize  # noqa: E402
 from ..vault_local_index import VaultLocalIndex  # noqa: E402
+from ..vault_relay_errors import VaultQuotaExceededError  # noqa: E402
 from ..vault_runtime import (  # noqa: E402
     create_vault_relay,
     open_local_vault_from_grant,
 )
 from ..vault_time_format import format_local  # noqa: E402
+from ..vault_upload import (  # noqa: E402
+    default_upload_resume_dir,
+    describe_quota_exceeded,
+    list_resumable_sessions,
+)
 from ..windows_common import _format_bytes, _make_app  # noqa: E402
 from .state import BrowserState
 
@@ -104,9 +111,14 @@ class VaultBrowser:
         self.back_btn: Gtk.Button | None = None
         self.forward_btn: Gtk.Button | None = None
         self.refresh_btn: Gtk.Button | None = None
+        self.upload_btn: Gtk.Button | None = None
+        self.upload_folder_btn: Gtk.Button | None = None
+        self.delete_btn: Gtk.Button | None = None
         self.versions_btn: Gtk.Button | None = None
         self.download_btn: Gtk.Button | None = None
         self.show_deleted_toggle: Gtk.CheckButton | None = None
+        self.resume_banner: Adw.Banner | None = None
+        self.quota_banner: Adw.Banner | None = None
         self.breadcrumb: Gtk.Label | None = None
         self.status_label: Gtk.Label | None = None
         self.progress_box: Gtk.Box | None = None
@@ -163,9 +175,23 @@ class VaultBrowser:
         except Exception:
             log.debug("apply_pointer_cursors failed", exc_info=True)
 
+        # F-LT04: pull the manifest when the window regains focus so a
+        # publish from another process (Sync now in Settings, background
+        # filesystem watcher) shows up without a manual Refresh click.
+        # We skip if the in-flight refresh has the Refresh button
+        # disabled — that path will land its own re-render.
+        self.win.connect("notify::is-active", self._refresh_on_focus)
+
         self.win.present()
         # Kick the initial manifest fetch on entry so the user sees the
         # tree populate without a manual click.
+        self._refresh_manifest_async()
+
+    def _refresh_on_focus(self, window, _pspec) -> None:
+        if not window.get_property("is-active"):
+            return
+        if self.refresh_btn is None or not self.refresh_btn.get_sensitive():
+            return
         self._refresh_manifest_async()
 
     # ------------------------------------------------------------------ layout
@@ -177,6 +203,13 @@ class VaultBrowser:
         self.back_btn = Gtk.Button(label="Back", css_classes=["pill"])
         self.forward_btn = Gtk.Button(label="Forward", css_classes=["pill"])
         self.refresh_btn = Gtk.Button(label="Refresh", css_classes=["pill"])
+        self.upload_btn = Gtk.Button(label="Upload", css_classes=["pill"])
+        self.upload_folder_btn = Gtk.Button(
+            label="Upload folder", css_classes=["pill"],
+        )
+        self.delete_btn = Gtk.Button(
+            label="Delete", css_classes=["pill", "destructive-action"],
+        )
         self.versions_btn = Gtk.Button(label="Versions", css_classes=["pill"])
         self.download_btn = Gtk.Button(
             label="Download", css_classes=["pill", "suggested-action"],
@@ -185,11 +218,26 @@ class VaultBrowser:
         self.back_btn.connect("clicked", self._on_back_clicked)
         self.forward_btn.connect("clicked", self._on_forward_clicked)
         self.refresh_btn.connect("clicked", lambda _btn: self._refresh_manifest_async())
+        self.upload_btn.connect("clicked", self._choose_upload_source)
+        self.upload_folder_btn.connect("clicked", self._choose_upload_folder_source)
+        self.delete_btn.connect("clicked", self._confirm_and_delete)
         self.download_btn.connect("clicked", self._choose_download_destination)
 
+        self.upload_btn.set_sensitive(False)
+        self.upload_folder_btn.set_sensitive(False)
+        self.delete_btn.set_sensitive(False)
         self.versions_btn.set_sensitive(False)
-        self.versions_btn.set_tooltip_text("Choose a version below to download")
         self.download_btn.set_sensitive(False)
+        self.upload_btn.set_tooltip_text(
+            "Open a remote folder, then click Upload to add a file",
+        )
+        self.upload_folder_btn.set_tooltip_text(
+            "Open a remote folder, then click to upload a local folder recursively",
+        )
+        self.delete_btn.set_tooltip_text(
+            "Soft-delete the selected file or current folder",
+        )
+        self.versions_btn.set_tooltip_text("Choose a version below to download")
         self.download_btn.set_tooltip_text(
             "Download selected file or current folder",
         )
@@ -198,6 +246,9 @@ class VaultBrowser:
             self.back_btn,
             self.forward_btn,
             self.refresh_btn,
+            self.upload_btn,
+            self.upload_folder_btn,
+            self.delete_btn,
             self.versions_btn,
             self.download_btn,
         ):
@@ -215,6 +266,20 @@ class VaultBrowser:
 
     def _build_breadcrumb_and_status(self) -> None:
         assert self.outer is not None
+        # Resume + quota banners sit above the breadcrumb (v1 lines
+        # 129–136). Both start hidden; ``_refresh_resume_banner`` and
+        # ``_handle_quota_exceeded`` reveal them when their state
+        # actually fires.
+        self.resume_banner = Adw.Banner.new("")
+        self.resume_banner.set_button_label("Resume")
+        self.resume_banner.set_revealed(False)
+        self.resume_banner.connect("button-clicked", self._start_resume_pending)
+        self.outer.append(self.resume_banner)
+
+        self.quota_banner = Adw.Banner.new("")
+        self.quota_banner.set_revealed(False)
+        self.outer.append(self.quota_banner)
+
         self.breadcrumb = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.breadcrumb.add_css_class("title-4")
         self.outer.append(self.breadcrumb)
@@ -337,8 +402,50 @@ class VaultBrowser:
         # render_detail here reapplies the right state for the current
         # selection-or-folder context.
         self._render_detail(self.state.selected_file)
+        # Upload / Delete sensitivity (v1 lines 584–595): both depend
+        # on whether the current location is inside a remote folder
+        # (so ``_resolve_upload_destination`` returns a tuple); Delete
+        # additionally enables when a non-tombstoned file is selected.
+        upload_destination = self._resolve_upload_destination()
+        if self.upload_btn is not None:
+            self.upload_btn.set_sensitive(upload_destination is not None)
+        if self.upload_folder_btn is not None:
+            self.upload_folder_btn.set_sensitive(upload_destination is not None)
+        if self.delete_btn is not None:
+            selected_file = self.state.selected_file or {}
+            can_delete_file = (
+                bool(selected_file)
+                and not bool(selected_file.get("deleted"))
+            )
+            can_delete_folder = upload_destination is not None
+            self.delete_btn.set_sensitive(can_delete_file or can_delete_folder)
         if message is not None:
             self._set_status(message, css_class)
+
+    # ------------------------------------------------------------------ upload destination resolver
+    def _resolve_upload_destination(self) -> tuple[str, str] | None:
+        """Return (remote_folder_id, sub_path) for the current location, or None.
+
+        Returned tuple feeds the upload + delete dispatch — both need
+        to know which active remote folder we're inside, plus the
+        path remainder under it.
+        """
+        manifest = self.state.manifest
+        path = str(self.state.path or "")
+        if not manifest or not path:
+            return None
+        parts = [p for p in path.split("/") if p]
+        if not parts:
+            return None
+        head, *rest = parts
+        for folder in manifest.get("remote_folders", []) or []:
+            if not isinstance(folder, dict):
+                continue
+            if str(folder.get("state", "active")) != "active":
+                continue
+            if str(folder.get("display_name_enc", "")) == head:
+                return str(folder["remote_folder_id"]), "/".join(rest)
+        return None
 
     # ------------------------------------------------------------------ cancel + progress
     def _arm_cancel(self, event: threading.Event) -> None:
@@ -377,9 +484,10 @@ class VaultBrowser:
 
     def _on_show_deleted_toggled(self, button: Gtk.CheckButton) -> None:
         self.state.show_deleted = bool(button.get_active())
-        # Re-render the file list to apply the deleted filter; tree
-        # pane stays unchanged (it only shows folders).
-        self._render_file_list()
+        # v1 line 1820: also clear the selection so a tombstoned row
+        # doesn't keep its detail pane after the toggle hides it.
+        self.state.selected_file = None
+        self._render_all()
 
     # ------------------------------------------------------------------ download paths
     @staticmethod
@@ -1110,9 +1218,16 @@ class VaultBrowser:
                     css_classes=["pill", "suggested-action"],
                 )
                 restore_btn.set_tooltip_text(
-                    "Restore — wired in v2 pass 4",
+                    "Promote this version to the current one. Tombstone is lifted."
+                    if entry_deleted else
+                    "Promote this version to the current one. The previous "
+                    "current becomes restorable history."
                 )
-                restore_btn.set_sensitive(False)
+                restore_btn.connect(
+                    "clicked",
+                    lambda _b, v=dict(version), f=dict(file_row):
+                        self._confirm_restore_version(f, v),
+                )
                 grid.attach(restore_btn, 5, row_index, 1, 1)
 
     # ------------------------------------------------------------------ navigation
@@ -1200,8 +1315,933 @@ class VaultBrowser:
                     self.state.forward = []
                 self.state.selected_file = None
                 self._render_all("Vault browser refreshed.", "success")
+                self._refresh_resume_banner(vault_id)
                 return False
 
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ------------------------------------------------------------------ upload paths
+    def _start_upload(
+        self,
+        local_path: Path,
+        remote_folder_id: str,
+        sub_path: str,
+        *,
+        override_remote_path: str | None = None,
+        upload_mode: str = "new_file_or_version",
+    ) -> None:
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        remote_path = override_remote_path or (
+            sub_path + "/" + local_path.name if sub_path else local_path.name
+        )
+        if self.upload_btn is not None:
+            self.upload_btn.set_sensitive(False)
+        if self.refresh_btn is not None:
+            self.refresh_btn.set_sensitive(False)
+        cancel_event = threading.Event()
+        self._arm_cancel(cancel_event)
+        if self.progress_bar is not None:
+            self.progress_bar.set_fraction(0.0)
+            self.progress_bar.set_text("Preparing upload...")
+        self._set_status(f"Uploading {local_path.name}...")
+
+        def report_progress(progress) -> None:
+            def update() -> bool:
+                if self.progress_bar is None:
+                    return False
+                total = max(1, int(progress.total_chunks))
+                fraction = (
+                    1.0 if progress.phase == "done"
+                    else progress.completed_chunks / total
+                )
+                self.progress_bar.set_fraction(max(0.0, min(1.0, fraction)))
+                self.progress_bar.set_text(
+                    f"{progress.completed_chunks}/{progress.total_chunks} chunks"
+                )
+                return False
+            GLib.idle_add(update)
+
+        def worker() -> None:
+            try:
+                from ..vault_upload import upload_file
+
+                self.config.reload()
+                relay = create_vault_relay(self.config)
+                vault = open_local_vault_from_grant(
+                    self.config_dir, self.config, vault_id,
+                )
+                try:
+                    current_manifest = vault.fetch_manifest(
+                        relay, local_index=self.local_index,
+                    )
+                    device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+                    result = upload_file(
+                        vault=vault,
+                        relay=relay,
+                        manifest=current_manifest,
+                        local_path=local_path,
+                        remote_folder_id=remote_folder_id,
+                        remote_path=remote_path,
+                        author_device_id=device_id,
+                        mode=upload_mode,
+                        progress=report_progress,
+                        local_index=self.local_index,
+                        should_continue=lambda: not cancel_event.is_set(),
+                    )
+                finally:
+                    vault.close()
+            except SyncCancelledError:
+                def cancelled() -> bool:
+                    self._disarm_cancel()
+                    if self.upload_btn is not None:
+                        self.upload_btn.set_sensitive(
+                            self._resolve_upload_destination() is not None,
+                        )
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._set_status(
+                        f"Upload cancelled: {local_path.name}. "
+                        "Resume from the bell-banner anytime.",
+                    )
+                    self._refresh_resume_banner(vault_id)
+                    return False
+                GLib.idle_add(cancelled)
+                return
+            except VaultQuotaExceededError as exc:
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    if self.upload_btn is not None:
+                        self.upload_btn.set_sensitive(
+                            self._resolve_upload_destination() is not None,
+                        )
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._handle_quota_exceeded(exc, action="Upload")
+                    return False
+                GLib.idle_add(fail)
+                return
+            except Exception as exc:
+                error_message = humanize(exc)
+
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    if self.upload_btn is not None:
+                        self.upload_btn.set_sensitive(
+                            self._resolve_upload_destination() is not None,
+                        )
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._set_status(f"Upload failed: {error_message}", "error")
+                    return False
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                self.state.manifest = result.manifest
+                self._disarm_cancel()
+                if self.refresh_btn is not None:
+                    self.refresh_btn.set_sensitive(True)
+                self.state.selected_file = None
+                self._render_all()
+                if result.skipped_identical:
+                    self._set_status(
+                        f"{remote_path} already has identical content — "
+                        "no upload needed.",
+                        "success",
+                    )
+                else:
+                    self._set_status(
+                        f"Uploaded {result.chunks_uploaded} chunks "
+                        f"({result.bytes_uploaded} bytes) to {remote_path}.",
+                        "success",
+                    )
+                return False
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _choose_upload_source(self, _btn: Gtk.Button) -> None:
+        destination = self._resolve_upload_destination()
+        if destination is None:
+            self._set_status("Open a remote folder before uploading.", "error")
+            return
+        remote_folder_id, sub_path = destination
+
+        file_dialog = Gtk.FileDialog()
+        file_dialog.set_title("Upload file to vault")
+
+        def on_source_chosen(file_dialog, result) -> None:
+            try:
+                gio_file = file_dialog.open_finish(result)
+            except GLib.Error:
+                return
+            if gio_file is None:
+                return
+            path = gio_file.get_path()
+            if not path:
+                self._set_status("Choose a local file to upload.", "error")
+                return
+            local_path = Path(path)
+            if not local_path.is_file():
+                self._set_status("Selected entry is not a file.", "error")
+                return
+            self._maybe_prompt_conflict_then_upload(
+                local_path, remote_folder_id, sub_path,
+            )
+
+        file_dialog.open(parent=self.win, callback=on_source_chosen)
+
+    def _maybe_prompt_conflict_then_upload(
+        self,
+        local_path: Path,
+        remote_folder_id: str,
+        sub_path: str,
+    ) -> None:
+        from ..vault_upload import detect_path_conflict, make_conflict_renamed_path
+
+        remote_path = (
+            sub_path + "/" + local_path.name if sub_path else local_path.name
+        )
+        manifest = self.state.manifest
+        if manifest is None or not detect_path_conflict(
+            manifest, remote_folder_id, remote_path
+        ):
+            self._start_upload(local_path, remote_folder_id, sub_path)
+            return
+
+        dlg = Adw.AlertDialog(
+            heading=f"{remote_path} already exists",
+            body=(
+                "A file with this name is already in the remote folder. "
+                "Choose what to do — identical content is detected automatically "
+                "and skipped, so this prompt only appears for new bytes."
+            ),
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("skip", "Skip")
+        dlg.add_response("keep_both", "Keep both with rename")
+        dlg.add_response("new_version", "Add as new version")
+        dlg.set_default_response("new_version")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("new_version", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(_dialog, response: str) -> None:
+            if response == "new_version":
+                self._start_upload(local_path, remote_folder_id, sub_path)
+            elif response == "keep_both":
+                self.config.reload()
+                device_name = str(getattr(self.config, "device_name", "") or "device")
+                renamed = make_conflict_renamed_path(remote_path, device_name)
+                new_sub_parts = [p for p in renamed.split("/") if p][:-1]
+                new_sub_path = "/".join(new_sub_parts)
+                self._start_upload(
+                    local_path,
+                    remote_folder_id,
+                    new_sub_path,
+                    override_remote_path=renamed,
+                    upload_mode="new_file_only",
+                )
+            elif response == "skip":
+                self._set_status(f"Skipped uploading {local_path.name}.", "dim-label")
+            # "cancel" → fall through and do nothing.
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
+    def _start_folder_upload(
+        self, local_root: Path, remote_folder_id: str, sub_path: str,
+    ) -> None:
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        if self.upload_btn is not None:
+            self.upload_btn.set_sensitive(False)
+        if self.upload_folder_btn is not None:
+            self.upload_folder_btn.set_sensitive(False)
+        if self.refresh_btn is not None:
+            self.refresh_btn.set_sensitive(False)
+        cancel_event = threading.Event()
+        self._arm_cancel(cancel_event)
+        if self.progress_bar is not None:
+            self.progress_bar.set_fraction(0.0)
+            self.progress_bar.set_text("Walking folder...")
+        self._set_status(f"Uploading folder {local_root.name}...")
+
+        def report_progress(folder_progress) -> None:
+            def update() -> bool:
+                if self.progress_bar is None:
+                    return False
+                if folder_progress.bytes_total > 0:
+                    fraction = folder_progress.bytes_completed / folder_progress.bytes_total
+                elif folder_progress.files_total > 0:
+                    fraction = folder_progress.files_completed / max(
+                        1, folder_progress.files_total,
+                    )
+                else:
+                    fraction = 1.0
+                self.progress_bar.set_fraction(max(0.0, min(1.0, fraction)))
+                self.progress_bar.set_text(
+                    f"{folder_progress.phase}: "
+                    f"{folder_progress.files_completed}/{folder_progress.files_total} files"
+                )
+                return False
+            GLib.idle_add(update)
+
+        def worker() -> None:
+            try:
+                from ..vault_upload import upload_folder
+
+                self.config.reload()
+                relay = create_vault_relay(self.config)
+                vault = open_local_vault_from_grant(
+                    self.config_dir, self.config, vault_id,
+                )
+                try:
+                    current_manifest = vault.fetch_manifest(
+                        relay, local_index=self.local_index,
+                    )
+                    device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+                    result = upload_folder(
+                        vault=vault,
+                        relay=relay,
+                        manifest=current_manifest,
+                        local_root=local_root,
+                        remote_folder_id=remote_folder_id,
+                        remote_sub_path=sub_path,
+                        author_device_id=device_id,
+                        progress=report_progress,
+                        local_index=self.local_index,
+                        should_continue=lambda: not cancel_event.is_set(),
+                    )
+                finally:
+                    vault.close()
+            except SyncCancelledError:
+                def cancelled() -> bool:
+                    self._disarm_cancel()
+                    upload_dest = self._resolve_upload_destination()
+                    if self.upload_btn is not None:
+                        self.upload_btn.set_sensitive(upload_dest is not None)
+                    if self.upload_folder_btn is not None:
+                        self.upload_folder_btn.set_sensitive(upload_dest is not None)
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._set_status(
+                        f"Folder upload cancelled: {local_root.name}.",
+                    )
+                    return False
+                GLib.idle_add(cancelled)
+                return
+            except VaultQuotaExceededError as exc:
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    upload_dest = self._resolve_upload_destination()
+                    if self.upload_btn is not None:
+                        self.upload_btn.set_sensitive(upload_dest is not None)
+                    if self.upload_folder_btn is not None:
+                        self.upload_folder_btn.set_sensitive(upload_dest is not None)
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._handle_quota_exceeded(exc, action="Folder upload")
+                    return False
+                GLib.idle_add(fail)
+                return
+            except Exception as exc:
+                error_message = humanize(exc)
+
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    upload_dest = self._resolve_upload_destination()
+                    if self.upload_btn is not None:
+                        self.upload_btn.set_sensitive(upload_dest is not None)
+                    if self.upload_folder_btn is not None:
+                        self.upload_folder_btn.set_sensitive(upload_dest is not None)
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._set_status(
+                        f"Folder upload failed: {error_message}", "error",
+                    )
+                    return False
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                self.state.manifest = result.manifest
+                self._disarm_cancel()
+                if self.refresh_btn is not None:
+                    self.refresh_btn.set_sensitive(True)
+                self.state.selected_file = None
+                self._render_all()
+                skipped = len(result.skipped)
+                self._set_status(
+                    f"Uploaded {len(result.uploaded)} files "
+                    f"({result.bytes_uploaded} bytes); skipped {skipped}.",
+                    "success",
+                )
+                return False
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _choose_upload_folder_source(self, _btn: Gtk.Button) -> None:
+        destination = self._resolve_upload_destination()
+        if destination is None:
+            self._set_status("Open a remote folder before uploading.", "error")
+            return
+        remote_folder_id, sub_path = destination
+
+        file_dialog = Gtk.FileDialog()
+        file_dialog.set_title("Upload folder to vault")
+
+        def on_source_chosen(file_dialog, result) -> None:
+            try:
+                gio_file = file_dialog.select_folder_finish(result)
+            except GLib.Error:
+                return
+            if gio_file is None:
+                return
+            path = gio_file.get_path()
+            if not path:
+                self._set_status("Choose a local folder to upload.", "error")
+                return
+            local_root = Path(path)
+            if not local_root.is_dir():
+                self._set_status("Selected entry is not a folder.", "error")
+                return
+            self._start_folder_upload(local_root, remote_folder_id, sub_path)
+
+        file_dialog.select_folder(parent=self.win, callback=on_source_chosen)
+
+    # ------------------------------------------------------------------ delete + restore
+    def _show_progress_no_cancel(self) -> None:
+        """Short-running flow that shouldn't expose a Cancel button.
+
+        Used for the delete worker (single manifest mutation) where
+        cancel mid-publish would be a partial-state hazard.
+        """
+        self._active_cancel = None
+        if self.cancel_btn is not None:
+            self.cancel_btn.set_visible(False)
+        if self.progress_box is not None:
+            self.progress_box.set_visible(True)
+
+    def _run_delete_worker(
+        self,
+        *,
+        label: str,
+        mutate: Callable[[dict], dict],
+    ) -> None:
+        """Execute ``mutate(current_manifest)`` in a worker thread.
+
+        ``mutate`` is expected to fetch the latest manifest, call into
+        :mod:`vault_delete`, and return the published manifest.
+        Thread-safe UI updates land via ``GLib.idle_add``.
+        """
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        if self.delete_btn is not None:
+            self.delete_btn.set_sensitive(False)
+        if self.refresh_btn is not None:
+            self.refresh_btn.set_sensitive(False)
+        # F-U03: delete is a single manifest mutation — no chunk loop
+        # to interrupt — so progress is shown without a Cancel button.
+        self._show_progress_no_cancel()
+        if self.progress_bar is not None:
+            self.progress_bar.set_fraction(0.0)
+            self.progress_bar.set_text(label)
+        self._set_status(f"{label}...")
+
+        def worker() -> None:
+            try:
+                self.config.reload()
+                relay = create_vault_relay(self.config)
+                vault = open_local_vault_from_grant(
+                    self.config_dir, self.config, vault_id,
+                )
+                try:
+                    current_manifest = vault.fetch_manifest(
+                        relay, local_index=self.local_index,
+                    )
+                    published = mutate({
+                        "vault": vault,
+                        "relay": relay,
+                        "manifest": current_manifest,
+                    })
+                finally:
+                    vault.close()
+            except Exception as exc:
+                error_message = humanize(exc)
+
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._render_all(f"{label} failed: {error_message}", "error")
+                    return False
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                self.state.manifest = published
+                self.state.selected_file = None
+                self._disarm_cancel()
+                if self.refresh_btn is not None:
+                    self.refresh_btn.set_sensitive(True)
+                self._render_all(f"{label} succeeded.", "success")
+                return False
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _confirm_delete_file(self, file_row: dict) -> None:
+        from ..vault_delete import delete_file
+
+        remote_folder_id = str(file_row.get("remote_folder_id") or "")
+        relative_path = str(file_row.get("relative_path") or "")
+        if not remote_folder_id or not relative_path:
+            self._set_status(
+                "Cannot delete: missing folder/path metadata.", "error",
+            )
+            return
+
+        display_path = str(file_row.get("path") or relative_path)
+        dlg = Adw.AlertDialog(
+            heading=f"Delete {display_path}?",
+            body=(
+                "This removes the file from the current remote view. Previous "
+                "versions are kept for the retention period and can be restored."
+            ),
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("delete", "Delete")
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "delete":
+                return
+            self.config.reload()
+            device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+
+            def mutate(ctx: dict) -> dict:
+                return delete_file(
+                    vault=ctx["vault"], relay=ctx["relay"],
+                    manifest=ctx["manifest"],
+                    remote_folder_id=remote_folder_id,
+                    remote_path=relative_path,
+                    author_device_id=device_id,
+                    local_index=self.local_index,
+                )
+            self._run_delete_worker(
+                label=f"Deleting {display_path}",
+                mutate=mutate,
+            )
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
+    def _confirm_delete_folder(
+        self, remote_folder_id: str, sub_path: str,
+    ) -> None:
+        from ..vault_delete import delete_folder_contents
+
+        target_label = sub_path or "this remote folder's contents"
+        dlg = Adw.AlertDialog(
+            heading=f"Delete contents of {target_label}?",
+            body=(
+                "Every file under this path becomes a tombstone. Previous "
+                "versions stay until eviction or retention claims them."
+            ),
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("delete", "Delete folder contents")
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "delete":
+                return
+            self.config.reload()
+            device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+
+            def mutate(ctx: dict) -> dict:
+                published, _tombstoned = delete_folder_contents(
+                    vault=ctx["vault"], relay=ctx["relay"],
+                    manifest=ctx["manifest"],
+                    remote_folder_id=remote_folder_id,
+                    path_prefix=sub_path,
+                    author_device_id=device_id,
+                    local_index=self.local_index,
+                )
+                return published
+            self._run_delete_worker(
+                label=f"Deleting contents of {target_label}",
+                mutate=mutate,
+            )
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
+    def _confirm_restore_version(self, file_row: dict, version: dict) -> None:
+        from ..vault_delete import restore_version_to_current
+
+        remote_folder_id = str(file_row.get("remote_folder_id") or "")
+        relative_path = str(file_row.get("relative_path") or "")
+        source_version_id = str(version.get("version_id") or "")
+        if not remote_folder_id or not relative_path or not source_version_id:
+            self._set_status("Cannot restore: missing metadata.", "error")
+            return
+
+        display_path = str(file_row.get("path") or relative_path)
+        modified = format_local(version.get("modified")) or "?"
+        heading = f"Restore {display_path} to {modified}?"
+        body = (
+            "A new version will be added on top, pointing at this version's "
+            "stored chunks. The previous current version stays in history."
+        )
+        if bool(file_row.get("deleted")):
+            body = (
+                "This file is currently deleted. Restoring lifts the tombstone "
+                "and adds a new version on top of the chosen one."
+            )
+        dlg = Adw.AlertDialog(heading=heading, body=body)
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("restore", "Restore")
+        # F-U05: restore is rare and a relay-mutating action; default
+        # to Cancel so bare Enter doesn't auto-confirm.
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "restore":
+                return
+            self.config.reload()
+            device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+
+            def mutate(ctx: dict) -> dict:
+                return restore_version_to_current(
+                    vault=ctx["vault"], relay=ctx["relay"],
+                    manifest=ctx["manifest"],
+                    remote_folder_id=remote_folder_id,
+                    remote_path=relative_path,
+                    source_version_id=source_version_id,
+                    author_device_id=device_id,
+                    local_index=self.local_index,
+                )
+            self._run_delete_worker(
+                label=f"Restoring {display_path}",
+                mutate=mutate,
+            )
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
+    def _confirm_and_delete(self, _btn: Gtk.Button) -> None:
+        file_row = self.state.selected_file
+        destination = self._resolve_upload_destination()
+        if file_row and not bool(file_row.get("deleted")):
+            self._confirm_delete_file(dict(file_row))
+            return
+        if destination is None:
+            self._set_status(
+                "Open a remote folder or select a file before deleting.",
+                "error",
+            )
+            return
+        remote_folder_id, sub_path = destination
+        self._confirm_delete_folder(remote_folder_id, sub_path)
+
+    # ------------------------------------------------------------------ quota + eviction
+    def _handle_quota_exceeded(
+        self, exc: VaultQuotaExceededError, *, action: str,
+    ) -> None:
+        """T6.6 + T7.5: route a 507 into either the eviction prompt or
+        the vault-full banner depending on ``eviction_available``."""
+        info = describe_quota_exceeded(exc)
+        if info["eviction_available"]:
+            if self.quota_banner is not None:
+                self.quota_banner.set_revealed(False)
+            dlg = Adw.AlertDialog(
+                heading=info["heading"],
+                body=info["body"],
+            )
+            dlg.add_response("cancel", "Cancel")
+            dlg.add_response("evict", info["primary_action_label"])
+            # F-U04: eviction is irreversible (history is dropped),
+            # so Enter must default to Cancel. The action button is
+            # rendered destructive to match brand guidance.
+            dlg.set_default_response("cancel")
+            dlg.set_close_response("cancel")
+            dlg.set_response_appearance(
+                "evict", Adw.ResponseAppearance.DESTRUCTIVE,
+            )
+
+            def on_response(_dialog, response: str) -> None:
+                if response == "evict":
+                    delta = max(1, exc.used_bytes - exc.quota_bytes + 1)
+                    self._run_eviction_pass(action=action, target_bytes=delta)
+                else:
+                    self._set_status(
+                        f"{action} paused — vault is full ({info['percent']}%).",
+                        "error",
+                    )
+            dlg.connect("response", on_response)
+            dlg.present(self.win)
+            return
+
+        # No history left → terminal sync-stop banner per §D2 step 4.
+        if self.quota_banner is not None:
+            self.quota_banner.set_title(info["body"])
+            self.quota_banner.set_button_label(info["primary_action_label"])
+            self.quota_banner.set_revealed(True)
+        self._set_status(
+            f"{action} stopped: vault full and no backup history remains.",
+            "error",
+        )
+
+    def _run_eviction_pass(self, *, action: str, target_bytes: int) -> None:
+        """T7.5: run the §D2 eviction pipeline in a worker thread."""
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        if self.refresh_btn is not None:
+            self.refresh_btn.set_sensitive(False)
+        cancel_event = threading.Event()
+        self._arm_cancel(cancel_event)
+        if self.progress_bar is not None:
+            self.progress_bar.set_fraction(0.0)
+            self.progress_bar.set_text("Reclaiming space...")
+        self._set_status(
+            f"{action}: running eviction to free {target_bytes} bytes...",
+        )
+
+        def worker() -> None:
+            try:
+                from ..vault_eviction import eviction_pass
+
+                self.config.reload()
+                relay = create_vault_relay(self.config)
+                vault = open_local_vault_from_grant(
+                    self.config_dir, self.config, vault_id,
+                )
+                try:
+                    current_manifest = vault.fetch_manifest(
+                        relay, local_index=self.local_index,
+                    )
+                    device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+                    result = eviction_pass(
+                        vault=vault, relay=relay,
+                        manifest=current_manifest,
+                        author_device_id=device_id,
+                        target_bytes_to_free=target_bytes,
+                        local_index=self.local_index,
+                        should_continue=lambda: not cancel_event.is_set(),
+                    )
+                finally:
+                    vault.close()
+            except SyncCancelledError:
+                def cancelled() -> bool:
+                    self._disarm_cancel()
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._set_status("Eviction cancelled.")
+                    return False
+                GLib.idle_add(cancelled)
+                return
+            except Exception as exc:
+                error_message = humanize(exc)
+
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    self._set_status(f"Eviction failed: {error_message}", "error")
+                    return False
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                self.state.manifest = result.manifest
+                self.state.selected_file = None
+                self._disarm_cancel()
+                if self.refresh_btn is not None:
+                    self.refresh_btn.set_sensitive(True)
+                if result.no_more_candidates:
+                    if self.quota_banner is not None:
+                        self.quota_banner.set_title(
+                            "Vault is full and no backup history remains. "
+                            "Sync is stopped. Free space by deleting files, "
+                            "or export and migrate to a relay with more capacity."
+                        )
+                        self.quota_banner.set_button_label("Open vault settings")
+                        self.quota_banner.set_revealed(True)
+                    self._render_all(
+                        f"Eviction stopped — no more candidates. "
+                        f"Freed {result.bytes_freed} bytes.",
+                        "error",
+                    )
+                else:
+                    self._render_all(
+                        f"Eviction freed {result.bytes_freed} bytes "
+                        f"({result.chunks_freed} chunks). "
+                        f"Try {action.lower()} again.",
+                        "success",
+                    )
+                return False
+            GLib.idle_add(succeed)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ------------------------------------------------------------------ resume banner
+    def _refresh_resume_banner(self, vault_id: str) -> None:
+        try:
+            sessions = list_resumable_sessions(
+                vault_id, default_upload_resume_dir(),
+            )
+        except Exception:
+            sessions = []
+        self.state.resume_sessions = sessions
+        if self.resume_banner is None:
+            return
+        if not sessions:
+            self.resume_banner.set_revealed(False)
+            return
+        count = len(sessions)
+        label = (
+            "1 upload was interrupted — click Resume to finish it."
+            if count == 1
+            else f"{count} uploads were interrupted — click Resume to finish them."
+        )
+        self.resume_banner.set_title(label)
+        self.resume_banner.set_revealed(True)
+
+    def _start_resume_pending(self, _btn=None) -> None:
+        sessions = list(self.state.resume_sessions or [])
+        if not sessions:
+            return
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        if self.refresh_btn is not None:
+            self.refresh_btn.set_sensitive(False)
+        if self.upload_btn is not None:
+            self.upload_btn.set_sensitive(False)
+        if self.upload_folder_btn is not None:
+            self.upload_folder_btn.set_sensitive(False)
+        if self.resume_banner is not None:
+            self.resume_banner.set_revealed(False)
+        cancel_event = threading.Event()
+        self._arm_cancel(cancel_event)
+        if self.progress_bar is not None:
+            self.progress_bar.set_fraction(0.0)
+            self.progress_bar.set_text("Resuming uploads...")
+        self._set_status(
+            f"Resuming {len(sessions)} interrupted upload(s)...",
+        )
+
+        def worker() -> None:
+            from ..vault_upload import resume_upload
+
+            completed = 0
+            failed = 0
+            cancelled_count = 0
+            last_manifest = self.state.manifest
+            try:
+                self.config.reload()
+                relay = create_vault_relay(self.config)
+                vault = open_local_vault_from_grant(
+                    self.config_dir, self.config, vault_id,
+                )
+                try:
+                    for session in sessions:
+                        if cancel_event.is_set():
+                            break
+                        try:
+                            current_manifest = vault.fetch_manifest(
+                                relay, local_index=self.local_index,
+                            )
+                            result = resume_upload(
+                                vault=vault,
+                                relay=relay,
+                                manifest=current_manifest,
+                                session=session,
+                                local_index=self.local_index,
+                                should_continue=lambda: not cancel_event.is_set(),
+                            )
+                            last_manifest = result.manifest
+                            completed += 1
+                        except SyncCancelledError:
+                            cancelled_count += 1
+                            break
+                        except Exception:
+                            failed += 1
+                finally:
+                    vault.close()
+            except Exception as exc:
+                error_message = humanize(exc)
+
+                def fail() -> bool:
+                    self._disarm_cancel()
+                    upload_dest = self._resolve_upload_destination()
+                    if self.refresh_btn is not None:
+                        self.refresh_btn.set_sensitive(True)
+                    if self.upload_btn is not None:
+                        self.upload_btn.set_sensitive(upload_dest is not None)
+                    if self.upload_folder_btn is not None:
+                        self.upload_folder_btn.set_sensitive(upload_dest is not None)
+                    self._set_status(f"Resume failed: {error_message}", "error")
+                    self._refresh_resume_banner(vault_id)
+                    return False
+                GLib.idle_add(fail)
+                return
+
+            def succeed() -> bool:
+                self._disarm_cancel()
+                upload_dest = self._resolve_upload_destination()
+                if self.refresh_btn is not None:
+                    self.refresh_btn.set_sensitive(True)
+                if self.upload_btn is not None:
+                    self.upload_btn.set_sensitive(upload_dest is not None)
+                if self.upload_folder_btn is not None:
+                    self.upload_folder_btn.set_sensitive(upload_dest is not None)
+                if last_manifest is not None:
+                    self.state.manifest = last_manifest
+                self.state.selected_file = None
+                self._render_all()
+                if cancelled_count > 0:
+                    self._set_status(
+                        f"Resume cancelled. {completed} upload(s) finished, "
+                        f"{len(sessions) - completed - failed} pending.",
+                    )
+                elif failed == 0:
+                    self._set_status(
+                        f"Resumed {completed} upload(s).", "success",
+                    )
+                else:
+                    self._set_status(
+                        f"Resumed {completed} upload(s); {failed} failed "
+                        "(will retry next time).",
+                        "error",
+                    )
+                self._refresh_resume_banner(vault_id)
+                return False
             GLib.idle_add(succeed)
 
         threading.Thread(target=worker, daemon=True).start()

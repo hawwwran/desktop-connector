@@ -31,3 +31,7 @@ class BrowserState:
     forward: list[str] = field(default_factory=list)
     selected_file: dict | None = None
     show_deleted: bool = False
+    # Pass 5: resume banner inputs. Filled by ``_refresh_resume_banner``
+    # after a successful manifest fetch / upload / cancel; consumed by
+    # ``_start_resume_pending`` when the user clicks Resume.
+    resume_sessions: list = field(default_factory=list)
