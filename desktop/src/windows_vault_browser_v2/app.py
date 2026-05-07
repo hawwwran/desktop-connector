@@ -29,7 +29,7 @@ from ..brand import (  # noqa: E402
     apply_pointer_cursors,
     apply_theme_mode_from_config_dir,
 )
-from ..vault_browser_model import list_folder  # noqa: E402
+from ..vault_browser_model import list_folder, list_versions  # noqa: E402
 from ..vault_error_messages import humanize  # noqa: E402
 from ..vault_local_index import VaultLocalIndex  # noqa: E402
 from ..vault_runtime import (  # noqa: E402
@@ -280,7 +280,7 @@ class VaultBrowser:
         self._update_nav_buttons()
         self._render_tree()
         self._render_file_list()
-        self._render_detail_placeholder()
+        self._render_detail(self.state.selected_file)
         if message is not None:
             self._set_status(message, css_class)
 
@@ -338,11 +338,7 @@ class VaultBrowser:
 
     def _select_file(self, file_row: dict) -> None:
         self.state.selected_file = file_row
-        # Detail pane is still placeholder in pass 2; pass 3 will
-        # replace this with the real render_detail. Re-render the
-        # placeholder so the selected-row state is at least visible
-        # in self.state for the next pass.
-        self._render_detail_placeholder()
+        self._render_detail(file_row)
 
     def _render_file_list(self) -> None:
         if self.list_grid is None:
@@ -415,19 +411,175 @@ class VaultBrowser:
             else:
                 self._attach_label("No remote folders yet.", 0, 1)
 
-    def _render_detail_placeholder(self) -> None:
+    # ------------------------------------------------------------------ detail pane (right)
+    def _render_detail(self, file_row: dict | None) -> None:
         if self.detail_box is None:
             return
         self._clear_box(self.detail_box)
-        self.detail_box.append(Gtk.Label(
-            label="Details", xalign=0, css_classes=["title-3"],
-        ))
-        self.detail_box.append(Gtk.Label(
-            label="Right pane lands in v2 pass 3 — metadata + version history.",
+
+        if not file_row:
+            self.detail_box.append(Gtk.Label(
+                label="Details", xalign=0, css_classes=["title-3"],
+            ))
+            current_path = str(self.state.path)
+            if current_path:
+                self.detail_box.append(Gtk.Label(
+                    label="Current folder",
+                    xalign=0,
+                    wrap=True,
+                    css_classes=["dim-label"],
+                ))
+                self.detail_box.append(Gtk.Label(
+                    label=current_path,
+                    xalign=0,
+                    wrap=True,
+                ))
+                self.detail_box.append(Gtk.Label(
+                    label="Download saves this folder recursively.",
+                    xalign=0,
+                    wrap=True,
+                    css_classes=["dim-label"],
+                ))
+                return
+            self.detail_box.append(Gtk.Label(
+                label="No file selected.",
+                xalign=0,
+                wrap=True,
+                css_classes=["dim-label"],
+            ))
+            return
+
+        heading_label = Gtk.Label(
+            label=str(file_row.get("name", "")) or "(unnamed)",
             xalign=0,
-            wrap=True,
-            css_classes=["dim-label"],
+            css_classes=["title-3"],
+        )
+        heading_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        heading_label.set_tooltip_text(str(file_row.get("name", "")))
+        self.detail_box.append(heading_label)
+
+        pairs = [
+            ("Path", str(file_row.get("path", "")) or "-", True, True),
+            ("Logical size", _format_bytes(int(file_row.get("size", 0))), False, False),
+            ("Remote stored size", _format_bytes(int(file_row.get("stored_size", 0))), False, False),
+            ("Modified", format_local(file_row.get("modified")) or "-", False, False),
+            ("Current version", str(file_row.get("latest_version_id", "")) or "-", True, True),
+            ("Versions", str(file_row.get("versions", 0)), False, False),
+            ("Status", str(file_row.get("status", "")), False, False),
+        ]
+        for label_text, value_text, ellipsize, monospace in pairs:
+            pair = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            pair.set_margin_bottom(6)
+            key = Gtk.Label(
+                label=label_text, xalign=0, css_classes=["dim-label", "caption"],
+            )
+            val_classes = ["monospace"] if monospace else []
+            val = Gtk.Label(label=value_text, xalign=0, css_classes=val_classes)
+            val.set_selectable(True)
+            if ellipsize:
+                val.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+                val.set_tooltip_text(value_text)
+            else:
+                val.set_wrap(True)
+                val.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            pair.append(key)
+            pair.append(val)
+            self.detail_box.append(pair)
+
+        self._render_versions_section(file_row)
+
+    def _render_versions_section(self, file_row: dict) -> None:
+        assert self.detail_box is not None
+        manifest = self.state.manifest
+        if not manifest:
+            return
+        try:
+            versions = list_versions(
+                manifest,
+                str(file_row.get("path", "")),
+                include_deleted=bool(file_row.get("deleted")),
+            )
+        except Exception:
+            versions = []
+
+        self.detail_box.append(Gtk.Label(
+            label="Versions", xalign=0, css_classes=["title-3"],
         ))
+        if bool(file_row.get("deleted")):
+            deleted_at_local = format_local(file_row.get("deleted_at"))
+            recoverable_local = format_local(file_row.get("recoverable_until"))
+            tombstone_label = Gtk.Label(
+                label=(
+                    f"Deleted {deleted_at_local}".strip()
+                    + (
+                        f" — recoverable until {recoverable_local}"
+                        if recoverable_local else ""
+                    )
+                ),
+                xalign=0,
+                wrap=True,
+                css_classes=["dim-label"],
+            )
+            self.detail_box.append(tombstone_label)
+        if not versions:
+            self.detail_box.append(Gtk.Label(
+                label="No version history yet.",
+                xalign=0,
+                wrap=True,
+                css_classes=["dim-label"],
+            ))
+            return
+
+        grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+        self.detail_box.append(grid)
+        for col, header in enumerate(
+            ("", "Modified", "Device", "Size", "Status", ""),
+        ):
+            grid.attach(
+                Gtk.Label(label=header, xalign=0, css_classes=["dim-label"]),
+                col, 0, 1, 1,
+            )
+
+        entry_deleted = bool(file_row.get("deleted"))
+        for row_index, version in enumerate(versions, start=1):
+            # Per-version action buttons (download icon + Restore as
+            # current) are placeholder-disabled in pass 3; pass 4
+            # wires them to ``choose_version_destination`` and
+            # ``_confirm_restore_version`` respectively.
+            download_icon_btn = Gtk.Button.new_from_icon_name("document-save-symbolic")
+            download_icon_btn.add_css_class("flat")
+            download_icon_btn.set_tooltip_text("Download — wired in v2 pass 4")
+            download_icon_btn.set_sensitive(False)
+            grid.attach(download_icon_btn, 0, row_index, 1, 1)
+
+            modified = format_local(version.get("modified")) or "-"
+            grid.attach(Gtk.Label(label=modified, xalign=0), 1, row_index, 1, 1)
+            device = str(version.get("author_device_id") or "")
+            grid.attach(
+                Gtk.Label(label=device[:12] if device else "-", xalign=0),
+                2, row_index, 1, 1,
+            )
+            size_label = _format_bytes(int(version.get("size", 0) or 0))
+            grid.attach(Gtk.Label(label=size_label, xalign=0), 3, row_index, 1, 1)
+            if entry_deleted and version.get("is_current"):
+                status_label = "Latest (deleted)"
+            elif version.get("is_current"):
+                status_label = "Current"
+            else:
+                status_label = "Previous"
+            grid.attach(Gtk.Label(label=status_label, xalign=0), 4, row_index, 1, 1)
+
+            show_restore = (not version.get("is_current")) or entry_deleted
+            if show_restore:
+                restore_btn = Gtk.Button(
+                    label="Restore as current",
+                    css_classes=["pill", "suggested-action"],
+                )
+                restore_btn.set_tooltip_text(
+                    "Restore — wired in v2 pass 4",
+                )
+                restore_btn.set_sensitive(False)
+                grid.attach(restore_btn, 5, row_index, 1, 1)
 
     # ------------------------------------------------------------------ navigation
     def _navigate_to(self, path: str, *, record: bool = True) -> None:
