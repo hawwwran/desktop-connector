@@ -43,6 +43,49 @@ from .vault_folder_ui_state import (
 from .vault_usage import calculate_vault_usage
 
 
+def _present_response_details_dialog(parent: Gtk.Widget, response_text: str) -> None:
+    """Show the raw relay response in a scrollable, read-only window."""
+    dialog = Adw.Dialog()
+    dialog.set_title("Response details")
+    dialog.set_content_width(640)
+    dialog.set_content_height(420)
+
+    toolbar = Adw.ToolbarView()
+    dialog.set_child(toolbar)
+    toolbar.add_top_bar(Adw.HeaderBar())
+
+    body = Gtk.Box(
+        orientation=Gtk.Orientation.VERTICAL,
+        spacing=8,
+        margin_top=12,
+        margin_bottom=12,
+        margin_start=12,
+        margin_end=12,
+    )
+    toolbar.set_content(body)
+
+    body.append(Gtk.Label(
+        label="Raw relay response",
+        xalign=0,
+        css_classes=["dim-label"],
+    ))
+
+    buf = Gtk.TextBuffer()
+    buf.set_text(response_text or "(empty)")
+    view = Gtk.TextView(
+        buffer=buf,
+        monospace=True,
+        editable=False,
+        cursor_visible=False,
+    )
+    view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+    scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+    scroller.set_child(view)
+    body.append(scroller)
+
+    dialog.present(parent)
+
+
 def build_vault_folders_tab(
     *,
     app: Adw.Application,
@@ -184,16 +227,11 @@ def build_vault_folders_tab(
         threading.Thread(target=worker, daemon=True).start()
 
     def open_add_folder_dialog(_btn) -> None:
-        dialog = Adw.ApplicationWindow(
-            application=app,
-            title="Add folder",
-            default_width=540,
-            default_height=420,
-        )
-        dialog.set_transient_for(parent_window)
-        dialog.set_modal(True)
+        dialog = Adw.Dialog()
+        dialog.set_title("Add folder")
+        dialog.set_content_width(540)
         dialog_toolbar = Adw.ToolbarView()
-        dialog.set_content(dialog_toolbar)
+        dialog.set_child(dialog_toolbar)
         dialog_toolbar.add_top_bar(Adw.HeaderBar())
 
         body_box = Gtk.Box(
@@ -222,15 +260,44 @@ def build_vault_folders_tab(
         ignore_scroller.set_child(ignore_view)
         body_box.append(ignore_scroller)
 
-        dialog_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
-        body_box.append(dialog_status)
+        dialog_status_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=6,
+        )
+        dialog_status = Gtk.Label(
+            xalign=0,
+            wrap=True,
+            hexpand=True,
+            css_classes=["dim-label"],
+        )
+        dialog_status_row.append(dialog_status)
+        dialog_details_btn = Gtk.Button(
+            icon_name="dialog-information-symbolic",
+            tooltip_text="Show details",
+            valign=Gtk.Align.START,
+            css_classes=["flat", "circular"],
+            visible=False,
+        )
+        dialog_status_row.append(dialog_details_btn)
+        body_box.append(dialog_status_row)
+
+        dialog_details_state: dict[str, str] = {"text": ""}
+
+        def on_details_clicked(_btn) -> None:
+            _present_response_details_dialog(dialog, dialog_details_state["text"])
+
+        dialog_details_btn.connect("clicked", on_details_clicked)
 
         dialog_buttons = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=8,
             halign=Gtk.Align.END,
+            margin_top=8,
+            margin_bottom=12,
+            margin_start=16,
+            margin_end=16,
         )
-        body_box.append(dialog_buttons)
+        dialog_toolbar.add_bottom_bar(dialog_buttons)
         cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
         confirm_btn = Gtk.Button(label="Add", css_classes=["pill", "suggested-action"])
         dialog_buttons.append(cancel_btn)
@@ -238,11 +305,22 @@ def build_vault_folders_tab(
 
         cancel_btn.connect("clicked", lambda _button: dialog.close())
 
-        def set_dialog_status(message: str, css_class: str = "dim-label") -> None:
+        def set_dialog_status(
+            message: str,
+            css_class: str = "dim-label",
+            *,
+            details: str | None = None,
+        ) -> None:
             for klass in ("dim-label", "error", "success"):
                 dialog_status.remove_css_class(klass)
             dialog_status.add_css_class(css_class)
             dialog_status.set_label(message)
+            if details:
+                dialog_details_state["text"] = details
+                dialog_details_btn.set_visible(True)
+            else:
+                dialog_details_state["text"] = ""
+                dialog_details_btn.set_visible(False)
 
         def read_ignore_patterns() -> list[str]:
             start = ignore_buffer.get_start_iter()
@@ -274,11 +352,16 @@ def build_vault_folders_tab(
                     usage = calculate_vault_usage(manifest).by_folder
                 except Exception as exc:
                     error_message = humanize(exc)
+                    error_details = getattr(exc, "response_text", None) or None
 
                     def fail() -> bool:
                         confirm_btn.set_sensitive(True)
                         cancel_btn.set_sensitive(True)
-                        set_dialog_status(f"Could not add folder: {error_message}", "error")
+                        set_dialog_status(
+                            f"Could not add folder: {error_message}",
+                            "error",
+                            details=error_details,
+                        )
                         return False
 
                     GLib.idle_add(fail)
@@ -295,7 +378,7 @@ def build_vault_folders_tab(
             threading.Thread(target=worker, daemon=True).start()
 
         confirm_btn.connect("clicked", on_confirm)
-        dialog.present()
+        dialog.present(parent_window)
 
     def open_rename_folder_dialog(_btn) -> None:
         if not vault_id:
@@ -315,16 +398,11 @@ def build_vault_folders_tab(
             if f.get("remote_folder_id")
         ]
 
-        dialog = Adw.ApplicationWindow(
-            application=app,
-            title="Rename folder",
-            default_width=480,
-            default_height=260,
-        )
-        dialog.set_transient_for(parent_window)
-        dialog.set_modal(True)
+        dialog = Adw.Dialog()
+        dialog.set_title("Rename folder")
+        dialog.set_content_width(480)
         dialog_toolbar = Adw.ToolbarView()
-        dialog.set_content(dialog_toolbar)
+        dialog.set_child(dialog_toolbar)
         dialog_toolbar.add_top_bar(Adw.HeaderBar())
 
         body_box = Gtk.Box(
@@ -357,8 +435,12 @@ def build_vault_folders_tab(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=8,
             halign=Gtk.Align.END,
+            margin_top=8,
+            margin_bottom=12,
+            margin_start=16,
+            margin_end=16,
         )
-        body_box.append(dialog_buttons)
+        dialog_toolbar.add_bottom_bar(dialog_buttons)
         cancel_btn = Gtk.Button(label="Cancel", css_classes=["pill"])
         confirm_btn = Gtk.Button(label="Save", css_classes=["pill", "suggested-action"])
         dialog_buttons.append(cancel_btn)
@@ -434,7 +516,7 @@ def build_vault_folders_tab(
             threading.Thread(target=worker, daemon=True).start()
 
         confirm_btn.connect("clicked", on_confirm)
-        dialog.present()
+        dialog.present(parent_window)
 
     add_folder_btn.connect("clicked", open_add_folder_dialog)
     rename_folder_btn.connect("clicked", open_rename_folder_dialog)

@@ -48,7 +48,7 @@ class VaultFoldersRenameSourceTests(unittest.TestCase):
     def test_rename_dialog_opens_picker_and_name_field(self) -> None:
         for text in (
             "def open_rename_folder_dialog(_btn) -> None:",
-            'title="Rename folder"',
+            'set_title("Rename folder")',
             "Gtk.DropDown.new_from_strings(",
             'name_entry = Gtk.Entry(',
             'confirm_btn = Gtk.Button(label="Save"',

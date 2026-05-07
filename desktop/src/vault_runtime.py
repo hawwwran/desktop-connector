@@ -232,10 +232,23 @@ class VaultHttpRelay:
             )
         try:
             body = resp.json()
-            data = body["data"]
-            return data
-        except Exception as exc:
-            raise RuntimeError("Relay returned an invalid vault manifest publish response.") from exc
+        except ValueError as exc:
+            from .vault_relay_errors import VaultRelayUnexpectedResponseError
+
+            raise VaultRelayUnexpectedResponseError(
+                "Relay returned a non-JSON vault manifest publish response.",
+                status_code=resp.status_code,
+                response_text=_scrub_secrets(resp.text or ""),
+            ) from exc
+        if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
+            from .vault_relay_errors import VaultRelayUnexpectedResponseError
+
+            raise VaultRelayUnexpectedResponseError(
+                "Relay returned an invalid vault manifest publish response.",
+                status_code=resp.status_code,
+                response_text=_scrub_secrets(resp.text or ""),
+            )
+        return body["data"]
 
     def batch_head_chunks(self, vault_id, vault_access_secret, chunk_ids):
         chunks = {}

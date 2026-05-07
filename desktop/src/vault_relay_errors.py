@@ -49,6 +49,25 @@ class VaultChunkMissingError(VaultRelayError):
         )
 
 
+class VaultRelayUnexpectedResponseError(RuntimeError):
+    """Relay returned HTTP 2xx but the body shape was not what the client expected.
+
+    Carries the full response text so the UI can offer a "Show details"
+    button next to the user-facing error.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        response_text: str,
+    ) -> None:
+        self.status_code = int(status_code)
+        self.response_text = str(response_text or "")
+        super().__init__(message)
+
+
 class VaultCASConflictError(VaultRelayError):
     """Server rejected a manifest publish because the CAS revision moved (HTTP 409).
 
