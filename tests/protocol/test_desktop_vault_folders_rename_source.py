@@ -35,9 +35,15 @@ from _paths import REPO_ROOT  # noqa: E402
 class VaultFoldersRenameSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.source = Path(
-            REPO_ROOT, "desktop/src/vault_folders_tab.py",
-        ).read_text()
+        # Post-#6 (file-size breakup): the tab is a package
+        # ``desktop/src/vault_folders/`` whose modules together carry
+        # the strings these pins track. Concatenate so substring
+        # matches keep working regardless of which submodule a given
+        # widget/dispatch lives in.
+        package_dir = Path(REPO_ROOT, "desktop/src/vault_folders")
+        cls.source = "\n".join(
+            p.read_text() for p in sorted(package_dir.glob("*.py"))
+        )
         cls.runtime_source = Path(
             REPO_ROOT, "desktop/src/vault_folder_runtime.py",
         ).read_text()
@@ -57,7 +63,7 @@ class VaultFoldersRenameSourceTests(unittest.TestCase):
         # selecting the folder).
         self.assertIn('"Configure folder"', self.source)
         self.assertIn(
-            "lambda r=rfid: open_configure_folder_dialog(r)", self.source,
+            "lambda r=rfid: open_configure_folder_dialog(ctx, r)", self.source,
         )
 
     def test_rename_dialog_opens_picker_and_name_field(self) -> None:
@@ -65,7 +71,11 @@ class VaultFoldersRenameSourceTests(unittest.TestCase):
         # no DropDown picker), and exposes BOTH a name entry and an
         # ignore-patterns text view, gated by a single Save button.
         for text in (
-            "def open_configure_folder_dialog(remote_folder_id: str) -> None:",
+            # Signature now threads a FoldersContext; pin the prefix
+            # so the multiline form ``def open_configure_folder_dialog(\n
+            # ctx: FoldersContext, remote_folder_id: str,\n) -> None:`` matches.
+            "def open_configure_folder_dialog(",
+            "remote_folder_id: str,",
             'dialog.set_title("Configure folder")',
             "name_entry = Gtk.Entry(",
             "ignore_buffer = Gtk.TextBuffer()",

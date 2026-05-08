@@ -155,7 +155,7 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
 
         add_tab("recovery", "Recovery", build_recovery_tab(ctx, win))
 
-        from ..vault_folders_tab import build_vault_folders_tab
+        from ..vault_folders import build_vault_folders_tab
         add_tab("folders", "Folders", build_vault_folders_tab(
             app=app,
             parent_window=win,

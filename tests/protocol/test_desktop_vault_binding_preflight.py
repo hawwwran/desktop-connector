@@ -189,12 +189,18 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
         # ``open_connect_local_dialog`` with the ``rfid`` already
         # known.
         from _paths import REPO_ROOT
-        source = Path(REPO_ROOT, "desktop/src/vault_folders_tab.py").read_text(
-            encoding="utf-8"
+        # Post-#6: the tab is a ``vault_folders/`` package; concatenate
+        # the submodules so the pin sees all the strings regardless of
+        # which submodule wires the Connect button vs. the dialog.
+        package_dir = Path(REPO_ROOT, "desktop/src/vault_folders")
+        source = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted(package_dir.glob("*.py"))
         )
         for needle in (
-            "from .vault_connect_folder_dialog import present_connect_folder_dialog",
-            "from .vault_bindings import VaultBindingsStore",
+            # Package siblings reach up via ``..`` rather than ``.``.
+            "from ..vault_connect_folder_dialog import present_connect_folder_dialog",
+            "from ..vault_bindings import VaultBindingsStore",
             "connect_btn = Gtk.Button(",
             'label="Connect with local folder"',
             "open_connect_local_dialog",

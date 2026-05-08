@@ -1,7 +1,7 @@
 """F-Y15 — pure-function tests for the Folders-tab lifecycle dispatchers.
 
-The GTK builder in ``vault_folders_tab.py`` delegates click handlers to
-``vault_folder_actions.dispatch_{pause,resume,disconnect}``. Those
+The GTK builder in the ``vault_folders`` package delegates click
+handlers to ``vault_folder_actions.dispatch_{pause,resume,disconnect}``. Those
 dispatchers are GTK-free and synchronous, so they unit-test cleanly
 against a real :class:`VaultBindingsStore` + the lifecycle helpers.
 

@@ -1,8 +1,8 @@
 """Per-row lifecycle dispatchers for the Vault settings Folders tab (F-Y15).
 
-GTK-free helpers so the click handlers in ``vault_folders_tab.py`` can
-delegate the synchronous "do the thing + format a toast" path here and
-keep their own surface area limited to widget plumbing.
+GTK-free helpers so the click handlers in the ``vault_folders``
+package can delegate the synchronous "do the thing + format a toast"
+path here and keep their own surface area limited to widget plumbing.
 
 Each dispatcher:
 

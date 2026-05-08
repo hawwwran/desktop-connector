@@ -328,16 +328,21 @@ class VaultRuntimeSourcePins(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.tab_source = Path(
-            REPO_ROOT, "desktop/src/vault_folders_tab.py",
-        ).read_text(encoding="utf-8")
+        # Post-#6: the tab is a ``vault_folders/`` package; concatenate
+        # the submodules so existing pinned substrings keep matching.
+        package_dir = Path(REPO_ROOT, "desktop/src/vault_folders")
+        cls.tab_source = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in sorted(package_dir.glob("*.py"))
+        )
         cls.runtime_source = Path(
             REPO_ROOT, "desktop/src/vault_folder_runtime.py",
         ).read_text(encoding="utf-8")
 
     def test_tab_imports_runtime(self) -> None:
+        # Post-#6: package siblings reach up to ``..vault_folder_runtime``.
         self.assertIn(
-            "from .vault_folder_runtime import VaultRuntime",
+            "from ..vault_folder_runtime import VaultRuntime",
             self.tab_source,
         )
 
