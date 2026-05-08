@@ -61,7 +61,7 @@ class VaultDownloadTests(unittest.TestCase):
         # case. The retry counter + log emission still execute as in
         # production; only the wall-clock wait is bypassed.
         self._sleep_patch = mock.patch(
-            "src.vault_download._chunk_missing_sleep", lambda _s: None,
+            "src.vault_download.chunks._chunk_missing_sleep", lambda _s: None,
         )
         self._sleep_patch.start()
 
@@ -329,7 +329,7 @@ class VaultDownloadTests(unittest.TestCase):
         destination = self.tmpdir / "report.txt"
         vault = _vault()
         with mock.patch(
-            "src.vault_download._chunk_missing_sleep", _capture,
+            "src.vault_download.chunks._chunk_missing_sleep", _capture,
         ):
             try:
                 download_latest_file(
@@ -489,7 +489,7 @@ class VaultDownloadTests(unittest.TestCase):
         destination = self.tmpdir / "Documents"
         try:
             with mock.patch(
-                "src.vault_download.shutil.disk_usage",
+                "src.vault_download.paths.shutil.disk_usage",
                 return_value=SimpleNamespace(free=10),
             ):
                 with self.assertRaises(VaultLocalDiskFullError):
