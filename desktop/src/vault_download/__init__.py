@@ -26,7 +26,6 @@ because module-local lookups in :mod:`.chunks` won't see a re-binding
 on this package object.
 """
 
-from ..vault_crypto import normalize_vault_id
 from ..vault_relay_errors import VaultChunkMissingError
 from .cache import (
     DEFAULT_VAULT_CHUNK_CACHE_MAX_BYTES,
@@ -72,7 +71,6 @@ __all__ = [
     "download_folder",
     "download_latest_file",
     "download_version",
-    "normalize_vault_id",
     "previous_version_filename",
     "prune_vault_chunk_cache",
     "resolve_download_destination",
