@@ -12,7 +12,10 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _history_window_source() -> str:
-    return Path(REPO_ROOT, "desktop/src/windows_history.py").read_text()
+    package_dir = Path(REPO_ROOT, "desktop/src/windows_history")
+    return "\n".join(
+        p.read_text() for p in sorted(package_dir.glob("*.py"))
+    )
 
 
 class HistoryMultiDeviceSourceTests(unittest.TestCase):
@@ -26,13 +29,15 @@ class HistoryMultiDeviceSourceTests(unittest.TestCase):
             "title=\"History for\"",
             "subtitle=\"Connected device\"",
             "device_group.add(device_picker)",
-            "device_picker.connect(\"notify::selected\", on_history_device_changed)",
+            "device_picker.connect(",
+            "\"notify::selected\"",
+            "_on_history_device_changed(ctx",
         ):
             self.assertIn(text, self.source)
 
     def test_history_rows_are_filtered_to_selected_device(self):
         for text in (
-            "selected_id = _selected_device_id()",
+            "selected_id = _selected_device_id(ctx)",
             "history.items_for_peer(",
             "fallback_device_id=selected_id",
             "s_sig = (",
@@ -42,10 +47,10 @@ class HistoryMultiDeviceSourceTests(unittest.TestCase):
 
     def test_empty_state_names_selected_device(self):
         for text in (
-            "def _empty_history_text() -> str:",
+            "def _empty_history_text(ctx: HistoryContext) -> str:",
             "return \"No connected devices\"",
-            "return f\"No transfers with {_selected_device_name()}\"",
-            "Gtk.Label(label=_empty_history_text())",
+            "return f\"No transfers with {_selected_device_name(ctx)}\"",
+            "Gtk.Label(label=_empty_history_text(ctx))",
         ):
             self.assertIn(text, self.source)
 
@@ -55,7 +60,7 @@ class HistoryMultiDeviceSourceTests(unittest.TestCase):
             "heading=f\"Clear history for {device_name}?\"",
             "history.clear_for_peer(",
             "fallback_device_id=device.device_id",
-            "_reset_history_view()",
+            "ctx.reset_history_view()",
         ):
             self.assertIn(text, self.source)
         self.assertNotIn("history.clear()", self.source)

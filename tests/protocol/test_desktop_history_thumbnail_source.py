@@ -14,7 +14,10 @@ from _paths import REPO_ROOT  # noqa: E402
 class DesktopHistoryThumbnailSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = Path(REPO_ROOT, "desktop/src/windows_history.py").read_text()
+        package_dir = Path(REPO_ROOT, "desktop/src/windows_history")
+        cls.source = "\n".join(
+            p.read_text() for p in sorted(package_dir.glob("*.py"))
+        )
 
     def test_sent_clipboard_image_rows_can_render_thumbnail(self):
         for text in (
