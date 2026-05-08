@@ -35,7 +35,7 @@ ensure_desktop_on_path()
 
 REPO_ROOT = Path(os.path.dirname(__file__) or ".").resolve().parent.parent
 WINDOWS_VAULT_PKG = REPO_ROOT / "desktop" / "src" / "windows_vault"
-WINDOWS_BROWSER = REPO_ROOT / "desktop" / "src" / "windows_vault_browser" / "app.py"
+WINDOWS_BROWSER_PKG = REPO_ROOT / "desktop" / "src" / "windows_vault_browser"
 WINDOWS_IMPORT = REPO_ROOT / "desktop" / "src" / "windows_vault_import.py"
 
 
@@ -46,6 +46,17 @@ def _read_windows_vault_pkg() -> str:
     return "\n".join(
         p.read_text(encoding="utf-8")
         for p in sorted(WINDOWS_VAULT_PKG.glob("*.py"))
+    )
+
+
+def _read_windows_vault_browser_pkg() -> str:
+    """Concatenate every module under ``windows_vault_browser/`` so the
+    F-U16 paned pins survive the mixin-extraction split (2026-05-08).
+    The original monolithic app.py was broken into topical mixin
+    modules; the layout builders now live in ``layout.py``."""
+    return "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(WINDOWS_BROWSER_PKG.glob("*.py"))
     )
 
 
@@ -111,7 +122,7 @@ class BrowserPanedShrinkableTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.text = WINDOWS_BROWSER.read_text(encoding="utf-8")
+        cls.text = _read_windows_vault_browser_pkg()
 
     def test_no_shrink_start_child_false(self) -> None:
         """The previous regression form pinned both panes with
