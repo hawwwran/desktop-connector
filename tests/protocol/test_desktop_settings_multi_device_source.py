@@ -12,7 +12,28 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _settings_window_source() -> str:
-    return Path(REPO_ROOT, "desktop/src/windows_settings.py").read_text()
+    """Concatenate every ``windows_settings/*.py`` in render order so
+    source-pin assertions keep working across the plan-#10 split.
+
+    Order matches the dispatch sequence in ``window.py`` (shell first,
+    then groups in render order: Connection → Appearance → Vault →
+    Receive Actions / Flood Protection → This Device + Connected
+    Devices + Statistics → Security → Logs).
+    """
+    pkg = Path(REPO_ROOT, "desktop/src/windows_settings")
+    ordered_modules = (
+        "__init__.py",
+        "context.py",
+        "window.py",
+        "group_relay.py",
+        "group_theme.py",
+        "group_vault.py",
+        "group_receive_actions.py",
+        "group_pairings.py",
+        "group_secret_storage.py",
+        "group_logs.py",
+    )
+    return "\n".join((pkg / name).read_text() for name in ordered_modules)
 
 
 class SettingsMultiDeviceSourceTests(unittest.TestCase):
@@ -40,7 +61,7 @@ class SettingsMultiDeviceSourceTests(unittest.TestCase):
             "def open_rename_dialog(target_id: str, current_name: str):",
             "settings_registry.rename(target_id, name_entry.get_text())",
             "DuplicateDeviceNameError",
-            "Gtk.Button(\n                    label=\"Rename\"",
+            "Gtk.Button(\n                label=\"Rename\"",
         ):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")
 

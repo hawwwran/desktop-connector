@@ -16,13 +16,43 @@ sys.path.insert(0, os.path.dirname(__file__))
 from _paths import REPO_ROOT  # noqa: E402
 
 
-WINDOWS_PY = Path(REPO_ROOT) / "desktop" / "src" / "windows_settings.py"
+WINDOWS_PKG = Path(REPO_ROOT) / "desktop" / "src" / "windows_settings"
+
+
+def _read_settings_package_source() -> str:
+    """Concatenate every ``windows_settings/*.py`` in render order so
+    source-pin assertions keep working across the per-group split
+    (see plan #10).
+
+    Order matches the dispatch sequence in ``window.py`` (Connection →
+    Appearance → Vault → Receive Actions / Flood Protection → This
+    Device + Connected Devices + Statistics → Security → Logs), so
+    tests asserting the *relative* ordering of recognizable substrings
+    (e.g. "Receive Actions" before "Receive Action Flood Protection"
+    before "Logs") still hold.
+    """
+    ordered_modules = (
+        "__init__.py",
+        "context.py",
+        "window.py",
+        "group_relay.py",
+        "group_theme.py",
+        "group_vault.py",
+        "group_receive_actions.py",
+        "group_pairings.py",
+        "group_secret_storage.py",
+        "group_logs.py",
+    )
+    parts: list[str] = []
+    for name in ordered_modules:
+        parts.append((WINDOWS_PKG / name).read_text())
+    return "\n".join(parts)
 
 
 class ReceiveActionsSettingsSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.source = WINDOWS_PY.read_text()
+        cls.source = _read_settings_package_source()
 
     def test_old_auto_open_links_row_is_removed(self):
         self.assertNotIn("Auto-open links", self.source)
@@ -92,10 +122,16 @@ class ReceiveActionsSettingsSourceTests(unittest.TestCase):
         self.assertLess(flood_pos, logs_pos)
 
     def test_logs_are_appended_after_connection_statistics(self):
+        # Plan #10 split: ``add_logs_group()`` became
+        # ``group_logs.build(ctx)`` invoked from ``window.py`` after
+        # ``group_secret_storage.build(ctx)``. In render-order
+        # concatenation the Logs group module ("Logs" PreferencesGroup
+        # title) still appears after the pairings module's "Pending
+        # outgoing" stats row, preserving the original UI order.
         stats_pos = self.source.index('title="Pending outgoing"')
-        logs_call_pos = self.source.index("\n        add_logs_group()")
+        logs_pos = self.source.index('Adw.PreferencesGroup(title="Logs")')
 
-        self.assertGreater(logs_call_pos, stats_pos)
+        self.assertGreater(logs_pos, stats_pos)
 
 
 if __name__ == "__main__":
