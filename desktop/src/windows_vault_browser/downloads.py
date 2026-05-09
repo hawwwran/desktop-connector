@@ -23,7 +23,7 @@ from ..vault_runtime import (
     create_vault_relay,
     open_local_vault_from_grant,
 )
-from ..vault_time_format import format_local
+from ..vault.ui.time_format import format_local
 
 
 class DownloadsMixin:
