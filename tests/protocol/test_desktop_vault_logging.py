@@ -15,7 +15,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_logging import (  # noqa: E402
+from src.vault.diagnostics.logging import (  # noqa: E402
     VAULT_LOG_BACKUPS, VAULT_LOG_MAX_BYTES, VAULT_LOG_NAME,
     VAULT_TAG_PREFIX,
     attach_vault_log_handler, detach_vault_log_handler,

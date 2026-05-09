@@ -79,7 +79,7 @@ def main():
     # already enabled at all (the helper no-ops if log dir creation
     # fails).
     if args.window.startswith("vault-"):
-        from .vault_logging import attach_vault_log_handler
+        from .vault.diagnostics.logging import attach_vault_log_handler
         attach_vault_log_handler(config_dir)
 
     if args.window == "send-files":
