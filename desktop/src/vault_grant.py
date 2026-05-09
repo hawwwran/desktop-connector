@@ -33,7 +33,7 @@ from typing import Protocol
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .vault_atomic import atomic_write_file
+from .vault.atomic import atomic_write_file
 
 from .vault_crypto import (
     XCHACHA20_KEY_BYTES,

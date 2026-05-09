@@ -2,9 +2,9 @@
 
 The download flows route every filesystem touch through this module:
 ``resolve_*_destination`` chooses the final path under the existing-file
-policy, ``atomic_write_*`` are thin re-exports of :mod:`vault_atomic`
+policy, ``atomic_write_*`` are thin re-exports of :mod:`vault.atomic`
 helpers preserved for back-compat, and ``_preflight_*`` enforces the
-:data:`vault_atomic.LOCAL_DISK_OVERHEAD_FACTOR` headroom before any
+:data:`vault.atomic.LOCAL_DISK_OVERHEAD_FACTOR` headroom before any
 network work begins.
 """
 
@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 
-from ..vault_atomic import (
+from ..vault.atomic import (
     LOCAL_DISK_OVERHEAD_FACTOR,
     atomic_write_chunks as _atomic_write_chunks,
     atomic_write_file as _atomic_write_file,
@@ -57,12 +57,12 @@ def resolve_folder_destination(destination: Path, policy: ExistingFilePolicy) ->
 
 
 def atomic_write_file(destination: Path, data: bytes) -> None:
-    """Re-export from :mod:`vault_atomic` for back-compat callers."""
+    """Re-export from :mod:`vault.atomic` for back-compat callers."""
     _atomic_write_file(destination, data)
 
 
 def atomic_write_chunks(destination: Path, chunks: Iterable[bytes]) -> int:
-    """Re-export from :mod:`vault_atomic` for back-compat callers."""
+    """Re-export from :mod:`vault.atomic` for back-compat callers."""
     return _atomic_write_chunks(destination, chunks)
 
 
@@ -122,5 +122,5 @@ def _preflight_folder_disk_space(destination: Path, logical_size: int) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
-    """Backwards-compat wrapper around :func:`vault_atomic.fsync_dir`."""
+    """Backwards-compat wrapper around :func:`vault.atomic.fsync_dir`."""
     _fsync_dir_helper(path)

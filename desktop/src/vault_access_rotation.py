@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .vault_atomic import atomic_write_file
+from .vault.atomic import atomic_write_file
 
 
 log = logging.getLogger(__name__)

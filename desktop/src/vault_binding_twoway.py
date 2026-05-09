@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .vault_atomic import fsync_dir
+from .vault.atomic import fsync_dir
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_binding_sync import (
     SyncCycleResult,

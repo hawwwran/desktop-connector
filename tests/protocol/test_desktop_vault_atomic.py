@@ -15,7 +15,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_atomic import (  # noqa: E402
+from src.vault.atomic import (  # noqa: E402
     DEFAULT_MAX_AGE_S,
     TEMP_SUFFIX,
     atomic_write_chunks,

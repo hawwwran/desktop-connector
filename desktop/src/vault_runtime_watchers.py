@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .vault_atomic import sweep_orphan_temp_files
+from .vault.atomic import sweep_orphan_temp_files
 from .vault_binding_lifecycle import pause_binding
 from .vault_bindings import VaultBindingsStore
 from .vault_filesystem_watcher import (
