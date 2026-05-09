@@ -28,11 +28,54 @@ Pick any one and start; they're independent.
 
 ## 1. Fold `vault_*.py` into the `vault/` package
 
+### Progress (2026-05-09)
+
+**Wave A — leaf utilities — 6 of 8 done.** Started 2026-05-09 on
+`tresor-vault`. Six commits landed:
+
+| Status | Move | Commit |
+| --- | --- | --- |
+| done | `vault_bytes_format` → `vault/ui/bytes_format.py` | `dad6a9e` |
+| done | `vault_time_format` → `vault/ui/time_format.py` | `111bc9b` |
+| done | `vault_window_args` → `vault/ui/window_args.py` | `d886cea` |
+| done | `vault_atomic` → `vault/atomic.py` | `b3cb3ee` |
+| done | `vault_logging` → `vault/diagnostics/logging.py` | `c83c4be` |
+| done | `vault_relay_errors` → `vault/relay_errors.py` | `0d5b27d` |
+| todo | `vault_error_messages` → `vault/error_messages.py` | — |
+| todo | `vault_conflict_naming` → `vault/conflict_naming.py` | — |
+
+Pattern that worked, repeat for the remaining two and for Wave B+:
+
+1. `mkdir -p` the new subpackage path + empty `__init__.py` if needed.
+2. `git mv` the file to its new home.
+3. Rewrite every importer in lockstep using `replace_all=true` per file
+   (the substring `vault_<name>` only appears as a module path; no
+   collateral matches) — then verify with `grep -rn "vault_<name>"`.
+4. Touch matching test source-pins / docstrings that reference the old
+   module path.
+5. Smoke-test by running the relevant unit-test suite + an import
+   round-trip.
+6. One commit per move.
+
+Test files seen so far: `test_desktop_vault_window_args` (source-pin
+asserting the dispatcher's import line), `test_desktop_vault_atomic`,
+`test_desktop_vault_logging`, `test_desktop_vault_download`,
+`test_desktop_vault_upload`. All have runtime imports plus occasional
+literal-string assertions; remember to scan tests during each move.
+
+**Waves B–F are entirely todo.** Wave A's remaining two moves are
+quick (16 + 5 importers); finishing Wave A before starting Wave B
+keeps the diff per commit small and the import graph half-flat /
+half-package, not three ways at once.
+
 ### Current state
 
-`desktop/src/` carries **52** flat top-level `vault_*.py` modules
+`desktop/src/` carried **52** flat top-level `vault_*.py` modules
 alongside three `vault_*/` packages and a tiny `vault/` core package
-(7 files, split out by breakup #9).
+(7 files, split out by breakup #9). After Wave A's first six moves
+(2026-05-09), 46 flat `vault_*.py` modules remain; `vault/` now also
+holds `atomic.py`, `relay_errors.py`, `ui/{bytes_format,time_format,
+window_args}.py`, and `diagnostics/logging.py`.
 
 ```
 desktop/src/
@@ -49,7 +92,7 @@ The 52 flat files (sorted, hand-grouped):
 
 ```
 crypto / passphrase:        vault_crypto.py vault_passphrase.py
-manifest / atomic:          vault_manifest.py vault_atomic.py
+manifest / atomic:          vault_manifest.py [vault_atomic.py → vault/atomic.py done]
 binding subsystem:          vault_bindings.py
                             vault_binding_baseline.py vault_binding_lifecycle.py
                             vault_binding_preflight.py vault_binding_scan.py
@@ -69,13 +112,16 @@ data ops:                   vault_restore.py vault_clear.py vault_repair.py
                             vault_purge_schedule.py vault_trash.py
 local state / index:        vault_local_index.py vault_local_state.py
                             vault_usage.py vault_activity.py
-diagnostics:                vault_logging.py vault_debug_bundle.py
+diagnostics:                [vault_logging.py → vault/diagnostics/logging.py done]
+                            vault_debug_bundle.py
                             vault_ransomware_detector.py
-errors:                     vault_error_messages.py vault_relay_errors.py
+errors:                     vault_error_messages.py
+                            [vault_relay_errors.py → vault/relay_errors.py done]
                             vault_conflict_naming.py
 UI helpers (non-window):    vault_browser_model.py vault_ui_state.py
-                            vault_window_args.py vault_time_format.py
-                            vault_bytes_format.py
+                            [vault_window_args.py → vault/ui/window_args.py done]
+                            [vault_time_format.py → vault/ui/time_format.py done]
+                            [vault_bytes_format.py → vault/ui/bytes_format.py done]
 ```
 
 ### Why bother
