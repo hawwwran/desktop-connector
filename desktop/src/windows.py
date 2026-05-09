@@ -25,7 +25,7 @@ specific vault without rewriting config on disk.
 import argparse
 from pathlib import Path
 
-from .vault_window_args import parse_vault_id_arg
+from .vault.ui.window_args import parse_vault_id_arg
 from .windows_common import _setup_subprocess_logging
 from .windows_find_phone import show_find_phone, show_locate_alert
 from .windows_history import show_history

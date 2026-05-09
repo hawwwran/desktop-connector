@@ -48,7 +48,7 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
     M1 manual-smoke surface; later phases populate the empty tabs.
     """
     from ..config import Config
-    from ..vault_window_args import resolve_active_vault_id
+    from ..vault.ui.window_args import resolve_active_vault_id
 
     log = logging.getLogger("desktop-connector.vault-ui")
     config = Config(config_dir)

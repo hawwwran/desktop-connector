@@ -49,7 +49,7 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
     simultaneously.
     """
     from .config import Config
-    from .vault_window_args import resolve_active_vault_id
+    from .vault.ui.window_args import resolve_active_vault_id
 
     config = Config(config_dir)
     local_index = VaultLocalIndex(config_dir)

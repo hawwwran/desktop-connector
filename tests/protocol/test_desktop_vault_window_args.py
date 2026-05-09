@@ -5,9 +5,9 @@ threads the normalized form into every ``show_vault_*`` entry point.
 This file covers the two helpers that own the parsing + fallback
 contract:
 
-- :func:`vault_window_args.parse_vault_id_arg` — strict normalizer
+- :func:`vault.ui.window_args.parse_vault_id_arg` — strict normalizer
   that the dispatcher hands the raw CLI string to.
-- :func:`vault_window_args.resolve_active_vault_id` — the small
+- :func:`vault.ui.window_args.resolve_active_vault_id` — the small
   router each window's ``local_vault_id()`` closure delegates to.
 
 Source-pin coverage of the dispatcher wiring + per-window signature
@@ -32,7 +32,7 @@ from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.config import Config  # noqa: E402
-from src.vault_window_args import (  # noqa: E402
+from src.vault.ui.window_args import (  # noqa: E402
     parse_vault_id_arg,
     resolve_active_vault_id,
 )
@@ -219,7 +219,7 @@ class DispatcherWiringSourceTests(unittest.TestCase):
 
     def test_dispatcher_imports_parser(self) -> None:
         self.assertIn(
-            "from .vault_window_args import parse_vault_id_arg",
+            "from .vault.ui.window_args import parse_vault_id_arg",
             self.source,
         )
 

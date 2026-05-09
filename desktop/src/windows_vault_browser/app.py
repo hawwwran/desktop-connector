@@ -103,7 +103,7 @@ class VaultBrowser(
         config,
         vault_id_override: str | None,
     ) -> None:
-        from ..vault_window_args import resolve_active_vault_id
+        from ..vault.ui.window_args import resolve_active_vault_id
 
         self.config_dir = Path(config_dir)
         self.config = config
