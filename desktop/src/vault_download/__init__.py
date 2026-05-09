@@ -26,7 +26,7 @@ because module-local lookups in :mod:`.chunks` won't see a re-binding
 on this package object.
 """
 
-from ..vault_relay_errors import VaultChunkMissingError
+from ..vault.relay_errors import VaultChunkMissingError
 from .cache import (
     DEFAULT_VAULT_CHUNK_CACHE_MAX_BYTES,
     _load_cached_chunk,

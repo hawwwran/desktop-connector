@@ -32,7 +32,7 @@ from .vault_import import (
     merge_import_into,
     preview_import,
 )
-from .vault_relay_errors import VaultCASConflictError
+from .vault.relay_errors import VaultCASConflictError
 from .vault_manifest import merge_with_remote_head, normalize_manifest_plaintext
 
 

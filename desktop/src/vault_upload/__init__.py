@@ -12,7 +12,7 @@ which means tests using ``assertLogs("src.vault_upload", …)`` keep
 capturing every emit through Python's logging propagation.
 """
 
-from ..vault_relay_errors import VaultRelayError
+from ..vault.relay_errors import VaultRelayError
 from .constants import (
     CAS_MAX_RETRIES,
     CHUNK_SIZE,

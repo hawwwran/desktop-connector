@@ -81,7 +81,7 @@ from .vault_bindings import (
     VaultPendingOperation,
 )
 from .vault_manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
-from .vault_relay_errors import VaultCASConflictError, VaultQuotaExceededError
+from .vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError
 from .vault_upload import UploadResult, UploadSpecialFileSkipped, upload_file
 
 

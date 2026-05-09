@@ -23,7 +23,7 @@ from .vault_manifest import (
     tombstone_file_entry,
     tombstone_files_under,
 )
-from .vault_relay_errors import VaultCASConflictError
+from .vault.relay_errors import VaultCASConflictError
 
 
 CAS_MAX_RETRIES = 5

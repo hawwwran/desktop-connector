@@ -208,7 +208,7 @@ class VaultHttpRelay:
         if resp is None:
             raise RuntimeError("Could not reach the relay while publishing the vault manifest.")
         if resp.status_code == 409:
-            from .vault_relay_errors import VaultCASConflictError
+            from .vault.relay_errors import VaultCASConflictError
 
             raise VaultCASConflictError(self._extract_error(resp))
         if resp.status_code == 507:
@@ -216,11 +216,11 @@ class VaultHttpRelay:
             # upload pushed used_bytes past the cap between our
             # batch-head and our publish). Surface as the typed error so
             # the sync engine can run an eviction pass.
-            from .vault_relay_errors import VaultQuotaExceededError
+            from .vault.relay_errors import VaultQuotaExceededError
 
             raise VaultQuotaExceededError(self._extract_error(resp))
         if resp.status_code in (413, 422):
-            from .vault_relay_errors import VaultRelayError
+            from .vault.relay_errors import VaultRelayError
 
             raise VaultRelayError(
                 self._extract_error(resp), status_code=resp.status_code,
@@ -233,7 +233,7 @@ class VaultHttpRelay:
         try:
             body = resp.json()
         except ValueError as exc:
-            from .vault_relay_errors import VaultRelayUnexpectedResponseError
+            from .vault.relay_errors import VaultRelayUnexpectedResponseError
 
             raise VaultRelayUnexpectedResponseError(
                 "Relay returned a non-JSON vault manifest publish response.",
@@ -241,7 +241,7 @@ class VaultHttpRelay:
                 response_text=_scrub_secrets(resp.text or ""),
             ) from exc
         if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
-            from .vault_relay_errors import VaultRelayUnexpectedResponseError
+            from .vault.relay_errors import VaultRelayUnexpectedResponseError
 
             raise VaultRelayUnexpectedResponseError(
                 "Relay returned an invalid vault manifest publish response.",
@@ -288,7 +288,7 @@ class VaultHttpRelay:
             # F-D27: typed error so the download retry budget can
             # distinguish "chunk not yet uploaded by peer" from a
             # generic relay failure.
-            from .vault_relay_errors import VaultChunkMissingError
+            from .vault.relay_errors import VaultChunkMissingError
 
             raise VaultChunkMissingError(
                 f"vault chunk missing: {chunk_id}",
@@ -436,7 +436,7 @@ class VaultHttpRelay:
             raise RuntimeError("Relay returned an invalid GC execute response.") from exc
 
     def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):
-        from .vault_relay_errors import VaultQuotaExceededError, VaultRelayError
+        from .vault.relay_errors import VaultQuotaExceededError, VaultRelayError
 
         resp = self._conn.request(
             "PUT",

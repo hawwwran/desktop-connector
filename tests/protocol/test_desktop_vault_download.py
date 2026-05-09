@@ -291,7 +291,7 @@ class VaultDownloadTests(unittest.TestCase):
         exponential default. We pin the math by capturing the delays
         the helper requested via the ``_chunk_missing_sleep`` hook.
         """
-        from src.vault_relay_errors import VaultChunkMissingError as _Exc
+        from src.vault.relay_errors import VaultChunkMissingError as _Exc
 
         delays_requested: list[float] = []
 
@@ -732,7 +732,7 @@ class _FlakyChunkRelay:
         raises_left = self.get_chunk_raises_for.get(chunk_id, 0)
         if raises_left > 0:
             self.get_chunk_raises_for[chunk_id] = raises_left - 1
-            from src.vault_relay_errors import VaultChunkMissingError
+            from src.vault.relay_errors import VaultChunkMissingError
             raise VaultChunkMissingError(f"vault chunk missing: {chunk_id}")
         self.downloaded.append(chunk_id)
         return self.chunks[chunk_id]

@@ -20,7 +20,7 @@ from ..vault_crypto import (
     build_chunk_aad,
     derive_subkey,
 )
-from ..vault_relay_errors import VaultChunkMissingError
+from ..vault.relay_errors import VaultChunkMissingError
 from .manifest import _int_value
 from .types import ChunkRelay, DownloadVault
 

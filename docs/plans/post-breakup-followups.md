@@ -142,8 +142,16 @@ desktop/src/vault/
   diagnostics/
     __init__.py
     logging.py debug_bundle.py ransomware_detector.py
-  errors.py                         # merge: error_messages + relay_errors
-                                    #        + conflict_naming
+  relay_errors.py                   # typed exception classes
+  error_messages.py                 # humanize() translation table
+  conflict_naming.py                # §A20 conflict-rename helper
+                                    # (the breakup principle "Move first,
+                                    # refactor second" wins over the
+                                    # earlier "merge into one errors.py"
+                                    # idea — these three are distinct
+                                    # concerns, co-locate them in vault/
+                                    # first, merge later if it still
+                                    # feels right)
   ui/
     __init__.py
     browser_model.py ui_state.py window_args.py
@@ -162,9 +170,14 @@ Naming notes:
   pass.
 - **`import_` trailing underscore.** Python's `import` keyword
   forbids the bare name; `import_` is the established convention.
-- **`vault.errors` consolidation.** The three small error/string
-  modules (`error_messages`, `relay_errors`, `conflict_naming`) are
-  each <100 lines and only used together. Merge into one file.
+- **No `vault.errors` consolidation in Wave A.** Original plan
+  proposed merging `error_messages` + `relay_errors` + `conflict_naming`
+  into one file. On execution this turned out to overreach: the three
+  cover distinct concerns (typed exceptions / user-facing translations /
+  conflict-rename utility), and the breakup principle "Move first,
+  refactor second" applies to merges too. They each move into `vault/`
+  as separate top-level modules; a later commit can merge if it still
+  feels right.
 
 ### Sequencing
 
@@ -179,7 +192,9 @@ nothing from vault. Move first to validate the rhythm.
 vault/ui/bytes_format.py     ← vault_bytes_format.py
 vault/ui/time_format.py      ← vault_time_format.py
 vault/ui/window_args.py      ← vault_window_args.py
-vault/errors.py              ← error_messages + relay_errors + conflict_naming
+vault/relay_errors.py        ← vault_relay_errors.py
+vault/error_messages.py      ← vault_error_messages.py
+vault/conflict_naming.py     ← vault_conflict_naming.py
 vault/atomic.py              ← vault_atomic.py
 vault/diagnostics/logging.py ← vault_logging.py
 ```

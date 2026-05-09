@@ -39,7 +39,7 @@ from ..vault_manifest import (
     normalize_manifest_path,
     normalize_manifest_plaintext,
 )
-from ..vault_relay_errors import VaultCASConflictError
+from ..vault.relay_errors import VaultCASConflictError
 from .constants import CAS_MAX_RETRIES, CHUNK_SIZE, MAX_FILE_BYTES_DEFAULT, UploadMode
 from .errors import UploadConflictError, UploadFileTooLargeError, UploadSpecialFileSkipped
 from .hashing import _hash_file, _now_rfc3339

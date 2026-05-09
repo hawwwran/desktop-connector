@@ -37,7 +37,7 @@ from .vault_manifest import (
     normalize_manifest_plaintext,
     DEFAULT_RETENTION_POLICY,
 )
-from .vault_relay_errors import VaultCASConflictError
+from .vault.relay_errors import VaultCASConflictError
 
 
 log = logging.getLogger(__name__)

@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from ..vault_relay_errors import VaultQuotaExceededError
+from ..vault.relay_errors import VaultQuotaExceededError
 
 
 class UploadConflictError(RuntimeError):
