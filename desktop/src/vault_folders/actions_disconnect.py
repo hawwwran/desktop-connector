@@ -16,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib  # noqa: E402
 
-from ..vault_bindings import VaultBindingsStore
+from ..vault.binding.bindings import VaultBindingsStore
 from ..vault.folder.actions import dispatch_disconnect
 from .actions_sync import _idle_finish
 from .context import FoldersContext

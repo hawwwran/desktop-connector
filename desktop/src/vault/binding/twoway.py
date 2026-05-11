@@ -39,21 +39,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .vault.atomic import fsync_dir
-from .vault_binding_lifecycle import SyncCancelledError
-from .vault_binding_sync import (
+from ..atomic import fsync_dir
+from .lifecycle import SyncCancelledError
+from .sync import (
     SyncCycleResult,
     SyncOpOutcome,
     SyncVault,
     _execute_op,
 )
-from .vault_bindings import (
+from .bindings import (
     VaultBinding, VaultBindingsStore, VaultLocalEntry,
     normalize_relative_path,
 )
-from .vault.conflict_naming import make_conflict_path
-from .vault_download import default_vault_download_cache_dir, download_latest_file
-from .vault_trash import trash_path
+from ..conflict_naming import make_conflict_path
+from ...vault_download import default_vault_download_cache_dir, download_latest_file
+from ...vault_trash import trash_path
 
 
 log = logging.getLogger(__name__)
@@ -670,7 +670,7 @@ def _latest_version(entry: dict[str, Any]) -> dict[str, Any] | None:
 
 def _content_fingerprint_key(vault: SyncVault) -> bytes | None:
     try:
-        from .vault.crypto import derive_content_fingerprint_key
+        from ..crypto import derive_content_fingerprint_key
     except ImportError:
         return None
     master = vault.master_key
@@ -696,7 +696,7 @@ def _file_keyed_fingerprint(
     except OSError:
         return None
     try:
-        from .vault.crypto import make_content_fingerprint
+        from ..crypto import make_content_fingerprint
         return make_content_fingerprint(fingerprint_key, sha)
     except Exception:  # noqa: BLE001
         return None

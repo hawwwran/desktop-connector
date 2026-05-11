@@ -14,7 +14,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_binding_preflight import (  # noqa: E402
+from src.vault.binding.preflight import (  # noqa: E402
     compute_preflight,
     render_preflight_text,
 )
@@ -200,7 +200,7 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
         for needle in (
             # Package siblings reach up via ``..`` rather than ``.``.
             "from ..vault.folder.connect_dialog import present_connect_folder_dialog",
-            "from ..vault_bindings import VaultBindingsStore",
+            "from ..vault.binding.bindings import VaultBindingsStore",
             "connect_btn = Gtk.Button(",
             'label="Connect with local folder"',
             "open_connect_local_dialog",
@@ -215,7 +215,7 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
             encoding="utf-8"
         )
         for needle in (
-            'from ...vault_binding_preflight import (',
+            'from ..binding.preflight import (',
             "compute_preflight",
             "render_preflight_text",
             "DEFAULT_MODE_INDEX",

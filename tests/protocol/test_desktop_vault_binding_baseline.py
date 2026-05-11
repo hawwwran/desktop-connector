@@ -15,8 +15,8 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_bindings import VaultBindingsStore  # noqa: E402
-from src.vault_binding_baseline import (  # noqa: E402
+from src.vault.binding.bindings import VaultBindingsStore  # noqa: E402
+from src.vault.binding.baseline import (  # noqa: E402
     BaselineProgress,
     run_initial_baseline,
 )
@@ -227,7 +227,7 @@ class VaultBaselineTests(unittest.TestCase):
         The single-file ``upload_file`` path was already lstat-protected;
         this test pins the matching guard for the walker.
         """
-        from src.vault_binding_baseline import _walk_local
+        from src.vault.binding.baseline import _walk_local
         # Regular file — yielded.
         (self.local_root / "regular.txt").write_bytes(b"yes")
         # Symlink that points outside the binding root. The pre-F-Y17

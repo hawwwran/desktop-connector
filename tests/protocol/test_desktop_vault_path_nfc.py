@@ -33,14 +33,14 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_bindings import (  # noqa: E402
+from src.vault.binding.bindings import (  # noqa: E402
     VaultBindingsStore,
     VaultLocalEntry,
     normalize_relative_path,
 )
-from src.vault_binding_baseline import _plan_baseline  # noqa: E402
+from src.vault.binding.baseline import _plan_baseline  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
-from src.vault_filesystem_watcher import WatcherCoordinator  # noqa: E402
+from src.vault.binding.filesystem_watcher import WatcherCoordinator  # noqa: E402
 
 
 # Czech "č" combining form (NFD) versus precomposed (NFC).

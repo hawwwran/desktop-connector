@@ -40,10 +40,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
-from ...vault_binding_baseline import run_initial_baseline as _run_initial_baseline
-from ...vault_binding_sync import flush_and_sync_binding as _flush_and_sync_binding
-from ...vault_bindings import VaultBindingsStore
-from ...vault_runtime import (
+from ..binding.baseline import run_initial_baseline as _run_initial_baseline
+from ..binding.sync import flush_and_sync_binding as _flush_and_sync_binding
+from ..binding.bindings import VaultBindingsStore
+from ..binding.runtime import (
     create_vault_relay as _create_vault_relay,
     open_local_vault_from_grant as _open_local_vault_from_grant,
 )

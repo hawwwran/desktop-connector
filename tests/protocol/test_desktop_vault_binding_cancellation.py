@@ -29,18 +29,18 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_binding_lifecycle import (  # noqa: E402
+from src.vault.binding.lifecycle import (  # noqa: E402
     BindingCancellationRegistry,
     SyncCancelledError,
     disconnect_binding,
     pause_binding,
 )
-from src.vault_binding_sync import (  # noqa: E402
+from src.vault.binding.sync import (  # noqa: E402
     SyncCycleResult,
     run_backup_only_cycle,
 )
-from src.vault_binding_twoway import run_two_way_cycle  # noqa: E402
-from src.vault_bindings import VaultBindingsStore  # noqa: E402
+from src.vault.binding.twoway import run_two_way_cycle  # noqa: E402
+from src.vault.binding.bindings import VaultBindingsStore  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402

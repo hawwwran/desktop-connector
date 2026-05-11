@@ -33,7 +33,7 @@ from ..brand import (  # noqa: E402
     apply_theme_mode_from_config_dir,
 )
 from ..vault_local_index import VaultLocalIndex  # noqa: E402
-from ..vault_runtime import (  # noqa: E402
+from ..vault.binding.runtime import (  # noqa: E402
     create_vault_relay,
     open_local_vault_from_grant,
 )

@@ -41,7 +41,7 @@ def _vault_onboard_source() -> str:
 
 
 def _vault_runtime_source() -> str:
-    return Path(REPO_ROOT, "desktop/src/vault_runtime.py").read_text()
+    return Path(REPO_ROOT, "desktop/src/vault/binding/runtime.py").read_text()
 
 
 class VaultDisconnectSourceTests(unittest.TestCase):

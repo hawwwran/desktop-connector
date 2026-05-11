@@ -611,7 +611,7 @@ def show_vault_onboard(config_dir: Path):
             landed.
             """
             from ..vault import Vault
-            from ..vault_runtime import create_vault_relay, save_local_vault_grant
+            from ..vault.binding.runtime import create_vault_relay, save_local_vault_grant
 
             body.set_visible_child_name("deriving_key")
             deriving_spinner.start()
@@ -765,7 +765,7 @@ def show_vault_onboard(config_dir: Path):
             byte-identical. If the relay accepts on retry, the wizard
             transitions to the normal post-publish state.
             """
-            from ..vault_runtime import create_vault_relay
+            from ..vault.binding.runtime import create_vault_relay
 
             vault = state.get("vault")
             if vault is None or not vault.has_pending_publish:

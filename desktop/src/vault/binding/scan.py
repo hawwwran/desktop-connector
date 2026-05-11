@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from .vault_bindings import VaultBinding, VaultBindingsStore, normalize_relative_path
+from .bindings import VaultBinding, VaultBindingsStore, normalize_relative_path
 
 
 log = logging.getLogger(__name__)

@@ -163,8 +163,8 @@ class VaultSubmenuMixin:
                 self._vault_autosync_runtime = None
                 return
             try:
-                from ..vault_runtime_watchers import VaultWatcherRuntime
-                from ..vault_bindings import VaultBindingsStore
+                from ..vault.binding.runtime_watchers import VaultWatcherRuntime
+                from ..vault.binding.bindings import VaultBindingsStore
                 from ..vault_local_index import VaultLocalIndex
                 from ..vault.folder.runtime import VaultRuntime
                 vault_id = str(
@@ -241,7 +241,7 @@ class VaultSubmenuMixin:
         a CAS conflict from a concurrent settings-subprocess publish
         will resolve itself on the next tick.
         """
-        from ..vault_bindings import VaultBindingsStore
+        from ..vault.binding.bindings import VaultBindingsStore
         from ..vault_local_index import VaultLocalIndex
 
         log.info(

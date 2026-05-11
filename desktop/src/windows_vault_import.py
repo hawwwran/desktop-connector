@@ -28,13 +28,13 @@ from .brand import (
     apply_pointer_cursors,
     apply_theme_mode_from_config_dir,
 )
-from .vault_binding_lifecycle import SyncCancelledError
+from .vault.binding.lifecycle import SyncCancelledError
 from .vault_local_index import VaultLocalIndex
 from .vault.error_messages import humanize
 from .vault.export.export import ExportError
 from .vault.export.reminder import normalize_cadence
 from .vault_import import ImportMergeResolution
-from .vault_runtime import create_vault_relay, open_local_vault_from_grant
+from .vault.binding.runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
 
 

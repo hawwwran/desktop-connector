@@ -123,7 +123,7 @@ def build_activity_tab(ctx: MainContext, win) -> "Gtk.Box":
 
         def worker() -> None:
             try:
-                from ..vault_runtime import (
+                from ..vault.binding.runtime import (
                     create_vault_relay, open_local_vault_from_grant,
                 )
                 config.reload()

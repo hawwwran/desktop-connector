@@ -43,7 +43,7 @@ def create_vault_relay(config):
 
 def save_local_vault_grant(config_dir: Path, config, vault) -> None:
     """Persist the creating device's local vault unlock grant."""
-    from .vault.grant.grant import VaultGrant, open_default_grant_store
+    from ..grant.grant import VaultGrant, open_default_grant_store
 
     master_key = vault.master_key
     vault_access_secret = vault.vault_access_secret
@@ -63,8 +63,8 @@ def save_local_vault_grant(config_dir: Path, config, vault) -> None:
 
 def open_local_vault_from_grant(config_dir: Path, config, vault_id: str):
     """Open vault state from this machine's saved grant."""
-    from .vault import Vault
-    from .vault.grant.grant import open_default_grant_store
+    from .. import Vault
+    from ..grant.grant import open_default_grant_store
 
     store = open_default_grant_store(
         config_dir=Path(config_dir),
@@ -86,7 +86,7 @@ def _vault_device_seed_provider(config_dir: Path, config):
     """Return the fallback grant-store seed provider for this device."""
     def provider() -> bytes:
         from cryptography.hazmat.primitives import serialization
-        from .crypto import KeyManager
+        from ...crypto import KeyManager
 
         key_manager = KeyManager(Path(config_dir), secret_store=config.secret_store)
         return key_manager.private_key.private_bytes(
@@ -105,7 +105,7 @@ class VaultHttpRelay:
         config.reload()
         if not config.device_id or not config.auth_token:
             raise RuntimeError("Desktop Connector is not registered with the relay.")
-        from .connection import ConnectionManager
+        from ...connection import ConnectionManager
         self._conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
 
     def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
@@ -208,7 +208,7 @@ class VaultHttpRelay:
         if resp is None:
             raise RuntimeError("Could not reach the relay while publishing the vault manifest.")
         if resp.status_code == 409:
-            from .vault.relay_errors import VaultCASConflictError
+            from ..relay_errors import VaultCASConflictError
 
             raise VaultCASConflictError(self._extract_error(resp))
         if resp.status_code == 507:
@@ -216,11 +216,11 @@ class VaultHttpRelay:
             # upload pushed used_bytes past the cap between our
             # batch-head and our publish). Surface as the typed error so
             # the sync engine can run an eviction pass.
-            from .vault.relay_errors import VaultQuotaExceededError
+            from ..relay_errors import VaultQuotaExceededError
 
             raise VaultQuotaExceededError(self._extract_error(resp))
         if resp.status_code in (413, 422):
-            from .vault.relay_errors import VaultRelayError
+            from ..relay_errors import VaultRelayError
 
             raise VaultRelayError(
                 self._extract_error(resp), status_code=resp.status_code,
@@ -233,7 +233,7 @@ class VaultHttpRelay:
         try:
             body = resp.json()
         except ValueError as exc:
-            from .vault.relay_errors import VaultRelayUnexpectedResponseError
+            from ..relay_errors import VaultRelayUnexpectedResponseError
 
             raise VaultRelayUnexpectedResponseError(
                 "Relay returned a non-JSON vault manifest publish response.",
@@ -241,7 +241,7 @@ class VaultHttpRelay:
                 response_text=_scrub_secrets(resp.text or ""),
             ) from exc
         if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
-            from .vault.relay_errors import VaultRelayUnexpectedResponseError
+            from ..relay_errors import VaultRelayUnexpectedResponseError
 
             raise VaultRelayUnexpectedResponseError(
                 "Relay returned an invalid vault manifest publish response.",
@@ -288,7 +288,7 @@ class VaultHttpRelay:
             # F-D27: typed error so the download retry budget can
             # distinguish "chunk not yet uploaded by peer" from a
             # generic relay failure.
-            from .vault.relay_errors import VaultChunkMissingError
+            from ..relay_errors import VaultChunkMissingError
 
             raise VaultChunkMissingError(
                 f"vault chunk missing: {chunk_id}",
@@ -436,7 +436,7 @@ class VaultHttpRelay:
             raise RuntimeError("Relay returned an invalid GC execute response.") from exc
 
     def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):
-        from .vault.relay_errors import VaultQuotaExceededError, VaultRelayError
+        from ..relay_errors import VaultQuotaExceededError, VaultRelayError
 
         resp = self._conn.request(
             "PUT",
@@ -509,7 +509,7 @@ class VaultLocalDevelopmentRelay:
 
     def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
                      header_hash, initial_manifest_ciphertext, initial_manifest_hash):
-        from .vault import crypto as vault_crypto  # noqa: F401
+        from .. import crypto as vault_crypto  # noqa: F401
         return {"vault_id": vault_id}
 
     def get_header(self, vault_id, vault_access_secret):

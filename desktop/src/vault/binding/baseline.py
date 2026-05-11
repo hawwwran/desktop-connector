@@ -26,11 +26,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
-from .vault_bindings import (
+from .bindings import (
     VaultBindingsStore, VaultBinding, VaultLocalEntry,
     normalize_relative_path,
 )
-from .vault_download import (
+from ...vault_download import (
     DownloadProgress,
     default_vault_download_cache_dir,
     download_latest_file,

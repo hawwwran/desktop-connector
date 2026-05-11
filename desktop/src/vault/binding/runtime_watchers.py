@@ -19,14 +19,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .vault.atomic import sweep_orphan_temp_files
-from .vault_binding_lifecycle import pause_binding
-from .vault_bindings import VaultBindingsStore
-from .vault_filesystem_watcher import (
+from ..atomic import sweep_orphan_temp_files
+from .lifecycle import pause_binding
+from .bindings import VaultBindingsStore
+from .filesystem_watcher import (
     WatcherCoordinator,
     start_watchdog_observer,
 )
-from .vault_ransomware_detector import (
+from ...vault_ransomware_detector import (
     BANNER_BODY,
     BANNER_TITLE,
     RansomwareDetector,

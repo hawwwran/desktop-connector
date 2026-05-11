@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from ..vault_binding_lifecycle import SyncCancelledError
+from ..vault.binding.lifecycle import SyncCancelledError
 from ..vault_browser_model import get_file
 from ..vault.manifest import normalize_manifest_plaintext
 from .cache import _load_cached_chunk, _store_cached_chunk

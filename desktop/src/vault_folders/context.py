@@ -32,7 +32,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw  # noqa: E402,F401
 
 if TYPE_CHECKING:
-    from ..vault_binding_lifecycle import BindingCancellationRegistry
+    from ..vault.binding.lifecycle import BindingCancellationRegistry
     from ..vault.folder.runtime import VaultRuntime
     from ..vault_local_index import VaultLocalIndex
 

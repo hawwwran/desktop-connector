@@ -14,7 +14,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_bindings import (  # noqa: E402
+from src.vault.binding.bindings import (  # noqa: E402
     DEFAULT_SYNC_MODE,
     VALID_BINDING_STATES,
     VALID_OP_TYPES,

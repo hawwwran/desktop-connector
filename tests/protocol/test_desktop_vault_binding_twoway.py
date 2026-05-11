@@ -15,8 +15,8 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_binding_twoway import run_two_way_cycle  # noqa: E402
-from src.vault_bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
+from src.vault.binding.twoway import run_two_way_cycle  # noqa: E402
+from src.vault.binding.bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import (  # noqa: E402
     DefaultVaultCrypto,
@@ -360,7 +360,7 @@ class TwoWayCycleTests(unittest.TestCase):
         vault = _vault()
         try:
             with self.assertLogs(
-                "src.vault_binding_twoway", level="WARNING"
+                "src.vault.binding.twoway", level="WARNING"
             ) as cm:
                 run_two_way_cycle(
                     vault=vault, relay=relay,

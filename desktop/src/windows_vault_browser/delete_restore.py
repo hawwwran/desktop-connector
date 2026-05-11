@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..vault.error_messages import humanize
-from ..vault_runtime import (
+from ..vault.binding.runtime import (
     create_vault_relay,
     open_local_vault_from_grant,
 )

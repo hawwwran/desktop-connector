@@ -28,7 +28,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .vault_bindings import VaultBinding, VaultBindingsStore
+from .bindings import VaultBinding, VaultBindingsStore
 
 
 log = logging.getLogger(__name__)

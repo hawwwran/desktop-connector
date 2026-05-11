@@ -28,8 +28,8 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_binding_lifecycle import BindingCancellationRegistry  # noqa: E402
-from src.vault_bindings import VaultBindingsStore  # noqa: E402
+from src.vault.binding.lifecycle import BindingCancellationRegistry  # noqa: E402
+from src.vault.binding.bindings import VaultBindingsStore  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
 from src.vault.folder.actions import (  # noqa: E402
     dispatch_disconnect,
@@ -121,7 +121,7 @@ class ResumeDispatcherTests(_ActionsTestBase):
         binding_id = self._bound()
         dispatch_pause(store=self.store, binding_id=binding_id)
 
-        from src.vault_binding_sync import SyncCycleResult
+        from src.vault.binding.sync import SyncCycleResult
         captured: dict[str, Any] = {}
 
         def flush(binding: Any) -> SyncCycleResult:

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .vault.ui.bytes_format import format_bytes_binary as _format_bytes
+from ..ui.bytes_format import format_bytes_binary as _format_bytes
 
 
 @dataclass(frozen=True)

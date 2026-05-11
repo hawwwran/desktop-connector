@@ -16,7 +16,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import GLib  # noqa: E402
 
-from ..vault_bindings import VaultBindingsStore
+from ..vault.binding.bindings import VaultBindingsStore
 from ..vault.error_messages import humanize
 from ..vault.folder.ui_state import (
     binding_rows_for_render,

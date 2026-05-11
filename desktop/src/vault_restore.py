@@ -35,7 +35,7 @@ from typing import Any, Callable, Iterable, Protocol
 from datetime import datetime, timezone
 
 from .vault.atomic import LOCAL_DISK_OVERHEAD_FACTOR
-from .vault_binding_lifecycle import SyncCancelledError
+from .vault.binding.lifecycle import SyncCancelledError
 from .vault.conflict_naming import make_conflict_path
 from .vault_download import (
     DownloadProgress,

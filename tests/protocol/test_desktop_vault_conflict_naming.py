@@ -261,7 +261,7 @@ class TwoWayUniqueConflictPathTests(unittest.TestCase):
     def test_first_attempt_returns_unsuffixed_form(self) -> None:
         import tempfile
         from pathlib import Path
-        from src.vault_binding_twoway import _unique_conflict_path
+        from src.vault.binding.twoway import _unique_conflict_path
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -277,7 +277,7 @@ class TwoWayUniqueConflictPathTests(unittest.TestCase):
     def test_collision_advances_attempt_not_suffix_stack(self) -> None:
         import tempfile
         from pathlib import Path
-        from src.vault_binding_twoway import _unique_conflict_path
+        from src.vault.binding.twoway import _unique_conflict_path
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

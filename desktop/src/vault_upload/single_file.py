@@ -16,7 +16,7 @@ import stat as _stat
 from pathlib import Path
 from typing import Any, Callable
 
-from ..vault_binding_lifecycle import SyncCancelledError
+from ..vault.binding.lifecycle import SyncCancelledError
 from ..vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..vault.crypto import (
     aead_encrypt,

@@ -14,7 +14,7 @@ import logging
 import time
 from typing import Any, Callable
 
-from ..vault_binding_lifecycle import SyncCancelledError
+from ..vault.binding.lifecycle import SyncCancelledError
 from ..vault.crypto import (
     aead_decrypt,
     build_chunk_aad,

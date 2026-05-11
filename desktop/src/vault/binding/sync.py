@@ -73,16 +73,16 @@ def _previously_synced_via_store(
         return False
     return bool(entry and entry.content_fingerprint)
 
-from .vault_binding_lifecycle import SyncCancelledError
-from .vault_bindings import (
+from .lifecycle import SyncCancelledError
+from .bindings import (
     VaultBinding,
     VaultBindingsStore,
     VaultLocalEntry,
     VaultPendingOperation,
 )
-from .vault.manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
-from .vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError
-from .vault_upload import UploadResult, UploadSpecialFileSkipped, upload_file
+from ..manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
+from ..relay_errors import VaultCASConflictError, VaultQuotaExceededError
+from ...vault_upload import UploadResult, UploadSpecialFileSkipped, upload_file
 
 
 log = logging.getLogger(__name__)
@@ -176,7 +176,7 @@ def flush_and_sync_binding(
     # No-op when disk == local-entries cache.
     if binding.sync_mode != "paused":
         try:
-            from .vault_binding_scan import scan_for_local_changes
+            from .scan import scan_for_local_changes
             scan_for_local_changes(store=store, binding=binding)
         except Exception:  # noqa: BLE001
             log.exception(
@@ -195,7 +195,7 @@ def flush_and_sync_binding(
         )
     if binding.sync_mode == "two-way":
         # Imported lazily to avoid an import cycle (twoway imports from sync).
-        from .vault_binding_twoway import run_two_way_cycle
+        from .twoway import run_two_way_cycle
         return run_two_way_cycle(
             vault=vault, relay=relay, store=store,
             binding=binding, author_device_id=author_device_id,

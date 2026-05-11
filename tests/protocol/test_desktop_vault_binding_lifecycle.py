@@ -14,11 +14,11 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_binding_lifecycle import (  # noqa: E402
+from src.vault.binding.lifecycle import (  # noqa: E402
     DisconnectResult, PauseResult, ResumeResult,
     disconnect_binding, pause_binding, resume_binding,
 )
-from src.vault_bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
+from src.vault.binding.bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
 
 
@@ -98,7 +98,7 @@ class PauseResumeTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_paused_binding_refuses_two_way_cycle(self) -> None:
-        from src.vault_binding_twoway import run_two_way_cycle
+        from src.vault.binding.twoway import run_two_way_cycle
 
         bid = self._make_bound_two_way()
         pause_binding(self.store, bid)
@@ -115,7 +115,7 @@ class PauseResumeTests(unittest.TestCase):
             )
 
     def test_paused_binding_refuses_backup_only_cycle(self) -> None:
-        from src.vault_binding_sync import run_backup_only_cycle
+        from src.vault.binding.sync import run_backup_only_cycle
 
         binding = self.store.create_binding(
             vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
@@ -271,7 +271,7 @@ class DisconnectTests(unittest.TestCase):
         self.assertEqual(before, after)
 
     def test_disconnect_disables_traffic(self) -> None:
-        from src.vault_binding_twoway import run_two_way_cycle
+        from src.vault.binding.twoway import run_two_way_cycle
 
         bid = self._make_bound_with_state()
         disconnect_binding(self.store, bid)
@@ -380,7 +380,7 @@ class CatalogConsistencyTests(unittest.TestCase):
 
     def test_pause_noop_log_line_has_only_binding_field(self) -> None:
         bid = self._make_binding(state="paused")
-        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+        with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
             pause_binding(self.store, bid)
         noop = [ln for ln in cm.output if "binding_pause_noop" in ln]
         self.assertEqual(len(noop), 1, cm.output)
@@ -388,7 +388,7 @@ class CatalogConsistencyTests(unittest.TestCase):
 
     def test_resume_noop_log_line_has_only_binding_field(self) -> None:
         bid = self._make_binding(state="bound")
-        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+        with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
             resume_binding(self.store, bid, flush=None)
         noop = [ln for ln in cm.output if "binding_resume_noop" in ln]
         self.assertEqual(len(noop), 1, cm.output)
@@ -396,7 +396,7 @@ class CatalogConsistencyTests(unittest.TestCase):
 
     def test_disconnect_noop_log_line_has_only_binding_field(self) -> None:
         bid = self._make_binding(state="unbound")
-        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+        with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
             disconnect_binding(self.store, bid)
         noop = [ln for ln in cm.output if "binding_disconnect_noop" in ln]
         self.assertEqual(len(noop), 1, cm.output)
@@ -446,7 +446,7 @@ class DisconnectAuditTrailTests(unittest.TestCase):
 
     def test_each_pending_op_logs_an_audit_line(self) -> None:
         bid = self._make_bound_with_pending(n_ops=3)
-        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+        with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
             disconnect_binding(self.store, bid)
 
         audit = [
@@ -466,10 +466,10 @@ class DisconnectAuditTrailTests(unittest.TestCase):
         self.assertIn("pending_ops_dropped=3", summary[0])
 
     def test_audit_log_caps_at_DISCONNECT_AUDIT_LOG_CAP(self) -> None:
-        from src.vault_binding_lifecycle import DISCONNECT_AUDIT_LOG_CAP
+        from src.vault.binding.lifecycle import DISCONNECT_AUDIT_LOG_CAP
         n = DISCONNECT_AUDIT_LOG_CAP + 5
         bid = self._make_bound_with_pending(n_ops=n)
-        with self.assertLogs("src.vault_binding_lifecycle", level="INFO") as cm:
+        with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
             disconnect_binding(self.store, bid)
 
         audit = [

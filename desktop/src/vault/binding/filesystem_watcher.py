@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal
 
-from .vault_bindings import normalize_relative_path
+from .bindings import normalize_relative_path
 
 
 log = logging.getLogger(__name__)

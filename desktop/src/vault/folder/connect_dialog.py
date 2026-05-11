@@ -26,12 +26,12 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib, Pango
 
-from ...vault_binding_preflight import (
+from ..binding.preflight import (
     PreflightSummary,
     compute_preflight,
     render_preflight_text,
 )
-from ...vault_bindings import (
+from ..binding.bindings import (
     DEFAULT_SYNC_MODE,
     VaultBindingsStore,
 )

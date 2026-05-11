@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .vault_binding_lifecycle import SyncCancelledError
+from .vault.binding.lifecycle import SyncCancelledError
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
 from .vault.crypto import normalize_vault_id
 from .vault.export.export import (

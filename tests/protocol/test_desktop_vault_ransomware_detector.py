@@ -131,7 +131,7 @@ class IntegrationWithBindingStoreTests(unittest.TestCase):
         import shutil
         import tempfile
         from pathlib import Path
-        from src.vault_bindings import VaultBindingsStore
+        from src.vault.binding.bindings import VaultBindingsStore
         from src.vault_local_index import VaultLocalIndex
 
         tmpdir = Path(tempfile.mkdtemp(prefix="vault_ransom_int_"))

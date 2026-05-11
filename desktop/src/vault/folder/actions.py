@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from ...vault_binding_lifecycle import (
+from ..binding.lifecycle import (
     BindingCancellationRegistry,
     DisconnectResult,
     PauseResult,
@@ -33,7 +33,7 @@ from ...vault_binding_lifecycle import (
     pause_binding,
     resume_binding,
 )
-from ...vault_bindings import VaultBinding, VaultBindingsStore
+from ..binding.bindings import VaultBinding, VaultBindingsStore
 from ..error_messages import humanize
 
 
@@ -79,7 +79,7 @@ def dispatch_resume(
         return "Resumed.", None
     # ``flushed`` is a SyncCycleResult; render with the existing toast
     # formatter to keep parity with the Sync-now toast.
-    from ...vault_binding_sync import format_sync_outcome_toast
+    from ..binding.sync import format_sync_outcome_toast
     return f"Resumed. {format_sync_outcome_toast(result.flushed)}", None
 
 

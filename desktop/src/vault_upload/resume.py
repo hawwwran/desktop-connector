@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from ..vault_binding_lifecycle import SyncCancelledError
+from ..vault.binding.lifecycle import SyncCancelledError
 from ..vault.crypto import (
     aead_encrypt,
     build_chunk_aad,

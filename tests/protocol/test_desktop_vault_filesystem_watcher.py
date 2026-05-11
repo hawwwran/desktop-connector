@@ -13,7 +13,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_filesystem_watcher import (  # noqa: E402
+from src.vault.binding.filesystem_watcher import (  # noqa: E402
     DEBOUNCE_WINDOW_S,
     STABILITY_HUNG_AFTER_S,
     STABILITY_WINDOW_LOCAL_S,
