@@ -14,7 +14,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_migration import (  # noqa: E402
+from src.vault.migration.migration import (  # noqa: E402
     ALLOWED_TRANSITIONS,
     MigrationRecord,
     MigrationTransitionError,

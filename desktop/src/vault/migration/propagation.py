@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .vault_migration import PREVIOUS_RELAY_GRACE_DAYS
+from .migration import PREVIOUS_RELAY_GRACE_DAYS
 
 
 @dataclass(frozen=True)

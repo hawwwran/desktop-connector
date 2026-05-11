@@ -34,13 +34,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
-from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
-from .vault.crypto import (
+from ...vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..crypto import (
     aead_decrypt,
     build_chunk_aad,
     derive_subkey,
 )
-from .vault_migration import (
+from .migration import (
     MigrationRecord,
     clear_state,
     load_state,

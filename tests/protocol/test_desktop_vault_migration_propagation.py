@@ -12,7 +12,7 @@ from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_migration_propagation import (  # noqa: E402
+from src.vault.migration.propagation import (  # noqa: E402
     PropagationDecision,
     can_switch_back,
     propagate_relay_migration,
@@ -103,7 +103,7 @@ class VaultSettingsMigrationTabSourceTests(unittest.TestCase):
         )
         for needle in (
             'add_tab("migration", "Migration"',
-            "from ..vault_migration_propagation import can_switch_back",
+            "from ..vault.migration.propagation import can_switch_back",
             "Switch back to previous relay",
             "Migrate to another relay",
             "vault_previous_relay_url",

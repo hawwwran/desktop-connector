@@ -19,8 +19,8 @@ from src.vault import Vault  # noqa: E402
 from src.vault_browser_model import decrypt_manifest as _decrypt_manifest  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
-from src.vault_migration import load_state, save_state, MigrationRecord  # noqa: E402
-from src.vault_migration_runner import (  # noqa: E402
+from src.vault.migration.migration import load_state, save_state, MigrationRecord  # noqa: E402
+from src.vault.migration.runner import (  # noqa: E402
     MigrationVerifyOutcome,
     rollback_verified_migration,
     run_migration,
@@ -299,7 +299,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         can read ``record.previous_relay_url`` and write the matching
         config field atomically.
         """
-        from src.vault_migration import load_state
+        from src.vault.migration.migration import load_state
 
         source_relay, _ = self._populated_source(
             files={"k.txt": b"committed callback test"},
@@ -349,7 +349,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         callback. Without this gate, a config-write crash would
         silently lose the rollback URL forever.
         """
-        from src.vault_migration import load_state
+        from src.vault.migration.migration import load_state
 
         source_relay, _ = self._populated_source(
             files={"k.txt": b"flaky callback test"},
@@ -367,7 +367,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         vault = _vault()
         try:
             with self.assertLogs(
-                "src.vault_migration_runner", level="WARNING",
+                "src.vault.migration.runner", level="WARNING",
             ) as captured:
                 run_migration(
                     vault=vault,
@@ -421,7 +421,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         source's ``migration_verify_source`` reports a different
         target than the one we committed to.
         """
-        from src.vault_migration import MigrationRecord, save_state
+        from src.vault.migration.migration import MigrationRecord, save_state
 
         source_relay, _ = self._populated_source(
             files={"k.txt": b"committed content"},
@@ -464,7 +464,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         vault = _vault()
         try:
             with self.assertLogs(
-                "src.vault_migration_runner", level="WARNING",
+                "src.vault.migration.runner", level="WARNING",
             ) as captured:
                 run_migration(
                     vault=vault,
@@ -486,7 +486,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
             f"missing committed_source_drift warning in: {captured.output!r}",
         )
         # The state still cleared (drift is observability, not blocking).
-        from src.vault_migration import load_state
+        from src.vault.migration.migration import load_state
         self.assertIsNone(load_state(self.config_dir))
 
     def test_committed_to_idle_silent_when_source_aligns(self) -> None:
@@ -500,7 +500,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         vault = _vault()
         try:
             with self.assertLogs(
-                "src.vault_migration_runner", level="DEBUG",
+                "src.vault.migration.runner", level="DEBUG",
             ) as captured:
                 run_migration(
                     vault=vault,
@@ -529,7 +529,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         one chunk from the target's relay state before the verify
         pass.
         """
-        from src.vault_migration import (
+        from src.vault.migration.migration import (
             MigrationRecord, save_state,
         )
 
@@ -635,11 +635,11 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         try:
             # Run far enough to set up target, but tamper one chunk before
             # verify to force the sample-decrypt to fail.
-            from src.vault_migration_runner import (
+            from src.vault.migration.runner import (
                 _bootstrap_target_and_inventory,
                 _copy_chunks,
             )
-            from src.vault_migration import save_state, MigrationRecord, transition
+            from src.vault.migration.migration import save_state, MigrationRecord, transition
 
             record = MigrationRecord(
                 vault_id=VAULT_ID, state="started",

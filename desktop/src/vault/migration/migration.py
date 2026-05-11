@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from .vault.atomic import atomic_write_file
+from ..atomic import atomic_write_file
 
 
 MigrationState = Literal[

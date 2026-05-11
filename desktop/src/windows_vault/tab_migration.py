@@ -15,7 +15,7 @@ from ._main_context import MainContext
 def build_migration_tab(ctx: MainContext, win) -> "Gtk.Box":
     config = ctx.config
 
-    from ..vault_migration_propagation import can_switch_back
+    from ..vault.migration.propagation import can_switch_back
 
     migration_tab = Gtk.Box(
         orientation=Gtk.Orientation.VERTICAL, spacing=12,
