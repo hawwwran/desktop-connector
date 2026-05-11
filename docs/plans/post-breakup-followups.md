@@ -53,7 +53,19 @@ on `tresor-vault`:
 | done | `vault_crypto` → `vault/crypto.py` | `9aafbdd` |
 | done | `vault_manifest` → `vault/manifest.py` | `a0b4e20` |
 
-Pattern that worked, repeat for Wave C+:
+**Wave C — cohesive subpackages — 6 of 6 done.** Finished 2026-05-11
+on `tresor-vault`. 25 files folded into 6 new subpackages:
+
+| Status | Subpackage | Files | Commit |
+| --- | --- | --- | --- |
+| done | `vault/export/` | 2 (`export.py`, `reminder.py`) | `ebab35d` |
+| done | `vault/migration/` | 3 (`migration.py`, `runner.py`, `propagation.py`) | `115f7ec` |
+| done | `vault/grant/` | 4 (`grant.py`, `qr.py`, `wrap.py`, `access_rotation.py`) | `3906e2e` |
+| done | `vault/folder/` | 4 (`actions.py`, `runtime.py`, `ui_state.py`, `connect_dialog.py`) | `1f2a133` |
+| done | `vault/binding/` | 10 (`bindings`, `baseline`, `lifecycle`, `preflight`, `scan`, `sync`, `twoway`, `filesystem_watcher`, `runtime`, `runtime_watchers`) | `4203918` |
+| done | `vault/import_/` | 2 (`import_.py`, `runner.py`) — trailing underscore avoids Python keyword | `b6f5d00` |
+
+Pattern that worked, repeat for Wave D+:
 
 1. `mkdir -p` the new subpackage path + empty `__init__.py` if needed.
 2. `git mv` the file to its new home.
@@ -83,55 +95,75 @@ literal-string assertions; remember to scan tests during each move.
 Also watch for string LITERALS that look like module names —
 `vault/error_messages.py` has keys like `"vault_manifest_conflict"`
 which are server-side error codes, not module paths. Don't sweep
-those.
+those. Wave C surfaced two more such categories:
 
-**Waves C–F are entirely todo.** Wave B finished cleanly; the flat
-namespace shrank from 44 → 41 modules. Pick up Wave C (subpackages
-— binding, folder, grant, migration, import_, export) next.
+- **Logger-name strings** passed to `unittest.assertLogs(...)` or
+  `logging.getLogger(...)`. These are stringified module paths
+  derived from the file location. After a move, e.g.
+  `"src.vault_binding_lifecycle"` → `"src.vault.binding.lifecycle"`.
+  Grep with `assertLogs\("src\.vault_` to catch them.
+- **SQL identifiers**. `vault_bindings` is both a Python module
+  name AND a SQLite table name. The DDL strings (`CREATE TABLE
+  vault_bindings`, `FOREIGN KEY ... REFERENCES vault_bindings(...)`)
+  are database identifiers — leave them.
+
+Test source-pin assertions live in:
+- `test_desktop_vault_window_args.py` (dispatcher imports)
+- `test_desktop_vault_disconnect_source.py` (file path REPO_ROOT
+  joins)
+- `test_desktop_vault_folder_runtime.py`,
+  `test_desktop_vault_folders_rename_source.py` (folder paths +
+  cross-package imports)
+- `test_desktop_vault_binding_preflight.py` (cross-package import
+  shapes inside vault_folders/* and vault/folder/*)
+- `test_desktop_vault_tray_local_vault_exists.py` (tray import pin)
+- `test_desktop_vault_import_wizard_source.py` (wizard runner pins)
+- `test_desktop_vault_migration_propagation.py` (pinned import string)
+Skim each before/after each move.
+
+**Wave D–F are entirely todo.** Wave C finished cleanly; the flat
+namespace shrank from 41 → 16 modules. The remaining 16 split into:
+data ops (8), local state/index (4), diagnostics (2), UI helpers (2).
+Pick up Wave D (operations — `ops/`, `state/`, `diagnostics/`,
+plus the loose `browser_model`/`ui_state` UI helpers) next.
 
 ### Current state
 
 `desktop/src/` carried **52** flat top-level `vault_*.py` modules
 alongside three `vault_*/` packages and a tiny `vault/` core package
-(7 files, split out by breakup #9). After Wave A + Wave B
-(2026-05-09 → 2026-05-11), **41 flat `vault_*.py` modules remain**;
-`vault/` now also holds `atomic.py`, `crypto.py`, `passphrase.py`,
-`manifest.py`, `relay_errors.py`, `error_messages.py`,
-`conflict_naming.py`, `ui/{bytes_format,time_format,window_args}.py`,
-and `diagnostics/logging.py`.
+(7 files, split out by breakup #9). After Waves A + B + C
+(2026-05-09 → 2026-05-11), **16 flat `vault_*.py` modules remain**;
+`vault/` now holds 51 files across 7 subpackages plus 11 top-level
+modules.
 
 ```
 desktop/src/
-  vault/                  # 18 files: original 7 (vault.py, ids,
-                          #   canonical, protocols, recovery_kit,
-                          #   remote_folders, __init__) plus Wave A's
-                          #   atomic, relay_errors, error_messages,
-                          #   conflict_naming, ui/, diagnostics/
-                          #   plus Wave B's crypto, passphrase, manifest
-  vault_upload/           # package (split out by breakup #4)
-  vault_download/         # package (split out post-breakup)
-  vault_folders/          # package (split out by breakup #6 — Folders TAB UI)
-  windows_vault/          # package (split out by breakup #1 — vault windows)
-  vault_*.py × 41         # flat
+  vault/                       # 51 files total
+    __init__.py vault.py ids.py canonical.py protocols.py
+    recovery_kit.py remote_folders.py                  # original 7
+    atomic.py crypto.py passphrase.py manifest.py
+    relay_errors.py error_messages.py conflict_naming.py  # Wave A+B leaves
+    ui/                        # bytes_format, time_format, window_args
+    diagnostics/               # logging
+    export/                    # export, reminder                    (Wave C.1)
+    migration/                 # migration, runner, propagation       (Wave C.2)
+    grant/                     # grant, qr, wrap, access_rotation    (Wave C.3)
+    folder/                    # actions, runtime, ui_state, connect_dialog (Wave C.4)
+    binding/                   # bindings, baseline, lifecycle, preflight,
+                               #   scan, sync, twoway, filesystem_watcher,
+                               #   runtime, runtime_watchers          (Wave C.5)
+    import_/                   # import_, runner                      (Wave C.6)
+  vault_upload/                # package (split out by breakup #4)
+  vault_download/              # package (split out post-breakup)
+  vault_folders/               # Folders TAB UI (kept under top-level
+                               #   per docs/plans naming note)
+  windows_vault/               # package (split out by breakup #1)
+  vault_*.py × 16              # flat — Wave D candidates
 ```
 
-The 41 flat files (sorted, hand-grouped):
+The 16 remaining flat files (hand-grouped):
 
 ```
-binding subsystem:          vault_bindings.py
-                            vault_binding_baseline.py vault_binding_lifecycle.py
-                            vault_binding_preflight.py vault_binding_scan.py
-                            vault_binding_sync.py vault_binding_twoway.py
-                            vault_filesystem_watcher.py
-                            vault_runtime.py vault_runtime_watchers.py
-folder / remote folder:     vault_folder_actions.py vault_folder_runtime.py
-                            vault_folder_ui_state.py vault_connect_folder_dialog.py
-grant flow:                 vault_grant.py vault_grant_qr.py vault_grant_wrap.py
-                            vault_access_rotation.py
-migration:                  vault_migration.py vault_migration_runner.py
-                            vault_migration_propagation.py
-import / export:            vault_import.py vault_import_runner.py
-                            vault_export.py vault_export_reminder.py
 data ops:                   vault_restore.py vault_clear.py vault_repair.py
                             vault_integrity.py vault_eviction.py vault_delete.py
                             vault_purge_schedule.py vault_trash.py
