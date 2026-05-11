@@ -78,61 +78,32 @@ want when arguing whether to flip the decision.
 
 **Status:** accepted.
 
-**Context.** Desktop Connector's vault subsystem accreted as a flat
-namespace of ~52 top-level `vault_*.py` modules in `desktop/src/`,
-alongside a small `vault/` core package (7 files) and the
-already-split `vault_upload/` / `vault_download/` packages. New
-contributors couldn't tell at a glance which file held plumbing vs.
-data ops vs. UI glue; cohesion was invisible (the 10
-`vault_binding_*.py` files formed a state machine the filesystem
-didn't show as a group); imports forked across two styles
-(flat + package). The breakup plan called for folding everything
-into a single coherent package — see `docs/plans/desktop-file-size-breakup.md`
-and the working notes in `docs/plans/post-breakup-followups.md`.
+**Context.** The vault subsystem accreted as ~52 flat top-level
+`vault_*.py` modules in `desktop/src/`, alongside a small `vault/`
+core package and the already-split `vault_upload/` / `vault_download/`
+packages. Cohesion was invisible (the 10 `vault_binding_*.py` files
+form a state machine; the filesystem didn't show them as a group),
+imports forked across two styles (flat + package), and new
+contributors couldn't tell plumbing from data ops from UI glue.
 
-**Decision.** All vault data-layer code now lives under
-`desktop/src/vault/`. After Waves A–G (2026-05-09 → 2026-05-11),
-the package holds **89 files across 12 subpackages plus 14
-top-level modules**:
+**Decision.** All vault data-layer code lives under
+`desktop/src/vault/` (89 files, 12 subpackages, 14 top-level
+modules). The lone surviving top-level **`vault_folders/`** is the
+**Folders TAB GTK widget tree** — UI, not vault logic. The
+data-layer name for folder concerns is **singular** (`vault.folder`);
+the GTK tab keeps the **plural** top-level name. Two unavoidable
+triple-dot imports remain inside `vault/binding/runtime.py` reaching
+the non-vault top-level `crypto.py` / `connection.py` — those don't
+belong under the vault subsystem.
 
-```
-vault/
-  __init__.py vault.py ids.py canonical.py protocols.py
-  recovery_kit.py remote_folders.py
-  atomic.py crypto.py passphrase.py manifest.py
-  relay_errors.py error_messages.py conflict_naming.py
-  ui/         { bytes_format, time_format, window_args,
-                browser_model, ui_state }
-  diagnostics/{ logging, debug_bundle, ransomware_detector }
-  export/     { bundle, reminder }
-  migration/  { state, runner, propagation }
-  grant/      { store, qr, wrap, access_rotation }
-  folder/     { actions, runtime, ui_state, connect_dialog }
-  binding/    { bindings, baseline, lifecycle, preflight, scan,
-                sync, twoway, filesystem_watcher, runtime,
-                runtime_watchers }
-  import_/    { bundle, runner }
-  state/      { local_index, local_state, usage, activity }
-  ops/        { restore, clear, repair, integrity, eviction,
-                delete, purge_schedule, trash }
-  upload/     12 files (promoted from top-level vault_upload/)
-  download/    8 files (promoted from top-level vault_download/)
-```
-
-`zero` flat `vault_*.py` modules and `zero` flat `vault_*/` data
-packages remain at `desktop/src/`. The lone surviving top-level
-**`vault_folders/`** is the **Folders TAB GTK widget tree** — UI,
-not vault logic. The data-layer name for folder concerns is
-**singular** (`vault.folder`); the GTK tab keeps the **plural**
-top-level name. Anyone writing a vault data-layer module looks
-under `vault/`; anyone touching the Folders TAB UI looks at
-`vault_folders/`.
-
-Two `from ...crypto` / `from ...connection` triple-dot imports
-remain inside `vault/binding/runtime.py`. They reach the non-vault
-top-level `desktop/src/crypto.py` and `desktop/src/connection.py`
-modules and stay that way — those don't belong to the vault
-subsystem.
+A regression-guard test
+(`tests/protocol/test_desktop_vault_no_legacy_paths.py`) AST-parses
+every `desktop/src/*.py` and `tests/protocol/*.py` for `vault_X`
+import shapes; anything outside `ALLOWED_VAULT_PREFIXED`
+(`folders`, `submenu`) fails CI. The scanner disambiguates module
+re-introduction (`from . import vault_X` where `vault_X.py` is on
+disk → fail) from harmless `__init__.py` symbol re-exports
+(`from .. import vault_id_dashed` where no file exists → ignore).
 
 **Alternatives.** (a) Keep the flat namespace and rely on
 alphabetic ordering — rejected: 52 files is past the point where
@@ -151,21 +122,23 @@ files (e.g. `vault.grant.grant`) into their `__init__.py` —
 rejected for Wave G in favour of semantic renames
 (`vault.grant.store`, `vault.export.bundle`, `vault.migration.state`,
 `vault.import_.bundle`), which give each submodule a name that
-describes what's inside.
+describes what's inside. (e) Regex-based regression guard —
+rejected (after a first implementation): regex missed three
+common import shapes (`from . import vault_X`,
+`from .. import vault_X`, `from src import vault_X`) and couldn't
+distinguish module re-introductions from `__init__.py` symbol
+re-exports. AST parsing handles every shape and the filesystem
+check resolves the symbol ambiguity.
 
-A regression-guard test
-(`tests/protocol/test_desktop_vault_no_legacy_paths.py`) fails CI
-if any pre-consolidation `vault_X` import path re-appears outside
-the small `ALLOWED_VAULT_PREFIXED` list (currently just
-`vault_folders` + tray-internal `vault_submenu`).
-
-**Anchor.** `desktop/src/vault/` is the package; the Wave commit
-range is `dad6a9e..0f79917` (`git log --oneline dad6a9e^..0f79917
--- desktop/src/vault/`). Plan: `docs/plans/desktop-file-size-breakup.md`
-(original scope) + `docs/plans/post-breakup-followups.md` (wave
-progression). Note: older entries in this file anchor at
-pre-consolidation paths like `vault_crypto.derive_recovery_wrap_key`
-— those live under `vault/crypto.py` now; one hop suffices.
+**Anchor.** `desktop/src/vault/` is the package. The full Wave A–G
+commit range is `dad6a9e^..0f79917`. Plan docs:
+`docs/plans/desktop-file-size-breakup.md` (original scope) +
+`docs/plans/post-breakup-followups.md` (wave progression). The
+filesystem layout (subpackages and their contents) is enumerated
+there; cross-link rather than duplicate. Older entries in this
+file anchor at pre-consolidation paths like
+`vault_crypto.derive_recovery_wrap_key` — those live under
+`vault/crypto.py` now; one hop suffices.
 
 ### 2026-05-06 — Recovery secret is one-shot — kit re-export requires header rotation
 
