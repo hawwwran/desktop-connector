@@ -34,8 +34,8 @@ ensure_desktop_on_path()
 
 from src.config import Config  # noqa: E402
 from src.history import TransferHistory  # noqa: E402
-import src.vault_grant as vault_grant  # noqa: E402
-from src.vault_grant import (  # noqa: E402
+import src.vault.grant.grant as vault_grant  # noqa: E402
+from src.vault.grant.grant import (  # noqa: E402
     KeyringUnavailable,
     fallback_grant_path,
 )
@@ -136,7 +136,7 @@ class TrayLocalVaultExistsSourcePins(unittest.TestCase):
         # tray.py is now a package; the helper lives in tray/vault_submenu.py.
         source = Path(REPO_ROOT, "desktop/src/tray/vault_submenu.py").read_text(encoding="utf-8")
         self.assertIn(
-            "from ..vault_grant import local_vault_grant_exists",
+            "from ..vault.grant.grant import local_vault_grant_exists",
             source,
         )
 

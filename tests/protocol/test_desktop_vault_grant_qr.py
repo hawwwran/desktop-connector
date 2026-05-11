@@ -12,7 +12,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_grant_qr import (  # noqa: E402
+from src.vault.grant.qr import (  # noqa: E402
     DEFAULT_TTL_SECONDS, SCHEME, VaultGrantQRError, VaultJoinUrl,
     derive_shared_secret,
     derive_verification_code,

@@ -28,7 +28,7 @@ from typing import Any
 
 import nacl.bindings
 
-from .vault.crypto import (
+from ..crypto import (
     XCHACHA20_NONCE_BYTES,
     aead_decrypt, aead_encrypt,
     build_device_grant_aad,

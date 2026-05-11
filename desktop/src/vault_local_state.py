@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable
 
-from .vault_grant import delete_local_grant_artifacts
+from .vault.grant.grant import delete_local_grant_artifacts
 
 
 log = logging.getLogger(__name__)

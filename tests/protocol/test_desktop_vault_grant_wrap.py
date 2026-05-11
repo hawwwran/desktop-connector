@@ -16,7 +16,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_grant_wrap import (  # noqa: E402
+from src.vault.grant.wrap import (  # noqa: E402
     GrantPayload, GrantWrapError,
     unwrap_grant_for_claimant, wrap_grant_for_claimant,
 )
@@ -215,7 +215,7 @@ class DeviceGrantV1VectorRoundTripTests(unittest.TestCase):
         import json
         import os
         from pathlib import Path
-        from src.vault_grant_wrap import _decode_payload
+        from src.vault.grant.wrap import _decode_payload
 
         vectors = Path(
             os.path.dirname(__file__) or ".",

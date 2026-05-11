@@ -43,7 +43,7 @@ def create_vault_relay(config):
 
 def save_local_vault_grant(config_dir: Path, config, vault) -> None:
     """Persist the creating device's local vault unlock grant."""
-    from .vault_grant import VaultGrant, open_default_grant_store
+    from .vault.grant.grant import VaultGrant, open_default_grant_store
 
     master_key = vault.master_key
     vault_access_secret = vault.vault_access_secret
@@ -64,7 +64,7 @@ def save_local_vault_grant(config_dir: Path, config, vault) -> None:
 def open_local_vault_from_grant(config_dir: Path, config, vault_id: str):
     """Open vault state from this machine's saved grant."""
     from .vault import Vault
-    from .vault_grant import open_default_grant_store
+    from .vault.grant.grant import open_default_grant_store
 
     store = open_default_grant_store(
         config_dir=Path(config_dir),

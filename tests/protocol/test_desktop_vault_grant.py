@@ -16,7 +16,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_grant import (  # noqa: E402
+from src.vault.grant.grant import (  # noqa: E402
     FileGrantStore,
     KeyringGrantStore,
     KeyringUnavailable,
@@ -167,7 +167,7 @@ class FileGrantStoreTests(unittest.TestCase):
 
 class OpenDefaultGrantStoreTests(unittest.TestCase):
     def test_falls_back_to_file_when_keyring_unavailable(self) -> None:
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         original = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
             lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
@@ -185,7 +185,7 @@ class OpenDefaultGrantStoreTests(unittest.TestCase):
 
 class DeleteLocalGrantArtifactsTests(unittest.TestCase):
     def test_removes_file_fallback_without_device_seed(self) -> None:
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         original = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
             lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
@@ -203,7 +203,7 @@ class DeleteLocalGrantArtifactsTests(unittest.TestCase):
             vault_grant.KeyringGrantStore.open_default = original
 
     def test_removes_keyring_grant_when_keyring_available(self) -> None:
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         fake = FakeKeyring()
         store = KeyringGrantStore(fake)
         grant = VaultGrant.from_bytes(VAULT_ID, b"\x22" * 32, "bearer")
@@ -223,7 +223,7 @@ class DeleteLocalGrantArtifactsTests(unittest.TestCase):
         errors and raise so the caller can surface a partial-disconnect
         message to the user.
         """
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         original = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
             lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
@@ -315,14 +315,14 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         # branch so the file fallback path gets exercised; individual
         # tests that need the keyring branch monkey-patch
         # ``open_default`` themselves.
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         self._original_open_default = vault_grant.KeyringGrantStore.open_default
         vault_grant.KeyringGrantStore.open_default = classmethod(
             lambda cls, service_name=None: (_ for _ in ()).throw(KeyringUnavailable("test forced"))
         )
 
     def tearDown(self) -> None:
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         vault_grant.KeyringGrantStore.open_default = self._original_open_default
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -338,7 +338,7 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
 
     def test_returns_true_when_keyring_has_grant(self) -> None:
         # Re-route open_default to a fake keyring with the entry set.
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         fake = FakeKeyring()
         kr = KeyringGrantStore(fake)
         kr.save(VaultGrant.from_bytes(VAULT_ID, b"\x44" * 32, "bearer"))
@@ -349,7 +349,7 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         # Tray reads ``last_known_id`` from config (canonical form) and
         # passes it through; F-U14's --vault-id arg can also be dashed.
         # Both forms must resolve to the same backend entry.
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         fake = FakeKeyring()
         kr = KeyringGrantStore(fake)
         kr.save(VaultGrant.from_bytes(VAULT_ID, b"\x44" * 32, "bearer"))
@@ -365,7 +365,7 @@ class LocalVaultGrantExistsTests(unittest.TestCase):
         # Keyring open_default raises something other than
         # KeyringUnavailable — should still fall through to the file
         # check rather than propagate.
-        import src.vault_grant as vault_grant
+        import src.vault.grant.grant as vault_grant
         vault_grant.KeyringGrantStore.open_default = classmethod(
             lambda cls, service_name=None: (_ for _ in ()).throw(RuntimeError("dbus busy"))
         )
@@ -414,7 +414,7 @@ class GrantStoreKeyringServiceIsolationTests(unittest.TestCase):
         # service-name derivation path.
         import sys as _sys
         from types import SimpleNamespace
-        from src.vault_grant import _resolve_keyring_service  # noqa: F401
+        from src.vault.grant.grant import _resolve_keyring_service  # noqa: F401
 
         self._real_keyring_module = _sys.modules.get("keyring")
         # Fake errors module the import path expects.

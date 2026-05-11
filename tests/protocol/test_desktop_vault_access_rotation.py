@@ -16,7 +16,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_access_rotation import (  # noqa: E402
+from src.vault.grant.access_rotation import (  # noqa: E402
     REMINDER_TTL_SECONDS, ReminderState, SECRET_BYTES,
     acknowledge_device, clear_reminder, generate_new_secret,
     read_reminder, reminder_path, rotation_request_body,
@@ -60,7 +60,7 @@ class WireBodyTests(unittest.TestCase):
         # F-C10: the wire payload must NOT carry the hex digest. Tests
         # asking for the hex form go through the explicit test helper.
         self.assertNotIn("_hash_hex", wire)
-        from src.vault_access_rotation import _compute_secret_hex_for_tests
+        from src.vault.grant.access_rotation import _compute_secret_hex_for_tests
         self.assertEqual(_compute_secret_hex_for_tests(secret), expected.hex())
 
     def test_rotation_request_body_carries_just_the_hash(self) -> None:

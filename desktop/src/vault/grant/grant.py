@@ -33,9 +33,9 @@ from typing import Protocol
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .vault.atomic import atomic_write_file
+from ..atomic import atomic_write_file
 
-from .vault.crypto import (
+from ..crypto import (
     XCHACHA20_KEY_BYTES,
     XCHACHA20_NONCE_BYTES,
     aead_decrypt,
