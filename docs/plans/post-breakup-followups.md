@@ -127,6 +127,67 @@ data ops (8), local state/index (4), diagnostics (2), UI helpers (2).
 Pick up Wave D (operations — `ops/`, `state/`, `diagnostics/`,
 plus the loose `browser_model`/`ui_state` UI helpers) next.
 
+### Known follow-ups (surfaced by the Wave C code review)
+
+These do NOT block Wave D, but should be cleaned up before declaring
+the consolidation done.
+
+**Triple-dot bridges (collapse in Wave D).** Seven `from ...vault_X
+import …` lines inside `vault/` reach into still-flat top-level
+modules. Each collapses to `from ..X import …` when its target moves
+in Wave D:
+
+```
+vault/binding/sync.py:85                from ...vault_upload import …
+vault/binding/runtime_watchers.py:29    from ...vault_ransomware_detector import …
+vault/binding/baseline.py:33            from ...vault_download import …
+vault/binding/twoway.py:55              from ...vault_download import …
+vault/binding/twoway.py:56              from ...vault_trash import …
+vault/migration/runner.py:37            from ...vault_browser_model import …
+vault/import_/runner.py:18              from ...vault_browser_model import …
+```
+
+Same pattern inside `vault/binding/runtime.py` for the two
+non-vault top-level modules `crypto.py` and `connection.py` —
+those won't move into `vault/` and will stay triple-dot:
+
+```
+vault/binding/runtime.py:89             from ...crypto import KeyManager
+vault/binding/runtime.py:108            from ...connection import ConnectionManager
+```
+
+After Wave D, only the second pair should remain.
+
+**Wave G — redundant `subpackage/subpackage.py` rename.** Four
+modules inherited a redundant inner-name from the plan-target's
+literal sketch:
+
+```
+vault/grant/grant.py
+vault/export/export.py
+vault/migration/migration.py
+vault/import_/import_.py
+```
+
+Callers have to type the redundancy
+(`from src.vault.grant.grant import VaultGrant`,
+`from src.vault.export.export import write_export_bundle`, etc.).
+Two cleanup shapes are possible:
+
+1. **Hoist into `__init__.py`** — folds each redundant module's
+   contents into its `__init__.py`. Pro: callers shorten to
+   `from src.vault.grant import VaultGrant`. Con: `__init__.py`
+   grows large (vault_export.py was 622 lines).
+2. **Rename to a semantic name** — `vault/grant/store.py`,
+   `vault/export/bundle.py`, `vault/migration/state.py`,
+   `vault/import_/bundle.py`. Pro: each module has a name that
+   describes its role. Con: another sweep of importers (move-only
+   cost again).
+
+Defer to Wave G after the data subsystem is fully consolidated.
+Either approach is mechanical; pick when there's a clear hour to
+make the pass without other moves in flight.
+
 ### Current state
 
 `desktop/src/` carried **52** flat top-level `vault_*.py` modules
