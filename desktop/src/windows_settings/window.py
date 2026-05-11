@@ -60,7 +60,9 @@ def show_settings(config_dir: Path):
     crypto = KeyManager(config_dir, secret_store=config.secret_store)
     conn = ConnectionManager(config.server_url, config.device_id or "", config.auth_token or "")
 
-    # Fetch stats from server
+    # Fetch stats from server. Short timeout so the window doesn't sit
+    # behind a hung TCP connect when the relay is unreachable — the stats
+    # group is optional, and the rest of the UI shouldn't wait for it.
     stats = None
     settings_registry = ConnectedDeviceRegistry(config)
     settings_active_device = settings_registry.get_active_device()
@@ -69,6 +71,7 @@ def show_settings(config_dir: Path):
         stats = api.get_stats(
             paired_with=settings_active_device.device_id
             if settings_active_device else None,
+            timeout=2.0,
         )
     except Exception:
         pass

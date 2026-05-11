@@ -201,7 +201,19 @@ class TrayApp(
         self._state_paths = _bake_state_paths(self.config.config_dir / "tray")
         self._last_applied_state: str | None = None
 
-        self.conn.on_state_change(lambda state: self._update_icon())
+        def _on_state_change(_state):
+            # Repaint the icon AND rebuild the menu. On AppIndicator backends
+            # (libappindicator / StatusNotifierItem) the menu is D-Bus-bound
+            # and lambda labels (e.g. _status_text) are only re-evaluated on
+            # update_menu(); without this rebuild the menu kept showing the
+            # last-rendered "Online" while the icon flipped to disconnected.
+            self._update_icon()
+            try:
+                if self._icon:
+                    self._icon.update_menu()
+            except Exception:
+                pass
+        self.conn.on_state_change(_on_state_change)
 
         def _on_auth_failure(kind):
             log.warning("auth.failure.surface kind=%s", kind.value)
