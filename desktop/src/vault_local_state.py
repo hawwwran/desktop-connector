@@ -57,7 +57,7 @@ def _purge_cached_resume_state(vault_id: str) -> None:
     # Local imports keep ``vault_upload`` / ``vault_download`` out of
     # the import graph for callers that just want disconnect — those
     # modules pull in the AEAD + atomic-write helpers transitively.
-    from .vault_crypto import normalize_vault_id
+    from .vault.crypto import normalize_vault_id
     from .vault_upload import default_upload_resume_dir, UploadSession
     from .vault_download import default_vault_download_cache_dir
 

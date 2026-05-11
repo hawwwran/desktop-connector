@@ -27,7 +27,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_crypto import (  # noqa: E402
+from src.vault.crypto import (  # noqa: E402
     ARGON2ID_ITERATIONS,
     ARGON2ID_MEMORY_KIB,
     ARGON2ID_SALT_BYTES,

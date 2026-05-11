@@ -30,7 +30,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_crypto import (  # noqa: E402
+from src.vault.crypto import (  # noqa: E402
     VaultFormatVersionUnsupported,
     aead_decrypt,
     aead_encrypt,

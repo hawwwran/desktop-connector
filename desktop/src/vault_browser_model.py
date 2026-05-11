@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .vault_crypto import (
+from .vault.crypto import (
     aead_decrypt,
     build_manifest_aad,
     derive_subkey,

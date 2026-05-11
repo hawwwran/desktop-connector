@@ -15,7 +15,7 @@ import time
 from typing import Any, Callable
 
 from ..vault_binding_lifecycle import SyncCancelledError
-from ..vault_crypto import (
+from ..vault.crypto import (
     aead_decrypt,
     build_chunk_aad,
     derive_subkey,

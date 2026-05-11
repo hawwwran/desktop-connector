@@ -299,7 +299,7 @@ class VaultPrepareThenPublishTests(unittest.TestCase):
 
 
 def _derive_header_subkey(master_key: bytes) -> bytes:
-    from src.vault_crypto import derive_subkey
+    from src.vault.crypto import derive_subkey
     return derive_subkey("dc-vault-v1/header", master_key)
 
 
@@ -316,7 +316,7 @@ def _extract_recovery_envelope(
     import base64
     import json
 
-    from src.vault_crypto import (
+    from src.vault.crypto import (
         aead_decrypt, build_header_aad, derive_subkey,
     )
 

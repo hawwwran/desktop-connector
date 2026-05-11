@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from ..vault_binding_lifecycle import SyncCancelledError
 from ..vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
-from ..vault_crypto import (
+from ..vault.crypto import (
     aead_encrypt,
     build_chunk_aad,
     build_chunk_envelope,

@@ -509,7 +509,7 @@ class VaultLocalDevelopmentRelay:
 
     def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
                      header_hash, initial_manifest_ciphertext, initial_manifest_hash):
-        from . import vault_crypto  # noqa: F401
+        from .vault import crypto as vault_crypto  # noqa: F401
         return {"vault_id": vault_id}
 
     def get_header(self, vault_id, vault_access_secret):

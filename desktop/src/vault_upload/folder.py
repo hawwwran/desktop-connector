@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterator
 
 from ..vault_binding_lifecycle import SyncCancelledError
 from ..vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
-from ..vault_crypto import (
+from ..vault.crypto import (
     derive_content_fingerprint_key,
     make_content_fingerprint,
 )

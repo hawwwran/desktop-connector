@@ -12,7 +12,7 @@ import base64
 import os
 from pathlib import Path
 
-from ..vault_crypto import (
+from .crypto import (
     aead_decrypt,
     build_recovery_aad,
     derive_recovery_wrap_key,

@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
-from .vault_crypto import (
+from .vault.crypto import (
     aead_decrypt,
     aead_encrypt,
     build_export_outer_header,

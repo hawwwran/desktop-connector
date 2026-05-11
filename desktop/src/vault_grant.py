@@ -35,7 +35,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .vault.atomic import atomic_write_file
 
-from .vault_crypto import (
+from .vault.crypto import (
     XCHACHA20_KEY_BYTES,
     XCHACHA20_NONCE_BYTES,
     aead_decrypt,

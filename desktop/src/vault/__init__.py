@@ -9,7 +9,7 @@ package and finds the names below in the package namespace.
 ``vault_local_state.py`` imports it through this module path.
 """
 
-from ..vault_crypto import normalize_vault_id
+from .crypto import normalize_vault_id
 from .ids import (
     _BASE32_LOWER,
     _BASE32_UPPER,

@@ -47,7 +47,7 @@ import json
 import logging
 import secrets
 
-from ..vault_crypto import (
+from .crypto import (
     DefaultVaultCrypto,
     VaultCrypto,
     aead_decrypt,

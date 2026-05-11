@@ -27,7 +27,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 from _real_relay_server import get_shared_server  # noqa: E402
 
 ensure_desktop_on_path()
-from src.vault_crypto import build_manifest_envelope  # noqa: E402
+from src.vault.crypto import build_manifest_envelope  # noqa: E402
 
 
 VAULT_ID_DASHED = "MFRP-2345-WXYZ"

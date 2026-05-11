@@ -523,7 +523,7 @@ def _bytes_match_remote(
     so we err on the side of writing a conflict copy).
     """
     try:
-        from .vault_crypto import (
+        from .vault.crypto import (
             derive_content_fingerprint_key,
             make_content_fingerprint,
         )

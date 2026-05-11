@@ -17,7 +17,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .vault_crypto import normalize_vault_id
+from .vault.crypto import normalize_vault_id
 
 
 MANIFEST_SCHEMA = "dc-vault-manifest-v1"

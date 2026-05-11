@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
-from .vault_crypto import (
+from .vault.crypto import (
     aead_decrypt,
     build_chunk_aad,
     derive_subkey,

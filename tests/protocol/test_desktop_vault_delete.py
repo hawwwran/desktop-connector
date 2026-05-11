@@ -17,7 +17,7 @@ ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
 from src.vault_browser_model import list_folder, list_versions  # noqa: E402
-from src.vault_crypto import DefaultVaultCrypto  # noqa: E402
+from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault_delete import (  # noqa: E402
     delete_file,
     delete_folder_contents,

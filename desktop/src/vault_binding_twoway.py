@@ -670,7 +670,7 @@ def _latest_version(entry: dict[str, Any]) -> dict[str, Any] | None:
 
 def _content_fingerprint_key(vault: SyncVault) -> bytes | None:
     try:
-        from .vault_crypto import derive_content_fingerprint_key
+        from .vault.crypto import derive_content_fingerprint_key
     except ImportError:
         return None
     master = vault.master_key
@@ -696,7 +696,7 @@ def _file_keyed_fingerprint(
     except OSError:
         return None
     try:
-        from .vault_crypto import make_content_fingerprint
+        from .vault.crypto import make_content_fingerprint
         return make_content_fingerprint(fingerprint_key, sha)
     except Exception:  # noqa: BLE001
         return None

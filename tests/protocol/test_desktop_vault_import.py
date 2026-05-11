@@ -390,7 +390,7 @@ class VaultImportRunnerTests(unittest.TestCase):
 
     def test_run_import_uploads_missing_chunks_and_publishes_merged_manifest(self) -> None:
         from src.vault import Vault
-        from src.vault_crypto import DefaultVaultCrypto
+        from src.vault.crypto import DefaultVaultCrypto
         from src.vault_export import write_export_bundle
         from src.vault_import import ImportMergeResolution
         from src.vault_import_runner import run_import
@@ -485,7 +485,7 @@ class VaultImportRunnerTests(unittest.TestCase):
 
     def test_run_import_refuses_when_vault_identity_mismatches(self) -> None:
         from src.vault import Vault
-        from src.vault_crypto import DefaultVaultCrypto
+        from src.vault.crypto import DefaultVaultCrypto
         from src.vault_export import write_export_bundle
         from src.vault_import import ImportMergeResolution
         from src.vault_import_runner import run_import

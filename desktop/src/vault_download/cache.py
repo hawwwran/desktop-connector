@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..vault_crypto import normalize_vault_id
+from ..vault.crypto import normalize_vault_id
 from .manifest import _int_value
 from .paths import atomic_write_file
 

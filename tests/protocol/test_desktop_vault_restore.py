@@ -16,7 +16,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_crypto import DefaultVaultCrypto  # noqa: E402
+from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault_manifest import (  # noqa: E402
     make_manifest,
     make_remote_folder,

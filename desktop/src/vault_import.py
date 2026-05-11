@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
-from .vault_crypto import normalize_vault_id
+from .vault.crypto import normalize_vault_id
 from .vault_manifest import (
     add_or_append_file_version,
     find_file_entry,

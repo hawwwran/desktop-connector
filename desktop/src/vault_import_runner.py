@@ -16,7 +16,7 @@ from typing import Any, Callable, Protocol
 
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
-from .vault_crypto import normalize_vault_id
+from .vault.crypto import normalize_vault_id
 from .vault_export import (
     BundleContents,
     ExportError,

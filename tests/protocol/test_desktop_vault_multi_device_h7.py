@@ -52,7 +52,7 @@ from src.vault_binding_twoway import run_two_way_cycle  # noqa: E402
 from src.vault_bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
 from src.vault_browser_model import decrypt_manifest  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
-from src.vault_crypto import (  # noqa: E402
+from src.vault.crypto import (  # noqa: E402
     DefaultVaultCrypto,
     derive_content_fingerprint_key, make_content_fingerprint,
 )
