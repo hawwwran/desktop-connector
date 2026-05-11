@@ -121,42 +121,45 @@ Test source-pin assertions live in:
 - `test_desktop_vault_migration_propagation.py` (pinned import string)
 Skim each before/after each move.
 
-**Wave D–F are entirely todo.** Wave C finished cleanly; the flat
-namespace shrank from 41 → 16 modules. The remaining 16 split into:
-data ops (8), local state/index (4), diagnostics (2), UI helpers (2).
-Pick up Wave D (operations — `ops/`, `state/`, `diagnostics/`,
-plus the loose `browser_model`/`ui_state` UI helpers) next.
+**Wave D — operations, state, diagnostics + UI helpers — 4 of 4
+done.** Finished 2026-05-11 on `tresor-vault`. 16 files folded into
+3 new and 2 existing subpackages:
 
-### Known follow-ups (surfaced by the Wave C code review)
+| Status | Subpackage / scope | Files | Commit |
+| --- | --- | --- | --- |
+| done | `vault/diagnostics/` additions | 2 (`debug_bundle.py`, `ransomware_detector.py`) — joins existing `logging.py` | `481a7d2` |
+| done | `vault/state/` (new) | 4 (`local_index.py`, `local_state.py`, `usage.py`, `activity.py`) | `5e38ead` |
+| done | `vault/ui/` additions | 2 (`browser_model.py`, `ui_state.py`) — joins existing 3 | `97ff6dc` |
+| done | `vault/ops/` (new) | 8 (`restore`, `clear`, `repair`, `integrity`, `eviction`, `delete`, `purge_schedule`, `trash`) | `56ce47a` |
 
-These do NOT block Wave D, but should be cleaned up before declaring
-the consolidation done.
+**Milestone:** as of `56ce47a`, **zero flat `vault_*.py` modules
+remain at `desktop/src/`**. The vault subsystem now lives entirely
+under `desktop/src/vault/`.
 
-**Triple-dot bridges (collapse in Wave D).** Seven `from ...vault_X
-import …` lines inside `vault/` reach into still-flat top-level
-modules. Each collapses to `from ..X import …` when its target moves
-in Wave D:
+**Wave E (vault_upload/ + vault_download/ promotion) and Wave F
+(shim cleanup) are still todo.** The remaining 4 triple-dot bridges
+to those top-level packages will collapse in Wave E.
+
+### Known follow-ups
+
+**Triple-dot bridges** (4 remaining after Wave D, all into the two
+still-flat packages — collapse in Wave E):
 
 ```
 vault/binding/sync.py:85                from ...vault_upload import …
-vault/binding/runtime_watchers.py:29    from ...vault_ransomware_detector import …
 vault/binding/baseline.py:33            from ...vault_download import …
 vault/binding/twoway.py:55              from ...vault_download import …
-vault/binding/twoway.py:56              from ...vault_trash import …
-vault/migration/runner.py:37            from ...vault_browser_model import …
-vault/import_/runner.py:18              from ...vault_browser_model import …
+vault/ops/restore.py:40                 from ...vault_download import …
 ```
 
-Same pattern inside `vault/binding/runtime.py` for the two
-non-vault top-level modules `crypto.py` and `connection.py` —
-those won't move into `vault/` and will stay triple-dot:
+Two permanent triple-dots remain into non-vault top-level modules
+(`crypto.py` and `connection.py`) — these don't belong to the
+vault subsystem and stay where they are:
 
 ```
 vault/binding/runtime.py:89             from ...crypto import KeyManager
 vault/binding/runtime.py:108            from ...connection import ConnectionManager
 ```
-
-After Wave D, only the second pair should remain.
 
 **Wave G — redundant `subpackage/subpackage.py` rename.** Four
 modules inherited a redundant inner-name from the plan-target's
@@ -192,48 +195,45 @@ make the pass without other moves in flight.
 
 `desktop/src/` carried **52** flat top-level `vault_*.py` modules
 alongside three `vault_*/` packages and a tiny `vault/` core package
-(7 files, split out by breakup #9). After Waves A + B + C
-(2026-05-09 → 2026-05-11), **16 flat `vault_*.py` modules remain**;
-`vault/` now holds 51 files across 7 subpackages plus 11 top-level
-modules.
+(7 files, split out by breakup #9). After Waves A + B + C + D
+(2026-05-09 → 2026-05-11), **zero flat `vault_*.py` modules
+remain**; `vault/` now holds 69 files across 9 subpackages plus 11
+top-level modules. Wave E will fold the two remaining flat packages
+(`vault_upload/`, `vault_download/`) under `vault/`.
 
 ```
 desktop/src/
-  vault/                       # 51 files total
+  vault/                       # 69 files total
     __init__.py vault.py ids.py canonical.py protocols.py
     recovery_kit.py remote_folders.py                  # original 7
     atomic.py crypto.py passphrase.py manifest.py
     relay_errors.py error_messages.py conflict_naming.py  # Wave A+B leaves
-    ui/                        # bytes_format, time_format, window_args
-    diagnostics/               # logging
-    export/                    # export, reminder                    (Wave C.1)
-    migration/                 # migration, runner, propagation       (Wave C.2)
-    grant/                     # grant, qr, wrap, access_rotation    (Wave C.3)
+    ui/                        # bytes_format, time_format, window_args,
+                               #   browser_model, ui_state              (Wave D.3 add)
+    diagnostics/               # logging, debug_bundle,
+                               #   ransomware_detector                  (Wave D.1 add)
+    export/                    # export, reminder                       (Wave C.1)
+    migration/                 # migration, runner, propagation         (Wave C.2)
+    grant/                     # grant, qr, wrap, access_rotation       (Wave C.3)
     folder/                    # actions, runtime, ui_state, connect_dialog (Wave C.4)
     binding/                   # bindings, baseline, lifecycle, preflight,
                                #   scan, sync, twoway, filesystem_watcher,
-                               #   runtime, runtime_watchers          (Wave C.5)
-    import_/                   # import_, runner                      (Wave C.6)
-  vault_upload/                # package (split out by breakup #4)
-  vault_download/              # package (split out post-breakup)
+                               #   runtime, runtime_watchers            (Wave C.5)
+    import_/                   # import_, runner                        (Wave C.6)
+    state/                     # local_index, local_state, usage,
+                               #   activity                             (Wave D.2)
+    ops/                       # restore, clear, repair, integrity,
+                               #   eviction, delete, purge_schedule,
+                               #   trash                                (Wave D.4)
+  vault_upload/                # package (split out by breakup #4) — Wave E
+  vault_download/              # package (split out post-breakup) — Wave E
   vault_folders/               # Folders TAB UI (kept under top-level
                                #   per docs/plans naming note)
   windows_vault/               # package (split out by breakup #1)
-  vault_*.py × 16              # flat — Wave D candidates
 ```
 
-The 16 remaining flat files (hand-grouped):
-
-```
-data ops:                   vault_restore.py vault_clear.py vault_repair.py
-                            vault_integrity.py vault_eviction.py vault_delete.py
-                            vault_purge_schedule.py vault_trash.py
-local state / index:        vault_local_index.py vault_local_state.py
-                            vault_usage.py vault_activity.py
-diagnostics:                vault_debug_bundle.py
-                            vault_ransomware_detector.py
-UI helpers (non-window):    vault_browser_model.py vault_ui_state.py
-```
+No flat `vault_*.py` modules remain — Wave E starts with `vault_upload/`
+and `vault_download/` as the only outstanding top-level packages.
 
 ### Why bother
 
