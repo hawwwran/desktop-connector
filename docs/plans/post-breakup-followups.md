@@ -44,18 +44,35 @@ finished 2026-05-11 on `tresor-vault`:
 | done | `vault_error_messages` → `vault/error_messages.py` | `8564656` |
 | done | `vault_conflict_naming` → `vault/conflict_naming.py` | `b547f2f` |
 
-Pattern that worked, repeat for Wave B+:
+**Wave B — data primitives — 3 of 3 done.** Finished 2026-05-11
+on `tresor-vault`:
+
+| Status | Move | Commit |
+| --- | --- | --- |
+| done | `vault_passphrase` → `vault/passphrase.py` | `1035b1c` |
+| done | `vault_crypto` → `vault/crypto.py` | `9aafbdd` |
+| done | `vault_manifest` → `vault/manifest.py` | `a0b4e20` |
+
+Pattern that worked, repeat for Wave C+:
 
 1. `mkdir -p` the new subpackage path + empty `__init__.py` if needed.
 2. `git mv` the file to its new home.
 3. Rewrite every importer in lockstep using `replace_all=true` per file
    (the substring `vault_<name>` only appears as a module path; no
    collateral matches) — then verify with `grep -rn "vault_<name>"`.
-4. Touch matching test source-pins / docstrings that reference the old
+4. **For modules that move INTO `vault/`**: collapse their own
+   `from .vault.X import` lines (siblings) to `from .X import`. Wave A
+   didn't surface this — its leaf utilities didn't import other vault
+   siblings. Wave B's `vault_manifest` had `from .vault.crypto import
+   normalize_vault_id` (correct while top-level) which needed to
+   become `from .crypto import` after the move; the unit-test failure
+   was loud and immediate, but the rewrite is mechanical and worth
+   doing in the same commit.
+5. Touch matching test source-pins / docstrings that reference the old
    module path.
-5. Smoke-test by running the relevant unit-test suite + an import
-   round-trip.
-6. One commit per move.
+6. Smoke-test by running the relevant unit-test suite + an import
+   round-trip + (for crypto changes) the vault-v1 cross-runtime vectors.
+7. One commit per move.
 
 Test files seen so far: `test_desktop_vault_window_args` (source-pin
 asserting the dispatcher's import line), `test_desktop_vault_atomic`,
@@ -63,39 +80,44 @@ asserting the dispatcher's import line), `test_desktop_vault_atomic`,
 `test_desktop_vault_upload`. All have runtime imports plus occasional
 literal-string assertions; remember to scan tests during each move.
 
-**Waves B–F are entirely todo.** Wave A finished cleanly; the flat
-namespace shrank from 52 → 44 modules. Pick up Wave B (data
-primitives — crypto, passphrase, manifest) next.
+Also watch for string LITERALS that look like module names —
+`vault/error_messages.py` has keys like `"vault_manifest_conflict"`
+which are server-side error codes, not module paths. Don't sweep
+those.
+
+**Waves C–F are entirely todo.** Wave B finished cleanly; the flat
+namespace shrank from 44 → 41 modules. Pick up Wave C (subpackages
+— binding, folder, grant, migration, import_, export) next.
 
 ### Current state
 
 `desktop/src/` carried **52** flat top-level `vault_*.py` modules
 alongside three `vault_*/` packages and a tiny `vault/` core package
-(7 files, split out by breakup #9). After Wave A (2026-05-09 →
-2026-05-11), **44 flat `vault_*.py` modules remain**; `vault/` now
-also holds `atomic.py`, `relay_errors.py`, `error_messages.py`,
+(7 files, split out by breakup #9). After Wave A + Wave B
+(2026-05-09 → 2026-05-11), **41 flat `vault_*.py` modules remain**;
+`vault/` now also holds `atomic.py`, `crypto.py`, `passphrase.py`,
+`manifest.py`, `relay_errors.py`, `error_messages.py`,
 `conflict_naming.py`, `ui/{bytes_format,time_format,window_args}.py`,
 and `diagnostics/logging.py`.
 
 ```
 desktop/src/
-  vault/                  # 15 files: original 7 (vault.py, ids,
+  vault/                  # 18 files: original 7 (vault.py, ids,
                           #   canonical, protocols, recovery_kit,
                           #   remote_folders, __init__) plus Wave A's
                           #   atomic, relay_errors, error_messages,
                           #   conflict_naming, ui/, diagnostics/
+                          #   plus Wave B's crypto, passphrase, manifest
   vault_upload/           # package (split out by breakup #4)
   vault_download/         # package (split out post-breakup)
   vault_folders/          # package (split out by breakup #6 — Folders TAB UI)
   windows_vault/          # package (split out by breakup #1 — vault windows)
-  vault_*.py × 44         # flat
+  vault_*.py × 41         # flat
 ```
 
-The 44 flat files (sorted, hand-grouped):
+The 41 flat files (sorted, hand-grouped):
 
 ```
-crypto / passphrase:        vault_crypto.py vault_passphrase.py
-manifest:                   vault_manifest.py
 binding subsystem:          vault_bindings.py
                             vault_binding_baseline.py vault_binding_lifecycle.py
                             vault_binding_preflight.py vault_binding_scan.py
