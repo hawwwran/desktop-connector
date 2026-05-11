@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from ..vault.atomic import atomic_write_file
+from ..atomic import atomic_write_file
 
 
 @dataclass

@@ -27,7 +27,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault.binding.lifecycle import SyncCancelledError  # noqa: E402
-from src.vault_download import download_latest_file, download_version  # noqa: E402
+from src.vault.download import download_latest_file, download_version  # noqa: E402
 
 from tests.protocol.test_desktop_vault_download import (  # noqa: E402
     CHUNK_A,

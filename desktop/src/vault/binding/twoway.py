@@ -52,7 +52,7 @@ from .bindings import (
     normalize_relative_path,
 )
 from ..conflict_naming import make_conflict_path
-from ...vault_download import default_vault_download_cache_dir, download_latest_file
+from ..download import default_vault_download_cache_dir, download_latest_file
 from ..ops.trash import trash_path
 
 

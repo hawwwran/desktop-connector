@@ -25,7 +25,7 @@ from src.vault.migration.runner import (  # noqa: E402
     rollback_verified_migration,
     run_migration,
 )
-from src.vault_upload import upload_file  # noqa: E402
+from src.vault.upload import upload_file  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,

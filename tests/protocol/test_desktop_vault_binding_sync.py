@@ -29,7 +29,7 @@ from src.vault.manifest import (  # noqa: E402
     make_manifest,
     make_remote_folder,
 )
-from src.vault_upload import upload_file  # noqa: E402
+from src.vault.upload import upload_file  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,

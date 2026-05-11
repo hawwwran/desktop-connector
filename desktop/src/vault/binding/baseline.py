@@ -30,7 +30,7 @@ from .bindings import (
     VaultBindingsStore, VaultBinding, VaultLocalEntry,
     normalize_relative_path,
 )
-from ...vault_download import (
+from ..download import (
     DownloadProgress,
     default_vault_download_cache_dir,
     download_latest_file,

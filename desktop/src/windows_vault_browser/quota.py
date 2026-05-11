@@ -24,7 +24,7 @@ from ..vault.binding.runtime import (
     create_vault_relay,
     open_local_vault_from_grant,
 )
-from ..vault_upload import describe_quota_exceeded
+from ..vault.upload import describe_quota_exceeded
 
 
 class QuotaMixin:

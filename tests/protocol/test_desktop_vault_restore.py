@@ -27,7 +27,7 @@ from src.vault.ops.restore import (  # noqa: E402
     restore_remote_folder,
     restore_remote_folder_at_date,
 )
-from src.vault_upload import upload_file  # noqa: E402
+from src.vault.upload import upload_file  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,
@@ -230,7 +230,7 @@ class RestoreRemoteFolderTests(unittest.TestCase):
 
     def test_preflight_raises_when_disk_full(self) -> None:
         relay, manifest = self._seed_remote({"a.bin": b"x" * 1024})
-        from src.vault_download import VaultLocalDiskFullError
+        from src.vault.download import VaultLocalDiskFullError
 
         # Patch shutil.disk_usage in vault_restore to report 0 free bytes.
         import src.vault.ops.restore as restore_mod

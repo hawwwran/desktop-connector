@@ -22,7 +22,7 @@ from ..vault.binding.runtime import (
     create_vault_relay,
     open_local_vault_from_grant,
 )
-from ..vault_upload import (
+from ..vault.upload import (
     clear_session,
     default_upload_resume_dir,
     list_resumable_sessions,
@@ -120,7 +120,7 @@ class ResumeBannerMixin:
         )
 
         def worker() -> None:
-            from ..vault_upload import resume_upload
+            from ..vault.upload import resume_upload
 
             completed = 0
             failed = 0

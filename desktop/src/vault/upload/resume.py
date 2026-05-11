@@ -12,8 +12,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from ..vault.binding.lifecycle import SyncCancelledError
-from ..vault.crypto import (
+from ..binding.lifecycle import SyncCancelledError
+from ..crypto import (
     aead_encrypt,
     build_chunk_aad,
     build_chunk_envelope,

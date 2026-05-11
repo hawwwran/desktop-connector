@@ -25,7 +25,7 @@ from src.vault.crypto import (  # noqa: E402
     build_chunk_envelope,
     derive_subkey,
 )
-from src.vault_download import (  # noqa: E402
+from src.vault.download import (  # noqa: E402
     DownloadCancelled,
     VaultChunkMissingError,
     VaultLocalDiskFullError,
@@ -61,7 +61,7 @@ class VaultDownloadTests(unittest.TestCase):
         # case. The retry counter + log emission still execute as in
         # production; only the wall-clock wait is bypassed.
         self._sleep_patch = mock.patch(
-            "src.vault_download.chunks._chunk_missing_sleep", lambda _s: None,
+            "src.vault.download.chunks._chunk_missing_sleep", lambda _s: None,
         )
         self._sleep_patch.start()
 
@@ -253,7 +253,7 @@ class VaultDownloadTests(unittest.TestCase):
         with neither field, pre-seeding a tampered cache file, and
         confirming the download re-fetches over the network.
         """
-        from src.vault_download import _load_cached_chunk
+        from src.vault.download import _load_cached_chunk
 
         # Build a manifest + cache that would otherwise fast-path.
         manifest, chunks = _manifest_and_chunks([b"hello"])
@@ -329,7 +329,7 @@ class VaultDownloadTests(unittest.TestCase):
         destination = self.tmpdir / "report.txt"
         vault = _vault()
         with mock.patch(
-            "src.vault_download.chunks._chunk_missing_sleep", _capture,
+            "src.vault.download.chunks._chunk_missing_sleep", _capture,
         ):
             try:
                 download_latest_file(
@@ -348,7 +348,7 @@ class VaultDownloadTests(unittest.TestCase):
         cache with several files, set a tight cap, and verify that
         only the freshest survive.
         """
-        from src.vault_download import (
+        from src.vault.download import (
             prune_vault_chunk_cache, vault_chunk_cache_path,
         )
 
@@ -385,7 +385,7 @@ class VaultDownloadTests(unittest.TestCase):
         beyond the initial size sum). Important so the per-store
         opportunistic call doesn't pay quadratic cost.
         """
-        from src.vault_download import (
+        from src.vault.download import (
             prune_vault_chunk_cache, vault_chunk_cache_path,
         )
         cache_dir = self.tmpdir / "cache"
@@ -403,7 +403,7 @@ class VaultDownloadTests(unittest.TestCase):
         """F-D04: prune is safe to call on a vault with no cache yet
         (e.g. immediately after disconnect → reconnect).
         """
-        from src.vault_download import prune_vault_chunk_cache
+        from src.vault.download import prune_vault_chunk_cache
         cache_dir = self.tmpdir / "cache"  # Doesn't exist yet.
         freed = prune_vault_chunk_cache(cache_dir, VAULT_ID)
         self.assertEqual(freed, 0)
@@ -489,7 +489,7 @@ class VaultDownloadTests(unittest.TestCase):
         destination = self.tmpdir / "Documents"
         try:
             with mock.patch(
-                "src.vault_download.paths.shutil.disk_usage",
+                "src.vault.download.paths.shutil.disk_usage",
                 return_value=SimpleNamespace(free=10),
             ):
                 with self.assertRaises(VaultLocalDiskFullError):

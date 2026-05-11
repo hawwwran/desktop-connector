@@ -394,7 +394,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         from src.vault.export.export import write_export_bundle
         from src.vault.import_.import_ import ImportMergeResolution
         from src.vault.import_.runner import run_import
-        from src.vault_upload import upload_file
+        from src.vault.upload import upload_file
         from tests.protocol.test_desktop_vault_manifest import (
             AUTHOR as MASTER_AUTHOR,
             DOCS_ID as MASTER_DOCS_ID,

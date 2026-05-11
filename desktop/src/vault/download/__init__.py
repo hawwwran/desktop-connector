@@ -1,14 +1,14 @@
 """Public surface of the vault download paths.
 
 Composed from topical submodules under this package; legacy
-``from .vault_download import …`` imports keep working unchanged
-because Python resolves ``vault_download`` as this package and finds
+``from .vault.download import …`` imports keep working unchanged
+because Python resolves ``vault.download`` as this package and finds
 the names below in the package namespace.
 
 Logger naming is preserved on purpose: each submodule does
 ``log = logging.getLogger(__name__)`` so the loggers are
-``src.vault_download.<submodule>`` — descendants of ``src.vault_download``,
-which means tests using ``assertLogs("src.vault_download", …)`` keep
+``src.vault.download.<submodule>`` — descendants of ``src.vault.download``,
+which means tests using ``assertLogs("src.vault.download", …)`` keep
 capturing every emit through Python's logging propagation.
 
 Two private helpers leak through this surface for genuine load-bearing
@@ -21,12 +21,12 @@ back-compat (don't add more without auditing the caller list):
 
 The ``_chunk_missing_sleep`` test seam is **not** re-exported here:
 tests that need to skip real sleeps must
-``mock.patch("src.vault_download.chunks._chunk_missing_sleep", …)``
+``mock.patch("src.vault.download.chunks._chunk_missing_sleep", …)``
 because module-local lookups in :mod:`.chunks` won't see a re-binding
 on this package object.
 """
 
-from ..vault.relay_errors import VaultChunkMissingError
+from ..relay_errors import VaultChunkMissingError
 from .cache import (
     DEFAULT_VAULT_CHUNK_CACHE_MAX_BYTES,
     _load_cached_chunk,

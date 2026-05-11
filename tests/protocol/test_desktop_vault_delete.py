@@ -32,7 +32,7 @@ from src.vault.manifest import (  # noqa: E402
     tombstone_file_entry,
     tombstone_files_under,
 )
-from src.vault_upload import upload_file
+from src.vault.upload import upload_file
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,

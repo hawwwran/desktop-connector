@@ -13,9 +13,9 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from ..vault.binding.lifecycle import SyncCancelledError
-from ..vault.ui.browser_model import get_file
-from ..vault.manifest import normalize_manifest_plaintext
+from ..binding.lifecycle import SyncCancelledError
+from ..ui.browser_model import get_file
+from ..manifest import normalize_manifest_plaintext
 from .cache import _load_cached_chunk, _store_cached_chunk
 from .chunks import (
     _decrypt_chunk,

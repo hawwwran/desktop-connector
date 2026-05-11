@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from typing import Iterable
 
-from ..vault.atomic import (
+from ..atomic import (
     LOCAL_DISK_OVERHEAD_FACTOR,
     atomic_write_chunks as _atomic_write_chunks,
     atomic_write_file as _atomic_write_file,

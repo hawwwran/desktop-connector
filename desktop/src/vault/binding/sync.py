@@ -82,7 +82,7 @@ from .bindings import (
 )
 from ..manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
 from ..relay_errors import VaultCASConflictError, VaultQuotaExceededError
-from ...vault_upload import UploadResult, UploadSpecialFileSkipped, upload_file
+from ..upload import UploadResult, UploadSpecialFileSkipped, upload_file
 
 
 log = logging.getLogger(__name__)

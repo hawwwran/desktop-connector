@@ -123,7 +123,7 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
         source = _read_browser_source()
 
         for text in (
-            "from ..vault_upload import upload_file",
+            "from ..vault.upload import upload_file",
             "_resolve_upload_destination",
             "Upload file to vault",
             "VaultQuotaExceededError",
@@ -184,7 +184,7 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             "list_resumable_sessions",
             "default_upload_resume_dir",
             "start_resume_pending",
-            "from ..vault_upload import resume_upload",
+            "from ..vault.upload import resume_upload",
             "uploads were interrupted",
         ):
             with self.subTest(text=text):
@@ -197,7 +197,7 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             # v2 splits the constructor args across lines; the label
             # literal is the stable anchor.
             'label="Upload folder"',
-            "from ..vault_upload import upload_folder",
+            "from ..vault.upload import upload_folder",
             "select_folder_finish",
             "Upload folder to vault",
             "start_folder_upload",

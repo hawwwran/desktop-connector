@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from ..atomic import LOCAL_DISK_OVERHEAD_FACTOR
 from ..binding.lifecycle import SyncCancelledError
 from ..conflict_naming import make_conflict_path
-from ...vault_download import (
+from ..download import (
     DownloadProgress,
     VaultLocalDiskFullError,
     default_vault_download_cache_dir,

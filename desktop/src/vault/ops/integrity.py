@@ -11,7 +11,7 @@ Two scopes per spec:
 
 - :func:`run_full_check` — extends the quick check by AEAD-decrypting
   every retained revision (not just the head) and pulling + AEAD-
-  decrypting every chunk through ``vault_download._decrypt_chunk``.
+  decrypting every chunk through ``vault.download._decrypt_chunk``.
   Slow but thorough — catches a corrupted older revision a quick scan
   would miss.
 

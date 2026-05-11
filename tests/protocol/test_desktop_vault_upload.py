@@ -19,10 +19,10 @@ ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault_download import download_latest_file  # noqa: E402
+from src.vault.download import download_latest_file  # noqa: E402
 from src.vault.manifest import find_file_entry, make_manifest, make_remote_folder  # noqa: E402
 from src.vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError  # noqa: E402
-from src.vault_upload import (  # noqa: E402
+from src.vault.upload import (  # noqa: E402
     FileSkipped,
     UploadConflictError,
     UploadSession,
@@ -124,7 +124,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay(manifest=manifest)
         vault = _vault()
         try:
-            from src.vault_upload import upload_folder
+            from src.vault.upload import upload_folder
 
             result = upload_folder(
                 vault=vault,
@@ -576,7 +576,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             # Patch ``open`` in the module that owns the function reading
             # the file (``resume``); patching the shim's namespace would be
             # silently ineffective post-split.
-            with mock.patch("src.vault_upload.resume.open", counting_open):
+            with mock.patch("src.vault.upload.resume.open", counting_open):
                 resume_upload(
                     vault=vault, relay=relay, manifest=manifest,
                     session=session, resume_cache_dir=cache_dir,
@@ -665,12 +665,12 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         now warns once per process per pattern so the user has a
         breadcrumb explaining why their rule didn't match.
         """
-        from src.vault_upload import (
+        from src.vault.upload import (
             _UNSUPPORTED_PATTERN_WARNED, _matches_ignore,
         )
         # Reset the per-process dedup so this test is deterministic.
         _UNSUPPORTED_PATTERN_WARNED.clear()
-        with self.assertLogs("src.vault_upload", level="WARNING") as captured:
+        with self.assertLogs("src.vault.upload", level="WARNING") as captured:
             # Two passes with the same unsupported pattern: only the
             # first should log.
             _matches_ignore(
@@ -696,18 +696,18 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         unsupported-shape warning.
         """
         import logging
-        from src.vault_upload import (
+        from src.vault.upload import (
             _UNSUPPORTED_PATTERN_WARNED, _matches_ignore,
         )
         _UNSUPPORTED_PATTERN_WARNED.clear()
         # ``assertLogs`` requires at least one record; emit one of our
         # own to satisfy that contract.
-        with self.assertLogs("src.vault_upload", level="WARNING") as captured:
+        with self.assertLogs("src.vault.upload", level="WARNING") as captured:
             _matches_ignore(
                 "main.py", "src/main.py", patterns=["*.pyc", ".git/", "node_modules/"],
                 is_dir=False,
             )
-            logging.getLogger("src.vault_upload").warning(
+            logging.getLogger("src.vault.upload").warning(
                 "test_anchor_to_satisfy_assertLogs"
             )
         warnings = [
@@ -780,7 +780,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay(manifest=manifest)
         vault = _vault()
         try:
-            with self.assertLogs("src.vault_upload", level="INFO") as captured:
+            with self.assertLogs("src.vault.upload", level="INFO") as captured:
                 result = upload_folder(
                     vault=vault,
                     relay=relay,
@@ -810,7 +810,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay(manifest=manifest)
         vault = _vault()
         try:
-            with self.assertLogs("src.vault_upload", level="INFO") as captured:
+            with self.assertLogs("src.vault.upload", level="INFO") as captured:
                 result = upload_folder(
                     vault=vault,
                     relay=relay,
@@ -841,7 +841,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         """
         from unittest import mock as _mock
         import errno as errno_mod
-        from src import vault_upload as vault_upload_mod
+        import src.vault.upload as vault_upload_mod
 
         root = self.tmpdir / "perms"
         root.mkdir()
@@ -861,7 +861,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         vault = _vault()
         try:
             with _mock.patch.object(Path, "lstat", _denied_lstat), \
-                 self.assertLogs("src.vault_upload", level="INFO") as captured:
+                 self.assertLogs("src.vault.upload", level="INFO") as captured:
                 result = upload_folder(
                     vault=vault, relay=relay, manifest=manifest,
                     local_root=root, remote_folder_id=DOCS_ID,

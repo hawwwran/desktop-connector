@@ -208,7 +208,7 @@ def build_maintenance_tab(ctx: MainContext, win) -> "Gtk.Box":
                         from ..vault.ui.browser_model import (
                             decrypt_manifest as _decrypt_manifest_envelope,
                         )
-                        from ..vault_download import _decrypt_chunk
+                        from ..vault.download import _decrypt_chunk
 
                         def _full_decrypt_chunk(folder, entry, version, chunk, encrypted):
                             return _decrypt_chunk(

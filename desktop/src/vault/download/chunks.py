@@ -4,7 +4,7 @@ Owns the §6.9 ``vault_chunk_missing`` retry budget for both the batch
 HEAD probe and the single-chunk GET, plus the AEAD decrypt that
 verifies size + tag against the manifest's chunk record. The
 ``_chunk_missing_sleep`` test seam stays module-level: tests must
-``mock.patch("src.vault_download.chunks._chunk_missing_sleep", …)``
+``mock.patch("src.vault.download.chunks._chunk_missing_sleep", …)``
 to drop wall-clock cost without disturbing the retry counter.
 """
 
@@ -14,13 +14,13 @@ import logging
 import time
 from typing import Any, Callable
 
-from ..vault.binding.lifecycle import SyncCancelledError
-from ..vault.crypto import (
+from ..binding.lifecycle import SyncCancelledError
+from ..crypto import (
     aead_decrypt,
     build_chunk_aad,
     derive_subkey,
 )
-from ..vault.relay_errors import VaultChunkMissingError
+from ..relay_errors import VaultChunkMissingError
 from .manifest import _int_value
 from .types import ChunkRelay, DownloadVault
 

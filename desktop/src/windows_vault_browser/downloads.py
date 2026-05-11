@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..vault.binding.lifecycle import SyncCancelledError
-from ..vault_download import previous_version_filename
+from ..vault.download import previous_version_filename
 from ..vault.error_messages import humanize
 from ..vault.binding.runtime import (
     create_vault_relay,
@@ -163,7 +163,7 @@ class DownloadsMixin:
 
         def worker() -> None:
             try:
-                from ..vault_download import (
+                from ..vault.download import (
                     default_vault_download_cache_dir,
                     download_folder,
                     download_latest_file,
@@ -353,7 +353,7 @@ class DownloadsMixin:
 
         def worker() -> None:
             try:
-                from ..vault_download import (
+                from ..vault.download import (
                     default_vault_download_cache_dir,
                     download_version,
                 )

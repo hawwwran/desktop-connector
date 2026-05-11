@@ -1,6 +1,6 @@
 """UploadsMixin — single-file + folder upload flows + conflict prompt.
 
-Calls into ``..vault_upload`` for the actual streaming upload work.
+Calls into ``..vault.upload`` for the actual streaming upload work.
 Quota-exceeded handling is delegated to ``QuotaMixin`` via
 ``self._handle_quota_exceeded``; resume banner refresh delegates to
 ``ResumeBannerMixin``. Coupling resolves through MRO at runtime.
@@ -75,7 +75,7 @@ class UploadsMixin:
 
         def worker() -> None:
             try:
-                from ..vault_upload import upload_file
+                from ..vault.upload import upload_file
 
                 self.config.reload()
                 relay = create_vault_relay(self.config)
@@ -209,7 +209,7 @@ class UploadsMixin:
         remote_folder_id: str,
         sub_path: str,
     ) -> None:
-        from ..vault_upload import detect_path_conflict, make_conflict_renamed_path
+        from ..vault.upload import detect_path_conflict, make_conflict_renamed_path
 
         remote_path = (
             sub_path + "/" + local_path.name if sub_path else local_path.name
@@ -303,7 +303,7 @@ class UploadsMixin:
 
         def worker() -> None:
             try:
-                from ..vault_upload import upload_folder
+                from ..vault.upload import upload_folder
 
                 self.config.reload()
                 relay = create_vault_relay(self.config)

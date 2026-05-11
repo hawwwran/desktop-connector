@@ -44,7 +44,7 @@ from src.vault.binding.bindings import VaultBindingsStore  # noqa: E402
 from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
-from src.vault_upload import upload_file  # noqa: E402
+from src.vault.upload import upload_file  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,
@@ -140,7 +140,7 @@ class UploadFileCancellationTests(unittest.TestCase):
     def _multichunk_payload(self, chunks: int) -> bytes:
         # 2 MiB per chunk; fill with deterministic bytes so the
         # chunk_id is non-degenerate.
-        from src.vault_upload import CHUNK_SIZE
+        from src.vault.upload import CHUNK_SIZE
         chunk_bytes = bytes(range(256)) * (CHUNK_SIZE // 256)
         return chunk_bytes * chunks + b"trailer"  # forces a small last chunk
 

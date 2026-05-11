@@ -368,7 +368,7 @@ class CallerConsistencyTests(unittest.TestCase):
     """Refactor guard: existing wrappers still produce historic outputs."""
 
     def test_upload_wrapper_kept_existing_signature(self) -> None:
-        from src.vault_upload import make_conflict_renamed_path
+        from src.vault.upload import make_conflict_renamed_path
         out = make_conflict_renamed_path(
             "Invoices/2026/report.pdf",
             "Workstation 7",

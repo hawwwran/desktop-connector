@@ -58,8 +58,8 @@ def _purge_cached_resume_state(vault_id: str) -> None:
     # the import graph for callers that just want disconnect — those
     # modules pull in the AEAD + atomic-write helpers transitively.
     from ..crypto import normalize_vault_id
-    from ...vault_upload import default_upload_resume_dir, UploadSession
-    from ...vault_download import default_vault_download_cache_dir
+    from ..upload import default_upload_resume_dir, UploadSession
+    from ..download import default_vault_download_cache_dir
 
     # 1. Per-vault upload resume sessions (filter by session.vault_id
     # so we don't nuke another vault's sessions if both happen to be

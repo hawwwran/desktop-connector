@@ -1,18 +1,18 @@
 """Public surface of the vault upload paths.
 
 Composed from topical submodules under this package; legacy
-``from .vault_upload import …`` imports keep working unchanged
-because Python resolves ``vault_upload`` as this package and finds
+``from .vault.upload import …`` imports keep working unchanged
+because Python resolves ``vault.upload`` as this package and finds
 the names below in the package namespace.
 
 Logger naming is preserved on purpose: each submodule does
 ``log = logging.getLogger(__name__)`` so the loggers are
-``src.vault_upload.<submodule>`` — descendants of ``src.vault_upload``,
-which means tests using ``assertLogs("src.vault_upload", …)`` keep
+``src.vault.upload.<submodule>`` — descendants of ``src.vault.upload``,
+which means tests using ``assertLogs("src.vault.upload", …)`` keep
 capturing every emit through Python's logging propagation.
 """
 
-from ..vault.relay_errors import VaultRelayError
+from ..relay_errors import VaultRelayError
 from .constants import (
     CAS_MAX_RETRIES,
     CHUNK_SIZE,

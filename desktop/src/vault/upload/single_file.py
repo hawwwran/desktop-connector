@@ -16,9 +16,9 @@ import stat as _stat
 from pathlib import Path
 from typing import Any, Callable
 
-from ..vault.binding.lifecycle import SyncCancelledError
-from ..vault.ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
-from ..vault.crypto import (
+from ..binding.lifecycle import SyncCancelledError
+from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..crypto import (
     aead_encrypt,
     build_chunk_aad,
     build_chunk_envelope,
@@ -30,7 +30,7 @@ from ..vault.crypto import (
     make_chunk_nonce,
     make_content_fingerprint,
 )
-from ..vault.manifest import (
+from ..manifest import (
     add_or_append_file_version,
     find_file_entry,
     generate_file_entry_id,
@@ -39,7 +39,7 @@ from ..vault.manifest import (
     normalize_manifest_path,
     normalize_manifest_plaintext,
 )
-from ..vault.relay_errors import VaultCASConflictError
+from ..relay_errors import VaultCASConflictError
 from .constants import CAS_MAX_RETRIES, CHUNK_SIZE, MAX_FILE_BYTES_DEFAULT, UploadMode
 from .errors import UploadConflictError, UploadFileTooLargeError, UploadSpecialFileSkipped
 from .hashing import _hash_file, _now_rfc3339
