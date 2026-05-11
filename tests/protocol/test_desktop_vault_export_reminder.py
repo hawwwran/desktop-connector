@@ -11,7 +11,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_export_reminder import (  # noqa: E402
+from src.vault.export.reminder import (  # noqa: E402
     CADENCE_DAYS,
     DEFAULT_CADENCE,
     compute_reminder_state,

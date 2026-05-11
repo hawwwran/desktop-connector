@@ -77,7 +77,7 @@ def build_recovery_tab(ctx: MainContext, win: "Adw.ApplicationWindow") -> "Gtk.B
     # ``vault_export_reminder.should_show_export_reminder``; the
     # "Dismiss" button persists ``last_dismissed_at`` so the
     # cadence-based gate has somewhere to anchor.
-    from ..vault_export_reminder import (
+    from ..vault.export.reminder import (
         normalize_cadence,
         should_show_export_reminder,
     )

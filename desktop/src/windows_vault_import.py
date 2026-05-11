@@ -31,8 +31,8 @@ from .brand import (
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_local_index import VaultLocalIndex
 from .vault.error_messages import humanize
-from .vault_export import ExportError
-from .vault_export_reminder import normalize_cadence
+from .vault.export.export import ExportError
+from .vault.export.reminder import normalize_cadence
 from .vault_import import ImportMergeResolution
 from .vault_runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
