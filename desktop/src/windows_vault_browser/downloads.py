@@ -18,7 +18,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..vault_binding_lifecycle import SyncCancelledError
 from ..vault_download import previous_version_filename
-from ..vault_error_messages import humanize
+from ..vault.error_messages import humanize
 from ..vault_runtime import (
     create_vault_relay,
     open_local_vault_from_grant,

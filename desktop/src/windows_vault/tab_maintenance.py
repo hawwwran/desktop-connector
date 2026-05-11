@@ -10,7 +10,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib
 
-from ..vault_error_messages import humanize
+from ..vault.error_messages import humanize
 from ._main_context import MainContext
 
 

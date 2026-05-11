@@ -37,7 +37,7 @@ from ..vault_runtime import (  # noqa: E402
     create_vault_relay,
     open_local_vault_from_grant,
 )
-from ..vault_error_messages import humanize  # noqa: E402
+from ..vault.error_messages import humanize  # noqa: E402
 from ..vault_browser_model import list_folder  # noqa: E402
 from ..windows_common import _make_app  # noqa: E402
 

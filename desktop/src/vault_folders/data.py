@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 from gi.repository import GLib  # noqa: E402
 
 from ..vault_bindings import VaultBindingsStore
-from ..vault_error_messages import humanize
+from ..vault.error_messages import humanize
 from ..vault_folder_ui_state import (
     binding_rows_for_render,
     folder_rows_from_cache,

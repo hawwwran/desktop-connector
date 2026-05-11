@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib  # noqa: E402
 
 from ..vault_binding_lifecycle import SyncCancelledError
-from ..vault_error_messages import humanize
+from ..vault.error_messages import humanize
 from ..vault.relay_errors import VaultQuotaExceededError
 from ..vault_runtime import (
     create_vault_relay,

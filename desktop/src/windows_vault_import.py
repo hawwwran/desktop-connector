@@ -30,7 +30,7 @@ from .brand import (
 )
 from .vault_binding_lifecycle import SyncCancelledError
 from .vault_local_index import VaultLocalIndex
-from .vault_error_messages import humanize
+from .vault.error_messages import humanize
 from .vault_export import ExportError
 from .vault_export_reminder import normalize_cadence
 from .vault_import import ImportMergeResolution

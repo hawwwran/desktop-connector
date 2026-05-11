@@ -34,7 +34,7 @@ from .vault_binding_lifecycle import (
     resume_binding,
 )
 from .vault_bindings import VaultBinding, VaultBindingsStore
-from .vault_error_messages import humanize
+from .vault.error_messages import humanize
 
 
 def dispatch_pause(
