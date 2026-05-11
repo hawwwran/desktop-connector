@@ -319,7 +319,7 @@ class RestoreUniqueConflictPathTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
         from datetime import datetime, timezone
-        from src.vault_restore import _unique_conflict_path
+        from src.vault.ops.restore import _unique_conflict_path
         from src.vault.conflict_naming import make_conflict_path
 
         when = datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc)

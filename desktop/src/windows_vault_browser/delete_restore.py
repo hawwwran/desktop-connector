@@ -101,7 +101,7 @@ class DeleteRestoreMixin:
         threading.Thread(target=worker, daemon=True).start()
 
     def _confirm_delete_file(self, file_row: dict) -> None:
-        from ..vault_delete import delete_file
+        from ..vault.ops.delete import delete_file
 
         remote_folder_id = str(file_row.get("remote_folder_id") or "")
         relative_path = str(file_row.get("relative_path") or "")
@@ -151,7 +151,7 @@ class DeleteRestoreMixin:
     def _confirm_delete_folder(
         self, remote_folder_id: str, sub_path: str,
     ) -> None:
-        from ..vault_delete import delete_folder_contents
+        from ..vault.ops.delete import delete_folder_contents
 
         target_label = sub_path or "this remote folder's contents"
         dlg = Adw.AlertDialog(
@@ -192,7 +192,7 @@ class DeleteRestoreMixin:
         dlg.present(self.win)
 
     def _confirm_restore_version(self, file_row: dict, version: dict) -> None:
-        from ..vault_delete import restore_version_to_current
+        from ..vault.ops.delete import restore_version_to_current
 
         remote_folder_id = str(file_row.get("remote_folder_id") or "")
         relative_path = str(file_row.get("relative_path") or "")

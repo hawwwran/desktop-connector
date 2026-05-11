@@ -11,7 +11,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_clear import (  # noqa: E402
+from src.vault.ops.clear import (  # noqa: E402
     build_clear_folder_manifest,
     build_clear_vault_manifest,
     confirm_folder_clear_text_matches,

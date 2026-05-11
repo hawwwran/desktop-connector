@@ -30,14 +30,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Protocol
 
-from .vault.binding.lifecycle import SyncCancelledError
-from .vault.ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
-from .vault.manifest import (
+from ..binding.lifecycle import SyncCancelledError
+from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..manifest import (
     compute_recoverable_until,
     normalize_manifest_plaintext,
     DEFAULT_RETENTION_POLICY,
 )
-from .vault.relay_errors import VaultCASConflictError
+from ..relay_errors import VaultCASConflictError
 
 
 log = logging.getLogger(__name__)

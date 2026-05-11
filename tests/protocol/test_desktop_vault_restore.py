@@ -22,7 +22,7 @@ from src.vault.manifest import (  # noqa: E402
     make_remote_folder,
     tombstone_file_entry,
 )
-from src.vault_restore import (  # noqa: E402
+from src.vault.ops.restore import (  # noqa: E402
     RestoreResult,
     restore_remote_folder,
     restore_remote_folder_at_date,
@@ -233,7 +233,7 @@ class RestoreRemoteFolderTests(unittest.TestCase):
         from src.vault_download import VaultLocalDiskFullError
 
         # Patch shutil.disk_usage in vault_restore to report 0 free bytes.
-        import src.vault_restore as restore_mod
+        import src.vault.ops.restore as restore_mod
         original = restore_mod.shutil.disk_usage
 
         class _Stub:
@@ -553,7 +553,7 @@ class RestoreAtDateTests(unittest.TestCase):
         (self.dest / "alpha.txt").write_bytes(payloads["alpha.txt-v1"])
         vault = _vault()
         try:
-            with self.assertLogs("src.vault_restore", level="INFO") as cm:
+            with self.assertLogs("src.vault.ops.restore", level="INFO") as cm:
                 result = restore_remote_folder_at_date(
                     vault=vault, relay=relay, manifest=manifest,
                     remote_folder_id=DOCS_ID, destination=self.dest,

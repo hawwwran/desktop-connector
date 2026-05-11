@@ -14,7 +14,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_purge_schedule import (  # noqa: E402
+from src.vault.ops.purge_schedule import (  # noqa: E402
     DEFAULT_DELAY_SECONDS, PENDING_FILE_NAME,
     PendingPurge, VaultPurgeAlreadyScheduledError, VaultPurgeError,
     build_execute_request_body, cancel_purge, clear_all_for_vault,

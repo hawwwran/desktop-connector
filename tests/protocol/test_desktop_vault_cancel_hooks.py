@@ -131,7 +131,7 @@ class EvictionCancelTests(unittest.TestCase):
     """
 
     def test_eviction_cancel_before_stage_1(self) -> None:
-        from src.vault_eviction import eviction_pass
+        from src.vault.ops.eviction import eviction_pass
 
         # Minimal "manifest" stub. The cancel check fires before any
         # parsing / candidate-selection happens, so the contents don't
@@ -167,7 +167,7 @@ class RestoreCancelTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_restore_cancel_before_first_file(self) -> None:
-        from src.vault_restore import restore_remote_folder
+        from src.vault.ops.restore import restore_remote_folder
         manifest, chunks = _manifest_and_chunks([b"alpha"])
         relay = FakeChunkRelay(chunks)
         vault = _vault()

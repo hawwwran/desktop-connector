@@ -18,7 +18,7 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault.ui.browser_model import list_folder, list_versions  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault_delete import (  # noqa: E402
+from src.vault.ops.delete import (  # noqa: E402
     delete_file,
     delete_folder_contents,
     restore_version_to_current,
@@ -237,7 +237,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         # F-510: capture vault.delete.completed so the Activity tab has
         # a real emit site to anchor on.
         import logging as _logging
-        with self.assertLogs("src.vault_delete", level="INFO") as cm:
+        with self.assertLogs("src.vault.ops.delete", level="INFO") as cm:
             try:
                 uploaded = upload_file(
                     vault=vault, relay=relay, manifest=manifest, local_path=local,

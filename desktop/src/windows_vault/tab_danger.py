@@ -11,14 +11,14 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
-from ..vault_clear import (
+from ..vault.ops.clear import (
     build_clear_folder_manifest,
     build_clear_vault_manifest,
     confirm_folder_clear_text_matches,
     confirm_vault_clear_text_matches,
 )
 from ..vault.error_messages import humanize
-from ..vault_purge_schedule import (
+from ..vault.ops.purge_schedule import (
     DEFAULT_DELAY_SECONDS,
     PendingPurge,
     VaultPurgeAlreadyScheduledError,

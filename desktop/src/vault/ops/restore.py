@@ -34,10 +34,10 @@ from typing import Any, Callable, Iterable, Protocol
 
 from datetime import datetime, timezone
 
-from .vault.atomic import LOCAL_DISK_OVERHEAD_FACTOR
-from .vault.binding.lifecycle import SyncCancelledError
-from .vault.conflict_naming import make_conflict_path
-from .vault_download import (
+from ..atomic import LOCAL_DISK_OVERHEAD_FACTOR
+from ..binding.lifecycle import SyncCancelledError
+from ..conflict_naming import make_conflict_path
+from ...vault_download import (
     DownloadProgress,
     VaultLocalDiskFullError,
     default_vault_download_cache_dir,
@@ -523,7 +523,7 @@ def _bytes_match_remote(
     so we err on the side of writing a conflict copy).
     """
     try:
-        from .vault.crypto import (
+        from ..crypto import (
             derive_content_fingerprint_key,
             make_content_fingerprint,
         )

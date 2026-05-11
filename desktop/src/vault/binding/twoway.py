@@ -53,7 +53,7 @@ from .bindings import (
 )
 from ..conflict_naming import make_conflict_path
 from ...vault_download import default_vault_download_cache_dir, download_latest_file
-from ...vault_trash import trash_path
+from ..ops.trash import trash_path
 
 
 log = logging.getLogger(__name__)

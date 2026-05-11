@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .vault.atomic import atomic_write_file
+from ..atomic import atomic_write_file
 
 
 log = logging.getLogger(__name__)

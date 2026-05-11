@@ -15,8 +15,8 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-import src.vault_trash as trash_mod  # noqa: E402
-from src.vault_trash import can_use_trash, trash_path  # noqa: E402
+import src.vault.ops.trash as trash_mod  # noqa: E402
+from src.vault.ops.trash import can_use_trash, trash_path  # noqa: E402
 
 
 class CanUseTrashTests(unittest.TestCase):
@@ -126,7 +126,7 @@ class AllowUnlinkFallbackTests(unittest.TestCase):
         target = self.tmpdir / "preserved.txt"
         target.write_bytes(b"important data")
         with mock.patch.object(trash_mod.shutil, "which", return_value=None):
-            with self.assertLogs("src.vault_trash", level="WARNING") as cm:
+            with self.assertLogs("src.vault.ops.trash", level="WARNING") as cm:
                 ok = trash_path(target, allow_unlink_fallback=False)
         self.assertFalse(ok)
         self.assertTrue(target.exists(), "file should still be on disk")

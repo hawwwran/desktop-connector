@@ -11,7 +11,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_repair import (  # noqa: E402
+from src.vault.ops.repair import (  # noqa: E402
     RepairPlan, RepairResult,
     mark_broken_in_next_revision, plan_restore_from_export,
 )

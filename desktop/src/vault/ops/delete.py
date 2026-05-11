@@ -12,10 +12,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from .vault.ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 
 log = logging.getLogger(__name__)
-from .vault.manifest import (
+from ..manifest import (
     generate_file_version_id,
     normalize_manifest_path,
     normalize_manifest_plaintext,
@@ -23,7 +23,7 @@ from .vault.manifest import (
     tombstone_file_entry,
     tombstone_files_under,
 )
-from .vault.relay_errors import VaultCASConflictError
+from ..relay_errors import VaultCASConflictError
 
 
 CAS_MAX_RETRIES = 5

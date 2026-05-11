@@ -16,8 +16,8 @@ ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault_delete import delete_file  # noqa: E402
-from src.vault_eviction import eviction_pass  # noqa: E402
+from src.vault.ops.delete import delete_file  # noqa: E402
+from src.vault.ops.eviction import eviction_pass  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     find_file_entry,
     make_manifest,

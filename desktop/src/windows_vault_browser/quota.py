@@ -97,7 +97,7 @@ class QuotaMixin:
 
         def worker() -> None:
             try:
-                from ..vault_eviction import eviction_pass
+                from ..vault.ops.eviction import eviction_pass
 
                 self.config.reload()
                 relay = create_vault_relay(self.config)

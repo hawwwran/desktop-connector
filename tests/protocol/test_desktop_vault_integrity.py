@@ -12,7 +12,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_integrity import (  # noqa: E402
+from src.vault.ops.integrity import (  # noqa: E402
     IntegrityIssue, IntegrityReport,
     run_full_check, run_quick_check,
 )
