@@ -17,7 +17,7 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault.grant.grant import VaultGrant  # noqa: E402
+from src.vault.grant.store import VaultGrant  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,

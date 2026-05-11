@@ -55,7 +55,7 @@ class VaultSubmenuMixin:
         it to flip its submenu from Create/Import to operating mode.
         Same propagation pattern as ``Config.vault_active``.
         """
-        from ..vault.grant.grant import local_vault_grant_exists
+        from ..vault.grant.store import local_vault_grant_exists
 
         self.config.reload()
         raw = self.config._data.get("vault")

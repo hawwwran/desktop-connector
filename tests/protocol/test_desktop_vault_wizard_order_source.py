@@ -93,7 +93,7 @@ class VaultWizardOrderSourceTests(unittest.TestCase):
         # exactly when grant_saved is true but published is false.
         for text in (
             "state.get(\"grant_saved\") and not state.get(\"published\")",
-            "from ..vault.grant.grant import delete_local_grant_artifacts",
+            "from ..vault.grant.store import delete_local_grant_artifacts",
             "delete_local_grant_artifacts(Path(config.config_dir), state[\"vault_id\"])",
         ):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")

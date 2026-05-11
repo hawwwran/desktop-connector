@@ -130,7 +130,7 @@ def show_vault_onboard(config_dir: Path):
         #     vault is usable.
         if state.get("grant_saved") and not state.get("published") and state.get("vault_id"):
             try:
-                from ..vault.grant.grant import delete_local_grant_artifacts
+                from ..vault.grant.store import delete_local_grant_artifacts
                 delete_local_grant_artifacts(Path(config.config_dir), state["vault_id"])
             except Exception:
                 pass
