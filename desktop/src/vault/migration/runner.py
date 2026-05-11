@@ -40,7 +40,7 @@ from ..crypto import (
     build_chunk_aad,
     derive_subkey,
 )
-from .migration import (
+from .state import (
     MigrationRecord,
     clear_state,
     load_state,
