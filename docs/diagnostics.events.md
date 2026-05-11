@@ -277,6 +277,8 @@ renamed/restructured.
 | `poll.loop.screen_off` | android | info | — | Phone paused polling |
 | `poll.loop.screen_on` | android | info | — | Phone resumed polling |
 | `poll.loop.fcm_wake` | android | info | `type` | FCM woke the poll loop |
+| `poll.loop.metered_hold` | android | info | — | Long-poll paused while screen-on + metered cellular + FCM healthy (modem stays cold; FCM is the wake path) |
+| `poll.loop.metered_release` | android | info | — | Network became unmetered (Wi-Fi) or FCM dropped — resume long-poll |
 | `fgs.start.denied` | android | error | `reason` | `startForeground` rejected (e.g. `dataSync` budget exhausted on Android 15+, or background-restricted). PollService stops itself; activity-foreground retry will re-attempt on next app open |
 | `fgs.bind.denied` | android | error | `reason` | `startForegroundService` from `PollService.start(context)` rejected by the system; service never bound |
 | `fgs.type.changed` | android | info | `location` | Boolean `location` indicates whether LOCATION was added to the FGS type for find-phone GPS |

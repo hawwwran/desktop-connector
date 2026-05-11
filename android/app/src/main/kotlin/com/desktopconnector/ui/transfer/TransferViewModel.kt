@@ -24,7 +24,9 @@ import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.ConnectionManager
 import com.desktopconnector.network.ConnectionState
 import com.desktopconnector.network.UploadWorker
+import com.desktopconnector.util.ForegroundTracker
 import com.desktopconnector.util.Installer
+import com.desktopconnector.util.NetworkPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -77,9 +79,21 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        // Health check loop — pings server, then waits for backoff or 15s
+        // Health check loop. Only runs while the app is foregrounded — the
+        // _connectionState flow it feeds is purely a UI indicator, so a
+        // backgrounded process polling it every 15 s burns radio for nothing
+        // (android_logs_3 / 2026-05-11: this loop alone fired ~1289 times
+        // in 9 h, mostly while the user wasn't looking at the app). On
+        // metered cellular with FCM healthy we stretch the interval to 60 s
+        // because FCM already tells us about real events; the heartbeat is
+        // just there to update the green/orange dot.
         viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
             while (true) {
+                // Park while backgrounded. Cheap CPU-only loop, no HTTP.
+                while (!ForegroundTracker.isForeground) {
+                    delay(2_000)
+                }
                 if (prefs.serverUrl != null) {
                     connectionManager.serverUrl = prefs.serverUrl!!
                     connectionManager.deviceId = prefs.deviceId ?: ""
@@ -91,7 +105,9 @@ class TransferViewModel(application: Application) : AndroidViewModel(application
                         val backoff = connectionManager.retryInfo.value.currentBackoff
                         delay((backoff * 1000).toLong())
                     } else {
-                        delay(15_000)
+                        val interval = if (NetworkPolicy.shouldSkipPollingForBattery(ctx)) 60_000L
+                                       else 15_000L
+                        delay(interval)
                     }
                 } else {
                     delay(5_000)

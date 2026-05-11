@@ -36,6 +36,7 @@ import com.desktopconnector.messaging.DeviceMessage
 import com.desktopconnector.messaging.MessageAdapters
 import com.desktopconnector.messaging.MessageDispatcher
 import com.desktopconnector.messaging.MessageType
+import com.desktopconnector.util.NetworkPolicy
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import java.util.Collections
@@ -471,6 +472,40 @@ class PollService : Service() {
                 if (running) {
                     longPollAvailable = null  // re-test after screen wake
                     AppLog.log("Poll", "poll.loop.screen_on")
+                    continue
+                }
+            } else if (FcmManager.isInitialized && NetworkPolicy.isMetered(this)) {
+                // Battery-friendly hold: on metered cellular with FCM
+                // healthy, each long-poll cycle costs ~30 s of modem
+                // active time for marginal value (FCM is HIGH-priority,
+                // bypasses Doze, and delivers transfer-ready in ~1 s).
+                // Wait for FCM wake, fasttrack wake, or the network
+                // becoming unmetered (Wi-Fi attach). See NetworkPolicy
+                // and the android_logs_3 analysis (2026-05-11) — this
+                // branch is where 95 mAh / 5 h goes when the user is on
+                // mobile data. 2 s tick keeps the CPU cold during long
+                // holds; FCM/fasttrack flags are checked on every tick.
+                longPollStatus = "active"  // FCM is the wake path; the dot is still online
+                AppLog.log("Poll", "poll.loop.metered_hold")
+                while (running && !fcmWakeSignal && !fasttrackWakeSignal
+                       && FcmManager.isInitialized
+                       && NetworkPolicy.isMetered(this)) {
+                    delay(2_000)
+                }
+                if (fcmWakeSignal) {
+                    fcmWakeSignal = false
+                    longPollAvailable = null
+                    AppLog.log("Poll", "poll.loop.fcm_wake type=transfer")
+                    continue
+                }
+                if (fasttrackWakeSignal) {
+                    longPollAvailable = null
+                    AppLog.log("Poll", "poll.loop.fcm_wake type=fasttrack")
+                    continue
+                }
+                if (running) {
+                    longPollAvailable = null
+                    AppLog.log("Poll", "poll.loop.metered_release")
                     continue
                 }
             }
