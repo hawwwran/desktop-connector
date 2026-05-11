@@ -20,12 +20,15 @@ log = logging.getLogger(__name__)
 
 # F-LT06: how often the tray drives a vault autosync pass — drains the
 # watcher debouncer + runs flush_and_sync_binding for each active
-# binding. Short enough that a file dropped into a bound folder feels
-# "auto", long enough that an idle desktop doesn't burn CPU walking
-# the binding tree. The loop also wakes early when something signals
-# ``_vault_autosync_kick`` (e.g. just-started watcher runtime → run
-# the offline-catch-up scan immediately).
-VAULT_AUTOSYNC_INTERVAL_S = 15.0
+# binding. Real changes drive responsiveness via ``_vault_autosync_kick``
+# (watchers fire it on inotify/FSEvents) so this interval is just the
+# no-op backstop catch-up cadence. A short interval here just produces
+# extra /api/vaults/.../manifest fetches per minute with nothing to do,
+# which amplifies any transient local network flakiness into a retry
+# storm and feeds extra FCM ping wakes to the phone via the reconnect
+# path. 60 s is comfortably above the typical wifi-reassoc/DHCP-renew
+# blip while still bounded enough to recover from a missed watcher event.
+VAULT_AUTOSYNC_INTERVAL_S = 60.0
 
 
 class VaultSubmenuMixin:
@@ -196,6 +199,20 @@ class VaultSubmenuMixin:
             # without waiting up to VAULT_AUTOSYNC_INTERVAL_S.
             if not self._vault_autosync_started:
                 self._vault_autosync_started = True
+                # Wake the loop the moment the connection recovers, so a
+                # transient drop doesn't cost us up to a full interval
+                # of catch-up lag. Registered once per process; the loop
+                # itself is idempotent under spurious kicks.
+                from ..connection import ConnectionState
+
+                def _kick_on_reconnect(state: ConnectionState) -> None:
+                    if state == ConnectionState.CONNECTED:
+                        self._vault_autosync_kick.set()
+
+                try:
+                    self.conn.on_state_change(_kick_on_reconnect)
+                except Exception:  # noqa: BLE001
+                    log.exception("vault.sync.autosync_state_subscribe_failed")
                 threading.Thread(
                     target=self._vault_autosync_loop,
                     name="vault-autosync",
@@ -250,6 +267,20 @@ class VaultSubmenuMixin:
             if watcher_runtime is None or autosync_runtime is None:
                 # Vault closed (or never opened on this boot); skip
                 # this tick. Re-opening will set the kick again.
+                continue
+
+            # Skip the whole pass while the connection is down. Every
+            # flush_and_sync_binding call would otherwise issue a doomed
+            # /api/vaults/.../manifest fetch, hit the same Network is
+            # unreachable error, and trip a backoff/reconnect cycle —
+            # which on its own forces an extra FCM ping wake to the
+            # phone. Watcher pending-ops + the catch-up filesystem scan
+            # in flush_and_sync_binding both survive the gap, and the
+            # state-change callback above will kick us the moment the
+            # connection recovers.
+            from ..connection import ConnectionState
+            conn = getattr(self, "conn", None)
+            if conn is not None and conn.state != ConnectionState.CONNECTED:
                 continue
 
             try:

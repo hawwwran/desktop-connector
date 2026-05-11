@@ -335,6 +335,75 @@ the three `show_vault_*` callsites in `windows_vault.py` /
 `windows_vault_browser.py` / `windows_vault_import.py`,
 `tests/protocol/test_desktop_vault_window_args.py`. Commit `7f1e88e`.
 
+### 2026-05-11 — Vault autosync is connection-gated, kicked on reconnect, slower
+
+**Status:** accepted.
+
+**Context.** A battery-usage dump from a paired phone showed Desktop
+Connector as the #2 power consumer (109 mAh / 4h 50m) with 95 % of
+that drain on `mobile_radio` and 80 `FcmService` launches in the
+window. The desktop log over the same period showed
+`connection.backoff.retry` storms driven by transient
+`[Errno 101] Network is unreachable` failures (78 in 37 hours,
+spiking to 22 in two hours during a wifi-unstable stretch). Two
+desktop-side amplifiers were stacking on top of the underlying
+local-network flakiness:
+
+1. `VAULT_AUTOSYNC_INTERVAL_S = 15.0` had the tray-side autosync
+   loop firing `flush_and_sync_binding` four times per minute even
+   when nothing changed. Each pass does a manifest fetch; during a
+   flaky window every one of them tripped the backoff path. Over
+   37 hours the log carried 4000 `vault.sync.autosync.tick` events.
+2. `icon_poll`'s reconnect handler called `_maybe_ping(0.0)` on
+   every CONNECTED transition — so each transient drop forced a
+   fresh HIGH-priority FCM ping wake on the phone, regardless of
+   how recently we had pinged.
+
+Watchers fire `_vault_autosync_kick` on real file changes via
+inotify/FSEvents, so responsiveness to user edits never depended on
+the periodic interval — only the no-op backstop cadence did. And
+the catch-up filesystem scan inside `flush_and_sync_binding` plus
+the watcher pending-ops queue both survive arbitrary gaps, so
+skipping a pass costs at most the next-pass delay.
+
+**Decision.** Three tightly coupled adjustments in
+`desktop/src/tray/`:
+
+1. `VAULT_AUTOSYNC_INTERVAL_S` 15 s → 60 s. Comfortably above the
+   typical wifi-reassoc/DHCP-renew blip; still bounded enough that
+   a missed watcher event recovers within a minute.
+2. The autosync loop checks `self.conn.state == ConnectionState.CONNECTED`
+   before doing any network work and `continue`s otherwise. Paired
+   with a one-time `on_state_change` callback that sets
+   `_vault_autosync_kick` on the next CONNECTED transition, so
+   recovery is instant rather than waiting up to a full interval.
+3. The reconnect ping in `icon_poll` uses `min_age = 30.0` (the same
+   cache window as the menu-open ping) instead of `0.0`. Brief
+   blips reuse the recent ping result; genuine multi-minute
+   reconnects still ping fresh through the existing 5 min cache.
+
+The combined effect: a wifi flap no longer cascades into a
+vault-manifest retry storm AND a fresh phone FCM wake — both
+amplifiers are damped.
+
+**Alternatives.** Subscribe the autosync loop to network-up signals
+via NetworkManager dbus (rejected: platform-specific, breaks
+non-NM Linux distros and never works on Windows/macOS; the
+connection-state callback we already have is portable and
+sufficient). Dropping the reconnect ping entirely (rejected: real
+"just opened the laptop after lunch" cases still want fast
+feedback; the 30 s window keeps that path live while filtering
+the sub-30 s blips). Keeping the 15 s interval and only adding
+the connection gate (rejected: still produces a manifest fetch per
+minute under normal conditions for an idle vault, which is pure
+noise and slowly contributes to phone modem tail-energy via the
+long-poll path even without retries).
+
+**Anchor.** `desktop/src/tray/vault_submenu.py` (interval constant,
+state-change subscription at first watcher start, connection gate
+inside `_vault_autosync_loop`), `desktop/src/tray/app.py` (the
+`min_age = 30.0` reconnect-ping change in `icon_poll`).
+
 ---
 
 _(add new decisions above this section header)_

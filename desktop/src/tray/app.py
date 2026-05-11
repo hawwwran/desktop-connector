@@ -305,8 +305,15 @@ class TrayApp(
 
                 connected = self.conn.state == ConnectionState.CONNECTED
                 if connected:
+                    # On a transition back to CONNECTED, use the same 30 s
+                    # cache window as the menu-open ping rather than forcing
+                    # an unconditional ping (min_age=0). Otherwise every
+                    # transient wifi-reassoc / DHCP-renew / route-flap blip
+                    # cascades into a fresh FCM ping wake on the phone —
+                    # 1 modem-active session per blip — even though we
+                    # pinged seconds ago and the result is still meaningful.
                     just_connected = not was_connected
-                    min_age = 0.0 if just_connected else self._ping_interval
+                    min_age = 30.0 if just_connected else self._ping_interval
                     self._maybe_ping(min_age)
                 elif self._remote_online:
                     self._remote_online = False
