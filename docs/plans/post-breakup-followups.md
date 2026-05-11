@@ -28,10 +28,10 @@ Pick any one and start; they're independent.
 
 ## 1. Fold `vault_*.py` into the `vault/` package
 
-### Progress (2026-05-09)
+### Progress (2026-05-11)
 
-**Wave A — leaf utilities — 6 of 8 done.** Started 2026-05-09 on
-`tresor-vault`. Six commits landed:
+**Wave A — leaf utilities — 8 of 8 done.** Started 2026-05-09,
+finished 2026-05-11 on `tresor-vault`:
 
 | Status | Move | Commit |
 | --- | --- | --- |
@@ -41,10 +41,10 @@ Pick any one and start; they're independent.
 | done | `vault_atomic` → `vault/atomic.py` | `b3cb3ee` |
 | done | `vault_logging` → `vault/diagnostics/logging.py` | `c83c4be` |
 | done | `vault_relay_errors` → `vault/relay_errors.py` | `0d5b27d` |
-| todo | `vault_error_messages` → `vault/error_messages.py` | — |
-| todo | `vault_conflict_naming` → `vault/conflict_naming.py` | — |
+| done | `vault_error_messages` → `vault/error_messages.py` | `8564656` |
+| done | `vault_conflict_naming` → `vault/conflict_naming.py` | `b547f2f` |
 
-Pattern that worked, repeat for the remaining two and for Wave B+:
+Pattern that worked, repeat for Wave B+:
 
 1. `mkdir -p` the new subpackage path + empty `__init__.py` if needed.
 2. `git mv` the file to its new home.
@@ -63,36 +63,39 @@ asserting the dispatcher's import line), `test_desktop_vault_atomic`,
 `test_desktop_vault_upload`. All have runtime imports plus occasional
 literal-string assertions; remember to scan tests during each move.
 
-**Waves B–F are entirely todo.** Wave A's remaining two moves are
-quick (16 + 5 importers); finishing Wave A before starting Wave B
-keeps the diff per commit small and the import graph half-flat /
-half-package, not three ways at once.
+**Waves B–F are entirely todo.** Wave A finished cleanly; the flat
+namespace shrank from 52 → 44 modules. Pick up Wave B (data
+primitives — crypto, passphrase, manifest) next.
 
 ### Current state
 
 `desktop/src/` carried **52** flat top-level `vault_*.py` modules
 alongside three `vault_*/` packages and a tiny `vault/` core package
-(7 files, split out by breakup #9). After Wave A's first six moves
-(2026-05-09), 46 flat `vault_*.py` modules remain; `vault/` now also
-holds `atomic.py`, `relay_errors.py`, `ui/{bytes_format,time_format,
-window_args}.py`, and `diagnostics/logging.py`.
+(7 files, split out by breakup #9). After Wave A (2026-05-09 →
+2026-05-11), **44 flat `vault_*.py` modules remain**; `vault/` now
+also holds `atomic.py`, `relay_errors.py`, `error_messages.py`,
+`conflict_naming.py`, `ui/{bytes_format,time_format,window_args}.py`,
+and `diagnostics/logging.py`.
 
 ```
 desktop/src/
-  vault/                  # 7 files: vault.py, ids, canonical, protocols,
-                          #          recovery_kit, remote_folders, __init__
+  vault/                  # 15 files: original 7 (vault.py, ids,
+                          #   canonical, protocols, recovery_kit,
+                          #   remote_folders, __init__) plus Wave A's
+                          #   atomic, relay_errors, error_messages,
+                          #   conflict_naming, ui/, diagnostics/
   vault_upload/           # package (split out by breakup #4)
   vault_download/         # package (split out post-breakup)
   vault_folders/          # package (split out by breakup #6 — Folders TAB UI)
   windows_vault/          # package (split out by breakup #1 — vault windows)
-  vault_*.py × 52         # flat
+  vault_*.py × 44         # flat
 ```
 
-The 52 flat files (sorted, hand-grouped):
+The 44 flat files (sorted, hand-grouped):
 
 ```
 crypto / passphrase:        vault_crypto.py vault_passphrase.py
-manifest / atomic:          vault_manifest.py [vault_atomic.py → vault/atomic.py done]
+manifest:                   vault_manifest.py
 binding subsystem:          vault_bindings.py
                             vault_binding_baseline.py vault_binding_lifecycle.py
                             vault_binding_preflight.py vault_binding_scan.py
@@ -112,16 +115,9 @@ data ops:                   vault_restore.py vault_clear.py vault_repair.py
                             vault_purge_schedule.py vault_trash.py
 local state / index:        vault_local_index.py vault_local_state.py
                             vault_usage.py vault_activity.py
-diagnostics:                [vault_logging.py → vault/diagnostics/logging.py done]
-                            vault_debug_bundle.py
+diagnostics:                vault_debug_bundle.py
                             vault_ransomware_detector.py
-errors:                     vault_error_messages.py
-                            [vault_relay_errors.py → vault/relay_errors.py done]
-                            vault_conflict_naming.py
 UI helpers (non-window):    vault_browser_model.py vault_ui_state.py
-                            [vault_window_args.py → vault/ui/window_args.py done]
-                            [vault_time_format.py → vault/ui/time_format.py done]
-                            [vault_bytes_format.py → vault/ui/bytes_format.py done]
 ```
 
 ### Why bother
