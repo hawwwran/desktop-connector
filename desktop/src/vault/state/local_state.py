@@ -14,7 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable
 
-from .vault.grant.grant import delete_local_grant_artifacts
+from ..grant.grant import delete_local_grant_artifacts
 
 
 log = logging.getLogger(__name__)
@@ -57,9 +57,9 @@ def _purge_cached_resume_state(vault_id: str) -> None:
     # Local imports keep ``vault_upload`` / ``vault_download`` out of
     # the import graph for callers that just want disconnect — those
     # modules pull in the AEAD + atomic-write helpers transitively.
-    from .vault.crypto import normalize_vault_id
-    from .vault_upload import default_upload_resume_dir, UploadSession
-    from .vault_download import default_vault_download_cache_dir
+    from ..crypto import normalize_vault_id
+    from ...vault_upload import default_upload_resume_dir, UploadSession
+    from ...vault_download import default_vault_download_cache_dir
 
     # 1. Per-vault upload resume sessions (filter by session.vault_id
     # so we don't nuke another vault's sessions if both happen to be
@@ -184,7 +184,7 @@ def run_recovery_material_test(
     wipe_after_success: bool = False,
 ) -> RecoveryMaterialTestResult:
     """Verify a recovery kit file, passphrase, and Vault ID together."""
-    from .vault import (
+    from .. import (
         normalize_vault_id,
         parse_recovery_kit_file,
         shred_file,

@@ -41,7 +41,7 @@ from src.vault.binding.sync import (  # noqa: E402
 )
 from src.vault.binding.twoway import run_two_way_cycle  # noqa: E402
 from src.vault.binding.bindings import VaultBindingsStore  # noqa: E402
-from src.vault_local_index import VaultLocalIndex  # noqa: E402
+from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 from src.vault_upload import upload_file  # noqa: E402

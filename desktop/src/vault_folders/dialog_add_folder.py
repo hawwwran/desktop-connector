@@ -21,7 +21,7 @@ from ..vault.folder.ui_state import (
     default_ignore_patterns_text,
     parse_ignore_patterns_text,
 )
-from ..vault_usage import calculate_vault_usage
+from ..vault.state.usage import calculate_vault_usage
 from .context import FoldersContext
 from .dialog_response_details import _present_response_details_dialog
 

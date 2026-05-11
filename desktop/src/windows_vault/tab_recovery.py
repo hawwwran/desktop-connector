@@ -153,7 +153,7 @@ def build_recovery_tab(ctx: MainContext, win: "Adw.ApplicationWindow") -> "Gtk.B
         try:
             from datetime import datetime, timezone
             from ..vault import recovery_envelope_meta_from_json, vault_id_dashed
-            from ..vault_local_state import run_recovery_material_test
+            from ..vault.state.local_state import run_recovery_material_test
 
             # F-U17: ``Adw.Dialog`` (libadwaita 1.5+) replaces the
             # old ``Adw.ApplicationWindow`` shape so the recovery

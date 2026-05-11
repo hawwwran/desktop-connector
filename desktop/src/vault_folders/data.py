@@ -22,7 +22,7 @@ from ..vault.folder.ui_state import (
     binding_rows_for_render,
     folder_rows_from_cache,
 )
-from ..vault_usage import calculate_vault_usage
+from ..vault.state.usage import calculate_vault_usage
 from .context import FoldersContext
 
 

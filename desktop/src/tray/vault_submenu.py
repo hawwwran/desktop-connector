@@ -165,7 +165,7 @@ class VaultSubmenuMixin:
             try:
                 from ..vault.binding.runtime_watchers import VaultWatcherRuntime
                 from ..vault.binding.bindings import VaultBindingsStore
-                from ..vault_local_index import VaultLocalIndex
+                from ..vault.state.local_index import VaultLocalIndex
                 from ..vault.folder.runtime import VaultRuntime
                 vault_id = str(
                     self.config._data.get("vault", {}).get("last_known_id") or ""
@@ -242,7 +242,7 @@ class VaultSubmenuMixin:
         will resolve itself on the next tick.
         """
         from ..vault.binding.bindings import VaultBindingsStore
-        from ..vault_local_index import VaultLocalIndex
+        from ..vault.state.local_index import VaultLocalIndex
 
         log.info(
             "vault.sync.autosync.started interval_s=%.1f",

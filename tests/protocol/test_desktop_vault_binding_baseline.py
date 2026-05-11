@@ -20,7 +20,7 @@ from src.vault.binding.baseline import (  # noqa: E402
     BaselineProgress,
     run_initial_baseline,
 )
-from src.vault_local_index import VaultLocalIndex  # noqa: E402
+from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     make_manifest,

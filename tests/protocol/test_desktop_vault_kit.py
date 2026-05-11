@@ -30,7 +30,7 @@ from src.vault import (  # noqa: E402
     verify_recovery_kit,
     write_recovery_kit_file,
 )
-from src.vault_local_state import run_recovery_material_test  # noqa: E402
+from src.vault.state.local_state import run_recovery_material_test  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"

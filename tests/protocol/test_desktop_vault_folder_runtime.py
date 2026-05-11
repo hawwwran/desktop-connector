@@ -306,7 +306,7 @@ class VaultRuntimeFlushAndSyncBindingTests(unittest.TestCase):
         # so the runtime's row lookup doesn't fail on "no such table".
         # Schema is owned by VaultLocalIndex (not by the store), so
         # construction here is what creates the tables.
-        from src.vault_local_index import VaultLocalIndex
+        from src.vault.state.local_index import VaultLocalIndex
         index = VaultLocalIndex(self.tmp)
         h = _RuntimeHarness()
         h.runtime._local_index = index

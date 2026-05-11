@@ -19,7 +19,7 @@ from src.vault.binding.lifecycle import (  # noqa: E402
     disconnect_binding, pause_binding, resume_binding,
 )
 from src.vault.binding.bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
-from src.vault_local_index import VaultLocalIndex  # noqa: E402
+from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"

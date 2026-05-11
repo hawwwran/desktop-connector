@@ -72,7 +72,7 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
         def on_resp(_dialog, response):
             if response != "disconnect":
                 return
-            from ..vault_local_state import disconnect_local_vault
+            from ..vault.state.local_state import disconnect_local_vault
             disconnect_local_vault(config)
             win.close()
 
@@ -134,7 +134,7 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
     def _refresh_clear_folder_options() -> None:
         """Rebuild the folder dropdown from the local vault manifest cache."""
         try:
-            from ..vault_local_index import VaultLocalIndex
+            from ..vault.state.local_index import VaultLocalIndex
             local_index = VaultLocalIndex(config_dir)
             folders = (
                 local_index.list_remote_folders(vault_id_undashed)

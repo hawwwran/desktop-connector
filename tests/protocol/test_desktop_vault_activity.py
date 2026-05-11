@@ -11,7 +11,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_activity import (  # noqa: E402
+from src.vault.state.activity import (  # noqa: E402
     ACTIVITY_KIND_PREFIXES, ActivityRow,
     filter_timeline, humanise_event_type, merge_timeline,
     normalize_audit_event, normalize_op_log_entry,

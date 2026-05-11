@@ -13,7 +13,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
-from src.vault_usage import calculate_vault_usage  # noqa: E402
+from src.vault.state.usage import calculate_vault_usage  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,
@@ -143,7 +143,7 @@ class MalformedChunkWarningTests(unittest.TestCase):
         )
 
     def test_missing_chunk_ciphertext_size_emits_warning(self) -> None:
-        with self.assertLogs("src.vault_usage", level="WARNING") as cm:
+        with self.assertLogs("src.vault.state.usage", level="WARNING") as cm:
             calculate_vault_usage(self._manifest_with_missing_size())
         joined = "\n".join(cm.output)
         self.assertIn("vault.usage.malformed_chunk_size_skipped", joined)
@@ -174,7 +174,7 @@ class MalformedChunkWarningTests(unittest.TestCase):
             def emit(self_inner, record: logging.LogRecord) -> None:
                 captured.append(record)
 
-        logger = logging.getLogger("src.vault_usage")
+        logger = logging.getLogger("src.vault.state.usage")
         handler = _Cap(level=logging.WARNING)
         logger.addHandler(handler)
         try:

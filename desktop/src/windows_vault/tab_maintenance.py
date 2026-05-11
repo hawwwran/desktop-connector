@@ -86,7 +86,7 @@ def build_maintenance_tab(ctx: MainContext, win) -> "Gtk.Box":
             try:
                 config.reload()
                 config_dump = dict(config._data)
-                from ..vault_local_index import VaultLocalIndex
+                from ..vault.state.local_index import VaultLocalIndex
                 local_index = VaultLocalIndex(config_dir)
                 activity_log = config_dir / "logs" / "vault.log"
                 out = write_debug_bundle(

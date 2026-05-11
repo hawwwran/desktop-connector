@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .vault.manifest import normalize_manifest_plaintext
+from ..manifest import normalize_manifest_plaintext
 
 
 DB_FILENAME = "vault-local-index.sqlite3"

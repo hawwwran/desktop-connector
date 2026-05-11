@@ -19,7 +19,7 @@ def build_activity_tab(ctx: MainContext, win) -> "Gtk.Box":
     config_dir = ctx.config_dir
     vault_id_undashed = ctx.vault_id_undashed
 
-    from ..vault_activity import (
+    from ..vault.state.activity import (
         ACTIVITY_KIND_PREFIXES,
         ActivityRow,
         filter_timeline,

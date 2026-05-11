@@ -39,7 +39,7 @@ from src.vault.binding.bindings import (  # noqa: E402
     normalize_relative_path,
 )
 from src.vault.binding.baseline import _plan_baseline  # noqa: E402
-from src.vault_local_index import VaultLocalIndex  # noqa: E402
+from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.binding.filesystem_watcher import WatcherCoordinator  # noqa: E402
 
 

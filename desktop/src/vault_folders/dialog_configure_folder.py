@@ -19,7 +19,7 @@ from gi.repository import Gtk, Adw, GLib  # noqa: E402
 
 from ..vault.error_messages import humanize
 from ..vault.folder.ui_state import parse_ignore_patterns_text
-from ..vault_usage import calculate_vault_usage
+from ..vault.state.usage import calculate_vault_usage
 from .context import FoldersContext
 from .data import lookup_folder_settings
 
