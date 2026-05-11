@@ -163,35 +163,31 @@ vault/binding/runtime.py:89             from ...crypto import KeyManager
 vault/binding/runtime.py:108            from ...connection import ConnectionManager
 ```
 
-**Wave G — redundant `subpackage/subpackage.py` rename.** Four
-modules inherited a redundant inner-name from the plan-target's
-literal sketch:
+**Wave G — redundant `subpackage/subpackage.py` rename — done.**
+Finished 2026-05-11 on `tresor-vault`. The four redundant inner
+modules picked the semantic-rename shape (option 2 from the
+options spelled out earlier in this plan):
+
+| Status | Rename | Commit |
+| --- | --- | --- |
+| done | `vault/migration/migration.py` → `state.py` | `3ac0fb7` |
+| done | `vault/import_/import_.py`     → `bundle.py` | `3fbda36` |
+| done | `vault/export/export.py`       → `bundle.py` | `1e1e86c` |
+| done | `vault/grant/grant.py`         → `store.py`  | `285e533` |
+
+Each name now describes what's inside (state machine; import/export
+bundles; grant store). Import paths read naturally:
 
 ```
-vault/grant/grant.py
-vault/export/export.py
-vault/migration/migration.py
-vault/import_/import_.py
+from src.vault.migration.state import MigrationRecord, load_state
+from src.vault.import_.bundle  import preview_import, ImportMergeResolution
+from src.vault.export.bundle   import write_export_bundle, ExportError
+from src.vault.grant.store     import VaultGrant, open_default_grant_store
 ```
 
-Callers have to type the redundancy
-(`from src.vault.grant.grant import VaultGrant`,
-`from src.vault.export.export import write_export_bundle`, etc.).
-Two cleanup shapes are possible:
-
-1. **Hoist into `__init__.py`** — folds each redundant module's
-   contents into its `__init__.py`. Pro: callers shorten to
-   `from src.vault.grant import VaultGrant`. Con: `__init__.py`
-   grows large (vault_export.py was 622 lines).
-2. **Rename to a semantic name** — `vault/grant/store.py`,
-   `vault/export/bundle.py`, `vault/migration/state.py`,
-   `vault/import_/bundle.py`. Pro: each module has a name that
-   describes its role. Con: another sweep of importers (move-only
-   cost again).
-
-Defer to Wave G after the data subsystem is fully consolidated.
-Either approach is mechanical; pick when there's a clear hour to
-make the pass without other moves in flight.
+Total: 39 importer sites + 5 intra-package sibling rewrites + 4
+test source-pin assertions + 11 `import-as` alias-preserving
+lines + all 4 `__init__.py` docstrings updated.
 
 ### Current state
 
@@ -215,14 +211,14 @@ desktop/src/
                                #   browser_model, ui_state              (Wave D.3 add)
     diagnostics/               # logging, debug_bundle,
                                #   ransomware_detector                  (Wave D.1 add)
-    export/                    # export, reminder                       (Wave C.1)
-    migration/                 # migration, runner, propagation         (Wave C.2)
-    grant/                     # grant, qr, wrap, access_rotation       (Wave C.3)
+    export/                    # bundle, reminder                       (Wave C.1 + G.3)
+    migration/                 # state, runner, propagation             (Wave C.2 + G.1)
+    grant/                     # store, qr, wrap, access_rotation       (Wave C.3 + G.4)
     folder/                    # actions, runtime, ui_state, connect_dialog (Wave C.4)
     binding/                   # bindings, baseline, lifecycle, preflight,
                                #   scan, sync, twoway, filesystem_watcher,
                                #   runtime, runtime_watchers            (Wave C.5)
-    import_/                   # import_, runner                        (Wave C.6)
+    import_/                   # bundle, runner                         (Wave C.6 + G.2)
     state/                     # local_index, local_state, usage,
                                #   activity                             (Wave D.2)
     ops/                       # restore, clear, repair, integrity,
