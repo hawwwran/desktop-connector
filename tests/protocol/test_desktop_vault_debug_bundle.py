@@ -18,7 +18,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_debug_bundle import (  # noqa: E402
+from src.vault.diagnostics.debug_bundle import (  # noqa: E402
     DebugBundleError, FORBIDDEN_PATTERNS, REDACTED,
     build_debug_bundle_bytes, redact_config, scan_for_forbidden,
     schema_dump, tail_lines, write_debug_bundle,

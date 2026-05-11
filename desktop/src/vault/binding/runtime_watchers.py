@@ -26,7 +26,7 @@ from .filesystem_watcher import (
     WatcherCoordinator,
     start_watchdog_observer,
 )
-from ...vault_ransomware_detector import (
+from ..diagnostics.ransomware_detector import (
     BANNER_BODY,
     BANNER_TITLE,
     RansomwareDetector,

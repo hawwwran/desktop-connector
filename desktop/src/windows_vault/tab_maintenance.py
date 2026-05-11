@@ -19,7 +19,7 @@ def build_maintenance_tab(ctx: MainContext, win) -> "Gtk.Box":
     config_dir = ctx.config_dir
     vault_id_undashed = ctx.vault_id_undashed
 
-    from ..vault_debug_bundle import write_debug_bundle, DebugBundleError
+    from ..vault.diagnostics.debug_bundle import write_debug_bundle, DebugBundleError
     from ..vault_integrity import (
         IntegrityReport, run_full_check, run_quick_check,
     )

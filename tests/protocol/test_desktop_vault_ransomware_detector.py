@@ -11,7 +11,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_ransomware_detector import (  # noqa: E402
+from src.vault.diagnostics.ransomware_detector import (  # noqa: E402
     ACTION_KEEP_PAUSED, ACTION_RESUME, ACTION_REVIEW, ACTION_ROLLBACK,
     BANNER_ACTIONS, BANNER_BODY, BANNER_TITLE,
     DetectorThresholds, DetectorVerdict,
