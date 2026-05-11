@@ -1,7 +1,9 @@
 """Import-bundle parsing + merge runner.
 
+The package name carries the trailing-underscore convention (``import_/``)
+because Python's ``import`` keyword forbids the bare form.
+
 Submodules:
-- ``import_`` — bundle parsing, manifest merge logic, typed errors (trailing
-  underscore avoids Python's ``import`` keyword).
-- ``runner`` — wizard-facing orchestrator: preview, merge, publish.
+- ``bundle`` — bundle parsing, manifest merge logic, typed errors
+- ``runner`` — wizard-facing orchestrator: preview, merge, publish
 """

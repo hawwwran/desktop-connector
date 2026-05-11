@@ -22,7 +22,7 @@ from ..export.export import (
     ExportError,
     read_export_bundle,
 )
-from .import_ import (
+from .bundle import (
     ImportAction,
     ImportMergeResolution,
     ImportPreview,

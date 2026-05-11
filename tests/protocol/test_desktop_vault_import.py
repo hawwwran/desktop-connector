@@ -14,7 +14,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault.import_.import_ import (  # noqa: E402
+from src.vault.import_.bundle import (  # noqa: E402
     DEFAULT_CONFLICT_MODE,
     ImportMergeResolution,
     decide_import_action,
@@ -392,7 +392,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         from src.vault import Vault
         from src.vault.crypto import DefaultVaultCrypto
         from src.vault.export.export import write_export_bundle
-        from src.vault.import_.import_ import ImportMergeResolution
+        from src.vault.import_.bundle import ImportMergeResolution
         from src.vault.import_.runner import run_import
         from src.vault.upload import upload_file
         from tests.protocol.test_desktop_vault_manifest import (
@@ -487,7 +487,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         from src.vault import Vault
         from src.vault.crypto import DefaultVaultCrypto
         from src.vault.export.export import write_export_bundle
-        from src.vault.import_.import_ import ImportMergeResolution
+        from src.vault.import_.bundle import ImportMergeResolution
         from src.vault.import_.runner import run_import
         from tests.protocol.test_desktop_vault_manifest import (
             AUTHOR as MASTER_AUTHOR,

@@ -380,7 +380,7 @@ class CallerConsistencyTests(unittest.TestCase):
         )
 
     def test_import_wrapper_kept_existing_signature(self) -> None:
-        from src.vault.import_.import_ import _conflict_imported_path
+        from src.vault.import_.bundle import _conflict_imported_path
         out = _conflict_imported_path(
             "docs/file.pdf", "2026-05-04T17:30:00.000Z",
         )
