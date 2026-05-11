@@ -15,10 +15,10 @@ def make_conflict_renamed_path(
 ) -> str:
     """A20-style conflict-rename for "Keep both" uploads.
 
-    Thin wrapper over :func:`vault_conflict_naming.make_conflict_path`.
+    Thin wrapper over :func:`vault.conflict_naming.make_conflict_path`.
     Kept as a stable import for the existing T6.2 callers.
     """
-    from ..vault_conflict_naming import make_conflict_path
+    from ..vault.conflict_naming import make_conflict_path
     return make_conflict_path(
         original_path=remote_path,
         kind=kind,

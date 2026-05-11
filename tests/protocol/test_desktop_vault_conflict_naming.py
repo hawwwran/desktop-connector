@@ -12,7 +12,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_conflict_naming import (  # noqa: E402
+from src.vault.conflict_naming import (  # noqa: E402
     KNOWN_KINDS,
     make_conflict_path,
     short_timestamp,
@@ -283,7 +283,7 @@ class TwoWayUniqueConflictPathTests(unittest.TestCase):
             root = Path(tmp)
             # Pre-create the unsuffixed candidate so the loop must
             # advance to attempt=2.
-            from src.vault_conflict_naming import make_conflict_path
+            from src.vault.conflict_naming import make_conflict_path
             from datetime import datetime, timezone
             # Freezing time isn't strictly necessary — _unique_conflict_path
             # uses datetime.now(); we just need the first attempt's
@@ -320,7 +320,7 @@ class RestoreUniqueConflictPathTests(unittest.TestCase):
         from pathlib import Path
         from datetime import datetime, timezone
         from src.vault_restore import _unique_conflict_path
-        from src.vault_conflict_naming import make_conflict_path
+        from src.vault.conflict_naming import make_conflict_path
 
         when = datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as tmp:

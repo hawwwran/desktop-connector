@@ -51,7 +51,7 @@ from .vault_bindings import (
     VaultBinding, VaultBindingsStore, VaultLocalEntry,
     normalize_relative_path,
 )
-from .vault_conflict_naming import make_conflict_path
+from .vault.conflict_naming import make_conflict_path
 from .vault_download import default_vault_download_cache_dir, download_latest_file
 from .vault_trash import trash_path
 

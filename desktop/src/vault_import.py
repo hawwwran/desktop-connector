@@ -568,10 +568,10 @@ def _merge_versions_into(
 def _conflict_imported_path(path: str, timestamp: str) -> str:
     """A20 "import" variant: ``<stem> (conflict imported <YYYY-MM-DD HH-MM>)<ext>``.
 
-    Thin wrapper over :func:`vault_conflict_naming.make_conflict_path`
+    Thin wrapper over :func:`vault.conflict_naming.make_conflict_path`
     so all three §A20 callers share one implementation.
     """
-    from .vault_conflict_naming import make_conflict_path
+    from .vault.conflict_naming import make_conflict_path
     when = _parse_rfc3339(timestamp)
     return make_conflict_path(
         original_path=path, kind="imported", when=when, device_name=None,

@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 from .vault.atomic import LOCAL_DISK_OVERHEAD_FACTOR
 from .vault_binding_lifecycle import SyncCancelledError
-from .vault_conflict_naming import make_conflict_path
+from .vault.conflict_naming import make_conflict_path
 from .vault_download import (
     DownloadProgress,
     VaultLocalDiskFullError,
