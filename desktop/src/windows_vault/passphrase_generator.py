@@ -28,7 +28,7 @@ def show_vault_passphrase_generator(config_dir: Path):
     the user Regenerate or Copy. The user pastes the result back into
     the wizard's passphrase fields manually.
     """
-    from ..vault_passphrase import generate_passphrase, estimated_entropy_bits
+    from ..vault.passphrase import generate_passphrase, estimated_entropy_bits
 
     app = _make_app()
 
