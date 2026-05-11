@@ -136,25 +136,27 @@ done.** Finished 2026-05-11 on `tresor-vault`. 16 files folded into
 remain at `desktop/src/`**. The vault subsystem now lives entirely
 under `desktop/src/vault/`.
 
-**Wave E (vault_upload/ + vault_download/ promotion) and Wave F
-(shim cleanup) are still todo.** The remaining 4 triple-dot bridges
-to those top-level packages will collapse in Wave E.
+**Wave E — promote `vault_upload/` + `vault_download/` — done.**
+Finished 2026-05-11 on `tresor-vault`. Both already-packaged
+subsystems folded under `vault/` in a single commit:
+
+| Status | Move | Files | Commit |
+| --- | --- | --- | --- |
+| done | `vault_upload/`   → `vault/upload/`   | 12 | `0ececff` |
+| done | `vault_download/` → `vault/download/` | 8  | `0ececff` |
+
+Resolves the last four triple-dot bridges from the Wave C review.
+
+**Wave F (shim cleanup) is still todo** — but the original plan
+called for "delete shims" after Waves A–E migrate all callers.
+Our move-only approach didn't create shims (we rewrote callers in
+lockstep), so Wave F is effectively a no-op grep verification:
+no `from src.vault_X import` should remain anywhere.
 
 ### Known follow-ups
 
-**Triple-dot bridges** (4 remaining after Wave D, all into the two
-still-flat packages — collapse in Wave E):
-
-```
-vault/binding/sync.py:85                from ...vault_upload import …
-vault/binding/baseline.py:33            from ...vault_download import …
-vault/binding/twoway.py:55              from ...vault_download import …
-vault/ops/restore.py:40                 from ...vault_download import …
-```
-
-Two permanent triple-dots remain into non-vault top-level modules
-(`crypto.py` and `connection.py`) — these don't belong to the
-vault subsystem and stay where they are:
+**Permanent triple-dots** (these stay — they cross out of the vault
+subsystem into top-level non-vault modules):
 
 ```
 vault/binding/runtime.py:89             from ...crypto import KeyManager
@@ -195,15 +197,16 @@ make the pass without other moves in flight.
 
 `desktop/src/` carried **52** flat top-level `vault_*.py` modules
 alongside three `vault_*/` packages and a tiny `vault/` core package
-(7 files, split out by breakup #9). After Waves A + B + C + D
-(2026-05-09 → 2026-05-11), **zero flat `vault_*.py` modules
-remain**; `vault/` now holds 69 files across 9 subpackages plus 11
-top-level modules. Wave E will fold the two remaining flat packages
-(`vault_upload/`, `vault_download/`) under `vault/`.
+(7 files, split out by breakup #9). After Waves A + B + C + D + E
+(2026-05-09 → 2026-05-11), **zero flat `vault_*.py` modules and zero
+flat `vault_*/` data packages remain** (only `vault_folders/` stays
+at top level — it's the Folders TAB UI, not vault logic, per the
+plan's naming note). `vault/` now holds 89 files across 12
+subpackages plus 14 top-level modules.
 
 ```
 desktop/src/
-  vault/                       # 69 files total
+  vault/                       # 89 files total
     __init__.py vault.py ids.py canonical.py protocols.py
     recovery_kit.py remote_folders.py                  # original 7
     atomic.py crypto.py passphrase.py manifest.py
@@ -225,15 +228,22 @@ desktop/src/
     ops/                       # restore, clear, repair, integrity,
                                #   eviction, delete, purge_schedule,
                                #   trash                                (Wave D.4)
-  vault_upload/                # package (split out by breakup #4) — Wave E
-  vault_download/              # package (split out post-breakup) — Wave E
+    upload/                    # 12 files: __init__, conflict, constants,
+                               #   errors, folder, hashing, ignore_patterns,
+                               #   protocols, results, resume, session,
+                               #   single_file                          (Wave E)
+    download/                  # 8 files: __init__, cache, chunks,
+                               #   folder, manifest, paths, single_file,
+                               #   types                                (Wave E)
   vault_folders/               # Folders TAB UI (kept under top-level
-                               #   per docs/plans naming note)
+                               #   per docs/plans naming note —
+                               #   "vault" data layer is .folder,
+                               #   "Folders TAB" UI is vault_folders/)
   windows_vault/               # package (split out by breakup #1)
 ```
 
-No flat `vault_*.py` modules remain — Wave E starts with `vault_upload/`
-and `vault_download/` as the only outstanding top-level packages.
+Zero flat `vault_*.py` modules, zero flat `vault_*/` data packages.
+The remaining top-level `vault_folders/` is GTK UI — kept by design.
 
 ### Why bother
 
