@@ -31,7 +31,7 @@ ensure_desktop_on_path()
 from src.vault_binding_lifecycle import BindingCancellationRegistry  # noqa: E402
 from src.vault_bindings import VaultBindingsStore  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
-from src.vault_folder_actions import (  # noqa: E402
+from src.vault.folder.actions import (  # noqa: E402
     dispatch_disconnect,
     dispatch_pause,
     dispatch_resume,

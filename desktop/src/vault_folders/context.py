@@ -33,7 +33,7 @@ from gi.repository import Gtk, Adw  # noqa: E402,F401
 
 if TYPE_CHECKING:
     from ..vault_binding_lifecycle import BindingCancellationRegistry
-    from ..vault_folder_runtime import VaultRuntime
+    from ..vault.folder.runtime import VaultRuntime
     from ..vault_local_index import VaultLocalIndex
 
 

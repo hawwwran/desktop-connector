@@ -166,7 +166,7 @@ class VaultSubmenuMixin:
                 from ..vault_runtime_watchers import VaultWatcherRuntime
                 from ..vault_bindings import VaultBindingsStore
                 from ..vault_local_index import VaultLocalIndex
-                from ..vault_folder_runtime import VaultRuntime
+                from ..vault.folder.runtime import VaultRuntime
                 vault_id = str(
                     self.config._data.get("vault", {}).get("last_known_id") or ""
                 )

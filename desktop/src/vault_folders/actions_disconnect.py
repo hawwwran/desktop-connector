@@ -17,7 +17,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, GLib  # noqa: E402
 
 from ..vault_bindings import VaultBindingsStore
-from ..vault_folder_actions import dispatch_disconnect
+from ..vault.folder.actions import dispatch_disconnect
 from .actions_sync import _idle_finish
 from .context import FoldersContext
 

@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import GLib  # noqa: E402
 
 from ..vault_bindings import VaultBindingsStore
-from ..vault_connect_folder_dialog import present_connect_folder_dialog
+from ..vault.folder.connect_dialog import present_connect_folder_dialog
 from ..vault.error_messages import humanize
 from .context import FoldersContext
 

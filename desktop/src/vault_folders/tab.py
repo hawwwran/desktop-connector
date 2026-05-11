@@ -29,7 +29,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, Gio  # noqa: E402
 
 from ..vault_binding_lifecycle import BindingCancellationRegistry
-from ..vault_folder_runtime import VaultRuntime
+from ..vault.folder.runtime import VaultRuntime
 from ..vault_local_index import VaultLocalIndex
 from .context import FoldersContext
 from .data import refresh_folders_usage_async as _refresh_folders_usage_async

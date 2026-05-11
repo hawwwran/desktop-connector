@@ -199,7 +199,7 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
         )
         for needle in (
             # Package siblings reach up via ``..`` rather than ``.``.
-            "from ..vault_connect_folder_dialog import present_connect_folder_dialog",
+            "from ..vault.folder.connect_dialog import present_connect_folder_dialog",
             "from ..vault_bindings import VaultBindingsStore",
             "connect_btn = Gtk.Button(",
             'label="Connect with local folder"',
@@ -211,11 +211,11 @@ class ConnectFolderUiSourceTests(unittest.TestCase):
 
     def test_dialog_module_default_mode_is_backup_only(self) -> None:
         from _paths import REPO_ROOT
-        source = Path(REPO_ROOT, "desktop/src/vault_connect_folder_dialog.py").read_text(
+        source = Path(REPO_ROOT, "desktop/src/vault/folder/connect_dialog.py").read_text(
             encoding="utf-8"
         )
         for needle in (
-            'from .vault_binding_preflight import (',
+            'from ...vault_binding_preflight import (',
             "compute_preflight",
             "render_preflight_text",
             "DEFAULT_MODE_INDEX",

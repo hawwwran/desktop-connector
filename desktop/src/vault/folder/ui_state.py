@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .vault.ui.bytes_format import format_bytes_binary
+from ..ui.bytes_format import format_bytes_binary
 
 
 DEFAULT_FOLDER_IGNORE_PATTERNS = [".git/", "node_modules/", "*.tmp"]

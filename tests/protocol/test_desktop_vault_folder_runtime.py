@@ -35,7 +35,7 @@ from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_folder_runtime import VaultRuntime  # noqa: E402
+from src.vault.folder.runtime import VaultRuntime  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"
@@ -336,13 +336,13 @@ class VaultRuntimeSourcePins(unittest.TestCase):
             for p in sorted(package_dir.glob("*.py"))
         )
         cls.runtime_source = Path(
-            REPO_ROOT, "desktop/src/vault_folder_runtime.py",
+            REPO_ROOT, "desktop/src/vault/folder/runtime.py",
         ).read_text(encoding="utf-8")
 
     def test_tab_imports_runtime(self) -> None:
         # Post-#6: package siblings reach up to ``..vault_folder_runtime``.
         self.assertIn(
-            "from ..vault_folder_runtime import VaultRuntime",
+            "from ..vault.folder.runtime import VaultRuntime",
             self.tab_source,
         )
 

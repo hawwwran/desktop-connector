@@ -11,7 +11,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_folder_ui_state import (  # noqa: E402
+from src.vault.folder.ui_state import (  # noqa: E402
     BINDING_COLUMNS,
     DEFAULT_FOLDER_IGNORE_PATTERNS,
     FOLDER_COLUMNS,

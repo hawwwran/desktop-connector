@@ -18,7 +18,7 @@ from gi.repository import Gtk, GLib  # noqa: E402
 from ..vault_binding_sync import format_sync_outcome_toast
 from ..vault_bindings import VaultBindingsStore
 from ..vault.error_messages import humanize
-from ..vault_folder_actions import dispatch_pause, dispatch_resume
+from ..vault.folder.actions import dispatch_pause, dispatch_resume
 from .context import FoldersContext
 
 

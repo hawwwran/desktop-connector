@@ -45,7 +45,7 @@ class VaultFoldersRenameSourceTests(unittest.TestCase):
             p.read_text() for p in sorted(package_dir.glob("*.py"))
         )
         cls.runtime_source = Path(
-            REPO_ROOT, "desktop/src/vault_folder_runtime.py",
+            REPO_ROOT, "desktop/src/vault/folder/runtime.py",
         ).read_text()
 
     def test_rename_button_is_live_not_disabled_with_t45_tooltip(self) -> None:
