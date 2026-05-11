@@ -391,7 +391,7 @@ class VaultImportRunnerTests(unittest.TestCase):
     def test_run_import_uploads_missing_chunks_and_publishes_merged_manifest(self) -> None:
         from src.vault import Vault
         from src.vault.crypto import DefaultVaultCrypto
-        from src.vault.export.export import write_export_bundle
+        from src.vault.export.bundle import write_export_bundle
         from src.vault.import_.bundle import ImportMergeResolution
         from src.vault.import_.runner import run_import
         from src.vault.upload import upload_file
@@ -486,7 +486,7 @@ class VaultImportRunnerTests(unittest.TestCase):
     def test_run_import_refuses_when_vault_identity_mismatches(self) -> None:
         from src.vault import Vault
         from src.vault.crypto import DefaultVaultCrypto
-        from src.vault.export.export import write_export_bundle
+        from src.vault.export.bundle import write_export_bundle
         from src.vault.import_.bundle import ImportMergeResolution
         from src.vault.import_.runner import run_import
         from tests.protocol.test_desktop_vault_manifest import (
@@ -575,7 +575,7 @@ class VaultImportRunnerVaultIdAssertTests(unittest.TestCase):
 
     def test_raises_export_error_when_vault_ids_disagree(self) -> None:
         from src.vault.import_.runner import _assert_bundle_vault_id_matches
-        from src.vault.export.export import ExportError
+        from src.vault.export.bundle import ExportError
         with self.assertRaises(ExportError) as ctx:
             _assert_bundle_vault_id_matches(
                 bundle_vault_id="AAAA2345WXYZ",

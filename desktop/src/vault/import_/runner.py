@@ -17,7 +17,7 @@ from typing import Any, Callable, Protocol
 from ..binding.lifecycle import SyncCancelledError
 from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..crypto import normalize_vault_id
-from ..export.export import (
+from ..export.bundle import (
     BundleContents,
     ExportError,
     read_export_bundle,

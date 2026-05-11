@@ -16,7 +16,7 @@ ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault.export.export import (  # noqa: E402
+from src.vault.export.bundle import (  # noqa: E402
     ExportError,
     OUTER_HEADER_BYTES,
     WRAPPED_KEY_BYTES,
