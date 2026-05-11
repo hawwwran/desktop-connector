@@ -215,7 +215,7 @@ class ImportCancelTests(unittest.TestCase):
         # asserting the source has the cancellation hook in the right
         # place — every other flow is round-tripped, this one is
         # source-pinned to keep the test focused.
-        from src import vault_import_runner
+        import src.vault.import_.runner as vault_import_runner
         import inspect
         src = inspect.getsource(vault_import_runner.run_import)
         # The chunk loop must check should_continue.

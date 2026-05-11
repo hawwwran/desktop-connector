@@ -33,7 +33,7 @@ from .vault_local_index import VaultLocalIndex
 from .vault.error_messages import humanize
 from .vault.export.export import ExportError
 from .vault.export.reminder import normalize_cadence
-from .vault_import import ImportMergeResolution
+from .vault.import_.import_ import ImportMergeResolution
 from .vault.binding.runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
 
@@ -249,7 +249,7 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
 
             def worker() -> None:
                 try:
-                    from .vault_import_runner import open_bundle_for_preview
+                    from .vault.import_.runner import open_bundle_for_preview
 
                     config.reload()
                     relay = create_vault_relay(config)
@@ -338,7 +338,7 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
 
             def worker() -> None:
                 try:
-                    from .vault_import_runner import run_import
+                    from .vault.import_.runner import run_import
 
                     vault_id = local_vault_id()
                     config.reload()

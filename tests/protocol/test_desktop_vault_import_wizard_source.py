@@ -36,8 +36,8 @@ class VaultImportWizardSourceTests(unittest.TestCase):
             encoding="utf-8"
         )
         for text in (
-            "from .vault_import_runner import open_bundle_for_preview",
-            "from .vault_import_runner import run_import",
+            "from .vault.import_.runner import open_bundle_for_preview",
+            "from .vault.import_.runner import run_import",
             'stack.add_named(pick_box, "pick")',
             'stack.add_named(preview_box, "preview")',
             'stack.add_named(progress_box, "progress")',

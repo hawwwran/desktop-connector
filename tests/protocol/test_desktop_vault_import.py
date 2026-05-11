@@ -14,7 +14,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_import import (  # noqa: E402
+from src.vault.import_.import_ import (  # noqa: E402
     DEFAULT_CONFLICT_MODE,
     ImportMergeResolution,
     decide_import_action,
@@ -392,8 +392,8 @@ class VaultImportRunnerTests(unittest.TestCase):
         from src.vault import Vault
         from src.vault.crypto import DefaultVaultCrypto
         from src.vault.export.export import write_export_bundle
-        from src.vault_import import ImportMergeResolution
-        from src.vault_import_runner import run_import
+        from src.vault.import_.import_ import ImportMergeResolution
+        from src.vault.import_.runner import run_import
         from src.vault_upload import upload_file
         from tests.protocol.test_desktop_vault_manifest import (
             AUTHOR as MASTER_AUTHOR,
@@ -487,8 +487,8 @@ class VaultImportRunnerTests(unittest.TestCase):
         from src.vault import Vault
         from src.vault.crypto import DefaultVaultCrypto
         from src.vault.export.export import write_export_bundle
-        from src.vault_import import ImportMergeResolution
-        from src.vault_import_runner import run_import
+        from src.vault.import_.import_ import ImportMergeResolution
+        from src.vault.import_.runner import run_import
         from tests.protocol.test_desktop_vault_manifest import (
             AUTHOR as MASTER_AUTHOR,
             DOCS_ID as MASTER_DOCS_ID,
@@ -559,14 +559,14 @@ class VaultImportRunnerVaultIdAssertTests(unittest.TestCase):
     """
 
     def test_passes_when_vault_ids_match_canonically(self) -> None:
-        from src.vault_import_runner import _assert_bundle_vault_id_matches
+        from src.vault.import_.runner import _assert_bundle_vault_id_matches
         _assert_bundle_vault_id_matches(
             bundle_vault_id="ABCD2345WXYZ",
             expected_vault_id="ABCD2345WXYZ",
         )  # no raise
 
     def test_passes_when_only_dashing_differs(self) -> None:
-        from src.vault_import_runner import _assert_bundle_vault_id_matches
+        from src.vault.import_.runner import _assert_bundle_vault_id_matches
         # normalize_vault_id strips dashes + uppercases.
         _assert_bundle_vault_id_matches(
             bundle_vault_id="ABCD-2345-WXYZ",
@@ -574,7 +574,7 @@ class VaultImportRunnerVaultIdAssertTests(unittest.TestCase):
         )  # no raise
 
     def test_raises_export_error_when_vault_ids_disagree(self) -> None:
-        from src.vault_import_runner import _assert_bundle_vault_id_matches
+        from src.vault.import_.runner import _assert_bundle_vault_id_matches
         from src.vault.export.export import ExportError
         with self.assertRaises(ExportError) as ctx:
             _assert_bundle_vault_id_matches(

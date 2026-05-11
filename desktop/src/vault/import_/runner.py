@@ -14,15 +14,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from .vault.binding.lifecycle import SyncCancelledError
-from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
-from .vault.crypto import normalize_vault_id
-from .vault.export.export import (
+from ..binding.lifecycle import SyncCancelledError
+from ...vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..crypto import normalize_vault_id
+from ..export.export import (
     BundleContents,
     ExportError,
     read_export_bundle,
 )
-from .vault_import import (
+from .import_ import (
     ImportAction,
     ImportMergeResolution,
     ImportPreview,
@@ -32,8 +32,8 @@ from .vault_import import (
     merge_import_into,
     preview_import,
 )
-from .vault.relay_errors import VaultCASConflictError
-from .vault.manifest import merge_with_remote_head, normalize_manifest_plaintext
+from ..relay_errors import VaultCASConflictError
+from ..manifest import merge_with_remote_head, normalize_manifest_plaintext
 
 
 log = logging.getLogger(__name__)

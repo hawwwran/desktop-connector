@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
-from .vault.crypto import normalize_vault_id
-from .vault.manifest import (
+from ..crypto import normalize_vault_id
+from ..manifest import (
     add_or_append_file_version,
     find_file_entry,
     generate_file_entry_id,
@@ -571,7 +571,7 @@ def _conflict_imported_path(path: str, timestamp: str) -> str:
     Thin wrapper over :func:`vault.conflict_naming.make_conflict_path`
     so all three §A20 callers share one implementation.
     """
-    from .vault.conflict_naming import make_conflict_path
+    from ..conflict_naming import make_conflict_path
     when = _parse_rfc3339(timestamp)
     return make_conflict_path(
         original_path=path, kind="imported", when=when, device_name=None,
