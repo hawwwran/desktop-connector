@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from ..vault_manifest import find_file_entry
+from ..vault.manifest import find_file_entry
 
 
 def make_conflict_renamed_path(

@@ -19,7 +19,7 @@ from .vault.crypto import (
     derive_subkey,
     normalize_vault_id,
 )
-from .vault_manifest import normalize_manifest_plaintext
+from .vault.manifest import normalize_manifest_plaintext
 
 log = logging.getLogger(__name__)
 

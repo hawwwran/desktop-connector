@@ -18,7 +18,7 @@ from src.vault_binding_preflight import (  # noqa: E402
     compute_preflight,
     render_preflight_text,
 )
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     make_manifest,
     make_remote_folder,
 )

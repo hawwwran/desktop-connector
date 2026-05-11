@@ -23,7 +23,7 @@ from src.vault_delete import (  # noqa: E402
     delete_folder_contents,
     restore_version_to_current,
 )
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     compute_recoverable_until,
     find_file_entry,
     make_manifest,
@@ -463,7 +463,7 @@ def _decrypt_current_manifest(vault, relay) -> dict:
     """Decrypt whatever envelope the fake relay last accepted."""
     from src.vault_browser_model import decrypt_manifest as _decrypt
     if not relay.current_envelope:
-        from src.vault_manifest import normalize_manifest_plaintext
+        from src.vault.manifest import normalize_manifest_plaintext
         return normalize_manifest_plaintext(relay.current_manifest)
     return _decrypt(vault, relay.current_envelope)
 

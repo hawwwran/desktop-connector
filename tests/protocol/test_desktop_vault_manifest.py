@@ -14,7 +14,7 @@ from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     add_remote_folder,
     canonical_manifest_json,
     make_manifest,
@@ -276,7 +276,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         )
 
     def test_assert_publishable_revision_accepts_valid_pairs(self) -> None:
-        from src.vault_manifest import assert_publishable_revision
+        from src.vault.manifest import assert_publishable_revision
 
         # Genesis manifest.
         assert_publishable_revision(
@@ -292,7 +292,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         ``revision`` instead of getting bumped, so it'd republish the
         same revision number — overwriting the parent in CAS terms.
         """
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             ManifestRevisionInvariantError,
             assert_publishable_revision,
         )
@@ -304,7 +304,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
 
     def test_assert_publishable_revision_rejects_unbumped_parent(self) -> None:
         """Caller forgot the parent_revision bump but advanced revision."""
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             ManifestRevisionInvariantError,
             assert_publishable_revision,
         )
@@ -315,7 +315,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
             )
 
     def test_assert_publishable_revision_rejects_zero_revision(self) -> None:
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             ManifestRevisionInvariantError,
             assert_publishable_revision,
         )
@@ -329,7 +329,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         """Catches a deepcopy of an encrypted-payload field that
         skipped normalization (e.g. ``revision`` arrived as a string).
         """
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             ManifestRevisionInvariantError,
             assert_publishable_revision,
         )
@@ -349,7 +349,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         """``bump_revision`` is the named alternative to open-coding the
         bump in callers. Result must satisfy the publish invariant.
         """
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             assert_publishable_revision, bump_revision,
         )
 
@@ -392,7 +392,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         chunks belonging to a tombstoned entry — those chunks would
         survive forever despite no UI being able to reach them.
         """
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             add_or_append_file_version, merge_with_remote_head,
             tombstone_file_entry,
         )
@@ -485,7 +485,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         ``latest_version_id`` per §D4. We pin this so the F-D07 fix
         doesn't accidentally suppress the live-merge path.
         """
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             add_or_append_file_version, merge_with_remote_head,
         )
 
@@ -567,7 +567,7 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         bump) must trip ``ManifestRevisionInvariantError`` *before*
         any AEAD encryption or relay POST.
         """
-        from src.vault_manifest import ManifestRevisionInvariantError
+        from src.vault.manifest import ManifestRevisionInvariantError
 
         VAULT_ACCESS_SECRET = "vault-secret"
         vault = Vault(

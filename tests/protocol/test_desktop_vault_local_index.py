@@ -16,7 +16,7 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault_local_index import DB_FILENAME, VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault_manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"

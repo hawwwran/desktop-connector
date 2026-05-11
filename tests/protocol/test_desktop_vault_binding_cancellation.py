@@ -43,7 +43,7 @@ from src.vault_binding_twoway import run_two_way_cycle  # noqa: E402
 from src.vault_bindings import VaultBindingsStore  # noqa: E402
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault_manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 from src.vault_upload import upload_file  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
@@ -192,7 +192,7 @@ class UploadFileCancellationTests(unittest.TestCase):
         # published (the version is still absent from the head).
         self.assertEqual(len(relay.put_calls), 1)
         head = relay.current_manifest
-        from src.vault_manifest import find_file_entry
+        from src.vault.manifest import find_file_entry
         self.assertIsNone(find_file_entry(head, DOCS_ID, "big.bin"))
 
 

@@ -25,7 +25,7 @@ from src.vault_export import (  # noqa: E402
     read_export_bundle,
     write_export_bundle,
 )
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     make_manifest,
     make_remote_folder,
 )

@@ -17,7 +17,7 @@ from src.vault_clear import (  # noqa: E402
     confirm_folder_clear_text_matches,
     confirm_vault_clear_text_matches,
 )
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     add_or_append_file_version, make_manifest, make_remote_folder,
 )
 
@@ -124,7 +124,7 @@ class ClearFolderTests(unittest.TestCase):
     def test_already_deleted_entries_are_not_double_counted(self) -> None:
         manifest = _seed_manifest_with_files()
         # Pre-tombstone one of the files.
-        from src.vault_manifest import tombstone_file_entry
+        from src.vault.manifest import tombstone_file_entry
         manifest = tombstone_file_entry(
             manifest,
             remote_folder_id=DOCS_ID, path="ledger.txt",

@@ -33,7 +33,7 @@ from .vault_import import (
     preview_import,
 )
 from .vault.relay_errors import VaultCASConflictError
-from .vault_manifest import merge_with_remote_head, normalize_manifest_plaintext
+from .vault.manifest import merge_with_remote_head, normalize_manifest_plaintext
 
 
 log = logging.getLogger(__name__)

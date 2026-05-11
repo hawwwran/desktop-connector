@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from .vault_manifest import (
+from .vault.manifest import (
     normalize_manifest_path,
     normalize_manifest_plaintext,
     tombstone_file_entry,

@@ -61,7 +61,7 @@ from .crypto import (
     derive_subkey,
     normalize_vault_id,
 )
-from ..vault_manifest import (
+from .manifest import (
     assert_publishable_revision,
     canonical_manifest_json,
     make_manifest,

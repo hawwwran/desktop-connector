@@ -15,7 +15,7 @@ from typing import Any, Callable, Protocol
 from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
 
 log = logging.getLogger(__name__)
-from .vault_manifest import (
+from .vault.manifest import (
     generate_file_version_id,
     normalize_manifest_path,
     normalize_manifest_plaintext,

@@ -22,7 +22,7 @@ from src.vault_binding_baseline import (  # noqa: E402
 )
 from src.vault_local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     make_manifest,
     make_remote_folder,
     tombstone_file_entry,

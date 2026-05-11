@@ -20,7 +20,7 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault_download import download_latest_file  # noqa: E402
-from src.vault_manifest import find_file_entry, make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import find_file_entry, make_manifest, make_remote_folder  # noqa: E402
 from src.vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError  # noqa: E402
 from src.vault_upload import (  # noqa: E402
     FileSkipped,

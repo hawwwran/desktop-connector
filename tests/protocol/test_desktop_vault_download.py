@@ -37,7 +37,7 @@ from src.vault_download import (  # noqa: E402
     resolve_download_destination,
     vault_chunk_cache_path,
 )
-from src.vault_manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,

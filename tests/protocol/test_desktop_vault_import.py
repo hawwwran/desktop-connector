@@ -22,7 +22,7 @@ from src.vault_import import (  # noqa: E402
     merge_import_into,
     preview_import,
 )
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     find_file_entry,
     make_manifest,
     make_remote_folder,

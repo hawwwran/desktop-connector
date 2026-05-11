@@ -56,7 +56,7 @@ from src.vault.crypto import (  # noqa: E402
     DefaultVaultCrypto,
     derive_content_fingerprint_key, make_content_fingerprint,
 )
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     find_file_entry, make_manifest, make_remote_folder,
 )
 from src.vault_upload import upload_file  # noqa: E402

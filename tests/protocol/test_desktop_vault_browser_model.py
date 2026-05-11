@@ -24,7 +24,7 @@ from src.vault_browser_model import (  # noqa: E402
     list_versions,
 )
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault_manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,

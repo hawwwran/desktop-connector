@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from ..vault_binding_lifecycle import SyncCancelledError
 from ..vault_browser_model import get_file
-from ..vault_manifest import normalize_manifest_plaintext
+from ..vault.manifest import normalize_manifest_plaintext
 from .cache import _load_cached_chunk, _store_cached_chunk
 from .chunks import (
     _decrypt_chunk,

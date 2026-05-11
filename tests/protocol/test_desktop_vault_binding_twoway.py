@@ -22,7 +22,7 @@ from src.vault.crypto import (  # noqa: E402
     DefaultVaultCrypto,
     derive_content_fingerprint_key, make_content_fingerprint,
 )
-from src.vault_manifest import (  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
     make_manifest,
     make_remote_folder,
 )
@@ -137,7 +137,7 @@ class TwoWayCycleTests(unittest.TestCase):
         *,
         path: str,
     ) -> dict:
-        from src.vault_manifest import (
+        from src.vault.manifest import (
             normalize_manifest_path, tombstone_file_entry,
         )
         normalized = normalize_manifest_path(path)
@@ -479,7 +479,7 @@ class TwoWayCycleTests(unittest.TestCase):
         self.assertEqual(upload_outcomes[0].status, "uploaded")
         self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
 
-        from src.vault_manifest import find_file_entry
+        from src.vault.manifest import find_file_entry
         from src.vault_browser_model import decrypt_manifest
         observer = _vault()
         try:

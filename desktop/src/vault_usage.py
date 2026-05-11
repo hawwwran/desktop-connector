@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from .vault_manifest import normalize_manifest_plaintext
+from .vault.manifest import normalize_manifest_plaintext
 
 log = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 from src.vault_usage import calculate_vault_usage  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402

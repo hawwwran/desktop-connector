@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
 from .vault.crypto import normalize_vault_id
-from .vault_manifest import (
+from .vault.manifest import (
     add_or_append_file_version,
     find_file_entry,
     generate_file_entry_id,

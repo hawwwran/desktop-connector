@@ -6,7 +6,7 @@ fetch → bump revision + parent_revision + author + timestamp →
 manifest helper → ``self.publish_manifest``.
 """
 
-from ..vault_manifest import (
+from .manifest import (
     add_remote_folder as manifest_add_remote_folder,
     generate_remote_folder_id,
     make_remote_folder,
@@ -96,7 +96,7 @@ class RemoteFoldersMixin:
         change the folder's name and ignore patterns after creation —
         previously the patterns were locked in at first init.
         """
-        from ..vault_manifest import update_remote_folder_settings as _update
+        from .manifest import update_remote_folder_settings as _update
 
         if new_display_name is None and ignore_patterns is None:
             raise ValueError(

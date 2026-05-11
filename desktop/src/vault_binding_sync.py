@@ -80,7 +80,7 @@ from .vault_bindings import (
     VaultLocalEntry,
     VaultPendingOperation,
 )
-from .vault_manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
+from .vault.manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
 from .vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError
 from .vault_upload import UploadResult, UploadSpecialFileSkipped, upload_file
 
