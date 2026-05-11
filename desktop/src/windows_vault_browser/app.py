@@ -38,7 +38,7 @@ from ..vault.binding.runtime import (  # noqa: E402
     open_local_vault_from_grant,
 )
 from ..vault.error_messages import humanize  # noqa: E402
-from ..vault_browser_model import list_folder  # noqa: E402
+from ..vault.ui.browser_model import list_folder  # noqa: E402
 from ..windows_common import _make_app  # noqa: E402
 
 from .delete_restore import DeleteRestoreMixin

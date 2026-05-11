@@ -73,7 +73,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         browser will silently fail to render new uploads no matter how
         clean ``state["manifest"] = result.manifest`` is.
         """
-        from src.vault_browser_model import list_folder
+        from src.vault.ui.browser_model import list_folder
 
         local = self.tmpdir / "guarded.txt"
         local.write_bytes(b"manifest-must-reflect-this-upload")
@@ -113,7 +113,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
     def test_upload_folder_result_manifest_surfaces_every_uploaded_file(self) -> None:
         """Same guard for ``upload_folder`` — every walked file must land
         in the published manifest under the configured sub-path."""
-        from src.vault_browser_model import list_folder
+        from src.vault.ui.browser_model import list_folder
 
         root = self.tmpdir / "tree"
         (root / "sub").mkdir(parents=True)
@@ -1091,7 +1091,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             f for f in relay.published_manifests[-1]["ciphertext"][:0] or []
             if False
         ) if False else None  # placeholder so the assertion below reads cleanly
-        from src.vault_browser_model import decrypt_manifest as _decrypt
+        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
         published_envelope = relay.current_envelope
         vault_observer = _vault()
         try:

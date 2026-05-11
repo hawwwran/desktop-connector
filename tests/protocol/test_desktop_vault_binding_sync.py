@@ -247,7 +247,7 @@ class BackupOnlySyncTests(unittest.TestCase):
         self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
 
         # Remote manifest now has the entry tombstoned.
-        from src.vault_browser_model import decrypt_manifest
+        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
             current = decrypt_manifest(observer, relay.current_envelope)

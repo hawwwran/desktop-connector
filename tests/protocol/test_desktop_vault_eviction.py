@@ -276,7 +276,7 @@ def _empty_manifest() -> dict:
 
 
 def _decrypt_current_manifest(vault, relay) -> dict:
-    from src.vault_browser_model import decrypt_manifest as _decrypt
+    from src.vault.ui.browser_model import decrypt_manifest as _decrypt
     return _decrypt(vault, relay.current_envelope)
 
 

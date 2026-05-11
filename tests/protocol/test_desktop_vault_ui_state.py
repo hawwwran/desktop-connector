@@ -17,7 +17,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault_ui_state import (  # noqa: E402
+from src.vault.ui.ui_state import (  # noqa: E402
     should_show_vault_submenu,
     vault_settings_button_state,
     vault_submenu_entries,

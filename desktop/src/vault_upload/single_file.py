@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..vault.binding.lifecycle import SyncCancelledError
-from ..vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..vault.ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..vault.crypto import (
     aead_encrypt,
     build_chunk_aad,

@@ -50,7 +50,7 @@ from src.vault import Vault  # noqa: E402
 from src.vault.binding.sync import run_backup_only_cycle  # noqa: E402
 from src.vault.binding.twoway import run_two_way_cycle  # noqa: E402
 from src.vault.binding.bindings import VaultBindingsStore, VaultLocalEntry  # noqa: E402
-from src.vault_browser_model import decrypt_manifest  # noqa: E402
+from src.vault.ui.browser_model import decrypt_manifest  # noqa: E402
 from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import (  # noqa: E402
     DefaultVaultCrypto,

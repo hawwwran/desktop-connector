@@ -23,7 +23,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw  # noqa: E402
 
-from ..vault_ui_state import vault_settings_button_state
+from ..vault.ui.ui_state import vault_settings_button_state
 from .context import SettingsContext
 
 

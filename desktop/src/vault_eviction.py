@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Protocol
 
 from .vault.binding.lifecycle import SyncCancelledError
-from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from .vault.ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from .vault.manifest import (
     compute_recoverable_until,
     normalize_manifest_plaintext,

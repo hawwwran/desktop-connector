@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from ..vault.binding.lifecycle import SyncCancelledError
-from ..vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..vault.ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..vault.crypto import (
     derive_content_fingerprint_key,
     make_content_fingerprint,

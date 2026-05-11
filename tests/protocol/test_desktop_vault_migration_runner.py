@@ -16,7 +16,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_browser_model import decrypt_manifest as _decrypt_manifest  # noqa: E402
+from src.vault.ui.browser_model import decrypt_manifest as _decrypt_manifest  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 from src.vault.migration.migration import load_state, save_state, MigrationRecord  # noqa: E402
@@ -567,7 +567,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         # excised from its referencing version. We need this so
         # ``_count_unique_chunks`` (which walks the target manifest)
         # reflects the deletion.
-        from src.vault_browser_model import decrypt_manifest
+        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
             target_manifest = decrypt_manifest(

@@ -101,7 +101,7 @@ class RestoreRemoteFolderTests(unittest.TestCase):
                 vault.publish_manifest(relay, current)
         finally:
             vault.close()
-        from src.vault_browser_model import decrypt_manifest as _decrypt
+        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
         observer = _vault()
         try:
             published = _decrypt(observer, relay.current_envelope)
@@ -372,7 +372,7 @@ class RestoreAtDateTests(unittest.TestCase):
                 current = res.manifest
         finally:
             vault.close()
-        from src.vault_browser_model import decrypt_manifest as _decrypt
+        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
         observer = _vault()
         try:
             published = _decrypt(observer, relay.current_envelope)
@@ -477,7 +477,7 @@ class RestoreAtDateTests(unittest.TestCase):
             vault.publish_manifest(relay, current)
         finally:
             vault.close()
-        from src.vault_browser_model import decrypt_manifest as _decrypt
+        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
         observer = _vault()
         try:
             published = _decrypt(observer, relay.current_envelope)

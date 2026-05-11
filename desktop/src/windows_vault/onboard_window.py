@@ -42,7 +42,7 @@ def show_vault_onboard(config_dir: Path):
     runs the shredder).
     """
     from ..config import Config
-    from ..vault_ui_state import wizard_cancel_rule
+    from ..vault.ui.ui_state import wizard_cancel_rule
 
     config = Config(config_dir)
 

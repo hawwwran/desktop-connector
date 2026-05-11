@@ -34,7 +34,7 @@ VAULT_AUTOSYNC_INTERVAL_S = 60.0
 class VaultSubmenuMixin:
     def _vault_submenu_visible(self) -> bool:
         """The submenu is visible when the user has vault.active=True."""
-        from ..vault_ui_state import should_show_vault_submenu
+        from ..vault.ui.ui_state import should_show_vault_submenu
         return should_show_vault_submenu(self.config.vault_active)
 
     def _local_vault_exists(self) -> bool:
@@ -117,7 +117,7 @@ class VaultSubmenuMixin:
         )
 
     def _vault_submenu_entry_visible(self, token: str) -> bool:
-        from ..vault_ui_state import vault_submenu_entries
+        from ..vault.ui.ui_state import vault_submenu_entries
         if not self.config.vault_active:
             return False
         entries = vault_submenu_entries(

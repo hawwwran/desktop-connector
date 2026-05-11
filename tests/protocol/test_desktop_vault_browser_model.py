@@ -15,7 +15,7 @@ from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_browser_model import (  # noqa: E402
+from src.vault.ui.browser_model import (  # noqa: E402
     BrowserIndex,
     _split_path,
     decrypt_manifest,
@@ -140,14 +140,14 @@ class SplitPathSafetyTests(unittest.TestCase):
                          ["Documents", "etc", "passwd"])
 
     def test_dotdot_emits_skip_unsafe_warning(self) -> None:
-        with self.assertLogs("src.vault_browser_model", level="WARNING") as cm:
+        with self.assertLogs("src.vault.ui.browser_model", level="WARNING") as cm:
             _split_path("Documents/../etc/passwd")
         joined = "\n".join(cm.output)
         self.assertIn("vault.browser.skip_unsafe", joined)
         self.assertIn("path=", joined)
 
     def test_clean_path_does_not_emit_warning(self) -> None:
-        logger = logging.getLogger("src.vault_browser_model")
+        logger = logging.getLogger("src.vault.ui.browser_model")
         # `assertLogs` requires at least one record — verify the clean
         # path doesn't emit one by capturing through a manual handler.
         captured: list[logging.LogRecord] = []

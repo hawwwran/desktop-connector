@@ -314,7 +314,7 @@ class TwoWayCycleTests(unittest.TestCase):
 
         # And the cycle pushed the conflict copy back to remote so other
         # devices can see it. Decrypt and look for it.
-        from src.vault_browser_model import decrypt_manifest
+        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
             current = decrypt_manifest(observer, relay.current_envelope)
@@ -428,7 +428,7 @@ class TwoWayCycleTests(unittest.TestCase):
         # And the modification flowed back to remote — the cycle should
         # have re-uploaded the file as a fresh version on top of the
         # tombstone.
-        from src.vault_browser_model import decrypt_manifest
+        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
             current = decrypt_manifest(observer, relay.current_envelope)
@@ -480,7 +480,7 @@ class TwoWayCycleTests(unittest.TestCase):
         self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
 
         from src.vault.manifest import find_file_entry
-        from src.vault_browser_model import decrypt_manifest
+        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
             current = decrypt_manifest(observer, relay.current_envelope)

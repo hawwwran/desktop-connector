@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from .vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from .vault.ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 
 log = logging.getLogger(__name__)
 from .vault.manifest import (

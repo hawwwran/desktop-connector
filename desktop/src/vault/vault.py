@@ -582,7 +582,7 @@ class Vault(RemoteFoldersMixin):
 
         Raises ``ValueError`` if the vault is closed.
         """
-        from ..vault_browser_model import decrypt_manifest
+        from .ui.browser_model import decrypt_manifest
 
         manifest = decrypt_manifest(self, self._manifest_ciphertext)
         if local_index is not None:

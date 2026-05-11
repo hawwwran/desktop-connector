@@ -14,7 +14,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Pango  # noqa: E402
 
-from ..vault_browser_model import list_folder, list_versions
+from ..vault.ui.browser_model import list_folder, list_versions
 from ..vault.ui.time_format import format_local
 from ..windows_common import _format_bytes
 

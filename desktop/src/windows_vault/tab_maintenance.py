@@ -205,7 +205,7 @@ def build_maintenance_tab(ctx: MainContext, win) -> "Gtk.Box":
                         # so "Full check" actually walks bytes (the
                         # earlier call was missing required kwargs and
                         # the worker silently surfaced a TypeError).
-                        from ..vault_browser_model import (
+                        from ..vault.ui.browser_model import (
                             decrypt_manifest as _decrypt_manifest_envelope,
                         )
                         from ..vault_download import _decrypt_chunk

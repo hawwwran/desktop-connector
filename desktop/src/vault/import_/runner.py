@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from ..binding.lifecycle import SyncCancelledError
-from ...vault_browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..crypto import normalize_vault_id
 from ..export.export import (
     BundleContents,

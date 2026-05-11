@@ -321,7 +321,7 @@ def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, 
             current_manifest = res.manifest
     finally:
         vault.close()
-    from src.vault_browser_model import decrypt_manifest as _decrypt
+    from src.vault.ui.browser_model import decrypt_manifest as _decrypt
     vault_observer = _vault()
     try:
         published = _decrypt(vault_observer, relay.current_envelope)

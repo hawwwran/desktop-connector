@@ -16,7 +16,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault_browser_model import list_folder, list_versions  # noqa: E402
+from src.vault.ui.browser_model import list_folder, list_versions  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault_delete import (  # noqa: E402
     delete_file,
@@ -461,7 +461,7 @@ def _seeded_manifest(files: list[tuple[str, str]]) -> dict:
 
 def _decrypt_current_manifest(vault, relay) -> dict:
     """Decrypt whatever envelope the fake relay last accepted."""
-    from src.vault_browser_model import decrypt_manifest as _decrypt
+    from src.vault.ui.browser_model import decrypt_manifest as _decrypt
     if not relay.current_envelope:
         from src.vault.manifest import normalize_manifest_plaintext
         return normalize_manifest_plaintext(relay.current_manifest)

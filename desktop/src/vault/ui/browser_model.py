@@ -13,13 +13,13 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .vault.crypto import (
+from ..crypto import (
     aead_decrypt,
     build_manifest_aad,
     derive_subkey,
     normalize_vault_id,
 )
-from .vault.manifest import normalize_manifest_plaintext
+from ..manifest import normalize_manifest_plaintext
 
 log = logging.getLogger(__name__)
 
