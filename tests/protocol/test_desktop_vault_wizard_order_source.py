@@ -63,16 +63,40 @@ class VaultWizardOrderSourceTests(unittest.TestCase):
         # path of phase 3.
         commit_pos = self.source.index("def _commit_after_publish(vault)")
         publish_pos = self.source.index("vault.publish_initial(relay)")
+        # vault.vault_id assignment and recovery_envelope_meta(.…) write
+        # both live inside _commit_after_publish on the create path.
         for text in (
             'config._data["vault"]["last_known_id"] = vault.vault_id',
             'config._data["vault"]["recovery_envelope_meta"]',
-            "state[\"completed_successfully\"] = True",
         ):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")
             self.assertGreater(
                 self.source.index(text), commit_pos,
                 f"{text!r} must live inside _commit_after_publish",
             )
+        # completed_successfully may also be set on the Resume path
+        # (which adopts an orphan via complete_pending_publish — that
+        # helper publishes and writes config in one atomic call before
+        # returning). Every occurrence must sit inside a function whose
+        # name starts with _commit_after_publish or on_resume_success.
+        completion = "state[\"completed_successfully\"] = True"
+        self.assertIn(completion, self.source)
+        allowed_callers = ("def _commit_after_publish", "def on_resume_success")
+        caller_positions = sorted(
+            self.source.index(name) for name in allowed_callers
+        )
+        cursor = 0
+        while True:
+            pos = self.source.find(completion, cursor)
+            if pos == -1:
+                break
+            # Find the nearest preceding allowed caller.
+            preceding = [c for c in caller_positions if c < pos]
+            self.assertTrue(
+                preceding,
+                f"{completion!r} at offset {pos} is not inside an allowed caller",
+            )
+            cursor = pos + 1
         # Sanity: commit helper itself sits before any publish_initial
         # call site (it's defined before perform_create / on_retry_publish).
         self.assertLess(commit_pos, publish_pos)

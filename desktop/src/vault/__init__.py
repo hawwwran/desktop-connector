@@ -29,17 +29,31 @@ from .recovery_kit import (
     verify_recovery_kit,
     write_recovery_kit_file,
 )
+from .resume import (
+    ResumedVaultState,
+    clear_pending_publish_marker,
+    complete_pending_publish,
+    discard_pending_publish,
+    read_pending_publish_marker,
+    set_pending_publish_marker,
+)
 from .vault import VAULT_CHUNK_SIZE, Vault
 
 __all__ = [
     "RelayProtocol",
+    "ResumedVaultState",
     "VAULT_CHUNK_SIZE",
     "Vault",
+    "clear_pending_publish_marker",
+    "complete_pending_publish",
+    "discard_pending_publish",
     "normalize_vault_id",
     "parse_recovery_kit_file",
+    "read_pending_publish_marker",
     "recovery_envelope_meta_from_json",
     "recovery_envelope_meta_to_json",
     "recovery_kit_path",
+    "set_pending_publish_marker",
     "shred_file",
     "vault_id_dashed",
     "verify_recovery_kit",

@@ -74,6 +74,67 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-12 — Cross-session vault-create orphans get a local-only resume
+
+**Status:** accepted.
+
+**Context.** The vault create flow's four phases run prepare → save_grant
+→ publish_initial → config.save. The 2026-05-07 fix (commit `eb2f71b`)
+folded phases 3 + 4 into one worker call, shrinking the in-session window
+between "row on relay" and "id in config.json" to microseconds. Cross-
+session orphans — rows published in a wizard session that was abandoned
+before config.save() (commit-failure, SIGKILL, network timeout after
+server-side write succeeded) — still leak: the next wizard launch has no
+knowledge of the prior vault id and creates a new one, leaving the
+abandoned row on the relay forever. The dev twin's live-testing surfaced
+this concretely: two `vaults` rows after one user-visible onboarding.
+
+**Decision.** Path A: an in-config pending-publish marker plus a Resume
+/ Discard UI panel on wizard launch. After `save_local_vault_grant`
+returns, `config.vault.pending_publish = {vault_id, server_url, created_at}`
+is persisted via `config.save()`; the same key is cleared in the
+`config.save()` that writes `last_known_id` on success. Wizard launch
+checks the marker — if present and the vault id doesn't match
+`last_known_id`, the wizard opens on a "Resume previous attempt"
+panel. Resume asks for the passphrase, re-derives fresh recovery
+material (new `recovery_secret`, new `argon_salt`, new envelope) using
+the existing master key read from the local grant, then either PUT-
+headers the orphaned relay row (revision N → N+1, recovery rotated) or
+POSTs a fresh row under the same `vault_id` if the relay 404s. Both
+paths converge on the wizard's normal success screen with
+`recovery_secret_bytes` populated, so Export + Verify works as if the
+user had just finished a fresh create. Discard runs the existing
+`feedback_security_ux` confirmation gate before deleting the local
+grant + clearing the marker; the orphan stays on the relay as
+unrecoverable ciphertext and falls out via retention policy.
+
+**Alternatives.** (a) Path B from the live-testing-followup options: a
+new authenticated `DELETE /api/vaults/{vault_id}` endpoint scoped to
+"vault-author-on-this-device-only". Rejected: needs a server schema
+addition (`vaults.created_by_device_id`), a threat-model entry for
+paired-peer deletes, and bidirectional migration. Adds protocol surface
+for one orphan case, with no demand from other features. The harmless-
+ciphertext path is acceptable: a relay row no client holds the master
+key for is byte-equivalent to a deleted row. (b) Adopt-only Resume (no
+re-publish, no PUT-header) — rejected: the prior session's recovery
+material is unrecoverable (random `recovery_secret` was in volatile
+memory only), so an adopt without rotation leaves the user with a vault
+that has no working recovery path. Rotating on Resume removes that
+trap. (c) Persist the entire `_pending_publish` payload to disk so
+Resume can byte-identically re-POST — rejected: the payload includes
+the wrapped master key in cleartext-against-disk form (it's already AEAD
+under the recovery_envelope_id key, but storing the assembled bundle
+isn't necessary when the grant gives us the master key directly).
+
+**Anchor.** `desktop/src/vault/resume.py` (marker helpers,
+`complete_pending_publish`, `discard_pending_publish`,
+`ResumedVaultState`); `desktop/src/vault/binding/runtime.py`
+(`VaultHttpRelay.put_header`); `desktop/src/windows_vault/onboard_window.py`
+(resume_or_discard / resume_passphrase / resuming stack pages,
+`perform_resume`, marker set/clear in `perform_create`);
+`tests/protocol/test_desktop_vault_resume.py`. Six new diagnostic events
+under `vault.resume.*` catalogued in `docs/diagnostics.events.md`.
+
 ### 2026-05-11 — Vault subsystem consolidates under `desktop/src/vault/`
 
 **Status:** accepted.

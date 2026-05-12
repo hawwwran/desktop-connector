@@ -63,6 +63,13 @@ def show_vault_onboard(config_dir: Path):
         "exported_kit_path": None,
         "verify_passed": False,
         "delete_after_close": False,
+        # Cross-session orphan recovery — populated on launch if a
+        # pending_publish marker is found in config.json. The user can
+        # Resume (re-derive material + adopt or re-publish under the
+        # same vault id) or Discard (delete the local grant + clear
+        # the marker). Set back to None when Resume completes or
+        # Discard is confirmed.
+        "resume_vault_id": None,
         # T8-pre safety net: defer the relay POST until the local grant
         # is durable. The wizard transitions through three flags so the
         # cancel cleanup knows what to undo on a partial run:
@@ -154,6 +161,12 @@ def show_vault_onboard(config_dir: Path):
         return False
 
     def on_activate(app):
+        from ..vault import (
+            clear_pending_publish_marker,
+            read_pending_publish_marker,
+            vault_id_dashed,
+        )
+
         apply_brand_css()
         apply_theme_mode_from_config_dir(config_dir)
         win = Adw.ApplicationWindow(
@@ -169,6 +182,105 @@ def show_vault_onboard(config_dir: Path):
 
         body = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT)
         toolbar.set_content(body)
+
+        # Step 0 — Resume vs Discard for an orphaned prior wizard run.
+        # The marker is set after save_local_vault_grant in a prior
+        # session and cleared on a successful config commit. Its presence
+        # here means a wizard session was abandoned between phase 2
+        # (grant saved) and phase 4 (config commit) — the relay may or
+        # may not have the row, but the local grant is there. Resume
+        # completes the publish; Discard removes the local material and
+        # starts fresh.
+        resume = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        resume.append(Gtk.Label(
+            label="Unfinished vault setup found",
+            xalign=0, css_classes=["title-2"],
+        ))
+        resume.append(Gtk.Label(
+            label=(
+                "A previous setup didn't finish. Resume completes it "
+                "(you'll be asked for the same passphrase). Discard removes "
+                "the local data — any data on the relay stays as encrypted "
+                "bytes no one can read."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        resume.append(Gtk.Label(
+            label="Vault ID:", xalign=0, css_classes=["dim-label"],
+        ))
+        resume_id_label = Gtk.Label(
+            xalign=0, selectable=True, css_classes=["monospace"],
+        )
+        resume.append(resume_id_label)
+        resume_btn = Gtk.Button(
+            label="Resume previous attempt",
+            css_classes=["pill", "suggested-action"],
+        )
+        discard_btn = Gtk.Button(
+            label="Discard and start fresh", css_classes=["pill"],
+        )
+        resume.append(resume_btn)
+        resume.append(discard_btn)
+        body.add_named(resume, "resume_or_discard")
+
+        # Resume passphrase entry — single field (the user typed both
+        # boxes before so we don't need a confirm; the worker will fail
+        # cleanly on a typo by reporting the relay AEAD/Argon2id outcome).
+        resume_pp = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=12,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        resume_pp.append(Gtk.Label(
+            label="Resume: enter your passphrase",
+            xalign=0, css_classes=["title-3"],
+        ))
+        resume_pp.append(Gtk.Label(
+            label=(
+                "Enter the same recovery passphrase you used when you "
+                "started this setup. We'll rebuild fresh recovery material "
+                "and finish the publish. Your master key (local) is reused — "
+                "this does NOT create a second vault."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        resume_pp_entry = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
+        resume_pp_entry.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Recovery passphrase"],
+        )
+        resume_pp.append(resume_pp_entry)
+        resume_pp_status = Gtk.Label(xalign=0, css_classes=["dim-label"])
+        resume_pp.append(resume_pp_status)
+        resume_pp_continue = Gtk.Button(
+            label="Resume", css_classes=["pill", "suggested-action"],
+        )
+        resume_pp_back = Gtk.Button(label="Back", css_classes=["pill"])
+        resume_pp.append(resume_pp_continue)
+        resume_pp.append(resume_pp_back)
+        body.add_named(resume_pp, "resume_passphrase")
+
+        # Resume "recovering" panel — same shape as the create flow's
+        # "deriving_key" but for the resume worker.
+        resuming = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=16,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        resuming.append(Gtk.Label(
+            label="Recovering vault…", xalign=0, css_classes=["title-2"],
+        ))
+        resuming_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+        )
+        resuming_spinner = Gtk.Spinner()
+        resuming_row.append(resuming_spinner)
+        resuming_row.append(Gtk.Label(
+            label="Re-running Argon2id against your passphrase and contacting the relay.",
+            xalign=0,
+        ))
+        resuming.append(resuming_row)
+        body.add_named(resuming, "resuming")
 
         # Step 1 — choose path.
         choose = Gtk.Box(
@@ -510,7 +622,160 @@ def show_vault_onboard(config_dir: Path):
 
         body.add_named(ok, "success")
 
-        body.set_visible_child_name("choose_path")
+        # --- Resume/Discard wiring ---
+        def on_resume_clicked(_btn) -> None:
+            resume_pp_entry.set_text("")
+            resume_pp_status.set_text("")
+            body.set_visible_child_name("resume_passphrase")
+        resume_btn.connect("clicked", on_resume_clicked)
+
+        def on_resume_back(_btn) -> None:
+            body.set_visible_child_name("resume_or_discard")
+        resume_pp_back.connect("clicked", on_resume_back)
+
+        def on_discard_clicked(_btn) -> None:
+            # feedback_security_ux: never silently auto-delete security
+            # material. Prominent loss warning + explicit confirmation gate
+            # before we drop the grant. The orphan vault is empty (the
+            # user never reached the kit-export step) so the destructive
+            # surface is small, but the rule applies regardless.
+            target_vault = state.get("resume_vault_id")
+            if not target_vault:
+                return
+            dialog = Adw.AlertDialog(
+                heading="Discard the unfinished vault?",
+                body=(
+                    "This removes the local unlock material for the "
+                    "previous attempt. The relay copy stays as encrypted "
+                    "bytes no one can read — it will be cleared by the "
+                    "relay's retention policy. This cannot be undone."
+                ),
+            )
+            dialog.add_response("cancel", "Cancel")
+            dialog.add_response("discard", "Discard")
+            dialog.set_response_appearance(
+                "discard", Adw.ResponseAppearance.DESTRUCTIVE,
+            )
+            dialog.set_default_response("cancel")
+            dialog.set_close_response("cancel")
+
+            def on_discard_response(_dlg, response: str) -> None:
+                if response != "discard":
+                    return
+                from ..vault import discard_pending_publish
+                try:
+                    discard_pending_publish(
+                        Path(config.config_dir), config, target_vault,
+                    )
+                except Exception as exc:
+                    resume_pp_status.set_text(
+                        f"Discard failed: {exc}. Close the wizard and try "
+                        "again."
+                    )
+                    return
+                state["resume_vault_id"] = None
+                body.set_visible_child_name("choose_path")
+            dialog.connect("response", on_discard_response)
+            dialog.present(win)
+        discard_btn.connect("clicked", on_discard_clicked)
+
+        def on_resume_pp_continue(_btn) -> None:
+            entered = resume_pp_entry.get_text()
+            if not entered:
+                resume_pp_status.set_text("Enter your passphrase to continue.")
+                return
+            target_vault = state.get("resume_vault_id")
+            if not target_vault:
+                resume_pp_status.set_text(
+                    "Internal state lost — close this wizard and re-open it."
+                )
+                return
+            state["passphrase"] = entered
+            perform_resume(target_vault, entered)
+        resume_pp_continue.connect("clicked", on_resume_pp_continue)
+
+        def perform_resume(target_vault: str, passphrase: str) -> None:
+            """Resume worker.
+
+            Off-thread: opens the local grant, derives fresh recovery
+            material from the passphrase, then either PUT-headers the
+            existing relay row or POSTs a new one. The success screen
+            ends up with the same state shape as a successful create —
+            Export + Verify works exactly the same way.
+            """
+            from ..vault import complete_pending_publish, vault_id_dashed
+
+            body.set_visible_child_name("resuming")
+            resuming_spinner.start()
+            cancelled: threading.Event = state["wizard_cancelled"]
+
+            def on_resume_failure(message: str) -> bool:
+                resuming_spinner.stop()
+                resume_pp_status.set_text(message)
+                body.set_visible_child_name("resume_passphrase")
+                return False
+
+            def on_resume_success(resumed) -> bool:
+                resuming_spinner.stop()
+                state["vault_id"] = resumed.vault_id
+                state["recovery_secret_bytes"] = resumed.recovery_secret_bytes
+                state["vault_access_secret"] = resumed.vault_access_secret
+                state["recovery_envelope_meta"] = resumed.recovery_envelope_meta
+                state["grant_saved"] = True
+                state["published"] = True
+                state["completed_successfully"] = True
+                state["resume_vault_id"] = None
+                ok_id_entry.set_text(vault_id_dashed(resumed.vault_id))
+                export_status.remove_css_class("error")
+                export_status.add_css_class("dim-label")
+                export_status.set_label("")
+                retry_publish_btn.set_visible(False)
+                export_btn.set_sensitive(True)
+                body.set_visible_child_name("success")
+                return False
+
+            def worker() -> None:
+                if cancelled.is_set():
+                    return
+                try:
+                    resumed = complete_pending_publish(
+                        Path(config.config_dir), config,
+                        target_vault, passphrase,
+                    )
+                except Exception as exc:
+                    GLib.idle_add(
+                        on_resume_failure,
+                        f"Could not resume the previous setup: {exc}",
+                    )
+                    return
+                if cancelled.is_set():
+                    return
+                GLib.idle_add(on_resume_success, resumed)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        # --- Initial-step selection: orphan-aware. ---
+        initial_marker = read_pending_publish_marker(config)
+        last_known_id = None
+        if isinstance(config._data.get("vault"), dict):
+            last_known_id = config._data["vault"].get("last_known_id")
+        if initial_marker and initial_marker["vault_id"] != last_known_id:
+            state["resume_vault_id"] = initial_marker["vault_id"]
+            resume_id_label.set_text(
+                vault_id_dashed(initial_marker["vault_id"])
+            )
+            body.set_visible_child_name("resume_or_discard")
+        else:
+            # Stale marker (matches last_known_id, so the wizard already
+            # finished): clear it so subsequent launches go straight to
+            # the normal flow.
+            if initial_marker is not None:
+                clear_pending_publish_marker(config)
+                try:
+                    config.save()
+                except Exception:
+                    pass
+            body.set_visible_child_name("choose_path")
 
         # Step transitions.
         def on_create_path(_btn):
@@ -548,7 +813,10 @@ def show_vault_onboard(config_dir: Path):
             persist last_known_id + envelope meta to config.json, mark
             the wizard completed, swap to the success screen.
             """
-            from ..vault import recovery_envelope_meta_to_json
+            from ..vault import (
+                clear_pending_publish_marker,
+                recovery_envelope_meta_to_json,
+            )
 
             if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
                 config._data["vault"] = {}
@@ -556,6 +824,7 @@ def show_vault_onboard(config_dir: Path):
             config._data["vault"]["recovery_envelope_meta"] = recovery_envelope_meta_to_json(
                 vault.recovery_envelope_meta
             )
+            clear_pending_publish_marker(config)
             config.save()
             state["completed_successfully"] = True
 
@@ -719,6 +988,23 @@ def show_vault_onboard(config_dir: Path):
                     )
                     return
 
+                # Cross-session orphan guard: the grant is durable now, but
+                # the relay POST is the next step. If the process dies (or
+                # the wizard is closed) between here and config.save() with
+                # last_known_id, the next launch needs to know there is an
+                # unfinished vault to resume. The marker is cleared in the
+                # same config.save() that records last_known_id on success.
+                from ..vault import set_pending_publish_marker
+                try:
+                    set_pending_publish_marker(
+                        config, vault.vault_id, config.server_url,
+                    )
+                except Exception:
+                    # A failure here means the next session can't offer
+                    # Resume — but the wizard can still complete normally.
+                    # Don't abort the run.
+                    pass
+
                 if cancelled.is_set():
                     # The grant is on disk; on_close's existing
                     # grant_saved-and-not-published branch will reap it.
@@ -740,6 +1026,7 @@ def show_vault_onboard(config_dir: Path):
                     return
 
                 try:
+                    from ..vault import clear_pending_publish_marker
                     if "vault" not in config._data or not isinstance(
                         config._data.get("vault"), dict
                     ):
@@ -748,6 +1035,7 @@ def show_vault_onboard(config_dir: Path):
                     config._data["vault"]["recovery_envelope_meta"] = (
                         recovery_envelope_meta_to_json(vault.recovery_envelope_meta)
                     )
+                    clear_pending_publish_marker(config)
                     config.save()
                     state["completed_successfully"] = True
                 except Exception as exc:

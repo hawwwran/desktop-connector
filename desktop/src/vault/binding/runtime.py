@@ -139,6 +139,39 @@ class VaultHttpRelay:
             raise RuntimeError("Relay returned an invalid vault creation response.")
         return body["data"]
 
+    def put_header(self, vault_id, vault_access_secret, *,
+                   expected_header_revision, new_header_revision,
+                   encrypted_header, header_hash):
+        """CAS-replace the encrypted header. Used by the resume flow to
+        rotate recovery material after a cross-session orphan adoption.
+        """
+        payload = {
+            "expected_header_revision": int(expected_header_revision),
+            "new_header_revision": int(new_header_revision),
+            "encrypted_header": base64.b64encode(encrypted_header).decode("ascii"),
+            "header_hash": header_hash,
+        }
+        resp = self._conn.request(
+            "PUT",
+            f"/api/vaults/{vault_id}/header",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=payload,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while replacing the vault header.")
+        if resp.status_code == 409:
+            from ..relay_errors import VaultCASConflictError
+            raise VaultCASConflictError(self._extract_error(resp))
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected vault header replace: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            return resp.json().get("data", {})
+        except ValueError:
+            return {}
+
     def get_header(self, vault_id, vault_access_secret):
         resp = self._conn.request(
             "GET",

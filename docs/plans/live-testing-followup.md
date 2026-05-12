@@ -154,6 +154,17 @@ abandoned wizard run that already published) still need either a
 scoped relay DELETE or a "Resume previous attempt" UI affordance —
 both deferred per the original fix-shape options; not in this pass.
 
+**Status (2026-05-12): done** on `tresor-vault`. Path A landed via
+`desktop/src/vault/resume.py` + `windows_vault/onboard_window.py`:
+in-config `pending_publish` marker written after `save_local_vault_grant`
+and cleared atomically alongside `last_known_id` on success; wizard
+launch detects the marker and offers Resume (re-derive recovery
+material, PUT-header or POST under the same vault id) or Discard
+(confirmation gate per `feedback_security_ux`, then delete grant
++ clear marker). Acceptance verified by 12 tests in
+`tests/protocol/test_desktop_vault_resume.py`; decision logged at
+`docs/architecture-decisions.md#2026-05-12`.
+
 ---
 
 ## 4. Vault Browser doesn't auto-refresh after a sync

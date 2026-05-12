@@ -439,14 +439,25 @@ broke something and must be backed out, not "fixed forward".
 
 ## 2. Cross-session orphan vault rows
 
-### Where this stands today
+Status: **done 2026-05-12** on `tresor-vault`. Path A shipped — in-config
+`pending_publish` marker plus a Resume / Discard panel on wizard
+launch. Resume rotates recovery material using the existing master key
+from the local grant and PUT-headers (orphan adoption) or POSTs (relay
+404s) under the same vault id; Discard runs the `feedback_security_ux`
+confirmation gate before dropping the local grant. Architecture-
+decisions entry dated 2026-05-12. Implementation in
+`desktop/src/vault/resume.py` + `windows_vault/onboard_window.py`;
+acceptance covered by 12 tests in
+`tests/protocol/test_desktop_vault_resume.py`.
+
+### Where this stood (preserved for context)
 
 Documented in detail at `docs/plans/live-testing-followup.md` §3
 (lines 112–155), marked **Status: partial**. The 2026-05-07 fix
 collapsed the in-session window between "publish_initial" and
 "config.save" to microseconds. Cross-session orphans — rows
 published in a wizard session that was abandoned before
-`config.save` ran — still leak.
+`config.save` ran — still leaked.
 
 ### Pick one of two paths
 

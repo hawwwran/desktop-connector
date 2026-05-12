@@ -461,6 +461,12 @@ relay log (filenames are local-only).
 | `vault.restore.skip_symlinked_dest` | desktop | warning | `path`, `reason` | F-D28 — refused to write through a symlink in destination |
 | `vault.restore.skip_unsafe` | desktop | warning | `path` | Restore refused a path traversing outside the destination |
 | `vault.restore.skipped_identical_at_cutoff` | desktop | info | `path`, `version` | F-D16 — restore-at-date short-circuited identical bytes; preserves "restored from snapshot" intent in the activity log |
+| `vault.resume.complete.ok` | desktop | info | `vault` | Cross-session orphan resume succeeded (config + relay back in sync) |
+| `vault.resume.complete.start` | desktop | info | `vault` | Resume worker started for an unfinished wizard session |
+| `vault.resume.create.ok` | desktop | info | `vault` | Resume took the POST path (relay 404'd; new row created under existing vault id) |
+| `vault.resume.discard.ok` | desktop | info | `vault` | Discard finished: local grant deleted, marker cleared |
+| `vault.resume.discard.start` | desktop | info | `vault` | User picked Discard on the resume-or-discard panel |
+| `vault.resume.put_header.ok` | desktop | info | `vault`, `rev` | Resume took the PUT-header path (relay had the orphan; header replaced) |
 | `vault.revoke.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant revoke logs through this surface (F-510) |
 | `vault.rotation.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when access-secret rotation logs through this surface (F-510) |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
