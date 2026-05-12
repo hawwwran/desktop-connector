@@ -91,10 +91,20 @@ class VaultEventCatalogTests(unittest.TestCase):
 
     # ------------------------------------------------------------------
     def _collect_emitted_tags(self) -> set[str]:
-        """grep desktop/src + server/src for `vault.<topic>.<verb>` strings."""
+        """grep desktop/src + server/src for ``"vault.<topic>.<verb>"`` strings.
+
+        Real emit sites open a string literal with the tag (``log.info(
+        "vault.foo.bar message")``) so the positive lookbehind for ``"``
+        or ``'`` excludes Python module-import paths (``from
+        ..vault.foo.bar import X``) and Sphinx cross-references
+        (``:func:`vault.foo.bar```) — both produce ``vault.X.Y`` tokens
+        that aren't event emissions but would otherwise match a quote-
+        agnostic regex.
+        """
         emit_re = re.compile(
-            r'(?<![A-Za-z0-9_])(vault\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*'
-            r'(?:\.[a-z][a-z0-9_]*)?)'
+            r'(?<=["\'])'                                  # string-literal opener
+            r'(vault\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*'    # vault.X.Y
+            r'(?:\.[a-z][a-z0-9_]*)?)'                     # optional .Z
         )
         out: set[str] = set()
         for root in (

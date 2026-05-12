@@ -475,6 +475,7 @@ relay log (filenames are local-only).
 | `vault.sync.autosync.tick` | desktop | info | `reason`, `active_bindings` | F-LT06 — tick fired (`reason ∈ {kick, interval}`) with N bindings to drain |
 | `vault.sync.autosync_flush_failed` | desktop | error | `binding`, exception traceback | F-LT06 — `flush_and_sync_binding` raised; loop continues, manual Sync now still works |
 | `vault.sync.autosync_list_bindings_failed` | desktop | error | exception traceback | F-LT06 — bindings store query raised; tick skipped, retried on next interval |
+| `vault.sync.autosync_state_subscribe_failed` | desktop | error | exception traceback | F-LT06 — `conn.on_state_change` registration raised; the autosync loop still starts but won't be kicked on reconnect (next interval tick still drains) |
 | `vault.sync.autosync_tick_failed` | desktop | error | exception traceback | F-LT06 — `watcher_runtime.tick_all()` raised; flush attempt still proceeds |
 | `vault.sync.binding_disconnect_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — disconnect cancelled an in-flight cycle via the registry |
 | `vault.sync.binding_disconnect_dropping_op` | desktop | info | `binding`, `op_type`, `path`, `attempts` | F-Y30 — per-op audit trail emitted before disconnect drops a pending op |
