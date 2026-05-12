@@ -307,3 +307,143 @@ use a different epoch path and were not in the listed scope.
 ---
 
 ## Add new items below as live testing surfaces them.
+
+---
+
+## 7. Wrong-passphrase rate-limit is Argon2id-implicit, not keyring-backed
+
+**Symptom**: `docs/plans/post-breakup-followups.md` §3 lists
+"wrong-passphrase rate-limit — verify the keyring-backed retry budget
+and the human-readable error path" as a candidate live-test flow.
+Reading the code, no such budget exists.
+
+**Cause**: protection comes entirely from Argon2id's intrinsic cost
+(`vault/recovery_kit.py:verify_recovery_kit` calls
+`derive_recovery_wrap_key` at v1-locked params m=128 MiB / t=4 ≈ 1-10 s
+per attempt). `windows_vault/tab_recovery.py` simply re-enables the
+Test button after each attempt — no counter, no cooldown, no lockout.
+The same holds in `vault/export/bundle.py` for the import flow.
+
+**Fix shape**: this is a doc drift, not a missing feature. At v1 params
+a generated 7-word passphrase has ≈ 84 bits of entropy; Argon2id at
+m=128 MiB takes ≈ 1-10 s/attempt; an offline brute-force is infeasible
+even without a lockout. Online attempts are bounded by physical access
++ Argon2id wall-clock. Recommend rewording the §3 line to "verify
+Argon2id-implicit rate-limit + human-readable error path", and adding a
+note to `docs/architecture-decisions.md` that v1 deliberately ships
+without an explicit retry counter (rejected as redundant given the
+Argon2id cost floor).
+
+**Acceptance**: post-breakup-followups.md §3 wording updated; either an
+ADR entry or a paragraph in CLAUDE.md captures the Argon2id-as-
+rate-limit decision.
+
+**Status (2026-05-12): done**, documentation-only. ADR entry at
+`docs/architecture-decisions.md#2026-05-12` (Wrong-passphrase
+rate-limit is Argon2id-implicit). Plan §3 line in
+`post-breakup-followups.md` reworded to drop the
+"keyring-backed retry budget" framing.
+
+---
+
+## 8. Conflict-naming attempt-exhaust silently overwrites a pre-existing file
+
+**Symptom**: under §A20 conflict resolution, the
+`_unique_conflict_path` helper caps at
+`_MAX_CONFLICT_PATH_ATTEMPTS = 20`. On exhaust it logs
+`vault.sync.conflict_naming_attempts_exhausted` and returns the last
+candidate — which already exists by definition (that's why the loop
+continued). The caller then writes to that path, silently overwriting
+a pre-existing conflict copy.
+
+**Cause**: two call sites:
+
+- `desktop/src/vault/ops/restore.py:548` — restore-time conflicts.
+  After 20 collisions, `_download_one(target=conflict_target)` writes
+  to a path that already exists.
+- `desktop/src/vault/binding/twoway.py:733` — two-way sync conflicts.
+  Same shape; the inline comment ("silently growing the path is the
+  worse failure") acknowledges the trade-off but the actual exhaust
+  behavior is silent overwrite, not growth.
+
+The 20-attempt cap is reachable only when the user runs ≥ 20 conflict-
+producing operations in the same UTC minute against the same path with
+the same device name — a pathological churn pattern. But the data-loss
+window is real.
+
+**Fix shape**: on exhaust, fall back to a longer disambiguator (UUID,
+microsecond timestamp, or a count file in the parent dir) instead of
+returning a path the caller will then overwrite. Two-line patch each
+site.
+
+**Acceptance**: test asserts that after exhausting 20 candidates,
+`_unique_conflict_path` returns a path that does NOT exist on disk.
+
+**Status (2026-05-12): done** on `tresor-vault`. F-LT07:
+`make_conflict_path` gained a `random_token=` parameter; both
+`_unique_conflict_path` helpers (restore + twoway) now fall back to a
+4-byte hex-token loop after the 20-attempt numeric cap. Coverage in
+`tests/protocol/test_desktop_vault_conflict_naming.py`
+`ConflictPathExhaustFallbackTests` asserts the returned path doesn't
+collide.
+
+---
+
+## 9. Debug bundle leak scan has narrow gaps for URL-safe base64 and
+   token-like field names
+
+**Symptom**: the debug-bundle redaction + leak scan
+(`vault/diagnostics/debug_bundle.py`) has two narrow gaps the existing
+test suite doesn't cover. Both are future-leak risks rather than
+current leaks (the present config.json shape is exhaustively
+catalogued in `REDACT_KEYS`), but the leak scan is the "last line of
+defence" — its blind spots matter.
+
+**Cause**: 
+
+1. **URL-safe base64.** `FORBIDDEN_PATTERNS` regex 6 requires
+   `[A-Za-z0-9+/]{43,44}` (standard base64). `secrets.token_urlsafe(32)`
+   outputs `[A-Za-z0-9_-]{43}` (url-safe). The vault uses url-safe in
+   `vault_access_secret = secrets.token_urlsafe(32)` (`vault/vault.py`
+   `prepare_new`). If a future code path landed that secret into
+   config.json under a field name that escapes `SENSITIVE_KEY_SUBSTRINGS`
+   (e.g. "bearer", "session"), the value scan would miss it (too short
+   for the 100+ FCM-token regex, wrong character class for the 43-44
+   base64 regex).
+2. **`SENSITIVE_KEY_SUBSTRINGS` is conservative.** The tuple is
+   `("secret", "recovery", "passphrase", "master_key", "authorization",
+   "purge")`. Notable absences: "token", "bearer", "credential",
+   "private". A future "fcm_token" / "session_token" / "private_key"
+   field would not be caught by name; only by value (and only if its
+   value matches FORBIDDEN_PATTERNS — see point 1).
+
+**Fix shape**:
+- Add `"token"`, `"bearer"`, `"credential"`, `"private"` to
+  `SENSITIVE_KEY_SUBSTRINGS`. (Five-character "secret" already implies
+  "secret" but is independent of "token".)
+- Extend the base64-32-bytes regex to a second alternative for url-
+  safe: `[A-Za-z0-9_-]{43,44}` (with the same right-side word-boundary
+  guard).
+- Add a test that round-trips a `token_urlsafe(32)` value through
+  `scan_for_forbidden` and asserts at least one pattern matches.
+
+**Acceptance**: a `secrets.token_urlsafe(32)` placed in a non-redacted
+field of a test config is caught by `build_debug_bundle_bytes` and the
+bundle raises `DebugBundleError` rather than writing the secret.
+
+**Status (2026-05-12): done** on `tresor-vault`. F-LT07:
+`SENSITIVE_KEY_SUBSTRINGS` extended with `token` / `bearer` /
+`credential` / `private`; `FORBIDDEN_PATTERNS` gained a second 32-byte
+shape matching url-safe `[A-Za-z0-9_-]{43,44}` alongside the existing
+`+/` form. Coverage in
+`tests/protocol/test_desktop_vault_debug_bundle.py`
+`ScanForbiddenTests.test_urlsafe_base64_32_byte_secret_is_caught` plus
+the new `SensitiveKeySubstringsTests` class.
+
+**Side note (not a bug)**: `binding_states.json` intentionally
+includes `local_path` per the bundle's docstring. For a user attaching
+the bundle to a public support thread, the home-directory path is
+mildly sensitive. Worth flagging in the bundle export UI ("your
+binding paths will be included") or trimming to leaf-only on export.
+Design decision, not a bug — but recording here so a future "private
+mode" toggle has a known scope.

@@ -527,6 +527,18 @@ this case alone is overkill.
 
 ## 3. Live-testing roadmap
 
+Status: **partial 2026-05-12**. Three flows reviewed via code-read
+(wrong-passphrase rate-limit, concurrent-edits conflict naming, debug
+bundle leak scan); findings captured as items 7-9 in
+`docs/plans/live-testing-followup.md` and all three landed fixes:
+F-LT07 covers items 8 (conflict-naming exhaust fallback) + 9 (leak
+scan extensions); ADR entry 2026-05-12 covers item 7
+(Argon2id-implicit rate-limit). Remaining seven flows (eviction,
+resume-after-kill, cross-device grant, large folder bind, migration
+switch-back, ransomware detector, scheduled purge) still need live
+driver sessions against the dev twin — this thread stays open per the
+doc's own "live testing is continuous" line.
+
 ### Where this stands today
 
 `docs/plans/live-testing-followup.md` invites new items as they
@@ -576,8 +588,10 @@ session against the dev twin; surface bugs into
 - **Ransomware detector trip.** Simulate a mass-rewrite event in a
   bound folder; verify `vault_ransomware_detector.py` pauses sync
   and surfaces the warning.
-- **Wrong-passphrase rate-limit.** Verify the keyring-backed retry
-  budget and the human-readable error path.
+- **Wrong-passphrase rate-limit.** Verify the Argon2id-implicit
+  rate-limit (no explicit retry counter — protection is the m=128 MiB
+  / t=4 cost per attempt) and the human-readable error path. See
+  `docs/architecture-decisions.md` 2026-05-12 (rate-limit decision).
 - **Schedule purge.** Set a purge schedule, fast-forward time
   (mock `_now_rfc3339` if needed), verify the scheduled purge
   fires and audits correctly.

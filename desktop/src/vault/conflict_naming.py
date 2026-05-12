@@ -54,6 +54,7 @@ def make_conflict_path(
     when: datetime | None = None,
     device_name: str | None = None,
     attempt: int = 1,
+    random_token: str | None = None,
 ) -> str:
     """Return the §A20 conflict-copy path for ``original_path``.
 
@@ -77,11 +78,26 @@ def make_conflict_path(
     blow past PATH_MAX on a same-minute collision streak. The loops in
     ``_unique_conflict_path`` (twoway sync, restore) now hold
     ``original_path`` constant and bump ``attempt`` instead.
+
+    F-LT07: ``random_token`` is the exhaust-fallback for the
+    ``_unique_conflict_path`` loops. After 20 numeric ``attempt``
+    values still collide with existing files, callers append a fresh
+    short hex token (4 bytes ⇒ 32 bits ⇒ ~2.3e-10 collision per try)
+    so the returned path is essentially guaranteed unique. Without
+    this, the loops fell through to returning a path that existed by
+    construction and the caller silently overwrote it.
+
+        report (conflict synced laptop 2026-05-06 12-34 a3f2b1c8).pdf
     """
     if not isinstance(kind, str) or not kind.strip():
         raise ValueError("kind must be a non-empty string")
     if not isinstance(attempt, int) or attempt < 1:
         raise ValueError("attempt must be a positive integer")
+    if random_token is not None:
+        if not isinstance(random_token, str) or not random_token.strip():
+            raise ValueError("random_token must be a non-empty string")
+        if not all(ch.isalnum() for ch in random_token):
+            raise ValueError("random_token must be alphanumeric")
 
     raw = str(original_path).replace("\\", "/")
     parts = [p for p in raw.split("/") if p]
@@ -109,6 +125,8 @@ def make_conflict_path(
     pieces.append(timestamp)
     if attempt > 1:
         pieces.append(f"#{attempt}")
+    if random_token is not None:
+        pieces.append(random_token)
     suffix = " (" + " ".join(pieces) + ")"
     new_leaf = f"{stem}{suffix}{ext}"
     return f"{parent}/{new_leaf}" if parent else new_leaf

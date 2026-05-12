@@ -98,6 +98,50 @@ class ScanForbiddenTests(unittest.TestCase):
             [],
         )
 
+    def test_urlsafe_base64_32_byte_secret_is_caught(self) -> None:
+        """F-LT07: `secrets.token_urlsafe(32)` produces a 43-char
+        url-safe base64 string. The pre-fix base64-32-bytes regex
+        required `+/` and missed url-safe `-_`; a `vault_access_secret`
+        value smuggled past field-name redaction would have survived
+        the value scan.
+        """
+        import secrets as _secrets
+        url_safe = _secrets.token_urlsafe(32)
+        # Sanity: token_urlsafe(32) lands at 43-44 chars in `[A-Za-z0-9_-]`.
+        self.assertGreaterEqual(len(url_safe), 43)
+        self.assertLessEqual(len(url_safe), 44)
+        self.assertTrue(all(
+            ch.isalnum() or ch in "_-" for ch in url_safe
+        ))
+        hits = scan_for_forbidden(f'"bearer_value": "{url_safe}"')
+        self.assertNotEqual(hits, [])
+
+
+class SensitiveKeySubstringsTests(unittest.TestCase):
+    """F-LT07: field-name redaction must cover token-like fields too."""
+
+    def test_session_token_field_is_redacted_by_name(self) -> None:
+        config = {"session_token": "value-shorter-than-fcm-but-still-sensitive"}
+        redacted = redact_config(config)
+        self.assertNotIn("session_token", redacted)
+        self.assertIn("<redacted-field>", redacted)
+        self.assertEqual(redacted["<redacted-field>"], "<redacted>")
+
+    def test_bearer_field_is_redacted_by_name(self) -> None:
+        config = {"bearer_token_v2": "any value goes here"}
+        redacted = redact_config(config)
+        self.assertNotIn("bearer_token_v2", redacted)
+
+    def test_private_key_field_is_redacted_by_name(self) -> None:
+        config = {"private_key_b64": "QUJD"}
+        redacted = redact_config(config)
+        self.assertNotIn("private_key_b64", redacted)
+
+    def test_credential_field_is_redacted_by_name(self) -> None:
+        config = {"device_credential": "x"}
+        redacted = redact_config(config)
+        self.assertNotIn("device_credential", redacted)
+
 
 class SchemaDumpTests(unittest.TestCase):
     def setUp(self) -> None:

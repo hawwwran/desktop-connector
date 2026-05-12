@@ -728,6 +728,7 @@ def _stamp_local_entry(
 
 
 _MAX_CONFLICT_PATH_ATTEMPTS = 20
+_MAX_CONFLICT_PATH_TOKEN_RETRIES = 10
 
 
 def _unique_conflict_path(
@@ -740,12 +741,20 @@ def _unique_conflict_path(
 
     F-Y12: bounded. Same-minute repeats use the ``attempt`` parameter
     on :func:`make_conflict_path` (numeric ``#N`` inside the parens)
-    instead of stacking a fresh suffix on every iteration. After 20
-    failed attempts we give up and return the last candidate; an
-    operator hitting that ceiling has either a clock issue or a
-    truly pathological churn pattern, and silently growing the path
-    is the worse failure.
+    instead of stacking a fresh suffix on every iteration.
+
+    F-LT07: cap-hit fallback. The pre-F-LT07 form returned the last
+    numeric candidate on exhaust, but that path *exists* by
+    construction — the caller then opened it for write and silently
+    overwrote a prior conflict copy. The cap path now appends a fresh
+    4-byte hex token (32 bits of entropy) until it finds a free name.
+    A clock-issue or pathological churn that exhausts 20 numeric
+    attempts is real but the silently-growing-path failure mode the
+    previous comment described turned out to be silently-overwriting
+    instead, which is worse.
     """
+    import secrets
+
     when = datetime.now(timezone.utc)
     candidate = ""
     for attempt in range(1, _MAX_CONFLICT_PATH_ATTEMPTS + 1):
@@ -763,7 +772,21 @@ def _unique_conflict_path(
         "kind=synced path=%s attempts=%d",
         relative_path, _MAX_CONFLICT_PATH_ATTEMPTS,
     )
-    return candidate
+    for _ in range(_MAX_CONFLICT_PATH_TOKEN_RETRIES):
+        candidate = make_conflict_path(
+            original_path=relative_path,
+            kind="synced",
+            device_name=device_name,
+            when=when,
+            random_token=secrets.token_hex(4),
+        )
+        if not (local_root / candidate).exists():
+            return candidate
+    raise RuntimeError(
+        f"unable to generate unique conflict path for {relative_path!r} "
+        f"after {_MAX_CONFLICT_PATH_ATTEMPTS} numeric attempts and "
+        f"{_MAX_CONFLICT_PATH_TOKEN_RETRIES} random-token retries"
+    )
 
 
 __all__ = [

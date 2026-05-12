@@ -543,6 +543,7 @@ def _bytes_match_remote(
 
 
 _MAX_CONFLICT_PATH_ATTEMPTS = 20
+_MAX_CONFLICT_PATH_TOKEN_RETRIES = 10
 
 
 def _unique_conflict_path(
@@ -562,10 +563,18 @@ def _unique_conflict_path(
     the existing parens, holding ``original_path`` constant; the
     previous form recursed by passing the prior candidate back as
     ``original_path``, which stacked suffixes and could blow past
-    PATH_MAX on a same-minute repeat streak. Cap at 20 attempts;
-    the cap-hit path logs the exhaust event and returns the last
-    candidate so the caller still gets *some* destination.
+    PATH_MAX on a same-minute repeat streak.
+
+    F-LT07: cap-hit fallback. The pre-F-LT07 form returned the last
+    numeric candidate on exhaust, but that path *exists* by
+    construction — the caller then opened it for write and silently
+    overwrote a prior conflict copy. The cap path now appends a fresh
+    4-byte hex token (`random_token=`) until it finds a free name; with
+    32 bits of entropy a collision per attempt is ~2.3e-10, so 10
+    retries is a vast safety margin.
     """
+    import secrets
+
     candidate = ""
     for attempt in range(1, _MAX_CONFLICT_PATH_ATTEMPTS + 1):
         candidate = make_conflict_path(
@@ -579,7 +588,19 @@ def _unique_conflict_path(
         "kind=restored path=%s attempts=%d",
         relative_path, _MAX_CONFLICT_PATH_ATTEMPTS,
     )
-    return candidate
+    for _ in range(_MAX_CONFLICT_PATH_TOKEN_RETRIES):
+        candidate = make_conflict_path(
+            original_path=relative_path, kind="restored",
+            device_name=device_name, when=when,
+            random_token=secrets.token_hex(4),
+        )
+        if not (destination / candidate).exists():
+            return candidate
+    raise RuntimeError(
+        f"unable to generate unique conflict path for {relative_path!r} "
+        f"after {_MAX_CONFLICT_PATH_ATTEMPTS} numeric attempts and "
+        f"{_MAX_CONFLICT_PATH_TOKEN_RETRIES} random-token retries"
+    )
 
 
 def _preflight_disk_for_plan(

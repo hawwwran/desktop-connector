@@ -74,6 +74,49 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-12 — Wrong-passphrase rate-limit is Argon2id-implicit, no counter
+
+**Status:** accepted.
+
+**Context.** Live-testing pass against the vault create / recovery
+flows surfaced a doc-vs-code drift: `docs/plans/post-breakup-
+followups.md` §3 listed "wrong-passphrase rate-limit — verify the
+keyring-backed retry budget" as a live-test target. There is no
+keyring-backed retry budget anywhere in `vault/recovery_kit.py` or
+`windows_vault/tab_recovery.py`. The wizard's recovery-test path
+re-enables the Test button after every attempt; the export-bundle
+import flow at `vault/export/bundle.py` does the same.
+
+**Decision.** v1 deliberately ships without an explicit retry counter
+or lockout. The rate limit comes from Argon2id at the v1-locked
+parameters (m=128 MiB, t=4, parallelism=1) inside
+`derive_recovery_wrap_key`. Wall-clock cost is ~1-10 s per attempt on
+typical hardware; a generated 7-word passphrase from the in-app
+generator carries ≈ 84 bits of entropy. Offline brute-force is
+infeasible (~10^25 attempts × 1 s/attempt at the locked params);
+online attempts are bounded by physical access to the device + the
+same Argon2id wall-clock floor. The "keyring-backed retry budget"
+wording in the plan doc was aspirational, not implemented, and is
+struck — an explicit counter buys nothing against an attacker who is
+already wall-clock-bound by Argon2id.
+
+**Alternatives.** (a) Add an explicit per-device retry counter in the
+keyring with exponential backoff — rejected. Argon2id already
+enforces the cost floor; a counter adds no defence against an
+attacker with the kit, and the rare in-app typo path (user keeps
+mistyping their own passphrase) deserves UX clarity over a lockout
+that would lock the legitimate user out. (b) Track failure counts in
+config.json (unencrypted) — rejected: an attacker with file-system
+access bypasses it trivially, and a user who hits 5 typos in a row
+shouldn't be locked out for hours. (c) Web-style CAPTCHA after N
+failures — rejected as ill-fit for desktop-local crypto.
+
+**Anchor.** `vault/crypto.py::derive_recovery_wrap_key` (the locked
+Argon2id params); `vault/recovery_kit.py::verify_recovery_kit` (the
+single-attempt verify surface); `windows_vault/tab_recovery.py`
+(Test button re-enable, no counter). Plan §3 line reworded in
+`docs/plans/post-breakup-followups.md`.
+
 ### 2026-05-12 — Cross-session vault-create orphans get a local-only resume
 
 **Status:** accepted.

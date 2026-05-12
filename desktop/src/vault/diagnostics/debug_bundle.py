@@ -70,6 +70,15 @@ FORBIDDEN_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(
         r"(?<![A-Za-z0-9+/=_-])(?!<redacted>)[A-Za-z0-9+/]{43,44}={0,2}(?![A-Za-z0-9+/=])"
     ),
+    # F-LT07: same 32-byte shape but url-safe base64 (`secrets.token_urlsafe(32)`
+    # → 43 chars of `[A-Za-z0-9_-]`). `vault_access_secret` uses this
+    # encoding; without the second alternative a future field name that
+    # escaped SENSITIVE_KEY_SUBSTRINGS would smuggle the value through.
+    # The lookbehind/lookahead guards keep the 100+-char FCM-token rule
+    # below from double-matching this same run.
+    re.compile(
+        r"(?<![A-Za-z0-9+/=_-])(?!<redacted>)[A-Za-z0-9_-]{43,44}(?![A-Za-z0-9_-])"
+    ),
     # FCM-token-shaped values: 100+ chars of url-safe base64.
     re.compile(r"(?<![A-Za-z0-9_-])(?!<redacted>)[A-Za-z0-9_-]{100,}"),
 )
@@ -101,9 +110,18 @@ class DebugBundleError(RuntimeError):
 # as keys — every match becomes ``<redacted-field>`` and the value
 # becomes ``<redacted>`` so a literal grep for these terms in the
 # debug bundle returns nothing.
+#
+# F-LT07: the original set was strictly secret-content nouns. Extended
+# with "token", "bearer", "credential", "private" so a future field
+# named e.g. "session_token" / "fcm_token" / "device_credential" /
+# "private_key_b64" can't smuggle a short (30-100 char) value past the
+# field-name redact and through the value-pattern scan. The cost is a
+# slightly broader false-positive surface (a non-secret key happening
+# to contain "token" would be over-redacted), which is the correct
+# trade for a security-critical leak guard.
 SENSITIVE_KEY_SUBSTRINGS = (
     "secret", "recovery", "passphrase", "master_key", "authorization",
-    "purge",
+    "purge", "token", "bearer", "credential", "private",
 )
 
 

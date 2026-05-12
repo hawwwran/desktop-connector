@@ -346,6 +346,106 @@ class RestoreUniqueConflictPathTests(unittest.TestCase):
         self.assertIn("#4", leaf)
 
 
+class ConflictPathExhaustFallbackTests(unittest.TestCase):
+    """F-LT07 — the 20-attempt cap must fall back to a random-token
+    candidate that doesn't collide, never to an existing path."""
+
+    def test_restore_exhaust_returns_nonexistent_path(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from datetime import datetime, timezone
+        from src.vault.ops.restore import (
+            _MAX_CONFLICT_PATH_ATTEMPTS,
+            _unique_conflict_path,
+        )
+        from src.vault.conflict_naming import make_conflict_path
+
+        when = datetime(2026, 5, 4, 17, 30, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Pre-occupy every numeric attempt so the loop is forced
+            # into the random-token fallback.
+            for attempt in range(1, _MAX_CONFLICT_PATH_ATTEMPTS + 1):
+                cand = make_conflict_path(
+                    original_path="report.pdf", kind="restored",
+                    device_name="Laptop", when=when, attempt=attempt,
+                )
+                (root / cand).parent.mkdir(parents=True, exist_ok=True)
+                (root / cand).write_text("x")
+
+            out = _unique_conflict_path(
+                destination=root,
+                relative_path="report.pdf",
+                device_name="Laptop",
+                when=when,
+            )
+            # Pre-F-LT07 returned an existing path the caller would
+            # overwrite. The fallback now produces a fresh hex token
+            # that doesn't collide with any of the seeded files.
+            self.assertFalse((root / out).exists())
+            leaf = out.split("/")[-1]
+            self.assertEqual(leaf.count("(conflict"), 1)
+            # The fallback form is `(conflict restored ... <8 hex>)`;
+            # no #N suffix because the random token replaces it.
+            self.assertNotIn(" #", leaf.split("(conflict")[1])
+
+    def test_twoway_exhaust_returns_nonexistent_path(self) -> None:
+        import tempfile
+        from pathlib import Path
+        from datetime import datetime, timezone
+        from src.vault.binding.twoway import (
+            _MAX_CONFLICT_PATH_ATTEMPTS,
+            _unique_conflict_path,
+        )
+        from src.vault.conflict_naming import make_conflict_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # The twoway helper picks `when = datetime.now(timezone.utc)`
+            # internally, so we can't pre-fill the numeric attempts at a
+            # known timestamp. Instead, force the same minute by
+            # rounding down + planting attempts at that exact minute,
+            # then verify post-call. We accept a small chance the clock
+            # ticks mid-test (in which case the very first attempt is
+            # free and the test still passes — exhaust isn't exercised
+            # but the contract still holds).
+            when = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+            for attempt in range(1, _MAX_CONFLICT_PATH_ATTEMPTS + 1):
+                cand = make_conflict_path(
+                    original_path="x.txt", kind="synced",
+                    device_name="L", when=when, attempt=attempt,
+                )
+                (root / cand).parent.mkdir(parents=True, exist_ok=True)
+                (root / cand).write_text("x")
+            out = _unique_conflict_path(
+                local_root=root,
+                relative_path="x.txt",
+                device_name="L",
+            )
+            # Contract: the returned path must not collide.
+            self.assertFalse((root / out).exists())
+
+    def test_make_conflict_path_with_random_token(self) -> None:
+        """The fallback uses ``random_token=`` to inject a hex
+        disambiguator inside the parens, alongside attempt=1.
+        """
+        out = make_conflict_path(
+            original_path="report.pdf", kind="restored",
+            device_name="Laptop", when=WHEN, random_token="a3f2b1c8",
+        )
+        self.assertEqual(
+            out,
+            "report (conflict restored Laptop 2026-05-04 17-30 a3f2b1c8).pdf",
+        )
+
+    def test_make_conflict_path_rejects_non_alnum_token(self) -> None:
+        with self.assertRaisesRegex(ValueError, "alphanumeric"):
+            make_conflict_path(
+                original_path="x.txt", kind="synced",
+                random_token="bad/token",
+            )
+
+
 class ShortTimestampTests(unittest.TestCase):
     def test_datetime_round_trip(self) -> None:
         self.assertEqual(short_timestamp(WHEN), "2026-05-04 17-30")
