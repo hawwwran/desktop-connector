@@ -262,7 +262,8 @@ renamed/restructured.
 | `ping.fcm.sent` | server (new) | info | `sender`, `recipient` | HIGH-priority wake dispatched |
 | `ping.fcm.timeout` | server (new) | info | `sender`, `recipient` | Phone didn't respond within 5s |
 | `ping.response.received` | desktop | info | `recipient`, `via`, `rtt_ms` | `via ∈ {fresh, fcm, no_fcm, fcm_failed, fcm_timeout}` |
-| `ping.pong.sent` | android | info | — | Phone's onMessageReceived fired pong |
+| `ping.pong.sent` | android | info | `screen_off`, `metered`, `ok`, `duration_ms` | Phone's onMessageReceived fired pong. Tags added 2026-05-12 to attribute LTE-tail radio cost on cellular sleep (android_logs_4 — ~12 pongs/h on default 5-min desktop cadence). |
+| `ping.pong.failed` | android | warning | `screen_off`, `metered`, `duration_ms`, `error_kind` | Pong threw before completing. |
 | `ping.pong.received` | server (new) | info | `device_id` | Auth middleware already bumped last_seen |
 
 ### poll
@@ -274,6 +275,7 @@ renamed/restructured.
 | `poll.notify.timeout` | server (new), desktop | info | `device_id` | 25s window expired |
 | `poll.notify.available` | desktop, android | info | — | Long-poll probe succeeded |
 | `poll.notify.unavailable` | desktop, android | warning | — | Falls back to regular polling |
+| `poll.loop.iteration` | android | info | `screen_off`, `metered`, `fcm`, `connected` | Top of each pollLoop iteration before any HTTP fires. Tag added 2026-05-12 to count actual long-poll cycles vs screen-off waits — an iteration with `screen_off=true` is a full ~25 s long-poll + LTE tail billed to the app. |
 | `poll.loop.screen_off` | android | info | — | Phone paused polling |
 | `poll.loop.screen_on` | android | info | — | Phone resumed polling |
 | `poll.loop.fcm_wake` | android | info | `type` | FCM woke the poll loop |

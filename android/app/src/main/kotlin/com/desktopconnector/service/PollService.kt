@@ -339,6 +339,15 @@ class PollService : Service() {
 
             val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
             activeApi = api
+            // Per-iteration battery attribution: an iteration that fires
+            // while screen_off=true is one full long-poll (≈25 s) + LTE
+            // tail (≈20–30 s) of radio time billed to the app. Use this
+            // alongside ping.pong.sent to attribute the 137 mAh of
+            // mobile_radio drain — android_logs_4 analysis 2026-05-12.
+            val iterScreenOff = !isScreenOn()
+            val iterMetered = com.desktopconnector.util.NetworkPolicy.isMetered(this)
+            AppLog.log("Poll",
+                "poll.loop.iteration screen_off=$iterScreenOff metered=$iterMetered fcm=${FcmManager.isInitialized} connected=$isConnected")
             try {
                 // Ensure we're connected first
                 if (!isConnected) {
