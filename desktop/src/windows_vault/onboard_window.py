@@ -304,8 +304,34 @@ def show_vault_onboard(config_dir: Path):
             xalign=0, wrap=True, css_classes=["dim-label"],
         ))
         create_btn = Gtk.Button(label="Create a new vault", css_classes=["pill", "suggested-action"])
-        import_btn = Gtk.Button(label="Import from export… (coming in T8)", css_classes=["pill"])
-        import_btn.set_sensitive(False)
+        import_btn = Gtk.Button(label="Import from export…", css_classes=["pill"])
+        import_btn.set_tooltip_text(
+            "Open the import wizard to restore a vault from a "
+            ".dc-vault-export bundle."
+        )
+        # The import wizard lives in its own GTK4 subprocess
+        # (windows_vault_import.py). Mirror the Generate button's
+        # subprocess-spawn pattern below.
+        def on_import_clicked(_btn) -> None:
+            import os as _os
+            import subprocess as _subprocess
+            import sys as _sys
+            appimage = _os.environ.get("APPIMAGE")
+            cmd = (
+                [appimage, "--gtk-window=vault-import",
+                 f"--config-dir={config.config_dir}"]
+                if appimage else
+                [_sys.executable, "-m", "src.windows", "vault-import",
+                 f"--config-dir={config.config_dir}"]
+            )
+            cwd = (None if appimage
+                   else str(Path(__file__).resolve().parent.parent.parent))
+            _subprocess.Popen(cmd, cwd=cwd)
+            # Close the onboard wizard so the user lands on the import
+            # wizard's window cleanly. The onboard close path runs the
+            # standard secret-zero + partial-state cleanup.
+            win.close()
+        import_btn.connect("clicked", on_import_clicked)
         choose.append(create_btn)
         choose.append(import_btn)
         body.add_named(choose, "choose_path")

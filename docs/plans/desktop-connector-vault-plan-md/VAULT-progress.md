@@ -4,6 +4,39 @@ Working tracker. T0 decision lock at [`desktop-connector-vault-T0-decisions.md`]
 
 ---
 
+## Status reconciliation — 2026-05-12
+
+**All phases T0–T14 and T17 are shipped.** The Phase Summary table
+below was stale for weeks: every T-phase's sub-tasks tick `[x]` in the
+detailed breakdown, but the summary line still read `[ ]` for
+T5 onward. Flipping the rollup to match the work that's actually on
+disk.
+
+What remains before "v1 ships":
+
+- **Critical-risks evaluation gate** (see the *Final step* section
+  near the bottom of this file). Read
+  [`desktop-connector-vault-critical-risks-and-weaknesses.md`](desktop-connector-vault-critical-risks-and-weaknesses.md)
+  end-to-end and label every risk as Resolved / Mitigated / Accepted
+  / Open against the as-built code. Until that runs, "v1" remains
+  unlabelled.
+- **Live-testing roadmap** — seven of the ten flows in
+  `docs/plans/post-breakup-followups.md` §3 still want at least one
+  driven session against the dev twin (eviction, resume-after-kill,
+  cross-device grant, large folder bind, migration switch-back,
+  ransomware detector, scheduled purge). Findings flow into
+  `docs/plans/live-testing-followup.md` items 10+.
+- **UI wire-up holes** — a handful of buttons in `tab_maintenance.py`
+  + `tab_danger.py` start `sensitive=False` and never enable; the
+  underlying ops (integrity check, debug-bundle export, clear-vault,
+  clear-folder) all have working backends and tests. One focused PR
+  away.
+
+T15 / T16 (Android browse + sync) stay `[—]` deferred per the v1
+scope decision in T0 §D7.
+
+---
+
 ## How to use this file
 
 - Tick `[x]` when a sub-task lands; `[~]` while working on it; `[!]` if blocked (link the blocker note).
@@ -69,17 +102,17 @@ If a sub-task genuinely requires something the default stack can't provide:
 | T2  | Shared crypto + format test vectors (cross-platform, Python harness) | M1 | `[x]` |
 | T3  | Desktop vault create / open / Vault settings window skeleton + main-settings toggle | M1 | `[x]` |
 | T4  | Remote folders + per-folder usage | M2 | `[x]` |
-| T5  | Remote browser read / download / version list | M2 | `[ ]` |
-| T6  | Browser upload (versions, conflict, CAS merge, resumable) | M3 | `[ ]` |
-| T7  | Browser soft delete + restore (tombstones, retention) | M3 | `[ ]` |
-| T8  | Protected export / import + D9 merge | M4 | `[ ]` |
-| T9  | Relay migration (verify-then-switch, H2 state machine) | M4 | `[ ]` |
-| T10 | Local binding + Backup-only mode | M5 | `[ ]` |
-| T11 | Restore remote → local folder (atomic writes, conflict copies) | M5 | `[ ]` |
-| T12 | Two-way sync (watcher, ransomware detector, CAS merge) | M6 | `[ ]` |
-| T13 | QR-assisted vault grants + revocation + access-secret rotation | M6 | `[ ]` |
-| T14 | Dangerous clear / purge flows (fresh-unlock, typed-confirm, delayed) | M7 | `[ ]` |
-| T17 | Diagnostics + hardening (activity log, redacted local log, integrity check, debug bundle) | M7 | `[ ]` |
+| T5  | Remote browser read / download / version list | M2 | `[x]` |
+| T6  | Browser upload (versions, conflict, CAS merge, resumable) | M3 | `[x]` |
+| T7  | Browser soft delete + restore (tombstones, retention) | M3 | `[x]` |
+| T8  | Protected export / import + D9 merge | M4 | `[x]` |
+| T9  | Relay migration (verify-then-switch, H2 state machine) | M4 | `[x]` |
+| T10 | Local binding + Backup-only mode | M5 | `[x]` |
+| T11 | Restore remote → local folder (atomic writes, conflict copies) | M5 | `[x]` |
+| T12 | Two-way sync (watcher, ransomware detector, CAS merge) | M6 | `[x]` |
+| T13 | QR-assisted vault grants + revocation + access-secret rotation | M6 | `[x]` |
+| T14 | Dangerous clear / purge flows (fresh-unlock, typed-confirm, delayed) | M7 | `[x]` |
+| T17 | Diagnostics + hardening (activity log, redacted local log, integrity check, debug bundle) | M7 | `[x]` |
 | T15 | ~~Android: browse / import / manual upload / QR grant~~ | — | `[—]` |
 | T16 | ~~Android folder sync~~ | — | `[—]` |
 

@@ -558,9 +558,7 @@ relay log (filenames are local-only).
 | `vault.sync.watcher_tick_failed` | desktop | error | `binding` | F-Y13 — coordinator tick raised |
 | `vault.sync.watchers_started` | desktop | info | `vault`, `count` | F-Y13 — boot-time watcher init |
 | `vault.tray.export.notify_failed` | desktop | error | exception traceback | F-T18 — system notification raised while routing the tray Export click |
-| `vault.tray.export.stub` | desktop | info | — | F-T18 — tray Export click; user-routed stub fires a notification pointing at Vault Settings → Recovery → Export. Real export is in the GTK window, not the tray |
-| `vault.tray.import.notify_failed` | desktop | error | exception traceback | F-T18 — system notification raised while routing the tray Import click |
-| `vault.tray.import.stub` | desktop | info | — | F-T18 — tray Import click; user-routed stub fires a notification pointing at Vault Settings → Recovery → Import. Real import wizard runs in its own subprocess, not the tray |
+| `vault.tray.export.stub` | desktop | info | — | F-T18 — tray Export click; data-layer export shipped but no UI launcher yet, so the stub still fires a "not-yet-available" notification (was the path-pointer notification pre-2026-05-12) |
 | `vault.tray.sync_now.notify_failed` | desktop | error | exception traceback | F-T18 — system notification raised while routing the tray Sync now click |
 | `vault.tray.sync_now.stub` | desktop | info | — | F-T18 — tray Sync now click; user-routed stub fires a notification pointing at Vault Settings → Folders → per-binding Sync now. The tray-side handler that would sync directly is intentionally deferred — see `vault_runtime_watchers` for the in-process equivalent |
 | `vault.upload.batch_cas_exhausted` | desktop | warning | `vault`, `additions`, `retries` | F-D25 — folder-upload batch retry budget exhausted; raised the CAS error to caller |

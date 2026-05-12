@@ -106,7 +106,7 @@ class VaultSubmenuMixin:
             ),
             pystray.MenuItem(
                 "Import…",
-                self._vault_import_stub,
+                self._spawn_vault_import,
                 visible=lambda _: self._vault_submenu_entry_visible("import"),
             ),
             pystray.MenuItem(
@@ -346,21 +346,30 @@ class VaultSubmenuMixin:
                     )
 
     def _vault_export_stub(self, *_) -> None:
+        # T8 export bundle logic (vault/export/bundle.py) is shipped at
+        # the data layer but no UI launcher is wired yet. The previous
+        # stub message pointed at "Vault Settings → Recovery → Export…"
+        # which does not exist in the Recovery tab. Until the launcher
+        # lands the honest message is "not yet available in the UI".
         log.info("vault.tray.export.stub")
         try:
             self.platform.notifications.notify(
                 title="Vault — Export",
-                body="Open Vault Settings → Recovery → Export… to back up your vault.",
+                body=(
+                    "Vault bundle export is not yet wired to a UI "
+                    "launcher. The data-layer support is in place; the "
+                    "launcher is tracked in the v1 finish-line work."
+                ),
             )
         except Exception:  # noqa: BLE001
             log.exception("vault.tray.export.notify_failed")
 
-    def _vault_import_stub(self, *_) -> None:
-        log.info("vault.tray.import.stub")
-        try:
-            self.platform.notifications.notify(
-                title="Vault — Import",
-                body="Use Vault Settings → Recovery → Import to load a vault bundle.",
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("vault.tray.import.notify_failed")
+    def _spawn_vault_import(self, *_) -> None:
+        # T8 ships an end-to-end import wizard (windows_vault_import.py)
+        # that takes a `.dc-vault-export` bundle + passphrase, previews
+        # the merge plan against the §D9 default `rename` resolution,
+        # and publishes. Pre-2026-05-12 this tray entry routed to
+        # ``_vault_import_stub`` which only fired a notification
+        # pointing at "Vault Settings → Recovery → Import" — a path
+        # that doesn't exist. The wizard subprocess is the real path.
+        self._open_gtk4_window("vault-import")
