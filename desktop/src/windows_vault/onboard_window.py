@@ -201,10 +201,11 @@ def show_vault_onboard(config_dir: Path):
         ))
         resume.append(Gtk.Label(
             label=(
-                "A previous setup didn't finish. Resume completes it "
-                "(you'll be asked for the same passphrase). Discard removes "
-                "the local data — any data on the relay stays as encrypted "
-                "bytes no one can read."
+                "A previous setup didn't finish. Resume completes it by "
+                "letting you set a recovery passphrase — your local master "
+                "key from the prior attempt is reused, so this is NOT a "
+                "new vault. Discard removes the local data; any bytes on "
+                "the relay become unreadable ciphertext."
             ),
             xalign=0, wrap=True, css_classes=["dim-label"],
         ))
@@ -226,31 +227,41 @@ def show_vault_onboard(config_dir: Path):
         resume.append(discard_btn)
         body.add_named(resume, "resume_or_discard")
 
-        # Resume passphrase entry — single field (the user typed both
-        # boxes before so we don't need a confirm; the worker will fail
-        # cleanly on a typo by reporting the relay AEAD/Argon2id outcome).
+        # Resume passphrase entry. Two fields — same as create flow.
+        # The Resume worker generates a fresh recovery_secret + envelope
+        # keyed on whatever the user types, so this entry effectively
+        # *sets* the passphrase rather than verifying a prior one (the
+        # prior attempt's recovery_secret died with its volatile
+        # memory). A confirm field catches typos that would otherwise
+        # turn into a kit the user can't reproduce.
         resume_pp = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=12,
             margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
         )
         resume_pp.append(Gtk.Label(
-            label="Resume: enter your passphrase",
+            label="Resume: set a recovery passphrase",
             xalign=0, css_classes=["title-3"],
         ))
         resume_pp.append(Gtk.Label(
             label=(
-                "Enter the same recovery passphrase you used when you "
-                "started this setup. We'll rebuild fresh recovery material "
-                "and finish the publish. Your master key (local) is reused — "
-                "this does NOT create a second vault."
+                "Pick a recovery passphrase to finish this vault. We'll "
+                "build fresh recovery material around it; your local "
+                "master key is reused so this stays the same vault — no "
+                "second row on the relay."
             ),
             xalign=0, wrap=True, css_classes=["dim-label"],
         ))
         resume_pp_entry = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
+        resume_pp_confirm = Gtk.PasswordEntry(hexpand=True, show_peek_icon=True)
         resume_pp_entry.update_property(
             [Gtk.AccessibleProperty.LABEL], ["Recovery passphrase"],
         )
+        resume_pp_confirm.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Confirm passphrase"],
+        )
         resume_pp.append(resume_pp_entry)
+        resume_pp.append(Gtk.Label(label="Confirm passphrase", xalign=0))
+        resume_pp.append(resume_pp_confirm)
         resume_pp_status = Gtk.Label(xalign=0, css_classes=["dim-label"])
         resume_pp.append(resume_pp_status)
         resume_pp_continue = Gtk.Button(
@@ -625,6 +636,7 @@ def show_vault_onboard(config_dir: Path):
         # --- Resume/Discard wiring ---
         def on_resume_clicked(_btn) -> None:
             resume_pp_entry.set_text("")
+            resume_pp_confirm.set_text("")
             resume_pp_status.set_text("")
             body.set_visible_child_name("resume_passphrase")
         resume_btn.connect("clicked", on_resume_clicked)
@@ -681,8 +693,21 @@ def show_vault_onboard(config_dir: Path):
 
         def on_resume_pp_continue(_btn) -> None:
             entered = resume_pp_entry.get_text()
-            if not entered:
-                resume_pp_status.set_text("Enter your passphrase to continue.")
+            confirm = resume_pp_confirm.get_text()
+            # Same minimum + match rules as the create flow (F-U23). The
+            # rationale carries over: the user is choosing a passphrase
+            # whose only verifier is a 32 MiB Argon2id derivation, so
+            # short passphrases are weak regardless of how the wizard
+            # arrived at this step.
+            if len(entered) < 12:
+                resume_pp_status.set_text(
+                    "Passphrase must be at least 12 characters. The "
+                    "Generate button on the create flow can produce a "
+                    "stronger 7-word phrase."
+                )
+                return
+            if entered != confirm:
+                resume_pp_status.set_text("Passphrases don't match.")
                 return
             target_vault = state.get("resume_vault_id")
             if not target_vault:
@@ -1001,9 +1026,14 @@ def show_vault_onboard(config_dir: Path):
                     )
                 except Exception:
                     # A failure here means the next session can't offer
-                    # Resume — but the wizard can still complete normally.
-                    # Don't abort the run.
-                    pass
+                    # Resume — but the wizard can still complete normally,
+                    # so don't abort. Log so the failure is visible in a
+                    # debug bundle rather than dropping on the floor.
+                    import logging as _logging
+                    _logging.getLogger("desktop.vault.resume").exception(
+                        "vault.resume.marker_write_failed vault=%s",
+                        vault.vault_id[:8] + "…",
+                    )
 
                 if cancelled.is_set():
                     # The grant is on disk; on_close's existing

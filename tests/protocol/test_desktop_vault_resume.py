@@ -36,6 +36,7 @@ from src.vault.grant.store import (  # noqa: E402
     VaultGrant,
     fallback_grant_path,
 )
+from src.vault.relay_errors import VaultNotFoundError  # noqa: E402
 from src.vault.resume import (  # noqa: E402
     clear_pending_publish_marker,
     complete_pending_publish,
@@ -96,13 +97,10 @@ class FakeResumeRelay:
     def get_header(self, vault_id: str, vault_access_secret: str) -> dict:
         self.get_header_calls += 1
         if vault_id not in self.vaults:
-            # The HTTP adapter raises a RuntimeError with "HTTP 404" on
-            # missing vaults; mirror that wording so the resume worker's
-            # 404 sniffing in `_probe_relay_state` exercises the same
-            # path the production code does.
-            raise RuntimeError(
-                f"Relay rejected vault header fetch: HTTP 404 vault_not_found"
-            )
+            # Mirror the production adapter, which raises the typed
+            # error on HTTP 404 so the resume probe doesn't have to
+            # substring-match an error message.
+            raise VaultNotFoundError(f"orphan {vault_id} no longer on relay")
         row = self.vaults[vault_id]
         return {
             "encrypted_header": row["encrypted_header"],
@@ -456,6 +454,45 @@ class CompletePendingPublishTests(unittest.TestCase):
             marker = read_pending_publish_marker(reopened)
             self.assertIsNotNone(marker)
             self.assertEqual(marker["vault_id"], VAULT_ID)
+
+    def test_missing_grant_raises_cleanly(self) -> None:
+        """If the local grant was deleted out of band between sessions
+        (manual keyring purge, OS-keyring backend swap, half-finished
+        cleanup), Resume cannot proceed. The worker must surface that
+        as a clean error rather than crash partway through publishing —
+        the wizard's failure-handler then routes back to Discard.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = Config(tmp_path)
+            # Marker present but no grant on disk.
+            set_pending_publish_marker(
+                config, VAULT_ID, "http://example.test/relay",
+            )
+
+            def empty_loader():
+                raise RuntimeError("no local grant for this vault")
+
+            relay = FakeResumeRelay()
+            with self.assertRaises(RuntimeError):
+                complete_pending_publish(
+                    tmp_path, config, VAULT_ID, self.PASSPHRASE,
+                    relay=relay,
+                    grant_loader=empty_loader,
+                    argon_memory_kib=ARGON_KIB,
+                    argon_iterations=ARGON_ITERS,
+                )
+
+            # No relay calls, no config mutation, marker still present
+            # so the user can retry or Discard.
+            self.assertEqual(relay.get_header_calls, 0)
+            self.assertEqual(relay.create_calls, 0)
+            self.assertEqual(relay.put_header_calls, 0)
+            reopened = Config(tmp_path)
+            self.assertNotIn(
+                "last_known_id", reopened._data.get("vault", {}),
+            )
+            self.assertIsNotNone(read_pending_publish_marker(reopened))
 
     def test_repeated_resume_against_same_orphan_is_safe(self) -> None:
         """Acceptance: a single onboarding session leaves at most one

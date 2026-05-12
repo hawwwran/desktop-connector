@@ -298,20 +298,20 @@ def _probe_relay_state(relay, vault_id: str, vault_access_secret: str) -> dict:
     """Return ``{"exists": bool, "header_revision": int|None}`` for a vault
     id on the relay.
 
-    Distinguishes "vault row missing" (404 / not-found error) from
-    transport failure (re-raised). The HTTP relay raises generic
-    ``RuntimeError("Relay rejected ... HTTP 404 ...")`` for 404s; the
-    fake relay in tests raises ``KeyError``. Both are detected.
+    Distinguishes "vault row missing" (typed
+    :class:`~vault.relay_errors.VaultNotFoundError`) from transport
+    failure (re-raised). Fake relays in tests can raise ``KeyError`` or
+    the typed error; both map to ``exists=False``. Substring-matching
+    the HTTP error message used to live here and was fragile — a future
+    relay-adapter cleanup that touched the message format could
+    silently flip a 5xx into a fake 404 and trigger a duplicate POST.
     """
+    from .relay_errors import VaultNotFoundError
+
     try:
         header_resp = relay.get_header(vault_id, vault_access_secret)
-    except KeyError:
+    except (KeyError, VaultNotFoundError):
         return {"exists": False, "header_revision": None}
-    except RuntimeError as exc:
-        message = str(exc)
-        if "404" in message or "vault_not_found" in message.lower():
-            return {"exists": False, "header_revision": None}
-        raise
     if not isinstance(header_resp, dict):
         raise RuntimeError("Relay returned an invalid header response on probe.")
     return {

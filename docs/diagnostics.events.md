@@ -466,6 +466,7 @@ relay log (filenames are local-only).
 | `vault.resume.create.ok` | desktop | info | `vault` | Resume took the POST path (relay 404'd; new row created under existing vault id) |
 | `vault.resume.discard.ok` | desktop | info | `vault` | Discard finished: local grant deleted, marker cleared |
 | `vault.resume.discard.start` | desktop | info | `vault` | User picked Discard on the resume-or-discard panel |
+| `vault.resume.marker_write_failed` | desktop | error | `vault`, exception traceback | Persisting the `pending_publish` marker raised; the wizard continues but the next session won't see this attempt as resumable |
 | `vault.resume.put_header.ok` | desktop | info | `vault`, `rev` | Resume took the PUT-header path (relay had the orphan; header replaced) |
 | `vault.revoke.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant revoke logs through this surface (F-510) |
 | `vault.rotation.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when access-secret rotation logs through this surface (F-510) |

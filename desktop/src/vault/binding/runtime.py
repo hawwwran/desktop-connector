@@ -180,6 +180,10 @@ class VaultHttpRelay:
         )
         if resp is None:
             raise RuntimeError("Could not reach the relay while fetching the vault header.")
+        if resp.status_code == 404:
+            from ..relay_errors import VaultNotFoundError
+            err = self._extract_error(resp)
+            raise VaultNotFoundError(err.get("message") or "vault_not_found")
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Relay rejected vault header fetch: HTTP {resp.status_code} "

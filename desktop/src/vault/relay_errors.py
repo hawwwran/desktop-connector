@@ -49,6 +49,24 @@ class VaultChunkMissingError(VaultRelayError):
         )
 
 
+class VaultNotFoundError(VaultRelayError):
+    """Server returned 404 ``vault_not_found`` for a vault-id-scoped call.
+
+    Distinct from :class:`VaultChunkMissingError` so the resume worker
+    can distinguish "the orphan row is still there" from "the row is
+    gone, publish a fresh one under the same id". Substring-matching the
+    HTTP error message would be fragile: a future relay-adapter cleanup
+    that touches the message format could silently flip a 5xx into a
+    fake 404 and cause a duplicate POST.
+    """
+
+    def __init__(self, message: str = "vault_not_found") -> None:
+        super().__init__(
+            {"code": "vault_not_found", "message": message},
+            status_code=404,
+        )
+
+
 class VaultRelayUnexpectedResponseError(RuntimeError):
     """Relay returned HTTP 2xx but the body shape was not what the client expected.
 
