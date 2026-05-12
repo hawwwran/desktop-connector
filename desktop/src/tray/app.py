@@ -264,9 +264,14 @@ class TrayApp(
         self._last_ping_time = 0.0
         self._ping_in_flight = False
         self._ping_lock = threading.Lock()
-        # 5 min between probes: icon may be stale, but phone battery stays near-zero.
-        # On-connect triggers an immediate ping regardless.
-        self._ping_interval = 300.0
+        # 15 min between background probes — was 5 min, but android_logs_4/5
+        # (2026-05-12) attributed ~25 mAh / 10 h on the phone to LTE-tail
+        # cost after each pong over cellular (12 pongs/h × ~25 s tail).
+        # On-connect and menu-open paths still ping immediately/with their
+        # own 30 s cache, so the dot stays accurate when the user actually
+        # looks. See docs/plans/android-radio-tail-cost.md for the dumpsys
+        # methodology behind the number.
+        self._ping_interval = 900.0
 
         def icon_poll():
             was_connected = False
