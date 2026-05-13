@@ -379,44 +379,123 @@ because half the AppLog buffer was unusable. Three changes:
 | 2026-05-12 | `94bedb2` desktop 5 min → 15 min icon-poll cadence | desktop tree |
 | 2026-05-12 | `43fe07b` ping/poll diagnostic tags landed in APK | android |
 | 2026-05-13 ~10:06 | **User reinstalled desktop from source** — first time the cadence fix was actually running for this user | local |
-| 2026-05-13 ~10:30 | `89cd8ad` log-spam coalesce + 3 s timeout + 4000-line buffer | android (this round) |
-| TBD | New APK installed on the phone | — |
+| 2026-05-13 ~10:30 | `89cd8ad` log-spam coalesce + 3 s timeout + 4000-line buffer | android |
+| 2026-05-13 ~10:35 | `89cd8ad` APK installed on the phone | phone |
+| 2026-05-13 ~14:06 | `android_logs_7.txt` exported | phone |
+| 2026-05-13 ~14:30 | `bf83c67` cancellable getSentStatus + transfer byte-attribution logs | android (this round) |
+| 2026-05-13 ~14:35 | `bf83c67` APK installed on the phone | phone |
 
-### What `_7.txt` (or whatever the next dump is) should show
+### What `_7.txt` actually showed (2026-05-13 14:06)
 
-Read this section *with the deploy timeline above*. The cleanest
-acceptance window is a dumpsys taken ≥4 h after the new APK *plus*
-new desktop have both been running uninterrupted on cellular.
+3 h 21 m dumpsys + 3 h 16 m AppLog. App was the *new* `89cd8ad`-built
+APK, desktop was the *new* binary the user reinstalled at ~10:06. So
+this is a true post-fix window, **but** it had heavy transfer activity
+(see §unattributed-bytes below) so it's not a comparable-idle baseline.
 
-1. **Pong cadence visibly settled at ~15 min intervals.** Look at
-   consecutive `ping.pong.sent screen_off=*` timestamps in the
-   AppLog — most gaps should be ≥850 s. If many are still ~300 s,
-   either the new desktop isn't running steady-state or there's a
-   second on-demand ping source we haven't accounted for.
-2. **App-attributed `mobile_radio` ≤ 70 mAh / 10 h equivalent.** For
-   a comparable-activity window. The plan's prediction was 15–20 mAh
-   saving from Option A; baseline was 137. Anything in the 60–70
-   range pro-rated to 10 h is the fix working.
-3. **`delivery.tracker.skipped` lines ≤ 5% of `app.log`.** Streak-
-   coalescing should reduce them from ~1000+ to a handful of
-   first-of-streak entries + a handful of `streak=N` summaries.
-   If they're still dominant, the `withTimeout(3000)` bump didn't
-   actually fix the timeout-driven streaks and we have a separate
-   bug.
-4. **`delivery.tracker.skipped reason=poll_timeout_3000ms` rare.**
-   Should be near-zero. If frequent, the cellular RTT is regularly
-   exceeding 3 s and we need a bigger budget or a different
-   strategy.
-5. **AppLog window ≥ 24 h.** With 4000-line cap + spam fix, the
-   buffer should hold roughly a full day even under normal activity.
-   If still under 12 h, some *other* event is dominating — grep the
-   counts and add the new offender to this doc.
+**Working:**
 
-If items 1–3 land, Option A + this round's log hygiene close the
-investigation. If item 2 underperforms (e.g. only 5–10 mAh saving
-vs predicted 15–20), reopen with Option C (server-side ping debounce)
-or Option D (skip ping if long-poll touched the server recently) —
-both still scoped above.
+- **Log-spam coalesce** — clear win. 1038 raw `delivery.tracker.skipped`
+  lines → 38 first-of-streak + 21 `streak=N` summaries. From 52 % of a
+  2000-line buffer down to ~3 % of a 4000-line buffer.
+- **Pong cadence** — confirmed at 15 min. 17 tagged pongs in 3 h 16 m;
+  intervals dominated by 900–902 s (8 of 16 intervals), with the rest
+  being on-demand pings (62 s, 241 s, 305 s, 361 s, 481 s) piggybacking
+  the background loop on menu opens or connection-state blips.
+- **4000-line buffer** — confirmed; AppLog spans 3 h 16 m with much
+  lower spam, so the rate of *useful* lines per slot is actually higher
+  than before.
+
+**NOT working as intended:**
+
+- **`withTimeout(3000)` did not cancel in-flight OkHttp calls.**
+  Zero `poll_timeout_3000ms` events. Yet streak=38 in the coalesced
+  output means one HTTP call held the in-flight slot for 19 s. The
+  root cause: Kotlin's `withTimeout` sets a cancellation flag on the
+  coroutine, but `OkHttp.execute()` runs on a `Dispatchers.IO` thread
+  and isn't coroutine-aware. The coroutine looks active for the full
+  socket-busy duration. 89cd8ad's bump from 750 → 3000 had no effect
+  on actual call durations. Fixed in `bf83c67` — see next section.
+
+**Mystery: 24 MB rx / 6.5 MB sent attributed to `u0a454` over 3 h 21 m
+with zero `transfer.*` lines in AppLog.** Wi-Fi was 100 % asleep, so
+all of it was cellular. No way to attribute. Plausible suspects: long-
+poll bodies, fasttrack messages, downloaded chunks that never logged
+a `started`-side event. Resolved by `bf83c67`'s byte-attribution logs.
+
+**Radio drain regression — but it's a workload artefact, not a fix
+regression.** App `mobile_radio` 41.8 mAh / 3 h 21 m ≈ 125 mAh / 10 h —
+about the same as the 137 mAh `_4.txt` baseline. Window had 51 k packets
+rx + tx and 24 MB throughput, plus the device's total discharge was
+492 mAh in 3 h 21 m (≈146 mAh/h vs `_6`'s 92 mAh/h). The phone was
+busy beyond just our app. Acceptance criterion #2 needs a comparable-
+idle window — this isn't one.
+
+## Changes deployed in `bf83c67` (2026-05-13)
+
+Two threads, both motivated by what `_7.txt` showed:
+
+1. **`ApiClient.getSentStatus` made coroutine-cancellable.** Now `suspend
+   fun`, routed through `OkHttp.enqueue` + `suspendCancellableCoroutine`.
+   `cont.invokeOnCancellation { call.cancel() }` closes the socket when
+   the surrounding `withTimeout(3000)` fires, unwinding the call
+   immediately. The 89cd8ad timeout bump finally becomes effective.
+
+2. **Byte-attribution logging.** Six new fields / events:
+
+   | Event | New field / addition | Site |
+   |---|---|---|
+   | `transfer.download.started` | new event — `transfer_id`, `chunks`, `mode` | `PollService.receiveFileTransfer` + `receiveStreamingTransfer` (fresh-start branch) |
+   | `transfer.download.resumed` | added `chunks=N` | same functions |
+   | `poll.notify.cycle` | new event — `duration_ms`, `has_pending` | `PollService.pollLoop` after each `longPollNotify` |
+   | `fasttrack.message.pending_listed` | added `encrypted_b64_bytes=B` | `PollService.handleFasttrackMessages` |
+   | `transfer.init.accepted` | added `bytes=$sourceSize` | `UploadWorker.doWork` |
+   | `transfer.upload.completed` | added `bytes=$sourceSize` (both classic + streaming variants) | `UploadWorker.runClassicUpload` / `runStreamingUpload` |
+
+   After this lands, summing all `bytes=` fields across one log window
+   plus the (count × ~1 KB) long-poll bodies and the fasttrack
+   `encrypted_b64_bytes` should account for ~all per-app `mobile_radio`
+   rx/tx in the matching dumpsys window. Anything unaccounted for is
+   a logging gap to close.
+
+### What `_8.txt` should show
+
+Read with the deploy timeline. Cleanest window is a dumpsys taken
+≥4 h after `bf83c67` is running on both ends, with cellular only, log
+cleared at install time. The user cleared the phone log right after
+the `bf83c67` install — so `_8.txt` starts from a clean slate.
+
+1. **Pong cadence ~15 min** — same as `_7`'s confirmation, now over
+   a longer window. Most `ping.pong.sent screen_off=*` gaps ≥850 s,
+   short outliers attributable to menu opens / reconnects.
+2. **Skip streaks short.** The cancellable `getSentStatus` should cap
+   any single in-flight at 3 s = 6 ticks. `delivery.tracker.skipped`
+   `streak=N` summaries should have N ≤ 6 in almost all cases. If
+   N still climbs into the teens or 30s, either a different call is
+   blocking the tracker, or `Call.cancel()` isn't unwinding our
+   OkHttp version cleanly.
+3. **`poll_timeout_3000ms` events present.** Counter-intuitive but
+   important — non-zero count means the cancellation is actually
+   firing. Pre-`bf83c67` this was always zero because the inner call
+   was running uncancelled past 3 s and completing on its own. Post-
+   `bf83c67` we expect some count > 0 whenever cellular RTT spikes.
+4. **Per-app `mobile_radio` rx/tx fully attributable.** Sum `bytes=`
+   across `transfer.download.started`/`completed` +
+   `transfer.upload.completed` + `fasttrack.message.pending_listed
+   encrypted_b64_bytes=` + (`poll.notify.cycle` count × ~1 KB). The
+   sum should be within ~20 % of dumpsys's `Mobile network: …MB
+   received, …MB sent` for `u0a454`. If a big gap remains, identify
+   the offender and add another `bytes=` site for it.
+5. **App `mobile_radio` ≤ 70 mAh / 10 h equivalent — finally.**
+   This is acceptance criterion #2 from the prior round, deferred
+   because `_7.txt` wasn't an idle window. Ideally `_8.txt` is.
+6. **AppLog window ≥ 24 h.** Same as before — buffer should hold
+   roughly a day under normal activity.
+
+If items 1–4 land, the diagnostic surface is now adequate. Items 5–6
+plus a clean idle baseline close the Option A acceptance loop. If
+mobile_radio is still > 100 mAh / 10 h with everything attributed,
+Option C (server-side ping debounce) or Option D (skip ping if long-
+poll touched the server recently) come back in scope.
 
 ## Cross-references
 
