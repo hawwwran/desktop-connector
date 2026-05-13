@@ -23,41 +23,85 @@ class PanesMixin:
     """Tree pane + center file list + right-hand detail pane."""
 
     def _render_tree(self) -> None:
-        if self.tree_box is None:
+        """Render the folder sidebar (Gtk.ListBox with navigation-sidebar style).
+
+        Each row carries its target vault path on the ``_vault_path``
+        Python attribute; the ``row-activated`` signal on the listbox
+        looks it up and calls ``_navigate_to``. The row matching the
+        current ``self.state.path`` is selected (highlighted) at the
+        end so the sidebar always reflects "where you are".
+        """
+        if self.tree_listbox is None:
             return
-        self._clear_box(self.tree_box)
-        root = Gtk.Button(label="Vault", halign=Gtk.Align.START)
-        root.add_css_class("flat")
-        root.connect("clicked", lambda _btn: self._navigate_to(""))
-        self.tree_box.append(root)
+        # Block the row-activated signal while we rebuild + re-select
+        # so programmatic ``select_row`` doesn't bounce back through
+        # ``_navigate_to``.
+        self.tree_listbox.handler_block_by_func(self._on_tree_row_activated)
+        try:
+            self.tree_listbox.remove_all()
+            current_path = str(self.state.path or "")
+            active_row: Gtk.ListBoxRow | None = None
 
-        manifest = self.state.manifest
-        if not manifest:
-            return
+            root_row = self._make_tree_row("Vault", path="", depth=0)
+            self.tree_listbox.append(root_row)
+            if current_path == "":
+                active_row = root_row
 
-        def add_path_button(path: str, depth: int) -> None:
-            assert self.tree_box is not None
-            name = path.split("/")[-1] if path else "Vault"
-            button = Gtk.Button(
-                label=("  " * depth) + name, halign=Gtk.Align.START,
+            manifest = self.state.manifest
+            if manifest:
+                def walk(path: str, depth: int) -> None:
+                    nonlocal active_row
+                    try:
+                        children, _files = list_folder(manifest, path)
+                    except Exception:
+                        return
+                    for child in children:
+                        child_path = str(child["path"])
+                        name = (
+                            child_path.split("/")[-1]
+                            if child_path else "Vault"
+                        )
+                        row = self._make_tree_row(
+                            name, path=child_path, depth=depth,
+                        )
+                        self.tree_listbox.append(row)
+                        if child_path == current_path:
+                            active_row = row
+                        walk(child_path, depth + 1)
+
+                walk("", 1)
+
+            if active_row is not None:
+                self.tree_listbox.select_row(active_row)
+        finally:
+            self.tree_listbox.handler_unblock_by_func(
+                self._on_tree_row_activated,
             )
-            button.add_css_class("flat")
-            button.connect(
-                "clicked", lambda _btn, p=path: self._navigate_to(p),
-            )
-            self.tree_box.append(button)
 
-        def walk(path: str, depth: int) -> None:
-            try:
-                children, _files = list_folder(manifest, path)
-            except Exception:
-                return
-            for child in children:
-                child_path = str(child["path"])
-                add_path_button(child_path, depth)
-                walk(child_path, depth + 1)
+    def _make_tree_row(
+        self, name: str, *, path: str, depth: int,
+    ) -> Gtk.ListBoxRow:
+        """Build one sidebar row: folder icon + label, indented per depth.
 
-        walk("", 1)
+        Indentation tracks the manifest's folder depth so users can read
+        the tree shape visually. Depth 0 (the Vault root) gets no inset.
+        """
+        row = Gtk.ListBoxRow()
+        row._vault_path = path  # type: ignore[attr-defined]
+        body = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+            margin_top=4,
+            margin_bottom=4,
+            margin_start=8 + depth * 16,
+            margin_end=8,
+        )
+        body.append(Gtk.Image.new_from_icon_name("folder-symbolic"))
+        label = Gtk.Label(label=name, xalign=0, hexpand=True)
+        label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        body.append(label)
+        row.set_child(body)
+        return row
 
     def _attach_cell(self, widget: Gtk.Widget, col: int, row: int) -> None:
         assert self.list_grid is not None

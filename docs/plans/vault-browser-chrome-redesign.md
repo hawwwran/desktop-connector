@@ -2,7 +2,10 @@
 
 **Date opened:** 2026-05-13
 **Branch:** `tresor-vault`
-**Status:** in progress (Wave 1 starting)
+**Status:** Waves 1, 1.5, 2 done 2026-05-13. Wave 2's optional
+`Adw.NavigationSplitView` responsive-collapse wrapper is deferred —
+the sidebar redesign landed without it; revisit if narrow-window
+usage becomes a concern.
 
 ## Why this exists
 

@@ -155,7 +155,11 @@ class VaultBrowser(
         self.progress_box: Gtk.Box | None = None
         self.progress_bar: Gtk.ProgressBar | None = None
         self.cancel_btn: Gtk.Button | None = None
-        self.tree_box: Gtk.Box | None = None
+        # Wave 2: the folder sidebar is now a Gtk.ListBox styled
+        # ``navigation-sidebar``. The legacy ``tree_box`` slot is
+        # retired; ``tree_listbox`` is the new home.
+        self.tree_box = None  # legacy slot; kept None for back-compat
+        self.tree_listbox: Gtk.ListBox | None = None
         self.list_grid: Gtk.Grid | None = None
         self.detail_box: Gtk.Box | None = None
 
@@ -424,6 +428,22 @@ class VaultBrowser(
         self.state.path = new_path
         self.state.selected_file = None
         self._render_all()
+
+    def _on_tree_row_activated(
+        self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow,
+    ) -> None:
+        """Sidebar row clicked → navigate to that folder.
+
+        Each row stashes its target path on the ``_vault_path`` Python
+        attribute when constructed in ``_render_tree``. An empty path
+        means the Vault root.
+        """
+        if row is None:
+            return
+        target = getattr(row, "_vault_path", None)
+        if target is None:
+            return
+        self._navigate_to(str(target))
 
     def _on_back_clicked(self, _btn: Gtk.Button) -> None:
         if not self.state.back:

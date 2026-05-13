@@ -335,17 +335,23 @@ class LayoutMixin:
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
         self.outer.append(paned)
 
-        # Left: tree pane (ported in pass 1).
+        # Left: folder sidebar — Wave 2 chrome redesign. A Gtk.ListBox
+        # styled with the Adwaita ``navigation-sidebar`` CSS class so
+        # rows pick up the same look as Files / Calendar / Settings
+        # sidebars (icon + label + selection highlight + hover state).
+        # Row activation drives ``_navigate_to`` via the
+        # ``row-activated`` signal, with each row carrying its target
+        # path as ``Gtk.ListBoxRow.set_action_name`` data via a
+        # ``Gtk.ListBoxRow`` subclass-free pattern: stash the path on
+        # the row using ``set_data``-style attribute assignment.
         tree_scroller = Gtk.ScrolledWindow(min_content_width=160)
-        self.tree_box = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=4,
-            margin_top=8,
-            margin_bottom=8,
-            margin_start=8,
-            margin_end=8,
+        self.tree_listbox = Gtk.ListBox()
+        self.tree_listbox.add_css_class("navigation-sidebar")
+        self.tree_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.tree_listbox.connect(
+            "row-activated", self._on_tree_row_activated,
         )
-        tree_scroller.set_child(self.tree_box)
+        tree_scroller.set_child(self.tree_listbox)
         paned.set_start_child(tree_scroller)
         paned.set_resize_start_child(False)
         paned.set_shrink_start_child(True)
