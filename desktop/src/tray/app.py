@@ -84,11 +84,6 @@ class TrayApp(
         self._vault_autosync_runtime = None  # type: ignore[assignment]
         self._vault_autosync_started = False
         self._vault_autosync_kick = threading.Event()
-        # F-LT07: set while a flush_and_sync_binding call is actively
-        # uploading chunks / publishing the manifest, so the tray icon
-        # paints the yellow-with-blue-border "uploading" sparkle the
-        # transfer pipeline already uses for outgoing transfers.
-        self._vault_autosync_active = False
 
     def run(self) -> None:
         try:
@@ -279,11 +274,13 @@ class TrayApp(
                 changed = False
 
                 # "Outgoing" = uploading OR delivering. Covers the full
-                # uploading → delivering → delivered arc, plus a vault
-                # autosync flush actively writing to the relay (F-LT07).
+                # uploading → delivering → delivered arc for user-initiated
+                # transfers. Vault autosync flushes are excluded — they're
+                # silent background maintenance, and tying the sparkle to a
+                # hung manifest fetch made the icon paint "uploading" for up
+                # to 30 s after the rest of the app reported online.
                 outgoing = (self._upload_status_file.exists()
-                            or self.poller.has_live_outgoing()
-                            or self._vault_autosync_active)
+                            or self.poller.has_live_outgoing())
                 if outgoing != self._was_uploading:
                     self._was_uploading = outgoing
                     self._update_icon()

@@ -314,13 +314,6 @@ class VaultSubmenuMixin:
             for binding in active_bindings:
                 if self._should_quit.is_set():
                     return
-                # F-LT07: paint the "uploading" sparkle for the
-                # duration of each flush. Most no-op ticks finish
-                # within ~100 ms (just a directory walk) and the
-                # icon-poll's 2 s cadence won't even register them;
-                # real uploads stretch over seconds and flip the
-                # icon yellow until they finish.
-                self._vault_autosync_active = True
                 result = None
                 try:
                     result = autosync_runtime.flush_and_sync_binding(
@@ -334,8 +327,6 @@ class VaultSubmenuMixin:
                         "vault.sync.autosync_flush_failed binding=%s",
                         binding.binding_id,
                     )
-                finally:
-                    self._vault_autosync_active = False
                 if result is None:
                     continue
                 outcomes = getattr(result, "outcomes", []) or []
