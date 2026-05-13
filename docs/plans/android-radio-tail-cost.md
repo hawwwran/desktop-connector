@@ -384,6 +384,11 @@ because half the AppLog buffer was unusable. Three changes:
 | 2026-05-13 ~14:06 | `android_logs_7.txt` exported | phone |
 | 2026-05-13 ~14:30 | `bf83c67` cancellable getSentStatus + transfer byte-attribution logs | android (this round) |
 | 2026-05-13 ~14:35 | `bf83c67` APK installed on the phone | phone |
+| 2026-05-13 ~16:39 | `android_logs_8.txt` exported | phone |
+| 2026-05-13 ~17:00 | Server logs retrieved + analysed — confirmed `ping.fcm.timeout` at +5 s, RTT distribution 31% ≥ 3 s | server |
+| 2026-05-13 ~17:30 | `4d3d511` pongClient 3 → 5 s + Clear-log confirmation dialog with battery-stats reset | android |
+| 2026-05-13 ~17:35 | `4d3d511` APK installed on the phone | phone |
+| **2026-05-13 ~17:36** | **Alignment zero point — phone AppLog + phone dumpsys batterystats + server.log + desktop log all cleared together.** Next exports of any of the four will have co-extensive windows starting here. | all |
 
 ### What `_7.txt` actually showed (2026-05-13 14:06)
 
