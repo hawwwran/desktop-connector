@@ -136,7 +136,12 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
         source = _read_browser_source()
 
         for text in (
-            'Gtk.CheckButton(label="Show deleted")',
+            # Wave 1 chrome redesign (2026-05-13): the Show deleted
+            # toggle moved from a body Gtk.CheckButton into a stateful
+            # Gio action backing a hamburger menu item. The action
+            # name is the new stable anchor.
+            '"show-deleted"',
+            'overflow_menu.append("Show deleted"',
             "from ..vault.ops.delete import delete_file",
             "from ..vault.ops.delete import delete_folder_contents",
             "from ..vault.ops.delete import restore_version_to_current",
@@ -194,9 +199,13 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
         source = _read_browser_source()
 
         for text in (
-            # v2 splits the constructor args across lines; the label
-            # literal is the stable anchor.
-            'label="Upload folder"',
+            # Wave 1 chrome redesign (2026-05-13): the standalone
+            # "Upload folder" pill button was folded into the
+            # Adw.SplitButton's dropdown popover, backed by a
+            # window-scoped Gio action ``upload-folder``. The action
+            # name + the menu label are the stable anchors.
+            '"Upload folder…"',
+            '"upload-folder"',
             "from ..vault.upload import upload_folder",
             "select_folder_finish",
             "Upload folder to vault",

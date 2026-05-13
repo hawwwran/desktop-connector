@@ -120,16 +120,25 @@ class VaultBrowser(
         self._app: Adw.Application | None = None
         self.win: Adw.ApplicationWindow | None = None
         self.outer: Gtk.Box | None = None
+        # Legacy slot — used to be the body button strip. Retained at
+        # ``None`` so any straggler reference doesn't NameError; the
+        # action bar now lives in ``Adw.HeaderBar`` (chrome) plus
+        # ``selection_actions_revealer`` (contextual). Drop in Wave 1.5.
         self.action_bar: Gtk.Box | None = None
+        self._toolbar_view: Adw.ToolbarView | None = None
+        self._header_bar: Adw.HeaderBar | None = None
+        self._show_deleted_action = None
+        self._upload_folder_action = None
         self.back_btn: Gtk.Button | None = None
         self.forward_btn: Gtk.Button | None = None
         self.refresh_btn: Gtk.Button | None = None
-        self.upload_btn: Gtk.Button | None = None
+        self.upload_btn: Adw.SplitButton | None = None
         self.upload_folder_btn: Gtk.Button | None = None
         self.delete_btn: Gtk.Button | None = None
         self.versions_btn: Gtk.Button | None = None
         self.download_btn: Gtk.Button | None = None
         self.show_deleted_toggle: Gtk.CheckButton | None = None
+        self.selection_actions_revealer: Gtk.Revealer | None = None
         # Resume "banner" is a custom horizontal Gtk.Box (not Adw.Banner)
         # because Adw.Banner only supports a single action button. Users
         # need both Resume (continue the interrupted upload) and Cancel
@@ -174,7 +183,10 @@ class VaultBrowser(
         )
         toolbar = Adw.ToolbarView()
         self.win.set_content(toolbar)
-        toolbar.add_top_bar(Adw.HeaderBar())
+        # Header bar is added by ``_build_action_bar`` (it owns the
+        # populated header now). Stash the toolbar view so the builder
+        # can reach it.
+        self._toolbar_view = toolbar
 
         self.outer = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -249,6 +261,28 @@ class VaultBrowser(
         if self.forward_btn is not None:
             self.forward_btn.set_sensitive(bool(self.state.forward))
 
+    def _update_selection_actions_visibility(self) -> None:
+        """Reveal the contextual action bar when there's something to act on.
+
+        Bar is open when:
+        - A file is selected (Download / Versions / Delete all apply), or
+        - We're inside a remote folder with no file selected
+          (Download = save the folder, Delete = remove the folder).
+
+        With nothing selected and outside any remote folder, the bar
+        is hidden — destructive actions need a target.
+        """
+        if self.selection_actions_revealer is None:
+            return
+        has_file = bool(self.state.selected_file)
+        has_folder_context = (
+            bool(self.state.path)
+            and self._resolve_upload_destination() is not None
+        )
+        self.selection_actions_revealer.set_reveal_child(
+            has_file or has_folder_context,
+        )
+
     # ------------------------------------------------------------------ render
     def _render_all(self, message: str | None = None, css_class: str = "dim-label") -> None:
         if self.breadcrumb is not None:
@@ -278,6 +312,7 @@ class VaultBrowser(
             )
             can_delete_folder = upload_destination is not None
             self.delete_btn.set_sensitive(can_delete_file or can_delete_folder)
+        self._update_selection_actions_visibility()
         if message is not None:
             self._set_status(message, css_class)
 
@@ -352,13 +387,6 @@ class VaultBrowser(
             self.cancel_btn.set_visible(False)
         if self.progress_box is not None:
             self.progress_box.set_visible(True)
-
-    def _on_show_deleted_toggled(self, button: Gtk.CheckButton) -> None:
-        self.state.show_deleted = bool(button.get_active())
-        # v1 line 1820: also clear the selection so a tombstoned row
-        # doesn't keep its detail pane after the toggle hides it.
-        self.state.selected_file = None
-        self._render_all()
 
     # ------------------------------------------------------------------ download folder name (shared helper)
     @staticmethod
