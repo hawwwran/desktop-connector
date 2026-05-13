@@ -11,22 +11,32 @@ shipped, plus three follow-up cleanups (`vault_download/` split, dead
 re-exports dropped, `vault_local_state` import normalized). Live-testing
 items 1–6 in `live-testing-followup.md` shipped on 2026-05-07.
 
-Three open threads remain. Each one is real work, none of them are
-documented as standalone plans today:
+Three threads started here. As of 2026-05-13, two have closed and
+one stays open:
 
-1. **`vault_*.py` → `vault/` package consolidation.** Mentioned in one
-   line at the bottom of breakup item #9, never planned out.
-2. **Cross-session orphan vault rows on the relay.** Partial fix landed
-   on 2026-05-07; `live-testing-followup.md` §3 spells out the deferred
-   options but doesn't pick one.
-3. **Live-testing roadmap.** `live-testing-followup.md` invites new
-   items but has no list of *what* to drive next.
-
-Pick any one and start; they're independent.
+1. ✅ **`vault_*.py` → `vault/` package consolidation.** Done — Waves
+   A–G landed across 2026-05-09 → 2026-05-13. Full per-wave detail
+   in §1 below.
+2. ✅ **Cross-session orphan vault rows on the relay.** Done
+   2026-05-12 — Path A (Resume affordance) shipped. Full detail in
+   §2 below.
+3. ⏳ **Live-testing roadmap.** Partial — three flows covered via
+   code-read (items 7–9 in `live-testing-followup.md`); seven flows
+   still need live-driver sessions. §3 below tracks the open list.
 
 ---
 
 ## 1. Fold `vault_*.py` into the `vault/` package
+
+Status: **done 2026-05-13** on `tresor-vault`. Waves A–G all landed
+(see per-wave commit tables below); zero flat `vault_*.py` modules and
+zero flat `vault_*/` data packages remain in `desktop/src/`. The
+`vault_folders/` top-level package is intentionally kept (Folders TAB
+UI, not vault data) — the original Target layout's suggested rename to
+`windows_vault/folders_tab/` has been formally retired (see Target
+layout note below). The legacy-paths AST guard in
+`tests/protocol/test_desktop_vault_no_legacy_paths.py` prevents
+regressions.
 
 ### Progress (2026-05-11)
 
@@ -147,11 +157,15 @@ subsystems folded under `vault/` in a single commit:
 
 Resolves the last four triple-dot bridges from the Wave C review.
 
-**Wave F (shim cleanup) is still todo** — but the original plan
-called for "delete shims" after Waves A–E migrate all callers.
-Our move-only approach didn't create shims (we rewrote callers in
-lockstep), so Wave F is effectively a no-op grep verification:
-no `from src.vault_X import` should remain anywhere.
+**Wave F — shim cleanup — done.** Our move-only approach never
+created shims (callers were rewritten in lockstep), so Wave F
+collapsed into a grep verification: `grep -rln "from src\.vault_\|
+from \.vault_\|import vault_" desktop/ tests/` returns only the
+legacy-paths guard test file itself, an unrelated `tray/vault_submenu`
+sibling import inside `desktop/src/tray/`, and the function-name
+`vault_id_dashed` re-export — no flat vault module imports remain.
+The AST-based guard in `tests/protocol/test_desktop_vault_no_legacy_paths.py`
+now enforces this on every test run.
 
 ### Known follow-ups
 
@@ -326,11 +340,17 @@ Naming notes:
   *Folders tab UI* (a GTK4 widget tree). Inside the new `vault/`
   package, the data-layer name `vault.folder` is singular to keep it
   clearly different from the GTK tab. The Folders TAB itself does not
-  move into `vault/` — it stays under `windows_vault/folders_tab.py`
-  (or sibling to `windows_vault/`) because it's UI, not vault logic.
-  Track the rename `vault_folders/` → `windows_vault/folders_tab/`
-  in the same wave as the data-layer move so importers fix in one
-  pass.
+  move into `vault/` — it stays at top-level `vault_folders/` because
+  it's UI, not vault logic. **The originally-planned rename to
+  `windows_vault/folders_tab/` was retired during execution:** the
+  Folders tab is its own subprocess window peer to other
+  `windows_vault/*` tabs only in lifecycle, not in code shape, and
+  nesting it under `windows_vault/` would have implied a parent-child
+  import relationship that doesn't exist. Keeping it as a top-level
+  sibling package matches its actual coupling. The
+  `test_desktop_vault_folders_rename_source.py` guard pins the
+  current import shape so a future rename would be a deliberate,
+  reviewed change rather than drift.
 - **`import_` trailing underscore.** Python's `import` keyword
   forbids the bare name; `import_` is the established convention.
 - **No `vault.errors` consolidation in Wave A.** Original plan
@@ -618,17 +638,17 @@ grant) so future sessions can run them automatically.
 
 ## Sequencing recommendation
 
+Status: **items 1 and 2 closed; only item 3 (live-testing roadmap)
+remains open.**
+
 If picking up cold:
 
-1. **Item 2 first** (cross-session orphans, Path A). Smallest, ships
-   one focused commit on `tresor-vault`, immediately improves the
-   onboarding flow.
-2. **Item 3** (live-testing flows). Pick two or three from the list
-   above and run them; capture findings as items 7+ in
+1. **Item 3** (live-testing flows). Pick two or three from the
+   seven still-open flows (eviction, resume-after-kill, cross-device
+   grant, large folder bind, migration switch-back, ransomware
+   detector, scheduled purge) and run them against the dev twin per
+   `docs/testing/vault-tests.md`; capture findings as items 10+ in
    `live-testing-followup.md`.
-3. **Item 1** (vault package consolidation). Big. Wave A and Wave B
-   are mechanical and safe; Wave C onward needs concentrated
-   review windows. Don't start Wave C the day before a release tag.
 
-These don't block each other — feel free to interleave or tackle
-out of order.
+Item 1 (vault package consolidation) closed 2026-05-13. Item 2
+(cross-session orphan vault rows) closed 2026-05-12.
