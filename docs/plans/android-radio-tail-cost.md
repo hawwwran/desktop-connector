@@ -279,6 +279,145 @@ If A under-delivers (e.g. only 5–8 mAh saving), consider stacking:
   interval on cellular) — the dump shows 15 s cadence even when the
   metered-fast-path should give us 60 s; that's a separate bug.
 
+### What `android_logs_6.txt` actually showed (2026-05-13 09:52)
+
+Mixed-signal window — partial confirmation of Option A plus a clearer
+view of the log-spam side issue.
+
+**Timeline** (important for reading this and any later dump):
+
+- `94bedb2` desktop fix (5 min → 15 min icon-poll cadence): committed
+  2026-05-12. **User reinstalled the desktop binary 2026-05-13 ~10:06**
+  — *after* the dumpsys window in `_6.txt` ended (06:48 → 09:52).
+  Consequence: this dumpsys saw ~3 h of mixed old/new desktop, not
+  pure new-desktop steady state.
+- `_6.txt` carries the dumpsys block at the top (3 h 4 m, since-charge)
+  + the AppLog tail (14 h, MAX_LINES=2000 cap). The two windows don't
+  align — AppLog is line-rotated, not time-rotated.
+
+**Dumpsys (3 h 4 m window, 06:48 → 09:52, com.desktopconnector = u0a454):**
+
+| Metric | `_6.txt` | Pro-rated 10 h | Baseline `_4.txt` (10 h 49 m) |
+|---|---:|---:|---:|
+| App total drain | 32.9 mAh | ~107 | 146 |
+| App `mobile_radio` | 26.8 mAh | ~87 | 137 |
+| App CPU | 4.20 mAh | ~14 | 9.08 |
+| Mobile radio active | 29 m 23 s (16%) | — | 2 h 24 m (22%) |
+| Packets rx/tx | 49 047 / 49 378 | — | 122 778 / 82 290 |
+| Data rx/tx | 22.05 MB / 6.55 MB | — | 74.4 MB / 22.5 MB |
+| Radio activations | 32 | — | 204 |
+| Foreground service | 3 h 2 m (99% of window) | — | — |
+
+Headline: app `mobile_radio` pro-rates **~127 → ~87 mAh / 10 h** =
+**–31%** vs `_4.txt`. Caveat — the desktop was on the new binary for
+only the last ~0% of this dumpsys window (user reinstalled *after* the
+dumpsys was exported), so the saving is almost certainly an artefact
+of fewer transfers / different user activity, not the cadence change.
+
+**AppLog (14 h window, 19:47 → 09:52, MAX_LINES=2000 cap):**
+
+| Event | Count | % of buffer |
+|---|---:|---:|
+| `delivery.tracker.skipped reason=previous_in_flight` | **1038** | **52%** |
+| `connection.check.succeeded` | 389 | 19% |
+| `fcm.message.received type=ping` | 163 | 8% |
+| `ping.pong.sent` (tagged) | 30 | 1.5% |
+| transfer events | 13 | 0.7% |
+
+Half the rotating buffer is the `delivery.tracker.skipped` noise the
+plan flagged in the prior round as a "Surprise finding." Untagged
+`ping.pong.sent` lines (133 of 163 total) are from the *pre*-diag-tag
+APK — the cadence-fix-only one. They show only the timestamp, not the
+screen/metered context.
+
+**Pong cadence — the one piece that already confirms Option A.**
+Looking at the freshest pongs (live `app.log` pulled via ADB
+2026-05-13 ~10:22, after both the user's desktop reinstall *and* the
+overnight phone-on-charger period that cleared all in-flight state):
+
+```
+20:22:56 [yesterday evening — last pong before phone went idle]
+10:06:56 [next pong — first one after user's desktop restart]
+10:21:57 [+901 s exactly]   ← 15-min cadence ✓
+```
+
+Inside the old/new desktop overlap window earlier in the same AppLog,
+intervals were 5–14 min — exactly what you'd see if the old-binary
+desktop (5-min) and the new-binary desktop (15-min) were briefly
+active back-to-back across the user's reinstall plus on-demand pings
+from menu opens.
+
+**Conclusion on Option A**: the +901 s pair is confirmation enough
+that the cadence fix takes effect when the new desktop binary is the
+only ping source. A clean steady-state measurement is still pending
+in `_7.txt` or later.
+
+## Changes deployed since `_6.txt` analysis (commit `89cd8ad`)
+
+The log-spam side-issue from `_5.txt` got stacked into this round
+because half the AppLog buffer was unusable. Three changes:
+
+1. **`AppLog.MAX_LINES` 2000 → 4000.** Doubles the rotating buffer
+   for longer post-hoc investigations.
+2. **`deliveryTrackerLoop` streak-coalescing.** First skip in a run
+   logs `delivery.tracker.skipped reason=previous_in_flight` as
+   before; subsequent ticks are silent; on streak end (next non-skip
+   tick) emits `delivery.tracker.skipped reason=previous_in_flight
+   streak=N` if N>1. Streak is also flushed on early-exit paths
+   (screen-off, no trackedIds) so a streak doesn't span unrelated
+   periods.
+3. **`withTimeout(750)` → `withTimeout(3000)`** in the tracker poll.
+   The 750 ms budget was Wi-Fi-LAN-sized; cellular routinely exceeded
+   it, which is *what created* the in-flight skip streaks. Bumping
+   the budget cuts the skip count at the source, not just at the log
+   sink. Log tag renamed `poll_timeout_3000ms`.
+
+### Deploy timeline (for reading later dumpsys against)
+
+| When | What | Where |
+|---|---|---|
+| 2026-05-12 | `94bedb2` desktop 5 min → 15 min icon-poll cadence | desktop tree |
+| 2026-05-12 | `43fe07b` ping/poll diagnostic tags landed in APK | android |
+| 2026-05-13 ~10:06 | **User reinstalled desktop from source** — first time the cadence fix was actually running for this user | local |
+| 2026-05-13 ~10:30 | `89cd8ad` log-spam coalesce + 3 s timeout + 4000-line buffer | android (this round) |
+| TBD | New APK installed on the phone | — |
+
+### What `_7.txt` (or whatever the next dump is) should show
+
+Read this section *with the deploy timeline above*. The cleanest
+acceptance window is a dumpsys taken ≥4 h after the new APK *plus*
+new desktop have both been running uninterrupted on cellular.
+
+1. **Pong cadence visibly settled at ~15 min intervals.** Look at
+   consecutive `ping.pong.sent screen_off=*` timestamps in the
+   AppLog — most gaps should be ≥850 s. If many are still ~300 s,
+   either the new desktop isn't running steady-state or there's a
+   second on-demand ping source we haven't accounted for.
+2. **App-attributed `mobile_radio` ≤ 70 mAh / 10 h equivalent.** For
+   a comparable-activity window. The plan's prediction was 15–20 mAh
+   saving from Option A; baseline was 137. Anything in the 60–70
+   range pro-rated to 10 h is the fix working.
+3. **`delivery.tracker.skipped` lines ≤ 5% of `app.log`.** Streak-
+   coalescing should reduce them from ~1000+ to a handful of
+   first-of-streak entries + a handful of `streak=N` summaries.
+   If they're still dominant, the `withTimeout(3000)` bump didn't
+   actually fix the timeout-driven streaks and we have a separate
+   bug.
+4. **`delivery.tracker.skipped reason=poll_timeout_3000ms` rare.**
+   Should be near-zero. If frequent, the cellular RTT is regularly
+   exceeding 3 s and we need a bigger budget or a different
+   strategy.
+5. **AppLog window ≥ 24 h.** With 4000-line cap + spam fix, the
+   buffer should hold roughly a full day even under normal activity.
+   If still under 12 h, some *other* event is dominating — grep the
+   counts and add the new offender to this doc.
+
+If items 1–3 land, Option A + this round's log hygiene close the
+investigation. If item 2 underperforms (e.g. only 5–10 mAh saving
+vs predicted 15–20), reopen with Option C (server-side ping debounce)
+or Option D (skip ping if long-poll touched the server recently) —
+both still scoped above.
+
 ## Cross-references
 
 - Earlier round of this same investigation: `android_logs_3` analysis
