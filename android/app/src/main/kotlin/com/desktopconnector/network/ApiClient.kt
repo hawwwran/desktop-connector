@@ -533,9 +533,27 @@ class ApiClient(
 
     // Short-timeout client for liveness pong — must fit inside FCM's
     // ~10s onMessageReceived wakelock even on slow networks.
+    //
+    // Read timeout was 3 s. android_logs_8.txt caught a 22-minute window
+    // of pong timeouts at duration_ms=~3100 — pongs hitting the 3 s cap,
+    // not server failures. Server logs for the same window confirmed
+    // why: the relay's ping handler waits up to 5 s for `last_seen_at`
+    // to update (`Liveness (ping/pong)` in CLAUDE.md), and the pong
+    // POSTs were arriving server-side at exactly +5 s while the client
+    // had bailed at +3 s. So the 3 s phone cap was the wrong side of an
+    // intermittent RTT spike (cellular tower hand-off, PHP worker
+    // contention, modem cold-start) and the only side timing out.
+    //
+    // When pong drops on the client, the desktop's connection state
+    // flips, on-reconnect re-pings fire, and the phone ends up in a
+    // retry storm (60–130 s cadence instead of the steady 15 min).
+    //
+    // 5 s matches the server's own polling budget: if the response
+    // comes back at all, we wait for it. Still leaves ~5 s slack inside
+    // FCM's onMessageReceived wakelock.
     private val pongClient = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
     fun pong(): Boolean {

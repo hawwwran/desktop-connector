@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
 import com.desktopconnector.crypto.PairedDeviceInfo
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
+import com.desktopconnector.data.BatteryStatsDumper
 import com.desktopconnector.data.ThemeMode
 import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
@@ -416,6 +417,15 @@ fun SettingsScreen(
                 val context = LocalContext.current
                 var loggingOn by remember { mutableStateOf(prefs.loggingEnabled) }
                 var showLogsDialog by remember { mutableStateOf(false) }
+                var showClearDialog by remember { mutableStateOf(false) }
+                // Same gate as LogsDialog's battery-stats toggle: only show the
+                // "also reset battery stats" option on devices where DUMP is
+                // granted (developer-mode setups). Without DUMP the reset call
+                // fails silently, so don't surface a button that can't work.
+                val hasDumpPermission = remember {
+                    context.checkSelfPermission(android.Manifest.permission.DUMP) ==
+                        PackageManager.PERMISSION_GRANTED
+                }
 
                 Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
                     Text("Logs", style = MaterialTheme.typography.titleSmall)
@@ -437,13 +447,27 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SettingsActionButton(onClick = { AppLog.clear() }) {
+                        SettingsActionButton(onClick = { showClearDialog = true }) {
                             Text("Clear")
                         }
                         SettingsActionButton(onClick = { showLogsDialog = true }) {
                             Text("Download Logs")
                         }
                     }
+                }
+
+                if (showClearDialog) {
+                    ClearLogsDialog(
+                        showBatteryOption = hasDumpPermission,
+                        onDismiss = { showClearDialog = false },
+                        onConfirm = { resetBattery ->
+                            AppLog.clear()
+                            if (resetBattery) {
+                                BatteryStatsDumper.reset()
+                            }
+                            showClearDialog = false
+                        },
+                    )
                 }
 
                 if (showLogsDialog) {
@@ -508,6 +532,66 @@ fun SettingsScreen(
             )
         }
     }
+}
+
+@Composable
+private fun ClearLogsDialog(
+    showBatteryOption: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (resetBattery: Boolean) -> Unit,
+) {
+    // Default ON when the option is visible — the typical investigation
+    // workflow wants AppLog and dumpsys windows to line up. Users who
+    // only want a log clear toggle it off.
+    var resetBattery by remember { mutableStateOf(showBatteryOption) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Clear log?") },
+        text = {
+            Column {
+                Text(
+                    "Removes all in-app log entries. This cannot be undone.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (showBatteryOption) {
+                    Spacer(Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "Also reset battery stats",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Switch(
+                            checked = resetBattery,
+                            onCheckedChange = { resetBattery = it },
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Resets the dumpsys batterystats since-charge " +
+                            "counters so the next export's window matches " +
+                            "the freshly-cleared log.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(showBatteryOption && resetBattery) }) {
+                Text("Clear")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 @Composable
