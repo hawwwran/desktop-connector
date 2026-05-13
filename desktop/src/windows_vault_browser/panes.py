@@ -114,8 +114,16 @@ class PanesMixin:
         return row
 
     def _select_file(self, file_row: dict) -> None:
+        """State-only setter.
+
+        Callers that immediately follow with ``_render_all`` get the
+        Details pane painted for free; callers that don't (the
+        ``row-selected`` handler) must call ``_render_detail``
+        explicitly. Keeping this state-only avoids the double-render
+        per menu click that the earlier "render inside the setter"
+        shape produced.
+        """
         self.state.selected_file = file_row
-        self._render_detail(file_row)
 
     def _render_file_list(self) -> None:
         """Render the center file list as a Gtk.ListBox of cards.

@@ -172,9 +172,8 @@ class VaultBrowser(
         self.tree_box = None  # legacy slot; kept None for back-compat
         self.tree_listbox: Gtk.ListBox | None = None
         # Wave 3.2: list_grid slot retired in favour of list_listbox.
-        self.list_grid = None  # legacy slot; kept None for back-compat
+        self.list_grid: Gtk.Grid | None = None  # legacy slot; kept None for back-compat
         self.list_listbox: Gtk.ListBox | None = None
-        self.list_grid: Gtk.Grid | None = None
         self.detail_box: Gtk.Box | None = None
 
         # F-U03: workers running long-flow operations (download / etc)
@@ -290,37 +289,40 @@ class VaultBrowser(
         bp.add_setter(self.split_view, "show-sidebar", False)
         self.win.add_breakpoint(bp)
 
-    def _scroll_to_versions(self) -> None:
+    def _scroll_to_versions(self) -> bool:
         """Wave 3.5: jump the Details pane to the Versions heading.
 
-        Called from ``_menu_action_versions`` via ``GLib.idle_add`` so
-        the layout pass has completed and the heading label has a
-        valid allocation. ``compute_point`` converts the label's
-        origin (0, 0) into ``detail_box`` coordinates, which is what
-        the scroller's vertical adjustment expects.
+        Scheduled via ``GLib.idle_add`` so the layout pass has
+        completed and the heading label has a valid allocation.
+        ``compute_point`` converts the label's origin (0, 0) into
+        ``detail_box`` coordinates, which is what the scroller's
+        vertical adjustment expects. Returns ``False`` so ``idle_add``
+        treats it as one-shot.
         """
         if (
             self.detail_scroller is None
             or self.detail_box is None
             or self._versions_heading_label is None
         ):
-            return
+            return False
         try:
             from gi.repository import Graphene
             success, point = self._versions_heading_label.compute_point(
                 self.detail_box, Graphene.Point.zero(),
             )
         except Exception:
-            return
+            log.debug("scroll-to-versions compute_point failed", exc_info=True)
+            return False
         if not success:
-            return
+            return False
         vadj = self.detail_scroller.get_vadjustment()
         if vadj is None:
-            return
+            return False
         # A small upward bias gives the heading a bit of breathing room
         # from the scroll-area's top edge.
         target = max(0.0, point.y - 8.0)
         vadj.set_value(min(target, vadj.get_upper() - vadj.get_page_size()))
+        return False
 
     def _refresh_on_focus(self, window, _pspec) -> None:
         if not window.get_property("is-active"):
@@ -344,15 +346,8 @@ class VaultBrowser(
         ``css_class`` is the legacy semantic tag: ``"success"`` /
         ``"error"`` / ``"dim-label"`` (info/idle). Wave 3.1 drives a
         fixed-position icon on the header bar; the message becomes
-        the icon's tooltip. The body ``self.status_label`` is kept
-        in sync as a transitional fallback (removed in Wave 3.4).
+        the icon's tooltip.
         """
-        if self.status_label is not None:
-            for klass in ("dim-label", "error", "success"):
-                self.status_label.remove_css_class(klass)
-            self.status_label.add_css_class(css_class)
-            self.status_label.set_label(message)
-        # Drive the header-bar icon.
         if css_class == "success":
             self._update_status_icon("success", message, auto_clear_seconds=4)
         elif css_class == "error":
@@ -380,7 +375,6 @@ class VaultBrowser(
         # wiped by the previous state's timer.
         if self._status_timeout_id is not None:
             try:
-                from gi.repository import GLib
                 GLib.source_remove(self._status_timeout_id)
             except Exception:
                 pass
@@ -411,8 +405,6 @@ class VaultBrowser(
         self._status_icon.set_visible(True)
 
         if auto_clear_seconds is not None and auto_clear_seconds > 0:
-            from gi.repository import GLib
-
             def _clear() -> bool:
                 self._status_timeout_id = None
                 self._update_status_icon("idle", "", auto_clear_seconds=None)
@@ -541,7 +533,7 @@ class VaultBrowser(
         """
         self._select_file(dict(file_row))
         self._render_all()
-        GLib.idle_add(lambda: (self._scroll_to_versions(), False)[1])
+        GLib.idle_add(self._scroll_to_versions)
 
     def _menu_action_delete_file(self, file_row: dict) -> None:
         """Per-row file menu: confirm + delete the file.
@@ -674,6 +666,7 @@ class VaultBrowser(
             file_row = getattr(row, "_vault_file_row", None)
             if file_row is not None:
                 self._select_file(dict(file_row))
+                self._render_detail(self.state.selected_file)
                 return
         # Folder row or empty row: clear file selection so the
         # Details pane doesn't show stale info from a previous click.

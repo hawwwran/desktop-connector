@@ -231,6 +231,34 @@ def apply_brand_css() -> None:
         background-color: {DC_BLUE_400};
         background-image: none;
     }}
+
+    /* Status-icon recolour: Adwaita's default `.success` is green and
+       `.error` is red, but the visual identity guide retires red and
+       uses brand blue for success / brand orange for error. Scope to
+       `image` so labels (which also use these classes) keep their
+       semantic colouring elsewhere in the app. */
+    image.success {{
+        color: {DC_BLUE_500};
+    }}
+    image.error {{
+        color: {DC_ORANGE_700};
+    }}
+
+    /* Destructive popover menu items: the global `button.destructive-action`
+       rule above paints a solid-orange pill, which is right for banner
+       Cancel buttons but heavy for a row inside a popover. Inside any
+       popover, flatten the destructive style to transparent background
+       + orange text so per-row hamburger menus read as conventional
+       Adwaita destructive items. */
+    popover button.destructive-action,
+    popover button.destructive-action:hover,
+    popover button.destructive-action:focus,
+    popover button.destructive-action:active,
+    popover button.destructive-action:checked {{
+        background-color: transparent;
+        background-image: none;
+        color: {DC_ORANGE_700};
+    }}
     """.encode("utf-8")
 
     provider = Gtk.CssProvider()
