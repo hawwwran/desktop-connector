@@ -84,6 +84,16 @@ class LayoutMixin:
         menu_button.set_tooltip_text("More")
         header_bar.pack_end(menu_button)
 
+        # Wave 3.1: fixed-position status icon. Sits between the
+        # hamburger and the upload group so layout never shifts on
+        # success / error / info state changes — only the icon glyph
+        # + tooltip update. Hidden when idle (no message) so the
+        # chrome is uncluttered.
+        self._status_icon = Gtk.Image()
+        self._status_icon.set_pixel_size(16)
+        self._status_icon.set_visible(False)
+        header_bar.pack_end(self._status_icon)
+
         # Refresh action backs the menu item; the off-tree
         # ``self.refresh_btn`` mirrors its sensitivity for legacy callers.
         refresh_action = Gio.SimpleAction.new("refresh", None)

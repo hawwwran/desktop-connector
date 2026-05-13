@@ -141,6 +141,9 @@ class VaultBrowser(
         self.selection_actions_revealer: Gtk.Revealer | None = None
         # Wave 1.5: window title (header subtitle is the current path).
         self._window_title: Adw.WindowTitle | None = None
+        # Wave 3.1: fixed-position status icon in the header bar.
+        self._status_icon: Gtk.Image | None = None
+        self._status_timeout_id: int | None = None
         # Resume "banner" is a custom horizontal Gtk.Box (not Adw.Banner)
         # because Adw.Banner only supports a single action button. Users
         # need both Resume (continue the interrupted upload) and Cancel
@@ -250,12 +253,88 @@ class VaultBrowser(
             child = nxt
 
     def _set_status(self, message: str, css_class: str = "dim-label") -> None:
-        if self.status_label is None:
+        """Set the user-facing status state.
+
+        ``css_class`` is the legacy semantic tag: ``"success"`` /
+        ``"error"`` / ``"dim-label"`` (info/idle). Wave 3.1 drives a
+        fixed-position icon on the header bar; the message becomes
+        the icon's tooltip. The body ``self.status_label`` is kept
+        in sync as a transitional fallback (removed in Wave 3.4).
+        """
+        if self.status_label is not None:
+            for klass in ("dim-label", "error", "success"):
+                self.status_label.remove_css_class(klass)
+            self.status_label.add_css_class(css_class)
+            self.status_label.set_label(message)
+        # Drive the header-bar icon.
+        if css_class == "success":
+            self._update_status_icon("success", message, auto_clear_seconds=4)
+        elif css_class == "error":
+            self._update_status_icon("error", message, auto_clear_seconds=None)
+        else:
+            # ``dim-label`` covers transient info-style messages
+            # ("Downloading foo…") plus the empty/idle clear path.
+            if message:
+                self._update_status_icon("info", message, auto_clear_seconds=4)
+            else:
+                self._update_status_icon("idle", "", auto_clear_seconds=None)
+
+    def _update_status_icon(
+        self, state: str, tooltip: str, *, auto_clear_seconds: int | None,
+    ) -> None:
+        """Drive the header-bar status icon.
+
+        States: ``idle`` (hidden), ``success`` (brand blue check),
+        ``error`` (brand orange triangle), ``info`` (dim info-i).
+        Optional ``auto_clear_seconds`` schedules a fade back to idle.
+        """
+        if self._status_icon is None:
             return
-        for klass in ("dim-label", "error", "success"):
-            self.status_label.remove_css_class(klass)
-        self.status_label.add_css_class(css_class)
-        self.status_label.set_label(message)
+        # Cancel any pending auto-clear so a new state doesn't get
+        # wiped by the previous state's timer.
+        if self._status_timeout_id is not None:
+            try:
+                from gi.repository import GLib
+                GLib.source_remove(self._status_timeout_id)
+            except Exception:
+                pass
+            self._status_timeout_id = None
+
+        icon_for_state = {
+            "success": "emblem-ok-symbolic",
+            "error": "dialog-error-symbolic",
+            "info": "dialog-information-symbolic",
+        }
+        css_for_state = {
+            "success": "success",
+            "error": "error",
+            "info": "dim-label",
+        }
+        if state == "idle":
+            self._status_icon.set_visible(False)
+            self._status_icon.set_tooltip_text(None)
+            for klass in ("success", "error", "dim-label"):
+                self._status_icon.remove_css_class(klass)
+            return
+
+        self._status_icon.set_from_icon_name(icon_for_state[state])
+        for klass in ("success", "error", "dim-label"):
+            self._status_icon.remove_css_class(klass)
+        self._status_icon.add_css_class(css_for_state[state])
+        self._status_icon.set_tooltip_text(tooltip or None)
+        self._status_icon.set_visible(True)
+
+        if auto_clear_seconds is not None and auto_clear_seconds > 0:
+            from gi.repository import GLib
+
+            def _clear() -> bool:
+                self._status_timeout_id = None
+                self._update_status_icon("idle", "", auto_clear_seconds=None)
+                return False  # one-shot
+
+            self._status_timeout_id = GLib.timeout_add_seconds(
+                auto_clear_seconds, _clear,
+            )
 
     def _current_path_label(self) -> str:
         path = str(self.state.path)

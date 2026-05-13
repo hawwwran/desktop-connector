@@ -2,10 +2,123 @@
 
 **Date opened:** 2026-05-13
 **Branch:** `tresor-vault`
-**Status:** Waves 1, 1.5, 2 done 2026-05-13. Wave 2's optional
-`Adw.NavigationSplitView` responsive-collapse wrapper is deferred —
-the sidebar redesign landed without it; revisit if narrow-window
-usage becomes a concern.
+**Status:** Waves 1, 1.5, 2 done 2026-05-13. Wave 3 (status icon +
+per-row hamburger menus + file cards) starting 2026-05-13. Wave 2's
+optional `Adw.NavigationSplitView` responsive-collapse wrapper is
+deferred — the sidebar redesign landed without it; revisit if
+narrow-window usage becomes a concern.
+
+## Wave 3 — status icon + per-row hamburger menus + file cards (planned 2026-05-13)
+
+Live-driving the new chrome surfaced three issues:
+
+1. The `_set_status` body label paints under the resume + quota
+   banners. When it appears (e.g. "Vault browser refreshed.") it
+   pushes the file list down by one row; when it disappears the file
+   list jumps back. Layout jitter on every refresh.
+2. The selection-driven action bar from Wave 1 (Download / Versions /
+   Delete revealing on selection) still moves the layout when it
+   appears, and its semantics overload "the selected row" — but the
+   sidebar folder rows have no selection, so Folder-level Download /
+   Delete have to ride on a separate path through
+   `_resolve_upload_destination`. Three sources of truth for "what
+   does each action target" is two too many.
+3. The center file list is a `Gtk.Grid` with five columns: Name,
+   Size, Modified, Versions, Status. The Modified column carries a
+   `format_local(...)` output ("Tue, 13 May 2026 22:08 +02:00") that
+   forces the column to a width the rest of the grid can't recover
+   from — Status gets crammed, Name gets squeezed, the whole row
+   reads as cluttered. The grid's all-rows-share-column-widths
+   property is the wrong fit for variable-content file rows.
+
+### Wave 3.1 — status icon in the header bar
+
+`self._status_icon` packed onto the header bar between the
+SplitButton group and the hamburger. States:
+
+- **idle** — icon hidden; no tooltip.
+- **success** (`emblem-ok-symbolic`, brand blue `#3986FC`) — tooltip
+  carries the message. Auto-fades to idle after 4 s.
+- **error** (`dialog-error-symbolic`, brand orange `#EA7601`) —
+  tooltip carries the message. Persists until the next status update.
+- **info** (`dialog-information-symbolic`, dim) — tooltip carries
+  the message. Persists for 4 s like success.
+
+The body `self.status_label` is removed in Wave 3.4. Wave 3.1 drives
+both during the transition for safety.
+
+### Wave 3.2 — file list → `Gtk.ListBox` of cards
+
+Replace the `Gtk.Grid` in `_render_file_list` with a vertical
+`Gtk.ListBox`. Each row is a `Gtk.Box` with:
+
+- **Prefix**: 24×24 icon (`folder-symbolic` for folders;
+  `text-x-generic-symbolic` for files, with a dim tone for deleted).
+- **Center column** (`hexpand=True`):
+  - title: file name (`title-4` class, ellipsised on overflow)
+  - subtitle: size · modified · versions (· status, when non-empty),
+    `dim-label` + `caption`. The Modified component shows the short
+    relative form ("3 May" / "yesterday" / "14:22") — the long ISO
+    form already lives in the right-hand Details pane.
+- **Suffix**: `Gtk.MenuButton` with `view-more-symbolic`, packed at
+  the end. Menu items:
+  - **For folders**: Download folder, Delete folder.
+  - **For files**: Download, Versions, Delete. (Versions opens the
+    file's detail pane and scrolls to the Versions section — see
+    Wave 3.5 polish.)
+
+Selection of a file (single click on the row body) still drives the
+right-hand Details pane via `_select_file`. Activating a folder row
+navigates into it via the same `row-activated` signal used by the
+sidebar.
+
+The column-header row at the top of the grid goes away — each card
+carries its own labels.
+
+### Wave 3.3 — sidebar folder rows → per-row hamburger
+
+Each `Gtk.ListBoxRow` built by `_make_tree_row` gains a
+`Gtk.MenuButton` suffix with the same `view-more-symbolic` icon. Menu:
+
+- Download folder
+- Delete folder
+
+The Vault root row gets no menu (you can't download "everything" or
+delete the root). The menu uses the same Gio action shape as Wave
+3.2 (parameterised actions taking the folder path).
+
+### Wave 3.4 — remove the now-unused chrome
+
+Once Waves 3.1–3.3 land:
+
+- Drop `self.selection_actions_revealer` from `_build_action_bar`
+  and `_build_breadcrumb_and_status` — every action it surfaced is
+  now on a per-row menu, and the chrome doesn't shift on selection.
+- Drop `self.status_label` from `_build_breadcrumb_and_status` —
+  the body label is replaced by the header icon.
+- Convert `self.download_btn` / `self.versions_btn` /
+  `self.delete_btn` to off-tree compatibility slots (same shape as
+  `upload_folder_btn`'s bridge). Legacy `set_sensitive` calls become
+  no-ops; the per-row menus carry their own enable/disable state.
+
+### Acceptance for Wave 3
+
+- Status icon never moves the layout. Showing / clearing it leaves
+  the breadcrumb, list, and detail pane all in place.
+- Refreshing the browser shows a brief green-check icon with the
+  refresh message as a tooltip; auto-clears after ~4 s.
+- An error (e.g. relay unreachable) shows an orange icon that
+  persists until cleared by the next status update.
+- Sidebar folder rows have a hamburger icon at their right edge.
+  Clicking it opens Download / Delete menu items wired to the folder.
+- File cards in the center pane have all five fields readable at
+  default window width; the date no longer breaks the row.
+- Each file card has a hamburger menu with Download / Versions /
+  Delete. The Folders that appear in the file list (when at the
+  Vault root) only show Download / Delete (no Versions).
+- The selection-action bar from Wave 1 is gone; selecting a file
+  still updates the right-hand Details pane, but doesn't change the
+  chrome.
 
 ## Why this exists
 
