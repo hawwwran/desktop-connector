@@ -85,6 +85,10 @@ class PanesMixin:
 
         Indentation tracks the manifest's folder depth so users can read
         the tree shape visually. Depth 0 (the Vault root) gets no inset.
+
+        Wave 3.3 (2026-05-13): non-root rows get a hamburger MenuButton
+        suffix with Download folder / Delete folder. The Vault root row
+        is unchanged — you can't download or delete "everything".
         """
         row = Gtk.ListBoxRow()
         row._vault_path = path  # type: ignore[attr-defined]
@@ -100,39 +104,54 @@ class PanesMixin:
         label = Gtk.Label(label=name, xalign=0, hexpand=True)
         label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         body.append(label)
+
+        if path:
+            # Non-root: attach per-row hamburger with Download / Delete.
+            body.append(
+                self._make_row_menu_button(folder={"path": path, "name": name}),
+            )
         row.set_child(body)
         return row
-
-    def _attach_cell(self, widget: Gtk.Widget, col: int, row: int) -> None:
-        assert self.list_grid is not None
-        self.list_grid.attach(widget, col, row, 1, 1)
-
-    def _attach_label(
-        self, text: str, col: int, row: int, *, header: bool = False,
-    ) -> None:
-        label = Gtk.Label(label=text, xalign=0, hexpand=(col == 0))
-        label.set_wrap(True)
-        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        if header:
-            label.add_css_class("dim-label")
-        self._attach_cell(label, col, row)
 
     def _select_file(self, file_row: dict) -> None:
         self.state.selected_file = file_row
         self._render_detail(file_row)
 
     def _render_file_list(self) -> None:
-        if self.list_grid is None:
-            return
-        self._clear_grid(self.list_grid)
-        for col, title in enumerate(
-            ("Name", "Size", "Modified", "Versions", "Status"),
-        ):
-            self._attach_label(title, col, 0, header=True)
+        """Render the center file list as a Gtk.ListBox of cards.
 
+        Wave 3.2 chrome redesign (2026-05-13): the former Gtk.Grid
+        with five fixed columns (Name, Size, Modified, Versions,
+        Status) was poorly fitted to variable-width content — the
+        date column in particular forced the rest of the row to
+        compete for space. The replacement renders each entry as a
+        card with a title (name) + subtitle (size · modified · status
+        · versions) + per-row hamburger menu (Download / [Versions]
+        / Delete). Subtitle fields are joined with `` · `` separators
+        and gracefully wrap on narrow widths.
+        """
+        if self.list_listbox is None:
+            return
+        # Block selection callback so programmatic rebuilds don't
+        # bounce events back through _select_file.
+        self.list_listbox.handler_block_by_func(self._on_list_row_selected)
+        try:
+            self.list_listbox.remove_all()
+            self._render_file_list_inner()
+        finally:
+            self.list_listbox.handler_unblock_by_func(
+                self._on_list_row_selected,
+            )
+
+    def _render_file_list_inner(self) -> None:
+        assert self.list_listbox is not None
         manifest = self.state.manifest
         if not manifest:
-            self._attach_label("Open or refresh a vault to browse files.", 0, 1)
+            self.list_listbox.append(
+                self._make_empty_row(
+                    "Open or refresh a vault to browse files.",
+                ),
+            )
             return
 
         include_deleted = self.state.show_deleted
@@ -141,56 +160,225 @@ class PanesMixin:
                 manifest, str(self.state.path), include_deleted=include_deleted,
             )
         except Exception as exc:
-            self._attach_label(f"Could not list this folder: {exc}", 0, 1)
+            self.list_listbox.append(
+                self._make_empty_row(
+                    f"Could not list this folder: {exc}", error=True,
+                ),
+            )
             return
 
-        row = 1
+        any_rows = False
         for folder in folders:
-            button = Gtk.Button(
-                label=str(folder["name"]), halign=Gtk.Align.START,
-            )
-            button.add_css_class("flat")
-            button.connect(
-                "clicked", lambda _btn, p=folder["path"]: self._navigate_to(str(p)),
-            )
-            self._attach_cell(button, 0, row)
-            self._attach_label("-", 1, row)
-            self._attach_label("-", 2, row)
-            self._attach_label("-", 3, row)
-            self._attach_label("Folder", 4, row)
-            row += 1
+            any_rows = True
+            self.list_listbox.append(self._make_folder_card_row(folder))
 
         for file_row in files:
-            deleted = str(file_row.get("status", "")) == "Deleted"
-            button = Gtk.Button(
-                label=str(file_row["name"]), halign=Gtk.Align.START,
-            )
-            button.add_css_class("flat")
-            if deleted:
-                button.add_css_class("dim-label")
-            button.connect(
-                "clicked", lambda _btn, f=file_row: self._select_file(dict(f)),
-            )
-            self._attach_cell(button, 0, row)
-            size_label = _format_bytes(int(file_row.get("size", 0)))
-            self._attach_label(size_label, 1, row)
-            self._attach_label(format_local(file_row.get("modified")) or "-", 2, row)
-            self._attach_label(str(file_row.get("versions", 0)), 3, row)
-            status_label = str(file_row.get("status", ""))
-            if deleted:
-                recoverable = format_local(file_row.get("recoverable_until"))
-                if recoverable:
-                    status_label = f"Deleted — recoverable until {recoverable}"
-            self._attach_label(status_label, 4, row)
-            row += 1
+            any_rows = True
+            self.list_listbox.append(self._make_file_card_row(file_row))
 
-        if row == 1:
+        if not any_rows:
             if self.state.path:
-                self._attach_label(
-                    "Folder is empty — drag files here or click Upload", 0, 1,
+                self.list_listbox.append(
+                    self._make_empty_row(
+                        "Folder is empty — click Upload to add a file.",
+                    ),
                 )
             else:
-                self._attach_label("No remote folders yet.", 0, 1)
+                self.list_listbox.append(
+                    self._make_empty_row("No remote folders yet."),
+                )
+
+    def _make_empty_row(self, message: str, *, error: bool = False) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        label = Gtk.Label(
+            label=message,
+            xalign=0,
+            wrap=True,
+            margin_top=12,
+            margin_bottom=12,
+            margin_start=12,
+            margin_end=12,
+        )
+        label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        label.add_css_class("error" if error else "dim-label")
+        row.set_child(label)
+        return row
+
+    def _make_folder_card_row(self, folder: dict) -> Gtk.ListBoxRow:
+        """Folder card: icon + name + 'Folder' subtitle + hamburger."""
+        row = Gtk.ListBoxRow()
+        row._vault_kind = "folder"  # type: ignore[attr-defined]
+        row._vault_folder_path = str(folder["path"])  # type: ignore[attr-defined]
+        row._vault_file_row = None  # type: ignore[attr-defined]
+
+        body = self._make_card_body(
+            icon_name="folder-symbolic",
+            title=str(folder["name"]),
+            subtitle_parts=["Folder"],
+            dim=False,
+        )
+        # Hamburger menu — Download folder / Delete folder.
+        body.append(self._make_row_menu_button(folder=folder))
+        row.set_child(body)
+        return row
+
+    def _make_file_card_row(self, file_row: dict) -> Gtk.ListBoxRow:
+        """File card: icon + name + 'size · modified · versions' subtitle + hamburger."""
+        row = Gtk.ListBoxRow()
+        row._vault_kind = "file"  # type: ignore[attr-defined]
+        row._vault_file_row = dict(file_row)  # type: ignore[attr-defined]
+        row._vault_folder_path = None  # type: ignore[attr-defined]
+
+        deleted = str(file_row.get("status", "")) == "Deleted"
+        size_label = _format_bytes(int(file_row.get("size", 0)))
+        modified_label = format_local(file_row.get("modified")) or ""
+        versions_label = ""
+        version_count = int(file_row.get("versions", 0) or 0)
+        if version_count > 1:
+            versions_label = f"{version_count} versions"
+        status_label = ""
+        if deleted:
+            recoverable = format_local(file_row.get("recoverable_until"))
+            status_label = (
+                f"Deleted — recoverable until {recoverable}"
+                if recoverable else "Deleted"
+            )
+
+        parts = [p for p in (size_label, modified_label, versions_label, status_label) if p]
+        body = self._make_card_body(
+            icon_name="text-x-generic-symbolic",
+            title=str(file_row.get("name", "")) or "(unnamed)",
+            subtitle_parts=parts,
+            dim=deleted,
+        )
+        body.append(self._make_row_menu_button(file_row=file_row))
+        row.set_child(body)
+        return row
+
+    def _make_card_body(
+        self,
+        *,
+        icon_name: str,
+        title: str,
+        subtitle_parts: list[str],
+        dim: bool,
+    ) -> Gtk.Box:
+        """Build the inner row body: [icon] [title / subtitle] (hamburger appended by caller)."""
+        body = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=12,
+            margin_top=6,
+            margin_bottom=6,
+            margin_start=12,
+            margin_end=8,
+        )
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.set_pixel_size(24)
+        if dim:
+            icon.add_css_class("dim-label")
+        body.append(icon)
+
+        text_col = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+        )
+        title_label = Gtk.Label(label=title, xalign=0)
+        title_label.add_css_class("title-4")
+        if dim:
+            title_label.add_css_class("dim-label")
+        title_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        text_col.append(title_label)
+
+        if subtitle_parts:
+            subtitle_label = Gtk.Label(
+                label=" · ".join(subtitle_parts), xalign=0, wrap=True,
+            )
+            subtitle_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            subtitle_label.add_css_class("dim-label")
+            subtitle_label.add_css_class("caption")
+            text_col.append(subtitle_label)
+
+        body.append(text_col)
+        return body
+
+    def _make_row_menu_button(
+        self,
+        *,
+        folder: dict | None = None,
+        file_row: dict | None = None,
+    ) -> Gtk.MenuButton:
+        """Build the per-row hamburger MenuButton.
+
+        Folders get Download / Delete; files get Download / Versions
+        / Delete. Each menu item is a plain Gtk.Button inside a
+        Gtk.Popover — we skip Gio actions because the row already
+        carries the full target context, and a plain button keeps
+        the wiring local + lambda-capturable.
+        """
+        menu_btn = Gtk.MenuButton(
+            icon_name="view-more-symbolic",
+            valign=Gtk.Align.CENTER,
+        )
+        menu_btn.add_css_class("flat")
+        menu_btn.set_tooltip_text("Actions for this item")
+
+        popover = Gtk.Popover()
+        menu_btn.set_popover(popover)
+        menu_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=2,
+            margin_top=4, margin_bottom=4, margin_start=4, margin_end=4,
+        )
+        popover.set_child(menu_box)
+
+        def add_item(label: str, callback, css: str | None = None) -> None:
+            btn = Gtk.Button(label=label, halign=Gtk.Align.FILL)
+            btn.add_css_class("flat")
+            if css is not None:
+                btn.add_css_class(css)
+            btn.set_has_frame(False)
+            child = btn.get_first_child()
+            if isinstance(child, Gtk.Label):
+                child.set_xalign(0)
+
+            def on_click(_b) -> None:
+                popover.popdown()
+                callback()
+
+            btn.connect("clicked", on_click)
+            menu_box.append(btn)
+
+        if folder is not None:
+            folder_path = str(folder["path"])
+            add_item(
+                "Download folder",
+                lambda: self._menu_action_download_folder(folder_path),
+            )
+            add_item(
+                "Delete folder",
+                lambda: self._menu_action_delete_folder(folder_path),
+                css="destructive-action",
+            )
+        elif file_row is not None:
+            captured = dict(file_row)
+            deleted = str(captured.get("status", "")) == "Deleted"
+            add_item(
+                "Download",
+                lambda: self._menu_action_download_file(captured),
+            )
+            if int(captured.get("versions", 0) or 0) > 0:
+                add_item(
+                    "Versions",
+                    lambda: self._menu_action_versions(captured),
+                )
+            if not deleted:
+                add_item(
+                    "Delete",
+                    lambda: self._menu_action_delete_file(captured),
+                    css="destructive-action",
+                )
+        return menu_btn
 
     def _render_detail(self, file_row: dict | None) -> None:
         if self.detail_box is None:

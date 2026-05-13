@@ -87,7 +87,10 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             "Size",
             "Modified",
             "Status",
-            "Folder is empty — drag files here or click Upload",
+            # Wave 3.2 (2026-05-13): grid → cards rewrite reworded
+            # the empty-folder microcopy. The new line is the stable
+            # anchor; the old "drag files here" form is retired.
+            "Folder is empty — click Upload to add a file.",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, source)

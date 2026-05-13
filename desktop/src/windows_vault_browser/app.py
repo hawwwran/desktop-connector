@@ -163,6 +163,9 @@ class VaultBrowser(
         # retired; ``tree_listbox`` is the new home.
         self.tree_box = None  # legacy slot; kept None for back-compat
         self.tree_listbox: Gtk.ListBox | None = None
+        # Wave 3.2: list_grid slot retired in favour of list_listbox.
+        self.list_grid = None  # legacy slot; kept None for back-compat
+        self.list_listbox: Gtk.ListBox | None = None
         self.list_grid: Gtk.Grid | None = None
         self.detail_box: Gtk.Box | None = None
 
@@ -242,14 +245,6 @@ class VaultBrowser(
         while child is not None:
             nxt = child.get_next_sibling()
             box.remove(child)
-            child = nxt
-
-    @staticmethod
-    def _clear_grid(grid: Gtk.Grid) -> None:
-        child = grid.get_first_child()
-        while child is not None:
-            nxt = child.get_next_sibling()
-            grid.remove(child)
             child = nxt
 
     def _set_status(self, message: str, css_class: str = "dim-label") -> None:
@@ -357,27 +352,6 @@ class VaultBrowser(
         if self.forward_btn is not None:
             self.forward_btn.set_sensitive(bool(self.state.forward))
 
-    def _update_selection_actions_visibility(self) -> None:
-        """Reveal the contextual action bar when there's something to act on.
-
-        Bar is open when:
-        - A file is selected (Download / Versions / Delete all apply), or
-        - We're inside a remote folder with no file selected
-          (Download = save the folder, Delete = remove the folder).
-
-        With nothing selected and outside any remote folder, the bar
-        is hidden — destructive actions need a target.
-        """
-        if self.selection_actions_revealer is None:
-            return
-        has_file = bool(self.state.selected_file)
-        has_folder_context = (
-            bool(self.state.path)
-            and self._resolve_upload_destination() is not None
-        )
-        self.selection_actions_revealer.set_reveal_child(
-            has_file or has_folder_context,
-        )
 
     # ------------------------------------------------------------------ render
     def _render_all(self, message: str | None = None, css_class: str = "dim-label") -> None:
@@ -410,7 +384,6 @@ class VaultBrowser(
             )
             can_delete_folder = upload_destination is not None
             self.delete_btn.set_sensitive(can_delete_file or can_delete_folder)
-        self._update_selection_actions_visibility()
         if message is not None:
             self._set_status(message, css_class)
 
@@ -422,8 +395,20 @@ class VaultBrowser(
         to know which active remote folder we're inside, plus the
         path remainder under it.
         """
+        return self._resolve_upload_destination_for(str(self.state.path or ""))
+
+    def _resolve_upload_destination_for(
+        self, target_path: str,
+    ) -> tuple[str, str] | None:
+        """Wave 3.2: explicit-path variant for per-row menus.
+
+        Same shape as ``_resolve_upload_destination`` but resolves
+        against a caller-supplied path instead of the current
+        navigation state — lets a sidebar folder's hamburger menu
+        operate on a folder you're not currently inside.
+        """
         manifest = self.state.manifest
-        path = str(self.state.path or "")
+        path = str(target_path or "")
         if not manifest or not path:
             return None
         parts = [p for p in path.split("/") if p]
@@ -438,6 +423,76 @@ class VaultBrowser(
             if str(folder.get("display_name_enc", "")) == head:
                 return str(folder["remote_folder_id"]), "/".join(rest)
         return None
+
+    # ------------------------------------------------------------------ Wave 3.2 / 3.3 per-row menu actions
+    def _menu_action_download_file(self, file_row: dict) -> None:
+        """Per-row file menu: select the row then trigger the existing dispatch.
+
+        Selecting first lights up the row + populates the right-hand
+        details pane, so the user gets visual feedback for what they
+        clicked on. The existing ``_choose_download_destination``
+        handler reads ``self.state.selected_file`` and opens the
+        save-file dialog for that file.
+        """
+        self._select_file(dict(file_row))
+        self._render_all()
+        self._choose_download_destination(None)
+
+    def _menu_action_versions(self, file_row: dict) -> None:
+        """Per-row file menu: surface the file's version history.
+
+        Selects the row so the right-hand Details pane renders its
+        version list — that pane already builds the per-version
+        Download icons via ``_render_versions_section``.
+        """
+        self._select_file(dict(file_row))
+        self._render_all()
+
+    def _menu_action_delete_file(self, file_row: dict) -> None:
+        """Per-row file menu: confirm + delete the file.
+
+        Routes straight to the existing ``_confirm_delete_file``
+        dispatcher — no state mutation required, since that helper
+        already takes the file_row dict explicitly.
+        """
+        if bool(file_row.get("deleted")):
+            self._set_status(
+                "File is already deleted; cannot soft-delete again.",
+                "error",
+            )
+            return
+        self._confirm_delete_file(dict(file_row))
+
+    def _menu_action_download_folder(self, folder_path: str) -> None:
+        """Per-row sidebar menu: download the folder at ``folder_path``.
+
+        Navigates into the folder first so the user sees the contents
+        they're about to download, then opens the folder-save dialog
+        via the existing dispatch. Side effect: the right pane and
+        breadcrumb update — appropriate UX feedback for the action.
+        """
+        self._navigate_to(folder_path)
+        self._choose_download_destination(None)
+
+    def _menu_action_delete_folder(self, folder_path: str) -> None:
+        """Per-row sidebar menu: confirm + delete the folder.
+
+        Resolves ``folder_path`` to the underlying (remote_folder_id,
+        sub_path) tuple via the explicit-path resolver, then dispatches
+        to the existing ``_confirm_delete_folder`` helper. Avoids
+        mutating navigation state — the delete is per-row, not "for
+        the folder you're currently in".
+        """
+        destination = self._resolve_upload_destination_for(folder_path)
+        if destination is None:
+            self._set_status(
+                f"Cannot delete '{folder_path}' — not inside an active "
+                "remote folder.",
+                "error",
+            )
+            return
+        remote_folder_id, sub_path = destination
+        self._confirm_delete_folder(remote_folder_id, sub_path)
 
     # ------------------------------------------------------------------ cancel + progress
     def _arm_cancel(self, event: threading.Event) -> None:
@@ -507,6 +562,46 @@ class VaultBrowser(
         self.state.path = new_path
         self.state.selected_file = None
         self._render_all()
+
+    def _on_list_row_selected(
+        self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None,
+    ) -> None:
+        """Selection in the center file list drives the Details pane.
+
+        File rows update ``selected_file`` and render details; folder
+        rows clear the selection (their action is navigation via
+        row-activated, not selection-driven details).
+        """
+        if row is None:
+            return
+        kind = getattr(row, "_vault_kind", None)
+        if kind == "file":
+            file_row = getattr(row, "_vault_file_row", None)
+            if file_row is not None:
+                self._select_file(dict(file_row))
+                return
+        # Folder row or empty row: clear file selection so the
+        # Details pane doesn't show stale info from a previous click.
+        if self.state.selected_file is not None:
+            self.state.selected_file = None
+            self._render_detail(None)
+
+    def _on_list_row_activated(
+        self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow,
+    ) -> None:
+        """Double-click (or Enter) on a folder row navigates into it.
+
+        File rows already drive selection via ``row-selected``;
+        ``row-activated`` is only meaningful for folder rows where
+        the affordance is "open this folder".
+        """
+        if row is None:
+            return
+        if getattr(row, "_vault_kind", None) != "folder":
+            return
+        folder_path = getattr(row, "_vault_folder_path", None)
+        if folder_path:
+            self._navigate_to(str(folder_path))
 
     def _on_tree_row_activated(
         self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow,

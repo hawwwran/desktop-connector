@@ -168,50 +168,19 @@ class LayoutMixin:
         self._toolbar_view.add_top_bar(header_bar)
         self._header_bar = header_bar
 
-        # --- Selection-driven action bar (Gtk.Revealer below banners) ----
-        # Built here but appended to ``self.outer`` by
-        # ``_build_breadcrumb_and_status`` so it sits below the banners
-        # and just above the file list. Created up-front so the
-        # ``download_btn`` / ``versions_btn`` / ``delete_btn`` slots are
-        # populated before any other mixin's first sensitivity poke.
-        self.selection_actions_revealer = Gtk.Revealer(
-            transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN,
-            reveal_child=False,
-        )
-        selection_bar = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=6,
-            margin_top=4,
-            margin_bottom=4,
-            halign=Gtk.Align.END,
-        )
-
-        self.download_btn = Gtk.Button(
-            label="Download", css_classes=["pill", "suggested-action"],
-        )
-        self.download_btn.set_tooltip_text(
-            "Download selected file or current folder",
-        )
-        self.download_btn.connect("clicked", self._choose_download_destination)
-        self.download_btn.set_sensitive(False)
-        selection_bar.append(self.download_btn)
-
-        self.versions_btn = Gtk.Button(label="Versions", css_classes=["pill"])
-        self.versions_btn.set_tooltip_text("Choose a version below to download")
-        self.versions_btn.set_sensitive(False)
-        selection_bar.append(self.versions_btn)
-
-        self.delete_btn = Gtk.Button(
-            label="Delete", css_classes=["pill", "destructive-action"],
-        )
-        self.delete_btn.set_tooltip_text(
-            "Soft-delete the selected file or current folder",
-        )
-        self.delete_btn.connect("clicked", self._confirm_and_delete)
-        self.delete_btn.set_sensitive(False)
-        selection_bar.append(self.delete_btn)
-
-        self.selection_actions_revealer.set_child(selection_bar)
+        # --- Off-tree compatibility slots for download / versions / delete --
+        # Wave 3.4 (2026-05-13): the global selection-driven action bar
+        # is retired — per-row hamburger menus on file cards + sidebar
+        # folder rows own these actions now. The slots stay as off-tree
+        # Gtk.Buttons so the dozens of legacy ``set_sensitive`` calls in
+        # ``downloads.py`` / ``delete_restore.py`` / ``quota.py`` /
+        # ``resume_banner.py`` / ``panes.py`` keep working without a
+        # sweeping rewrite — they just affect a widget no longer in the
+        # tree, which is harmless.
+        self.download_btn = Gtk.Button()
+        self.versions_btn = Gtk.Button()
+        self.delete_btn = Gtk.Button()
+        self.selection_actions_revealer = None
 
         # Legacy slot: ``self.action_bar`` used to be the body container
         # for the 8-button strip. Nothing reads it after the rewrite, so
@@ -322,14 +291,14 @@ class LayoutMixin:
         # self.breadcrumb slot stays at None for backward compatibility
         # with any straggler references.
 
-        # Selection-driven action bar sits just below the banners and
-        # above the status / progress rows so contextual actions live
-        # close to the file list they act on.
-        if self.selection_actions_revealer is not None:
-            self.outer.append(self.selection_actions_revealer)
+        # Wave 3.4: body status label retired — status surfaces as the
+        # fixed-position icon on the header bar (Wave 3.1). Legacy
+        # ``self.status_label`` slot stays None; ``_set_status`` no-ops
+        # the body branch on None and drives the icon directly.
+        self.status_label = None
 
-        self.status_label = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
-        self.outer.append(self.status_label)
+        # Wave 3.4: selection-action revealer retired — Download /
+        # Versions / Delete live on per-row hamburger menus now.
 
         self.progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.progress_box.set_visible(False)
@@ -374,18 +343,23 @@ class LayoutMixin:
         paned.set_shrink_end_child(True)
         paned.set_position(220)
 
+        # Wave 3.2: center file list is now a Gtk.ListBox of cards
+        # (replaces the former 5-column Gtk.Grid). Each row carries
+        # its own title/subtitle/hamburger; the listbox's
+        # ``row-selected`` signal drives the right-hand Details pane.
         list_scroller = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        self.list_grid = Gtk.Grid(
-            column_spacing=18,
-            row_spacing=8,
-            margin_top=8,
-            margin_bottom=8,
-            margin_start=8,
-            margin_end=8,
-            hexpand=True,
-            vexpand=True,
+        self.list_listbox = Gtk.ListBox(
+            hexpand=True, vexpand=True,
         )
-        list_scroller.set_child(self.list_grid)
+        self.list_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.list_listbox.add_css_class("boxed-list")
+        self.list_listbox.set_margin_top(8)
+        self.list_listbox.set_margin_bottom(8)
+        self.list_listbox.set_margin_start(8)
+        self.list_listbox.set_margin_end(8)
+        self.list_listbox.connect("row-selected", self._on_list_row_selected)
+        self.list_listbox.connect("row-activated", self._on_list_row_activated)
+        list_scroller.set_child(self.list_listbox)
         right.set_start_child(list_scroller)
         right.set_resize_start_child(True)
         right.set_shrink_start_child(True)
