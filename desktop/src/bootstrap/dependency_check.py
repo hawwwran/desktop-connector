@@ -70,17 +70,42 @@ def check_dependencies(*, headless: bool = False) -> list[tuple[str, str]]:
     # with pystray in the main process. Uses sys.executable so an AppImage
     # run probes its own bundled Python (where GTK4 lives in $APPDIR/usr/),
     # not the host's python3 which may be a different version with no `gi`.
+    #
+    # Two failure modes the probe distinguishes (returncode):
+    #   0  — Adw 1.4+ available, all good.
+    #   2  — Adw < 1.4 (no OverlaySplitView). The vault-browser chrome
+    #        redesign (Wave 2.5) uses Adw.OverlaySplitView +
+    #        Adw.BreakpointCondition.parse, both 1.4+ APIs. Ubuntu
+    #        22.04 ships libadwaita 1.0; users on older distros need
+    #        the AppImage (bundles 1.5+) or a backports install.
+    #   other — GTK4 / libadwaita not importable at all.
     import subprocess as _sp
 
     result = _sp.run(
         [
             sys.executable,
             "-c",
-            "import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1'); from gi.repository import Gtk, Adw",
+            (
+                "import sys, gi; "
+                "gi.require_version('Gtk','4.0'); "
+                "gi.require_version('Adw','1'); "
+                "from gi.repository import Gtk, Adw; "
+                "sys.exit(0 if hasattr(Adw, 'OverlaySplitView') else 2)"
+            ),
         ],
         capture_output=True,
     )
-    if result.returncode != 0:
+    if result.returncode == 2:
+        missing.append(
+            (
+                "libadwaita 1.4+",
+                "Need Adw.OverlaySplitView (libadwaita 1.4+). Ubuntu 24.04+ / "
+                "Fedora 39+ ship a new enough gir1.2-adw-1; on older distros "
+                "use the AppImage (curl -fsSL https://raw.githubusercontent.com/"
+                "hawwwran/desktop-connector/main/desktop/install.sh | bash).",
+            )
+        )
+    elif result.returncode != 0:
         missing.append(
             (
                 "GTK4/libadwaita",

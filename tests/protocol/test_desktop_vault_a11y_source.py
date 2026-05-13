@@ -157,6 +157,145 @@ class BrowserPanedShrinkableTests(unittest.TestCase):
         self.assertIn("min_content_width=200", self.text)
 
 
+class BrowserChromeRedesignTests(unittest.TestCase):
+    """Vault Browser chrome redesign (Waves 1–3.5, landed 2026-05-13).
+
+    The chrome moved from a body strip of 8 pill buttons to Adwaita
+    HeaderBar + per-row hamburger menus + responsive
+    Adw.OverlaySplitView. The surfaces are easy to silently revert in
+    a future refactor (e.g. swapping the listbox back to a grid for
+    "easier" rendering), so source-pin the key anchors.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = _read_windows_vault_browser_pkg()
+
+    def test_header_bar_status_icon_present(self) -> None:
+        """Wave 3.1: status moved off the body label onto a fixed-position
+        header-bar Gtk.Image so painting status never shifts layout."""
+        self.assertIn("self._status_icon = Gtk.Image()", self.text)
+        self.assertIn("header_bar.pack_end(self._status_icon)", self.text)
+
+    def test_header_window_title_subtitle(self) -> None:
+        """Wave 1.5: breadcrumb absorbed into the Adw.WindowTitle
+        subtitle. Title stays ``Vault``; subtitle carries the path."""
+        self.assertIn('Adw.WindowTitle(title="Vault"', self.text)
+        # _render_all drives the subtitle on every render pass.
+        self.assertIn("set_subtitle(", self.text)
+
+    def test_responsive_overlay_split_view(self) -> None:
+        """Wave 2.5: outer split is Adw.OverlaySplitView, not Gtk.Paned,
+        with a max-width: 600sp breakpoint that collapses the sidebar
+        and a header-bar toggle button to reveal it.
+        """
+        self.assertIn("Adw.OverlaySplitView()", self.text)
+        self.assertIn("max-width: 600sp", self.text)
+        self.assertIn("Adw.Breakpoint.new", self.text)
+        self.assertIn('icon_name="sidebar-show-symbolic"', self.text)
+        # Sidebar width clamp lives on the OverlaySplitView, not the
+        # retired outer Gtk.Paned.
+        self.assertIn("set_min_sidebar_width", self.text)
+        self.assertIn("set_max_sidebar_width", self.text)
+
+    def test_navigation_sidebar_listbox(self) -> None:
+        """Wave 2: folder tree is a Gtk.ListBox carrying the Adwaita
+        ``navigation-sidebar`` class so it picks up the same selection
+        + hover treatment Files/Calendar/Settings sidebars use."""
+        self.assertIn('add_css_class("navigation-sidebar")', self.text)
+        self.assertIn("self.tree_listbox = Gtk.ListBox()", self.text)
+        # Row activation drives navigation, not per-button clicked.
+        self.assertIn("_on_tree_row_activated", self.text)
+
+    def test_file_card_listbox(self) -> None:
+        """Wave 3.2: file list rebuilt as a ``boxed-list`` ListBox of
+        cards. The old Gtk.Grid with hardcoded columns is retired."""
+        self.assertIn('add_css_class("boxed-list")', self.text)
+        self.assertIn("_make_file_card_row", self.text)
+        self.assertIn("_make_folder_card_row", self.text)
+        # No regression to "render the file list as a Gtk.Grid": the
+        # grid helper attribute should stay None.
+        self.assertIn(
+            "self.list_grid: Gtk.Grid | None = None", self.text,
+        )
+
+    def test_per_row_hamburger_menus(self) -> None:
+        """Waves 3.2 / 3.3: file cards and non-root sidebar rows carry
+        per-row Gtk.MenuButton with ``view-more-symbolic``."""
+        self.assertIn('icon_name="view-more-symbolic"', self.text)
+        # ``_make_row_menu_button`` is the shared factory; counted
+        # callsites: definition + folder card + file card + sidebar
+        # row = 4. Drop below that and we've lost a surface.
+        self.assertGreaterEqual(
+            self.text.count("_make_row_menu_button"), 4,
+            "expected definition + 3 callsites for the row menu factory",
+        )
+
+    def test_destructive_popover_brand_css_present(self) -> None:
+        """The destructive-menu items in popovers must not paint as
+        solid orange pills (heavy for popover rows). The brand CSS
+        adds a scoped override for ``popover button.destructive-action``
+        that flattens the background — guard against its removal.
+        """
+        # The brand stylesheet lives outside the browser package, so
+        # this anchor is checked against the brand module directly.
+        brand_path = (
+            REPO_ROOT / "desktop" / "src" / "brand.py"
+        )
+        brand_text = brand_path.read_text(encoding="utf-8")
+        self.assertIn("popover button.destructive-action", brand_text)
+        # Same file should also remap status-icon colours so the
+        # header status icon paints brand blue / orange instead of
+        # Adwaita default green / red.
+        self.assertIn("image.success", brand_text)
+        self.assertIn("image.error", brand_text)
+
+
+class BrowserChromeA11yTests(unittest.TestCase):
+    """F-U10 — AT-SPI accessible-name bindings on the new chrome.
+
+    Tooltip text alone is not an accessible name. Screen readers /
+    dogtail / Accerciser see icon-only buttons as "togglebutton"
+    or "menu button" with no context unless an explicit
+    ``Gtk.AccessibleProperty.LABEL`` is bound. The chrome redesign
+    added three icon-only surfaces (status icon, sidebar toggle, per-
+    row hamburger menus) that need the binding.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = _read_windows_vault_browser_pkg()
+
+    def test_status_icon_has_accessible_label(self) -> None:
+        """Wave 3.1 status icon — labelled ``Status indicator`` so a
+        screen reader can find it. Tooltip carries the live state."""
+        self.assertIn("Status indicator", self.text)
+
+    def test_sidebar_toggle_has_accessible_label(self) -> None:
+        """Wave 2.5 sidebar toggle — labelled ``Toggle folder sidebar``
+        so the narrow-mode reveal button is named."""
+        self.assertIn("Toggle folder sidebar", self.text)
+
+    def test_per_row_hamburger_has_contextual_label(self) -> None:
+        """Waves 3.2 / 3.3 — file and folder rows attach a label
+        like ``Actions for file foo.txt`` / ``Actions for folder
+        Documents`` so a row's menu button is identifiable in
+        sequence with the rest of the row contents.
+        """
+        self.assertIn("Actions for file", self.text)
+        self.assertIn("Actions for folder", self.text)
+
+    def test_chrome_a11y_label_count(self) -> None:
+        """At least 3 ``Gtk.AccessibleProperty.LABEL`` bindings landed
+        for the chrome redesign (status icon, sidebar toggle, per-row
+        menu). Catches a regression that drops all of them.
+        """
+        self.assertGreaterEqual(
+            self.text.count("Gtk.AccessibleProperty.LABEL"), 3,
+            "expected at least 3 accessible-label bindings on the chrome",
+        )
+
+
 class ImportPassphraseAsymmetryTests(unittest.TestCase):
     """F-U07 — confirm-field asymmetry between create and import wizards
     is intentionally documented; the rationale must stay near the entry

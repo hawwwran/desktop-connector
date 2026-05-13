@@ -71,6 +71,13 @@ class LayoutMixin:
         )
         self._sidebar_toggle_btn.add_css_class("flat")
         self._sidebar_toggle_btn.set_tooltip_text("Show folder sidebar")
+        # F-U10: icon-only ToggleButton — tooltip alone isn't an
+        # accessible name. Bind an explicit Gtk.AccessibleProperty.LABEL
+        # so AT-SPI / dogtail see "Toggle folder sidebar" instead of an
+        # empty-named togglebutton.
+        self._sidebar_toggle_btn.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Toggle folder sidebar"],
+        )
         self._sidebar_toggle_btn.set_visible(False)
         header_bar.pack_start(self._sidebar_toggle_btn)
 
@@ -105,6 +112,13 @@ class LayoutMixin:
         # chrome is uncluttered.
         self._status_icon = Gtk.Image()
         self._status_icon.set_pixel_size(16)
+        # F-U10: bare Gtk.Image isn't named for AT-SPI. Bind a label
+        # so screen readers announce "Status indicator" plus whatever
+        # description ``_update_status_icon`` writes onto the tooltip
+        # (which AT-SPI surfaces as ``accessible-description``).
+        self._status_icon.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Status indicator"],
+        )
         self._status_icon.set_visible(False)
         header_bar.pack_end(self._status_icon)
 

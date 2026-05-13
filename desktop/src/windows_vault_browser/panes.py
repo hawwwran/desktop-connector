@@ -330,6 +330,21 @@ class PanesMixin:
         )
         menu_btn.add_css_class("flat")
         menu_btn.set_tooltip_text("Actions for this item")
+        # F-U10: icon-only MenuButton on each row — without an
+        # accessible-name binding, screen readers announce "menu
+        # button" with no context for which row they're on. Build a
+        # contextual label ("Actions for file foo.txt" / "Actions for
+        # folder Documents") so AT-SPI tooling can navigate the list
+        # by row identity.
+        if folder is not None:
+            target_name = str(folder.get("name") or folder.get("path") or "folder")
+            a11y_label = f"Actions for folder {target_name}"
+        elif file_row is not None:
+            target_name = str(file_row.get("name", "")) or "file"
+            a11y_label = f"Actions for file {target_name}"
+        else:
+            a11y_label = "Actions for this item"
+        menu_btn.update_property([Gtk.AccessibleProperty.LABEL], [a11y_label])
 
         popover = Gtk.Popover()
         menu_btn.set_popover(popover)
