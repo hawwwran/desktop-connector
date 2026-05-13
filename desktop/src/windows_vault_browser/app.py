@@ -139,6 +139,8 @@ class VaultBrowser(
         self.download_btn: Gtk.Button | None = None
         self.show_deleted_toggle: Gtk.CheckButton | None = None
         self.selection_actions_revealer: Gtk.Revealer | None = None
+        # Wave 1.5: window title (header subtitle is the current path).
+        self._window_title: Adw.WindowTitle | None = None
         # Resume "banner" is a custom horizontal Gtk.Box (not Adw.Banner)
         # because Adw.Banner only supports a single action button. Users
         # need both Resume (continue the interrupted upload) and Cancel
@@ -255,6 +257,17 @@ class VaultBrowser(
         path = str(self.state.path)
         return "Vault" if not path else "Vault / " + path.replace("/", " / ")
 
+    def _current_subtitle(self) -> str:
+        """Path component for the header bar subtitle.
+
+        Empty at the vault root (title alone is enough); otherwise
+        ``foo / bar`` formatting that matches the legacy breadcrumb
+        style minus the leading ``Vault / `` (now redundant with
+        the header title).
+        """
+        path = str(self.state.path or "").strip("/")
+        return path.replace("/", " / ") if path else ""
+
     def _update_nav_buttons(self) -> None:
         if self.back_btn is not None:
             self.back_btn.set_sensitive(bool(self.state.back))
@@ -285,6 +298,8 @@ class VaultBrowser(
 
     # ------------------------------------------------------------------ render
     def _render_all(self, message: str | None = None, css_class: str = "dim-label") -> None:
+        if self._window_title is not None:
+            self._window_title.set_subtitle(self._current_subtitle())
         if self.breadcrumb is not None:
             self.breadcrumb.set_label(self._current_path_label())
         self._update_nav_buttons()

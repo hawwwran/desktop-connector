@@ -34,7 +34,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 
 class LayoutMixin:
@@ -53,6 +53,11 @@ class LayoutMixin:
         assert self._toolbar_view is not None
 
         header_bar = Adw.HeaderBar()
+        # Window title widget — Wave 1.5 absorbs the former body
+        # breadcrumb into the header chrome. Title stays "Vault";
+        # subtitle is the current path (empty when at root).
+        self._window_title = Adw.WindowTitle(title="Vault", subtitle="")
+        header_bar.set_title_widget(self._window_title)
 
         # --- Start edge: Back ---------------------------------------------
         self.back_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic")
@@ -302,13 +307,14 @@ class LayoutMixin:
         self.quota_banner.set_revealed(False)
         self.outer.append(self.quota_banner)
 
-        self.breadcrumb = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.breadcrumb.add_css_class("title-4")
-        self.outer.append(self.breadcrumb)
+        # Wave 1.5: body breadcrumb removed — current path now lives
+        # as the subtitle of self._window_title in the header bar.
+        # self.breadcrumb slot stays at None for backward compatibility
+        # with any straggler references.
 
-        # Selection-driven action bar sits between the breadcrumb and
-        # the status / progress rows so contextual actions live close
-        # to the content they act on.
+        # Selection-driven action bar sits just below the banners and
+        # above the status / progress rows so contextual actions live
+        # close to the file list they act on.
         if self.selection_actions_revealer is not None:
             self.outer.append(self.selection_actions_revealer)
 
