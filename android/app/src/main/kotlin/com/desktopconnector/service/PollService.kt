@@ -1144,11 +1144,28 @@ class PollService : Service() {
         val db = AppDatabase.getInstance(this)
         var inFlightJob: Job? = null
 
+        // Streak-coalescing for the spammiest skip reason. The previous in-flight
+        // call regularly runs >750 ms on cellular, so the 500 ms-tick loop was
+        // writing a `delivery.tracker.skipped` line every tick — up to ~50% of
+        // app.log when an upload is mid-flight. Log first skip immediately; on
+        // streak end (next non-skip tick) emit a `streak=N` summary if N>1.
+        var inFlightSkipStreak = 0
+        fun flushInFlightSkipStreak() {
+            if (inFlightSkipStreak > 1) {
+                AppLog.log(
+                    "Delivery",
+                    "delivery.tracker.skipped reason=previous_in_flight streak=$inFlightSkipStreak",
+                )
+            }
+            inFlightSkipStreak = 0
+        }
+
         while (running) {
             val tickStart = System.currentTimeMillis()
             try {
                 if (prefs.serverUrl == null || prefs.deviceId == null || prefs.authToken == null
                     || !isScreenOn()) {
+                    flushInFlightSkipStreak()
                     delay(500); continue
                 }
 
@@ -1160,18 +1177,26 @@ class PollService : Service() {
 
                 val trackedIds = (allActiveIds - trackerGaveUp).toList()
                 if (trackedIds.isEmpty()) {
+                    flushInFlightSkipStreak()
                     delay(500); continue
                 }
 
                 if (inFlightJob?.isActive == true) {
-                    AppLog.log("Delivery", "delivery.tracker.skipped reason=previous_in_flight")
+                    if (inFlightSkipStreak == 0) {
+                        AppLog.log("Delivery", "delivery.tracker.skipped reason=previous_in_flight")
+                    }
+                    inFlightSkipStreak++
                 } else {
+                    flushInFlightSkipStreak()
                     val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
                     inFlightJob = scope.launch {
                         try {
-                            withTimeout(750) { runDeliveryPoll(api, trackedIds, db) }
+                            // 3000 ms was 750 ms. The shorter timeout was chosen for
+                            // Wi-Fi LAN round-trips and elapsed routinely on cellular,
+                            // turning every cellular tick into a skip.
+                            withTimeout(3000) { runDeliveryPoll(api, trackedIds, db) }
                         } catch (_: TimeoutCancellationException) {
-                            AppLog.log("Delivery", "delivery.tracker.skipped reason=poll_timeout_750ms")
+                            AppLog.log("Delivery", "delivery.tracker.skipped reason=poll_timeout_3000ms")
                         } catch (_: Exception) {
                             // transient — next tick retries
                         }

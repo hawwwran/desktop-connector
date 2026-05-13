@@ -17,7 +17,7 @@ import java.util.Locale
  *   sizes, outcomes, and error_kind.
  */
 object AppLog {
-    private const val MAX_LINES = 2000
+    private const val MAX_LINES = 4000
     private const val FILENAME = "app.log"
     private lateinit var logFile: File
     private var enabled = false
