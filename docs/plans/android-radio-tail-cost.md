@@ -502,6 +502,130 @@ mobile_radio is still > 100 mAh / 10 h with everything attributed,
 Option C (server-side ping debounce) or Option D (skip ping if long-
 poll touched the server recently) come back in scope.
 
+## What `_9.txt` showed (2026-05-13)
+
+Captured ~3 h after `bf83c67` install with the AppLog cleared at install
+time. Dumpsys window: 2 h 29 m on-battery, 81.7 % screen off.
+
+Acceptance scorecard vs the criteria laid out for `_8.txt`:
+
+1. ✅ Pong cadence ~15 min. 4 pongs in the 3 h post-clear AppLog window,
+   gaps ≥ 15 min in every case.
+2. ✅ Skip streaks capped. Max `streak=5` in `_9.txt`, max `streak=6`
+   in `_8.txt`. The `bf83c67` cancellable `getSentStatus` change is
+   doing its job — the 3 s timeout now actually unwinds the call.
+3. ✅ `poll_timeout_3000ms` events present. 8 in `_9.txt`. Cancellation
+   firing on cellular RTT spikes, exactly as expected.
+4. ❌ Per-app `mobile_radio` rx/tx fully attributable. **Cannot
+   verify** with the captured windows — both `_8.txt` and `_9.txt`
+   AppLogs contain **zero** Android-side transfer events
+   (`transfer.upload.completed`, `transfer.init.accepted`,
+   `transfer.download.*`). There were no real transfers to attribute
+   the 304 523 packets against. The new `bytes=` fields work in
+   principle (verified by inspection — `bf83c67` planted them on
+   every site) but a future round needs a window with real transfer
+   activity.
+5. ❌ App `mobile_radio` ≤ 70 mAh / 10 h. **Still failing badly.**
+   `u0a454`: 118 mAh of `mobile_radio:fgs` in 2 h 29 m on-battery, with
+   the radio active for 1 h 35 m of that window. That extrapolates to
+   roughly **745 mAh / 10 h equivalent — about 10× target.**
+6. ⚠️ AppLog window ≥ 24 h. Only 3 h 12 m captured post-clear; not a
+   clean test of buffer capacity.
+
+### Why mobile_radio is still ~10× target — root cause found
+
+The AppLog had **187 `delivery.tracker.skipped` events** over the 3 h
+post-clear window, with the only non-tracker transfer event being a
+single `delivery.acked` for a 3 675-byte inbound clipboard fasttrack.
+Per the tracker loop's screen-on gate (`PollService.kt:1185`), every
+skip means there was at least one tid in `getActiveDeliveryIds()` —
+i.e., an outgoing transfer in Room with `delivered=0` and an active
+status — yet zero actual upload activity was happening.
+
+Two leaks in `runDeliveryPoll`:
+
+1. **`val s = byId[tid] ?: continue`** at `PollService.kt:1242` silently
+   bypassed the stall safeguard when the server's `/sent-status`
+   response had no row for an active tid. Evidence: across all 9 log
+   captures there is **zero** `delivery.tracker.stall` event — the
+   2-min stall logic (line 1277) was unreachable for the orphan case.
+2. **Streaming "don't give up" branch** at `PollService.kt:1295-1301`
+   keeps polling indefinitely for streaming-mode rows that stall the
+   present-row path. The comment justifies it as "sender may still be
+   uploading", but for a row whose `UploadWorker` is long dead the
+   backstop (sender's 30 min `WAITING_STREAM` budget) never engages.
+
+Both produce the same observed shape: a phantom outgoing row from an
+earlier test session (e.g. `9bf1b34e`, `d2ec1df1`, `13b80f68` —
+streaming `android_logs.txt` uploads from rounds `_4`/`_5`/`_6`) keeps
+the tracker loop alive every screen-on second, paying the LTE radio
+tail on each `getSentStatus()` call.
+
+### Changes deployed (2026-05-13)
+
+Two fixes shipped together, both motivated by the `_9.txt` round:
+
+**Fix A — absent-row stall safeguard.** `runDeliveryPoll`'s `byId[tid]
+?: continue` path now consults `trackerAbsentDecision` (pure helper in
+`service/DeliveryTrackerDecisions.kt`). First absent observation seeds
+`trackerAbsentSince[tid]`; subsequent absent ticks within the 2 min
+`DELIVERY_STALL_TIMEOUT_MS` window keep waiting; past 2 min the tid is
+added to in-memory `trackerGaveUp` and `clearDeliveryProgress` zeroes
+the deliveryChunks/Total fields (UI falls back to "Sent"). The
+present-row path resets the absent clock on observation, so a flicker
+in/out of LIMIT-50 doesn't trip a false give-up.
+
+**Fix B — 12 h orphan sweep on PollService start.** New one-shot
+`sweepOrphanOutgoingTransfers` coroutine runs after a 5 s settle delay,
+querying `getStaleUndeliveredOutgoing` (new DAO method) for rows
+older than `ORPHAN_SWEEP_AGE_SECONDS` (12 h) that still have
+`delivered=0` AND `status` in the active set
+(`COMPLETE`/`SENDING`/`UPLOADING`/`WAITING_STREAM`). One
+`getSentStatus()` call decides per-row via `orphanSweepAction`:
+
+- Present in `/sent-status` → leave (regular tracker handles it).
+- Absent + status `COMPLETE`/`SENDING` (upload finished) →
+  `markDelivered`. The server's 7 d `TRANSFER_EXPIRY` or LIMIT-50
+  prune means the row was almost certainly delivered before being
+  forgotten.
+- Absent + status `UPLOADING`/`WAITING_STREAM` (upload never finished)
+  → `markAborted reason="tracking_expired"`. Server's 24 h
+  `INCOMPLETE_EXPIRY` pruned it without delivery.
+
+Network/auth failures during the sweep are non-fatal (logged as
+`delivery.tracker.orphan_sweep.failed`); the next PollService start
+retries.
+
+Together: Fix A catches new orphans within 2 min of screen-on; Fix B
+mops up the persistent pile from prior test sessions on each service
+start. Together they should drain `getActiveDeliveryIds()` to empty
+for a normal idle device — `delivery.tracker.skipped` events stop
+firing entirely once no real transfers are in flight.
+
+### What `_10.txt` should show
+
+1. **`delivery.tracker.orphan_sweep` fires once at install** with
+   `stale=` matching the number of stuck rows in Room and either
+   `delivered=N`/`aborted=M` reflecting the per-row policy. Most
+   likely `delivered=` heavy since the prior `android_logs.txt`
+   streaming uploads all reached the desktop.
+2. **`delivery.tracker.skipped` events drop to near zero** during
+   idle windows. Any skip should be tied to a real outgoing transfer
+   in flight (paired in the log with `transfer.init.accepted` +
+   `transfer.upload.completed`).
+3. **`delivery.tracker.stall mode=absent action=gave_up`** events
+   appear ONLY if a new transfer racing against server-side GC slips
+   in between the 12 h sweep boundary; rare in practice. Their
+   presence is healthy, not a bug.
+4. **mobile_radio drops materially** for `u0a454`. Target: ≤ 70 mAh /
+   10 h. Even if we don't hit that, anything below ~200 mAh / 10 h
+   would be a clear win.
+5. **Per-app `bytes=` attribution becomes meaningful** if a real
+   transfer happens in the captured window — sum `transfer.*.bytes`
+   + `fasttrack.message.pending_listed encrypted_b64_bytes` +
+   `poll.notify.cycle` count × ~1 KB and compare against
+   `dumpsys`'s per-app rx/tx for `u0a454`.
+
 ## Cross-references
 
 - Earlier round of this same investigation: `android_logs_3` analysis
@@ -513,4 +637,7 @@ poll touched the server recently) come back in scope.
 - Architecture rationale for on-demand pings (not periodic
   heartbeats): `CLAUDE.md` § *Liveness (ping/pong)*.
 - Diagnostic event catalog: `docs/diagnostics.events.md` § `ping`,
-  § `poll`.
+  § `poll`, § `delivery`.
+- Pure-helper test coverage:
+  `android/app/src/test/kotlin/com/desktopconnector/service/DeliveryTrackerDecisionsTest.kt`
+  (11 cases — absent stall transitions + orphan-sweep policy matrix).

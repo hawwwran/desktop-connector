@@ -210,7 +210,9 @@ renamed/restructured.
 |---|---|---|---|---|
 | `delivery.progress` | server (new), desktop, android | debug | `transfer_id`, `chunks_downloaded`, `chunk_count` | Progress advanced |
 | `delivery.acked` | server (new), desktop, android | info | `transfer_id`, `recipient`, `total_bytes` | Recipient ACK finalized the transfer |
-| `delivery.tracker.stall` | desktop, android | warning | `transfer_id`, `stall_seconds` | Tracker gave up; transfer row preserved |
+| `delivery.tracker.stall` | desktop, android | warning | `transfer_id`, `stall_seconds`, `mode`, `action` | Tracker gave up; transfer row preserved. `mode=classic` (give up), `mode=streaming` (clear Y display, keep polling), `mode=absent` (server has no row — 2 min of absence → give up) |
+| `delivery.tracker.orphan_sweep` | android | info | `stale`, `delivered`, `aborted`, `age_threshold_h` | One-shot startup sweep mopped up undelivered outgoing rows older than the age threshold whose server-side row is gone — flipped delivered=1 for completed-uploads, ABORTED for never-completed uploads |
+| `delivery.tracker.orphan_sweep.failed` | android | warning | `reason`, `stale` | Sweep aborted (network/auth/etc.); next service restart retries. Stale rows stay tracked until the in-runtime stall safeguard catches them |
 
 ### fasttrack
 

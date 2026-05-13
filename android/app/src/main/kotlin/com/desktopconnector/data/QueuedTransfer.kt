@@ -236,6 +236,34 @@ interface TransferDao {
     """)
     suspend fun getUndeliveredTransferIds(): List<String>
 
+    /**
+     * Startup orphan sweep: same row-shape filter as `getActiveDeliveryIds`,
+     * narrowed to rows created before `ageThresholdSeconds` (epoch-seconds,
+     * matching the entity's `createdAt`). The full row is returned so the
+     * sweep can switch on `status` per-orphan without a second lookup.
+     *
+     * The 12h default age threshold sits above the server's longest
+     * non-delivery expiry window (24h INCOMPLETE_EXPIRY) by half — so a
+     * row crossing 12h has been observable on the server for at least
+     * one charge cycle. Anything still active in Room at this point is
+     * either delivered-but-LIMIT-50-pruned (mark delivered=1) or
+     * incomplete-and-server-GC'd (mark aborted). See
+     * `service/DeliveryTrackerDecisions.kt::orphanSweepAction`.
+     */
+    @Query("""
+        SELECT * FROM queued_transfers
+        WHERE direction = 'OUTGOING'
+          AND delivered = 0
+          AND transferId IS NOT NULL
+          AND createdAt < :ageThresholdSeconds
+          AND (
+            status = 'COMPLETE'
+            OR (negotiatedMode = 'streaming'
+                AND status IN ('UPLOADING', 'WAITING_STREAM', 'SENDING'))
+          )
+    """)
+    suspend fun getStaleUndeliveredOutgoing(ageThresholdSeconds: Long): List<QueuedTransfer>
+
     @Query("DELETE FROM queued_transfers WHERE id NOT IN (SELECT id FROM queued_transfers ORDER BY createdAt DESC LIMIT 100)")
     suspend fun trimHistory()
 
