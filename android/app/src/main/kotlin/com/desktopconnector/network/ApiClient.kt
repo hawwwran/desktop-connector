@@ -3,12 +3,19 @@ package com.desktopconnector.network
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 
 /** Why the server rejected our credentials. 401 vs 403 mark different
@@ -380,14 +387,51 @@ class ApiClient(
         }
     }
 
-    fun getSentStatus(): List<JSONObject> {
+    /**
+     * Suspend variant that is properly coroutine-cancellable so callers can
+     * wrap it in `withTimeout(N)` and have the underlying HTTP call actually
+     * abort at N ms. The blocking `client.newCall(...).execute()` path
+     * Kotlin's `withTimeout` cannot interrupt — the coroutine looks active
+     * for as long as the socket is busy, and we observed streak=38 (19 s
+     * in-flight) in `android_logs_7.txt` with zero timeout fires despite
+     * `withTimeout(3000)` wrapping. Using `enqueue` + `Callback` here lets
+     * `cont.invokeOnCancellation` call `Call.cancel()` which closes the
+     * socket and unwinds immediately.
+     */
+    suspend fun getSentStatus(): List<JSONObject> {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/sent-status")
             .get()
             .build()
-        val result = executeJson(request) ?: return emptyList()
+        val result = executeJsonCancellable(request) ?: return emptyList()
         val arr = result.optJSONArray("transfers") ?: return emptyList()
         return (0 until arr.length()).map { arr.getJSONObject(it) }
+    }
+
+    private suspend fun Call.awaitResponse(): Response =
+        suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { try { cancel() } catch (_: Throwable) {} }
+            enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    if (cont.isActive) cont.resume(response)
+                    else response.close()
+                }
+                override fun onFailure(call: Call, e: IOException) {
+                    if (cont.isActive) cont.resumeWithException(e)
+                }
+            })
+        }
+
+    private suspend fun executeJsonCancellable(request: Request, peerId: String? = null): JSONObject? {
+        return try {
+            client.newCall(request).awaitResponse().use { resp ->
+                reportAuthStatus(resp.code, peerId)
+                val body = resp.body?.string() ?: return null
+                if (resp.isSuccessful) JSONObject(body) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun downloadChunk(transferId: String, chunkIndex: Int, peerId: String? = null): ByteArray? {

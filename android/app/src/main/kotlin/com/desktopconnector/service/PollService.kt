@@ -390,12 +390,20 @@ class PollService : Service() {
                 }
 
                 if (longPollAvailable == true) {
+                    val notifyStart = System.currentTimeMillis()
                     val notifyResult = api.longPollNotify(lastPollTime / 1000)
+                    val notifyDurationMs = System.currentTimeMillis() - notifyStart
 
                     if (notifyResult != null) {
                         lastPollTime = System.currentTimeMillis()
 
                         val hasPending = notifyResult.optBoolean("pending", false)
+                        // Per-cycle attribution for mobile_radio time. A "wait" cycle
+                        // (~25 s, no pending) is the dominant idle-cellular cost.
+                        AppLog.log(
+                            "Poll",
+                            "poll.notify.cycle duration_ms=$notifyDurationMs has_pending=$hasPending",
+                        )
 
                         if (hasPending) {
                             val transfers = api.getPendingTransfers()
@@ -530,7 +538,15 @@ class PollService : Service() {
             return
         }
 
-        AppLog.log("Fasttrack", "fasttrack.message.pending_listed count=${messages.size}")
+        // Sum encrypted base64 lengths so we can attribute fasttrack's share
+        // of the app's mobile_radio rx bytes (dumpsys batterystats).
+        val totalEncryptedBytes = messages.sumOf {
+            it.optString("encrypted_data").length.toLong()
+        }
+        AppLog.log(
+            "Fasttrack",
+            "fasttrack.message.pending_listed count=${messages.size} encrypted_b64_bytes=$totalEncryptedBytes",
+        )
 
         for (msg in messages) {
             val messageId = msg.getInt("id")
@@ -764,9 +780,10 @@ class PollService : Service() {
         val dbRowId: Long = if (existing != null) {
             db.transferDao().updateStatus(existing.id, TransferStatus.UPLOADING)
             db.transferDao().updateProgress(existing.id, 0, chunkCount)
-            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)}")
+            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)} chunks=$chunkCount")
             existing.id
         } else {
+            AppLog.log("Recv", "transfer.download.started transfer_id=${transferId.take(12)} chunks=$chunkCount mode=classic")
             db.transferDao().insert(QueuedTransfer(
                 contentUri = "",
                 displayName = fileName,
@@ -920,9 +937,10 @@ class PollService : Service() {
         val dbRowId: Long = if (existing != null) {
             db.transferDao().updateStatus(existing.id, TransferStatus.UPLOADING)
             db.transferDao().updateProgress(existing.id, 0, chunkCount)
-            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)} mode=streaming")
+            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)} chunks=$chunkCount mode=streaming")
             existing.id
         } else {
+            AppLog.log("Recv", "transfer.download.started transfer_id=${transferId.take(12)} chunks=$chunkCount mode=streaming")
             db.transferDao().insert(QueuedTransfer(
                 contentUri = "",
                 displayName = fileName,
