@@ -2,22 +2,24 @@
 
 **Date opened:** 2026-05-13
 **Branch:** `tresor-vault`
-**Status:** All planned waves done 2026-05-13. Waves 1 / 1.5 / 2 /
-3.1 / 3.2 / 3.3 / 3.4 shipped across commits `d67a348` (Wave 1),
-`1a51c56` (Wave 1.5), `dd396df` (Wave 2), `dfd94b3` (Wave 3.1), and
-`bf1d7f0` (Wave 3 — file cards + per-row menus + cleanup).
+**Status:** All planned waves + the two originally-deferred polish
+items are done as of 2026-05-13. Wave history:
 
-Two items intentionally deferred:
-
-- **Wave 2's `Adw.NavigationSplitView` responsive-collapse wrapper.**
-  The sidebar redesign landed without it because aligning with the
-  existing Vault Settings shell (which uses `Gtk.StackSidebar`)
-  mattered more than narrow-window collapse. Revisit if narrow-window
-  usage becomes a concern.
-- **Wave 3.5 ergonomic polish** — the file-card Versions menu item
-  currently selects the file (so the right-hand Details pane shows
-  the versions list at the bottom) but does not auto-scroll to the
-  Versions heading. Small UX nit; left for a future polish pass.
+- `d67a348` Wave 1 — header bar + selection-driven action bar.
+- `1a51c56` Wave 1.5 — breadcrumb into header title.
+- `dd396df` Wave 2 — folder sidebar → navigation-sidebar list box.
+- `dfd94b3` Wave 3.1 — fixed-position status icon.
+- `bf1d7f0` Wave 3 — file cards + per-row hamburger menus + cleanup.
+- `c989969` doc reconciliation (plan-doc header pass 1).
+- Wave 2.5 — `Adw.OverlaySplitView` wrapper so the sidebar collapses
+  on narrow windows; a header-bar toggle button (`sidebar-show-symbolic`)
+  reveals / hides it while collapsed. (Chose `OverlaySplitView` over
+  `NavigationSplitView` — the latter is for app-section drill-down;
+  ours is a simple sidebar-overlay-content split.)
+- Wave 3.5 — per-row Versions menu now scrolls the Details pane to
+  the Versions heading via `compute_point` + `vadjustment.set_value`,
+  scheduled on `GLib.idle_add` so the heading has a valid allocation
+  before the scroll fires.
 
 ## Wave 3 — status icon + per-row hamburger menus + file cards (planned 2026-05-13)
 

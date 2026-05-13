@@ -132,13 +132,21 @@ class BrowserPanedShrinkableTests(unittest.TestCase):
         self.assertNotIn("set_shrink_start_child(False)", self.text)
 
     def test_shrink_start_children_enabled(self) -> None:
-        """Both ``set_shrink_start_child(True)`` calls land on the outer
-        ``paned`` and inner ``right`` paned.
+        """``set_shrink_start_child(True)`` is enabled on the inner
+        ``right`` Paned (file list ↔ details split).
+
+        Wave 2.5 (2026-05-13): the outer Gtk.Paned was replaced by
+        Adw.OverlaySplitView, which carries its own width-shrinkability
+        semantics via ``set_min_sidebar_width`` / ``set_max_sidebar_width``
+        — verified separately below. The inner pane retains the F-U16
+        shrink-start enable.
         """
         self.assertGreaterEqual(
-            self.text.count("set_shrink_start_child(True)"), 2,
-            "F-U16 expects shrink-start-child enabled on both panes",
+            self.text.count("set_shrink_start_child(True)"), 1,
+            "F-U16 expects shrink-start-child enabled on the inner pane",
         )
+        self.assertIn("set_min_sidebar_width", self.text)
+        self.assertIn("set_max_sidebar_width", self.text)
 
     def test_min_content_widths_lowered(self) -> None:
         """The tree min was 220 (matching set_position) — fixed pin.

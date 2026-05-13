@@ -144,6 +144,14 @@ class VaultBrowser(
         # Wave 3.1: fixed-position status icon in the header bar.
         self._status_icon: Gtk.Image | None = None
         self._status_timeout_id: int | None = None
+        # Wave 2.5: Adw.OverlaySplitView wrapping the sidebar + content,
+        # plus the header-bar toggle that reveals/hides the sidebar
+        # while collapsed.
+        self.split_view: Adw.OverlaySplitView | None = None
+        self._sidebar_toggle_btn: Gtk.ToggleButton | None = None
+        # Wave 3.5: detail-pane scroller is needed by _scroll_to_versions.
+        self.detail_scroller: Gtk.ScrolledWindow | None = None
+        self._versions_heading_label: Gtk.Label | None = None
         # Resume "banner" is a custom horizontal Gtk.Box (not Adw.Banner)
         # because Adw.Banner only supports a single action button. Users
         # need both Resume (continue the interrupted upload) and Cancel
@@ -213,6 +221,7 @@ class VaultBrowser(
         self._build_action_bar()
         self._build_breadcrumb_and_status()
         self._build_panes()
+        self._wire_responsive_sidebar()
 
         try:
             apply_pointer_cursors(self.win)
@@ -230,6 +239,88 @@ class VaultBrowser(
         # Kick the initial manifest fetch on entry so the user sees the
         # tree populate without a manual click.
         self._refresh_manifest_async()
+
+    def _wire_responsive_sidebar(self) -> None:
+        """Wave 2.5: bind split-view ⟷ toggle button + window breakpoint.
+
+        On a wide window the OverlaySplitView keeps the sidebar
+        permanently visible — the toggle button is hidden. Below the
+        breakpoint width (600sp), the split view collapses; the toggle
+        button appears and reveals / hides the sidebar overlay. The
+        ``Adw.Breakpoint`` watches the window's width condition and
+        flips ``collapsed`` on the split view automatically.
+        """
+        if (
+            self.split_view is None
+            or self._sidebar_toggle_btn is None
+            or self.win is None
+        ):
+            return
+
+        from gi.repository import GObject
+
+        # Toggle button visibility tracks split-view ``collapsed`` — the
+        # button only matters in narrow mode. ``SYNC_CREATE`` snaps the
+        # initial value across at bind time.
+        self.split_view.bind_property(
+            "collapsed",
+            self._sidebar_toggle_btn,
+            "visible",
+            GObject.BindingFlags.SYNC_CREATE,
+        )
+        # Toggle state ↔ sidebar visibility, bidirectional.
+        self.split_view.bind_property(
+            "show-sidebar",
+            self._sidebar_toggle_btn,
+            "active",
+            (
+                GObject.BindingFlags.BIDIRECTIONAL
+                | GObject.BindingFlags.SYNC_CREATE
+            ),
+        )
+
+        # Narrow-window breakpoint: when the window is ≤ 600 scaled
+        # pixels wide, collapse the split view. On wider windows the
+        # sidebar is permanently visible.
+        breakpoint_cond = Adw.BreakpointCondition.parse(
+            "max-width: 600sp",
+        )
+        bp = Adw.Breakpoint.new(breakpoint_cond)
+        bp.add_setter(self.split_view, "collapsed", True)
+        bp.add_setter(self.split_view, "show-sidebar", False)
+        self.win.add_breakpoint(bp)
+
+    def _scroll_to_versions(self) -> None:
+        """Wave 3.5: jump the Details pane to the Versions heading.
+
+        Called from ``_menu_action_versions`` via ``GLib.idle_add`` so
+        the layout pass has completed and the heading label has a
+        valid allocation. ``compute_point`` converts the label's
+        origin (0, 0) into ``detail_box`` coordinates, which is what
+        the scroller's vertical adjustment expects.
+        """
+        if (
+            self.detail_scroller is None
+            or self.detail_box is None
+            or self._versions_heading_label is None
+        ):
+            return
+        try:
+            from gi.repository import Graphene
+            success, point = self._versions_heading_label.compute_point(
+                self.detail_box, Graphene.Point.zero(),
+            )
+        except Exception:
+            return
+        if not success:
+            return
+        vadj = self.detail_scroller.get_vadjustment()
+        if vadj is None:
+            return
+        # A small upward bias gives the heading a bit of breathing room
+        # from the scroll-area's top edge.
+        target = max(0.0, point.y - 8.0)
+        vadj.set_value(min(target, vadj.get_upper() - vadj.get_page_size()))
 
     def _refresh_on_focus(self, window, _pspec) -> None:
         if not window.get_property("is-active"):
@@ -443,10 +534,14 @@ class VaultBrowser(
 
         Selects the row so the right-hand Details pane renders its
         version list — that pane already builds the per-version
-        Download icons via ``_render_versions_section``.
+        Download icons via ``_render_versions_section``. Wave 3.5
+        polish: schedule a scroll-to-Versions-heading on the next
+        idle so the user lands on the section they asked for instead
+        of the top of the Details pane.
         """
         self._select_file(dict(file_row))
         self._render_all()
+        GLib.idle_add(lambda: (self._scroll_to_versions(), False)[1])
 
     def _menu_action_delete_file(self, file_row: dict) -> None:
         """Per-row file menu: confirm + delete the file.

@@ -389,6 +389,9 @@ class PanesMixin:
         # finds history. Same shape preserved here.
         if self.versions_btn is not None:
             self.versions_btn.set_sensitive(False)
+        # Wave 3.5: drop any stale Versions-heading reference — the
+        # previous label is about to be removed from the box.
+        self._versions_heading_label = None
 
         if not file_row:
             self.detail_box.append(Gtk.Label(
@@ -480,9 +483,14 @@ class PanesMixin:
         except Exception:
             versions = []
 
-        self.detail_box.append(Gtk.Label(
+        # Wave 3.5: stash this heading on the orchestrator so the
+        # per-row "Versions" menu item can scroll to it after the
+        # render pass settles.
+        versions_heading = Gtk.Label(
             label="Versions", xalign=0, css_classes=["title-3"],
-        ))
+        )
+        self._versions_heading_label = versions_heading
+        self.detail_box.append(versions_heading)
         if bool(file_row.get("deleted")):
             deleted_at_local = format_local(file_row.get("deleted_at"))
             recoverable_local = format_local(file_row.get("recoverable_until"))

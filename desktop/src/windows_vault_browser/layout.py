@@ -59,7 +59,21 @@ class LayoutMixin:
         self._window_title = Adw.WindowTitle(title="Vault", subtitle="")
         header_bar.set_title_widget(self._window_title)
 
-        # --- Start edge: Back ---------------------------------------------
+        # --- Start edge: sidebar toggle (Wave 2.5) + Back -----------------
+        # Wave 2.5: when the OverlaySplitView is collapsed (narrow
+        # window), the sidebar slides over the content. This toggle
+        # button reveals / hides it. The button is bound to the
+        # split-view's ``collapsed`` (visibility) and ``show-sidebar``
+        # (active state) properties so it auto-hides on wide windows
+        # and tracks sidebar state when shown.
+        self._sidebar_toggle_btn = Gtk.ToggleButton(
+            icon_name="sidebar-show-symbolic",
+        )
+        self._sidebar_toggle_btn.add_css_class("flat")
+        self._sidebar_toggle_btn.set_tooltip_text("Show folder sidebar")
+        self._sidebar_toggle_btn.set_visible(False)
+        header_bar.pack_start(self._sidebar_toggle_btn)
+
         self.back_btn = Gtk.Button.new_from_icon_name("go-previous-symbolic")
         self.back_btn.add_css_class("flat")
         self.back_btn.set_tooltip_text("Back to previous folder")
@@ -311,8 +325,19 @@ class LayoutMixin:
 
     def _build_panes(self) -> None:
         assert self.outer is not None
-        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True)
-        self.outer.append(paned)
+        # Wave 2.5 (2026-05-13): the outer two-pane split is now an
+        # Adw.OverlaySplitView so the sidebar slides over the content
+        # when the window narrows past the breakpoint defined in
+        # ``_on_activate``. On a wide window it behaves like the prior
+        # Gtk.Paned — fixed sidebar, content fills the rest. On narrow
+        # windows, the sidebar collapses and a toggle button in the
+        # header bar (also added in Wave 2.5) reveals / hides it.
+        self.split_view = Adw.OverlaySplitView()
+        self.split_view.set_vexpand(True)
+        self.split_view.set_sidebar_width_fraction(0.25)
+        self.split_view.set_min_sidebar_width(180.0)
+        self.split_view.set_max_sidebar_width(360.0)
+        self.outer.append(self.split_view)
 
         # Left: folder sidebar — Wave 2 chrome redesign. A Gtk.ListBox
         # styled with the Adwaita ``navigation-sidebar`` CSS class so
@@ -320,9 +345,7 @@ class LayoutMixin:
         # sidebars (icon + label + selection highlight + hover state).
         # Row activation drives ``_navigate_to`` via the
         # ``row-activated`` signal, with each row carrying its target
-        # path as ``Gtk.ListBoxRow.set_action_name`` data via a
-        # ``Gtk.ListBoxRow`` subclass-free pattern: stash the path on
-        # the row using ``set_data``-style attribute assignment.
+        # path as a Python attribute set in ``_make_tree_row``.
         tree_scroller = Gtk.ScrolledWindow(min_content_width=160)
         self.tree_listbox = Gtk.ListBox()
         self.tree_listbox.add_css_class("navigation-sidebar")
@@ -331,17 +354,11 @@ class LayoutMixin:
             "row-activated", self._on_tree_row_activated,
         )
         tree_scroller.set_child(self.tree_listbox)
-        paned.set_start_child(tree_scroller)
-        paned.set_resize_start_child(False)
-        paned.set_shrink_start_child(True)
+        self.split_view.set_sidebar(tree_scroller)
 
         # Right: split between file list (center) and detail (right).
-        # Both panes are placeholders in pass 1.
         right = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        paned.set_end_child(right)
-        paned.set_resize_end_child(True)
-        paned.set_shrink_end_child(True)
-        paned.set_position(220)
+        self.split_view.set_content(right)
 
         # Wave 3.2: center file list is now a Gtk.ListBox of cards
         # (replaces the former 5-column Gtk.Grid). Each row carries
@@ -364,7 +381,11 @@ class LayoutMixin:
         right.set_resize_start_child(True)
         right.set_shrink_start_child(True)
 
-        detail_scroller = Gtk.ScrolledWindow(min_content_width=200)
+        # Wave 3.5: stash the detail scroller on self so
+        # ``_scroll_to_versions`` can drive its vertical adjustment
+        # when the Versions menu item is activated.
+        self.detail_scroller = Gtk.ScrolledWindow(min_content_width=200)
+        detail_scroller = self.detail_scroller
         self.detail_box = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
             spacing=8,
