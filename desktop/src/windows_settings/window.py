@@ -41,6 +41,7 @@ from ..devices import ConnectedDeviceRegistry
 from ..windows_common import _make_app
 from . import (
     group_logs,
+    group_notifications,
     group_pairings,
     group_receive_actions,
     group_relay,
@@ -120,6 +121,7 @@ def show_settings(config_dir: Path):
         group_theme.build(ctx)
         group_vault.build(ctx)
         group_receive_actions.build(ctx)
+        group_notifications.build(ctx)
         group_pairings.build(ctx)
         group_secret_storage.build(ctx)
         group_logs.build(ctx)

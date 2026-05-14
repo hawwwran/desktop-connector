@@ -790,6 +790,24 @@ class Config:
         self.save()
 
     @property
+    def connection_state_notifications(self) -> bool:
+        """Whether to emit desktop toasts on "connection lost"/"restored".
+
+        Default True so existing installs keep their current behaviour;
+        users who find the toasts noisy can flip it off in Settings →
+        Notifications. The receiver subprocess (``runners/receiver_runner``)
+        is expected to ``self.reload()`` before reading on each state
+        change so the settings subprocess's write propagates without
+        a tray restart.
+        """
+        return bool(self._data.get("connection_state_notifications", True))
+
+    @connection_state_notifications.setter
+    def connection_state_notifications(self, value: bool) -> None:
+        self._data["connection_state_notifications"] = bool(value)
+        self.save()
+
+    @property
     def theme_mode(self) -> str:
         value = self._data.get("theme_mode", DEFAULT_THEME_MODE)
         if value not in _ALLOWED_THEME_MODES:

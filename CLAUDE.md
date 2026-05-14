@@ -185,6 +185,9 @@ Desktop sends encrypted start/stop via fasttrack. Phone: alarm (STREAM_ALARM, by
 ### Logging (opt-in)
 Off by default, "Allow logging" toggle in Settings. Desktop: Python `RotatingFileHandler` (1 MB + 1 backup = 2 MB max) at `~/.config/desktop-connector/logs/`. Android: `AppLog` writes gated on pref. Server: `data/logs/server.log` with 2-file rotation (1 MB each). Desktop settings has "Download Logs" (copies to `~/Downloads/`, opens folder).
 
+### Notification toggles (opt-out)
+Desktop Settings → Notifications → "Connection state messages" gates the toast emitted on relay connection lost / restored (`config.connection_state_notifications`, default `True`). The receiver (`runners/receiver_runner.on_state_change`) calls `config.reload()` before reading the flag on every state transition, so the toggle takes effect without a tray restart.
+
 ## Visual identity
 
 See [`docs/visual-identity-guide.md`](docs/visual-identity-guide.md). Blue-dominant (70%) + neutral soft-white (20%) + warm accents (10%); 4-point sparkle = status/spark mark; monitor + phone + orbital arc = full symbol.
