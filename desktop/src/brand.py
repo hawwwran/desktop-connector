@@ -259,6 +259,84 @@ def apply_brand_css() -> None:
         background-image: none;
         color: {DC_ORANGE_700};
     }}
+
+    /* Vault browser folder sidebar.
+
+       Diagnosis (colour-coded debug pass, 2026-05-14): the gray
+       "frame" around the sidebar card is painted by *three* stacked
+       widgets, not one. Working outward:
+
+         ListBox          — we paint this gray (the visible card).
+         ScrolledWindow   — Adwaita paints this opaque too (sidebar
+                            slot styling). We transparentize it via
+                            `.vault-folder-sidebar-wrap`.
+         Bin .sidebar-pane — AdwOverlaySplitView's internal sidebar-
+                            slot widget. Adwaita paints it
+                            @sidebar_bg_color via `.sidebar-pane`
+                            (a CSS CLASS on a Bin, NOT a node name —
+                            so a `sidebar-pane` type selector
+                            silently matches nothing; only the
+                            class-form `.sidebar-pane` lands). This
+                            is what was still showing through after
+                            we silenced the scroller — a faint gray
+                            rim hugging the OSV edge.
+
+       Why the right-hand content pane has no equivalent gray:
+       Adwaita's analogous rule is `.sidebar-pane .content-pane`
+       (paints `@secondary_sidebar_bg_color`) — it only kicks in
+       when the content-pane is NESTED inside another sidebar-pane.
+       A standalone `.content-pane` is unstyled, so the content
+       slot just shows through to the window bg.
+
+       Fix: transparentize both the scroller and the OSV pane Bin,
+       paint @sidebar_bg_color on the ListBox alone with 12px
+       rounded corners so the sidebar reads as a single gray card
+       aligned with the right-hand boxed-list pane.
+
+       Selector quirks worth keeping:
+       - `.sidebar-pane` is a class on a Bin widget, not the
+         widget's CSS node name. A bare `sidebar-pane` selector
+         (no dot) matches nothing.
+       - Gtk.ListBox's GTK4 node name isn't `listbox`, so a
+         `listbox.vault-folder-sidebar` selector also matches
+         nothing — the class-only form is what works.
+       - The `vault-folder-split` marker class is set on
+         `self.split_view` in layout.py so the `.sidebar-pane`
+         transparentization is scoped to the vault browser only.
+       - The CSS provider only reads `brand.py` once per subprocess;
+         restart the vault browser to see changes. */
+    .vault-folder-split > .sidebar-pane {{
+        background-color: transparent;
+    }}
+    .vault-folder-sidebar-wrap {{
+        background-color: transparent;
+    }}
+    .vault-folder-sidebar {{
+        background-color: @sidebar_bg_color;
+        border-radius: 12px;
+    }}
+
+    /* Vault browser loading skeleton (Wave 3.6).
+
+       Painted while the centre pane is showing the "loading" stack
+       child (layout.py `_build_panes`). Each row is a 56px-tall
+       Gtk.Box matching the boxed-list card geometry so the layout
+       doesn't jump when real folder/file rows replace them.
+       `currentColor` follows the theme — light text on dark, dark
+       text on light — and 0.08 alpha keeps the placeholder gentle.
+       A subtle 1.4 s opacity pulse signals "in progress" without
+       distracting; GTK4 supports @keyframes (see Adwaita's own
+       `needs_attention` / `spin` animations). */
+    @keyframes vault-skeleton-pulse {{
+        0%   {{ opacity: 0.5; }}
+        50%  {{ opacity: 1.0; }}
+        100% {{ opacity: 0.5; }}
+    }}
+    .vault-skeleton-row {{
+        background-color: alpha(currentColor, 0.08);
+        border-radius: 12px;
+        animation: vault-skeleton-pulse 1.4s ease-in-out infinite;
+    }}
     """.encode("utf-8")
 
     provider = Gtk.CssProvider()

@@ -316,34 +316,88 @@ class PanesMixin:
         folder: dict | None = None,
         file_row: dict | None = None,
     ) -> Gtk.MenuButton:
-        """Build the per-row hamburger MenuButton.
+        """Build the per-row hamburger MenuButton for a folder or file.
 
-        Folders get Download / Delete; files get Download / Versions
-        / Delete. Each menu item is a plain Gtk.Button inside a
-        Gtk.Popover — we skip Gio actions because the row already
-        carries the full target context, and a plain button keeps
-        the wiring local + lambda-capturable.
+        Folders get Download / Delete; files get Download / Versions /
+        Delete. The actual MenuButton + popover plumbing lives in
+        ``_make_card_menu_button`` so the version-history rows (Wave
+        3.7) can reuse the same shape with their own action set.
+        """
+        if folder is not None:
+            target_name = str(folder.get("name") or folder.get("path") or "folder")
+            a11y_label = f"Actions for folder {target_name}"
+            folder_path = str(folder["path"])
+            items: list[tuple[str, object, str | None]] = [
+                (
+                    "Download folder",
+                    lambda: self._menu_action_download_folder(folder_path),
+                    None,
+                ),
+                (
+                    "Delete folder",
+                    lambda: self._menu_action_delete_folder(folder_path),
+                    "destructive-action",
+                ),
+            ]
+        elif file_row is not None:
+            target_name = str(file_row.get("name", "")) or "file"
+            a11y_label = f"Actions for file {target_name}"
+            captured = dict(file_row)
+            deleted = str(captured.get("status", "")) == "Deleted"
+            items = [
+                (
+                    "Download",
+                    lambda: self._menu_action_download_file(captured),
+                    None,
+                ),
+            ]
+            if int(captured.get("versions", 0) or 0) > 0:
+                items.append((
+                    "Versions",
+                    lambda: self._menu_action_versions(captured),
+                    None,
+                ))
+            if not deleted:
+                items.append((
+                    "Delete",
+                    lambda: self._menu_action_delete_file(captured),
+                    "destructive-action",
+                ))
+        else:
+            a11y_label = "Actions for this item"
+            items = []
+
+        return self._make_card_menu_button(
+            a11y_label=a11y_label, items=items,
+        )
+
+    def _make_card_menu_button(
+        self,
+        *,
+        a11y_label: str,
+        items: list[tuple[str, object, str | None]],
+    ) -> Gtk.MenuButton:
+        """Build a per-card hamburger MenuButton from an items list.
+
+        ``items`` is a list of ``(label, callback, css_class)`` triples;
+        ``css_class`` may be ``None`` for a plain menu item or a class
+        like ``"destructive-action"``. The popover dismisses itself
+        before invoking the callback so the click handler observes a
+        clean window-focus state. No tooltip on the MenuButton: the
+        view-more glyph is a universally recognised affordance, and a
+        tooltip appearing right where the popover opens obscures the
+        click target.
+
+        F-U10: icon-only MenuButton needs an explicit accessible
+        label — ``a11y_label`` (e.g. "Actions for file foo.txt",
+        "Actions for version 2026-05-14 12:30") is what screen readers
+        announce for the button.
         """
         menu_btn = Gtk.MenuButton(
             icon_name="view-more-symbolic",
             valign=Gtk.Align.CENTER,
         )
         menu_btn.add_css_class("flat")
-        menu_btn.set_tooltip_text("Actions for this item")
-        # F-U10: icon-only MenuButton on each row — without an
-        # accessible-name binding, screen readers announce "menu
-        # button" with no context for which row they're on. Build a
-        # contextual label ("Actions for file foo.txt" / "Actions for
-        # folder Documents") so AT-SPI tooling can navigate the list
-        # by row identity.
-        if folder is not None:
-            target_name = str(folder.get("name") or folder.get("path") or "folder")
-            a11y_label = f"Actions for folder {target_name}"
-        elif file_row is not None:
-            target_name = str(file_row.get("name", "")) or "file"
-            a11y_label = f"Actions for file {target_name}"
-        else:
-            a11y_label = "Actions for this item"
         menu_btn.update_property([Gtk.AccessibleProperty.LABEL], [a11y_label])
 
         popover = Gtk.Popover()
@@ -355,7 +409,7 @@ class PanesMixin:
         )
         popover.set_child(menu_box)
 
-        def add_item(label: str, callback, css: str | None = None) -> None:
+        for label, callback, css in items:
             btn = Gtk.Button(label=label, halign=Gtk.Align.FILL)
             btn.add_css_class("flat")
             if css is not None:
@@ -365,42 +419,16 @@ class PanesMixin:
             if isinstance(child, Gtk.Label):
                 child.set_xalign(0)
 
-            def on_click(_b) -> None:
+            # Default-arg capture pins ``callback`` per iteration —
+            # otherwise every button would invoke the last item's
+            # lambda due to late-binding closure semantics.
+            def on_click(_b, cb=callback) -> None:
                 popover.popdown()
-                callback()
+                cb()
 
             btn.connect("clicked", on_click)
             menu_box.append(btn)
 
-        if folder is not None:
-            folder_path = str(folder["path"])
-            add_item(
-                "Download folder",
-                lambda: self._menu_action_download_folder(folder_path),
-            )
-            add_item(
-                "Delete folder",
-                lambda: self._menu_action_delete_folder(folder_path),
-                css="destructive-action",
-            )
-        elif file_row is not None:
-            captured = dict(file_row)
-            deleted = str(captured.get("status", "")) == "Deleted"
-            add_item(
-                "Download",
-                lambda: self._menu_action_download_file(captured),
-            )
-            if int(captured.get("versions", 0) or 0) > 0:
-                add_item(
-                    "Versions",
-                    lambda: self._menu_action_versions(captured),
-                )
-            if not deleted:
-                add_item(
-                    "Delete",
-                    lambda: self._menu_action_delete_file(captured),
-                    css="destructive-action",
-                )
         return menu_btn
 
     def _render_detail(self, file_row: dict | None) -> None:
@@ -545,64 +573,85 @@ class PanesMixin:
         if self.versions_btn is not None:
             self.versions_btn.set_sensitive(True)
 
-        grid = Gtk.Grid(column_spacing=12, row_spacing=6)
-        self.detail_box.append(grid)
-        for col, header in enumerate(
-            ("", "Modified", "Device", "Size", "Status", ""),
-        ):
-            grid.attach(
-                Gtk.Label(label=header, xalign=0, css_classes=["dim-label"]),
-                col, 0, 1, 1,
-            )
+        # Wave 3.7 (2026-05-14): the version history is now a
+        # `boxed-list` Gtk.ListBox of card rows matching the main
+        # file pane's geometry. Each card carries the version date
+        # as title, `Device · Size · Status` as subtitle, and a
+        # per-row hamburger menu with Download / Restore actions
+        # (built via the shared `_make_card_menu_button` helper).
+        # Selection is disabled — the menu drives interaction;
+        # row-activate would clobber a click on the MenuButton.
+        versions_listbox = Gtk.ListBox(hexpand=True)
+        versions_listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        versions_listbox.add_css_class("boxed-list")
+        versions_listbox.set_margin_top(8)
+        versions_listbox.set_margin_bottom(8)
+        self.detail_box.append(versions_listbox)
 
         entry_deleted = bool(file_row.get("deleted"))
-        for row_index, version in enumerate(versions, start=1):
-            # Per-version download icon — pass 4 wires this. Restore
-            # button below stays placeholder-disabled until pass 5.
-            download_icon_btn = Gtk.Button.new_from_icon_name("document-save-symbolic")
-            download_icon_btn.add_css_class("flat")
-            download_icon_btn.set_tooltip_text("Download this version")
-            download_icon_btn.connect(
-                "clicked",
-                lambda _b, v=dict(version), f=dict(file_row):
+        for version in versions:
+            versions_listbox.append(
+                self._make_version_row(file_row, version, entry_deleted),
+            )
+
+    def _make_version_row(
+        self,
+        file_row: dict,
+        version: dict,
+        entry_deleted: bool,
+    ) -> Gtk.ListBoxRow:
+        """Build a single version card for the detail-pane history list."""
+        row = Gtk.ListBoxRow()
+        row.set_activatable(False)
+        row.set_selectable(False)
+
+        modified = format_local(version.get("modified")) or "Unknown date"
+        device = str(version.get("author_device_id") or "")
+        device_part = f"Device {device[:12]}" if device else ""
+        size_part = _format_bytes(int(version.get("size", 0) or 0))
+        is_current = bool(version.get("is_current"))
+        if entry_deleted and is_current:
+            status_part = "Latest (deleted)"
+        elif is_current:
+            status_part = "Current"
+        else:
+            status_part = "Previous"
+
+        parts = [p for p in (device_part, size_part, status_part) if p]
+        body = self._make_card_body(
+            icon_name="text-x-generic-symbolic",
+            title=modified,
+            subtitle_parts=parts,
+            dim=False,
+        )
+
+        # Build the action set — current-non-deleted has no download
+        # (you already have this file) and no restore (it IS the
+        # current). The "deleted entry's latest version" case is the
+        # exception: download + restore are both meaningful because
+        # the visible file is a tombstone.
+        items: list[tuple[str, object, str | None]] = []
+        if not is_current or entry_deleted:
+            items.append((
+                "Download this version",
+                lambda v=dict(version), f=dict(file_row):
                     self._choose_version_destination(f, v),
-            )
-            if version.get("is_current") and not entry_deleted:
-                download_icon_btn.set_sensitive(False)
-            grid.attach(download_icon_btn, 0, row_index, 1, 1)
+                None,
+            ))
+        show_restore = (not is_current) or entry_deleted
+        if show_restore:
+            items.append((
+                "Restore as current",
+                lambda v=dict(version), f=dict(file_row):
+                    self._confirm_restore_version(f, v),
+                None,
+            ))
 
-            modified = format_local(version.get("modified")) or "-"
-            grid.attach(Gtk.Label(label=modified, xalign=0), 1, row_index, 1, 1)
-            device = str(version.get("author_device_id") or "")
-            grid.attach(
-                Gtk.Label(label=device[:12] if device else "-", xalign=0),
-                2, row_index, 1, 1,
-            )
-            size_label = _format_bytes(int(version.get("size", 0) or 0))
-            grid.attach(Gtk.Label(label=size_label, xalign=0), 3, row_index, 1, 1)
-            if entry_deleted and version.get("is_current"):
-                status_label = "Latest (deleted)"
-            elif version.get("is_current"):
-                status_label = "Current"
-            else:
-                status_label = "Previous"
-            grid.attach(Gtk.Label(label=status_label, xalign=0), 4, row_index, 1, 1)
+        if items:
+            body.append(self._make_card_menu_button(
+                a11y_label=f"Actions for version {modified}",
+                items=items,
+            ))
 
-            show_restore = (not version.get("is_current")) or entry_deleted
-            if show_restore:
-                restore_btn = Gtk.Button(
-                    label="Restore as current",
-                    css_classes=["pill", "suggested-action"],
-                )
-                restore_btn.set_tooltip_text(
-                    "Promote this version to the current one. Tombstone is lifted."
-                    if entry_deleted else
-                    "Promote this version to the current one. The previous "
-                    "current becomes restorable history."
-                )
-                restore_btn.connect(
-                    "clicked",
-                    lambda _b, v=dict(version), f=dict(file_row):
-                        self._confirm_restore_version(f, v),
-                )
-                grid.attach(restore_btn, 5, row_index, 1, 1)
+        row.set_child(body)
+        return row

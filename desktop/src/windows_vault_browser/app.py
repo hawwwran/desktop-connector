@@ -175,6 +175,16 @@ class VaultBrowser(
         self.list_grid: Gtk.Grid | None = None  # legacy slot; kept None for back-compat
         self.list_listbox: Gtk.ListBox | None = None
         self.detail_box: Gtk.Box | None = None
+        # Wave 3.6 (2026-05-14): centre-pane loading affordance. The
+        # manifest fetch can take many seconds on a slow relay; without
+        # this the user sees an empty pane and assumes something is
+        # broken. ``list_stack`` swaps between a spinner+skeleton view
+        # ("loading") and the real ``list_listbox`` ("content"). Only
+        # the initial fetch (no cached manifest) flips to "loading";
+        # background refreshes keep content visible and let the header-
+        # bar status icon carry the in-flight feedback.
+        self.list_stack: Gtk.Stack | None = None
+        self._loading_spinner: Gtk.Spinner | None = None
 
         # F-U03: workers running long-flow operations (download / etc)
         # register their ``threading.Event`` here before starting and
@@ -197,8 +207,13 @@ class VaultBrowser(
         self.win = Adw.ApplicationWindow(
             application=app,
             title="Vault",
-            default_width=1040,
-            default_height=680,
+            # Wave 3.7 (2026-05-14): bumped from 1040×680 → 1280×760
+            # so the detail pane (Versions card list + per-field
+            # rows) has room to breathe without the user reaching
+            # for the paned splitter. Pairs with the lowered right-
+            # paned divider position in ``layout.py`` (540 → 500).
+            default_width=1280,
+            default_height=760,
         )
         toolbar = Adw.ToolbarView()
         self.win.set_content(toolbar)
@@ -327,6 +342,22 @@ class VaultBrowser(
     def _refresh_on_focus(self, window, _pspec) -> None:
         if not window.get_property("is-active"):
             return
+        # On Wayland, popovers are separate native surfaces. Opening a
+        # per-row hamburger toggles the parent window's ``is-active``
+        # (it briefly loses focus to the popover surface, then regains
+        # it once the popover is mapped). Without this guard, the
+        # regain fires _refresh_on_focus → manifest fetch → _render_all
+        # → tree rebuild ~100ms later, and the popover the user just
+        # opened vanishes mid-hover. Skip the refresh when focus is on
+        # / inside a MenuButton or Popover — same focus-walk used by
+        # _click_targets_row_menu, kept identical so both code paths
+        # agree on what "the user is interacting with a row menu" means.
+        focus = window.get_focus()
+        cur = focus
+        while cur is not None:
+            if isinstance(cur, (Gtk.MenuButton, Gtk.Popover)):
+                return
+            cur = cur.get_parent()
         if self.refresh_btn is None or not self.refresh_btn.get_sensitive():
             return
         self._refresh_manifest_async()
@@ -650,6 +681,38 @@ class VaultBrowser(
         self.state.selected_file = None
         self._render_all()
 
+    def _click_targets_row_menu(self, row: Gtk.ListBoxRow | None) -> bool:
+        """Return True if the current click landed on this row's hamburger.
+
+        Clicking a Gtk.MenuButton inside a Gtk.ListBoxRow still fires the
+        listbox's row-activated / row-selected signals, which (for the
+        sidebar) navigate and rebuild the listbox — destroying the
+        menu button before its popover can appear. We can't claim the
+        gesture on the MenuButton itself (claiming a sequence denies
+        the MenuButton's own concurrent gesture and the popover never
+        opens). Instead, when GTK delivers the click it also moves
+        keyboard focus onto the focusable target widget. By the time
+        these handlers fire, ``win.get_focus()`` is the MenuButton —
+        walk up from the focus widget and short-circuit if we find a
+        descendant MenuButton inside this row.
+        """
+        if self.win is None or row is None:
+            return False
+        focus = self.win.get_focus()
+        while focus is not None:
+            if isinstance(focus, Gtk.MenuButton):
+                # Confirm the focused MenuButton is actually a child of
+                # this row (vs. the header-bar overflow menu which
+                # shouldn't affect row routing).
+                ancestor = focus
+                while ancestor is not None:
+                    if ancestor is row:
+                        return True
+                    ancestor = ancestor.get_parent()
+                return False
+            focus = focus.get_parent()
+        return False
+
     def _on_list_row_selected(
         self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None,
     ) -> None:
@@ -660,6 +723,8 @@ class VaultBrowser(
         row-activated, not selection-driven details).
         """
         if row is None:
+            return
+        if self._click_targets_row_menu(row):
             return
         kind = getattr(row, "_vault_kind", None)
         if kind == "file":
@@ -685,6 +750,8 @@ class VaultBrowser(
         """
         if row is None:
             return
+        if self._click_targets_row_menu(row):
+            return
         if getattr(row, "_vault_kind", None) != "folder":
             return
         folder_path = getattr(row, "_vault_folder_path", None)
@@ -701,6 +768,8 @@ class VaultBrowser(
         means the Vault root.
         """
         if row is None:
+            return
+        if self._click_targets_row_menu(row):
             return
         target = getattr(row, "_vault_path", None)
         if target is None:
@@ -736,6 +805,18 @@ class VaultBrowser(
         if self.refresh_btn is not None:
             self.refresh_btn.set_sensitive(False)
         self._set_status("Refreshing vault manifest...")
+        # Wave 3.6: show the centre-pane spinner + skeleton only on
+        # the initial load (no manifest yet). For incremental
+        # refreshes keep the existing rows visible — the header
+        # status icon is enough feedback and blanking the view
+        # would feel like a regression.
+        if (
+            self.state.manifest is None
+            and self.list_stack is not None
+            and self._loading_spinner is not None
+        ):
+            self._loading_spinner.start()
+            self.list_stack.set_visible_child_name("loading")
 
         def worker() -> None:
             try:
@@ -756,6 +837,10 @@ class VaultBrowser(
                 def fail() -> bool:
                     if self.refresh_btn is not None:
                         self.refresh_btn.set_sensitive(True)
+                    if self._loading_spinner is not None:
+                        self._loading_spinner.stop()
+                    if self.list_stack is not None:
+                        self.list_stack.set_visible_child_name("content")
                     self._render_all(
                         f"Could not refresh vault browser: {error_message}",
                         "error",
@@ -768,6 +853,10 @@ class VaultBrowser(
             def succeed() -> bool:
                 if self.refresh_btn is not None:
                     self.refresh_btn.set_sensitive(True)
+                if self._loading_spinner is not None:
+                    self._loading_spinner.stop()
+                if self.list_stack is not None:
+                    self.list_stack.set_visible_child_name("content")
                 self.state.manifest = manifest
                 # Validate the current path still exists in the new
                 # manifest; reset to root if not.

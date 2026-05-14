@@ -347,6 +347,10 @@ class LayoutMixin:
         # windows, the sidebar collapses and a toggle button in the
         # header bar (also added in Wave 2.5) reveals / hides it.
         self.split_view = Adw.OverlaySplitView()
+        # Marker class so brand.py's `.vault-folder-split > .sidebar`
+        # rule can transparentize the pane Adwaita would otherwise
+        # paint with @sidebar_bg_color.
+        self.split_view.add_css_class("vault-folder-split")
         self.split_view.set_vexpand(True)
         self.split_view.set_sidebar_width_fraction(0.25)
         self.split_view.set_min_sidebar_width(180.0)
@@ -361,8 +365,20 @@ class LayoutMixin:
         # ``row-activated`` signal, with each row carrying its target
         # path as a Python attribute set in ``_make_tree_row``.
         tree_scroller = Gtk.ScrolledWindow(min_content_width=160)
+        tree_scroller.add_css_class("vault-folder-sidebar-wrap")
         self.tree_listbox = Gtk.ListBox()
         self.tree_listbox.add_css_class("navigation-sidebar")
+        # Marker class so brand.py can paint the rounded white card
+        # treatment that matches the right-hand boxed-list file pane.
+        # Pair with margins matching ``self.list_listbox`` below so the
+        # left and right cards line up vertically inside the
+        # OverlaySplitView (whose own sidebar-pane background is
+        # transparentized in the same CSS rule).
+        self.tree_listbox.add_css_class("vault-folder-sidebar")
+        self.tree_listbox.set_margin_top(8)
+        self.tree_listbox.set_margin_bottom(8)
+        self.tree_listbox.set_margin_start(8)
+        self.tree_listbox.set_margin_end(8)
         self.tree_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.tree_listbox.connect(
             "row-activated", self._on_tree_row_activated,
@@ -391,7 +407,61 @@ class LayoutMixin:
         self.list_listbox.connect("row-selected", self._on_list_row_selected)
         self.list_listbox.connect("row-activated", self._on_list_row_activated)
         list_scroller.set_child(self.list_listbox)
-        right.set_start_child(list_scroller)
+
+        # Wave 3.6: loading affordance. The manifest fetch is the
+        # gating remote call between window open and first paint. On
+        # a slow relay we used to leave the centre pane visually
+        # empty for seconds, so users read it as "broken" rather
+        # than "loading". A Gtk.Stack swaps between:
+        #   - "loading" — Gtk.Spinner + a column of pulsing skeleton
+        #     rows shaped like the real folder/file cards.
+        #   - "content" — the real ``list_listbox`` scroller.
+        # `_refresh_manifest_async` flips to "loading" only when
+        # ``state.manifest is None`` so subsequent refreshes don't
+        # blank the existing view; the header status icon already
+        # surfaces in-flight work in that case.
+        loading_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=24,
+            margin_bottom=24,
+            margin_start=16,
+            margin_end=16,
+            valign=Gtk.Align.START,
+        )
+        spinner_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=10,
+            halign=Gtk.Align.CENTER,
+            margin_bottom=4,
+        )
+        self._loading_spinner = Gtk.Spinner()
+        self._loading_spinner.set_size_request(20, 20)
+        spinner_row.append(self._loading_spinner)
+        loading_label = Gtk.Label(label="Loading vault…")
+        loading_label.add_css_class("dim-label")
+        spinner_row.append(loading_label)
+        loading_box.append(spinner_row)
+        # Skeleton cards: same outer shape as a real folder/file row
+        # (boxed-list pill, ~56px tall) so the layout doesn't jump
+        # when the real rows replace them.
+        for _ in range(4):
+            sk = Gtk.Box()
+            sk.add_css_class("vault-skeleton-row")
+            sk.set_size_request(-1, 56)
+            sk.set_hexpand(True)
+            loading_box.append(sk)
+
+        self.list_stack = Gtk.Stack()
+        self.list_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.list_stack.set_transition_duration(180)
+        self.list_stack.set_hhomogeneous(True)
+        self.list_stack.set_vhomogeneous(False)
+        self.list_stack.add_named(loading_box, "loading")
+        self.list_stack.add_named(list_scroller, "content")
+        self.list_stack.set_visible_child_name("content")
+
+        right.set_start_child(self.list_stack)
         right.set_resize_start_child(True)
         right.set_shrink_start_child(True)
 
@@ -412,4 +482,9 @@ class LayoutMixin:
         right.set_end_child(detail_scroller)
         right.set_resize_end_child(False)
         right.set_shrink_end_child(True)
-        right.set_position(540)
+        # Wave 3.7 (2026-05-14): divider lowered 540 → 500 to give
+        # the detail pane more horizontal room out of the gate. With
+        # the window default also widened to 1280, the detail pane
+        # now lands at ~460px (was ~240px) — enough for the
+        # Versions card list's subtitle row to fit on one line.
+        right.set_position(500)
