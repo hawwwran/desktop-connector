@@ -12,7 +12,7 @@ The intentional survivors are listed in ``ALLOWED_VAULT_PREFIXED``:
 
 - ``vault_folders/`` — the Folders TAB GTK widget tree. ``vault.folder``
   (singular) is the data layer; ``vault_folders/`` is UI. The
-  duplication is documented in ``docs/plans/post-breakup-followups.md``.
+  duplication is documented in ``temp/finished-plans/post-breakup-followups.md``.
 - ``vault_submenu`` — the tray's vault submenu mixin
   (``tray/vault_submenu.py``). Tray-internal, not a vault-subsystem
   module.

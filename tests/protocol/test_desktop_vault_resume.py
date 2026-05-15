@@ -1,6 +1,6 @@
 """Cross-session resume of an unfinished vault create — worker-thread tests.
 
-Acceptance (post-breakup-followups.md §2): a single onboarding session
+Acceptance (temp/finished-plans/post-breakup-followups.md §2): a single onboarding session
 leaves at most one ``vaults`` row on the relay regardless of how many
 times the wizard was opened and closed. These tests exercise the worker
 seam — the GTK wizard plumbing is a thin shell over

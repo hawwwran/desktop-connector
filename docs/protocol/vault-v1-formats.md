@@ -6,7 +6,7 @@ Scope: the byte layout of every encrypted envelope, AAD construction, KDF parame
 
 This document is the second-implementer reference. Where the wire surface is documented in [`vault-v1.md`](vault-v1.md), this file covers what those base64 / hex / opaque byte strings actually look like. A second implementer should be able to write a compatible client or server from this doc + the wire doc + the test vectors at `tests/protocol/vault-v1/` (drafted in T0.4).
 
-When this document disagrees with [T0 §"Implementation clarifications"](../plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md#implementation-clarifications-audit-closures-2026-05-02), T0 wins.
+When this document disagrees with [T0 §"Implementation clarifications"](../../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md#implementation-clarifications-audit-closures-2026-05-02), T0 wins.
 
 ---
 
@@ -1087,9 +1087,9 @@ A vector that breaks one side breaks the build. This is the ground truth for "co
 
 ## 20. References
 
-- T0 decisions (authoritative): [`desktop-connector-vault-T0-decisions.md`](../plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md). Particularly relevant: §A3 (manifest_format_version + AAD), §A7 (tie-breaker timestamps), §A10 (export bundle), §A11 (recovery kit form), §A18 (test vector schema), §A19 (chunk ID regex), §D1 (manifest format versioning), §D14 (op-log segments).
+- T0 decisions (authoritative): [`desktop-connector-vault-T0-decisions.md`](../../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md). Particularly relevant: §A3 (manifest_format_version + AAD), §A7 (tie-breaker timestamps), §A10 (export bundle), §A11 (recovery kit form), §A18 (test vector schema), §A19 (chunk ID regex), §D1 (manifest format versioning), §D14 (op-log segments).
 - Wire surface: [`vault-v1.md`](vault-v1.md). The two documents form a closed pair: this file says "what the bytes mean", that file says "where the bytes go".
 - Test vectors (when populated): `tests/protocol/vault-v1/`.
 - Crypto sources (per-side): `desktop/src/vault_crypto.py`, `server/src/Crypto/VaultCrypto.php`.
 - Base protocol: [`protocol.md`](protocol.md).
-- Plan files: [`docs/plans/desktop-connector-vault-plan-md/`](../plans/desktop-connector-vault-plan-md/) — narrative architecture (01–11) plus the T0 decision lock.
+- Plan files: [`temp/finished-plans/desktop-connector-vault-plan-md/`](../../temp/finished-plans/desktop-connector-vault-plan-md/) — narrative architecture (01–11) plus the T0 decision lock. Archived 2026-05-15; canonical overview moved to [`docs/vault-architecture.md`](../vault-architecture.md).

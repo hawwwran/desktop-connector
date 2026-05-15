@@ -197,7 +197,7 @@ failures — rejected as ill-fit for desktop-local crypto.
 Argon2id params); `vault/recovery_kit.py::verify_recovery_kit` (the
 single-attempt verify surface); `windows_vault/tab_recovery.py`
 (Test button re-enable, no counter). Plan §3 line reworded in
-`docs/plans/post-breakup-followups.md`.
+`temp/finished-plans/post-breakup-followups.md`.
 
 ### 2026-05-12 — Cross-session vault-create orphans get a local-only resume
 
@@ -319,7 +319,7 @@ check resolves the symbol ambiguity.
 **Anchor.** `desktop/src/vault/` is the package. The full Wave A–G
 commit range is `dad6a9e^..0f79917`. Plan docs:
 `temp/finished-plans/desktop-file-size-breakup.md` (original scope) +
-`docs/plans/post-breakup-followups.md` (wave progression). The
+`temp/finished-plans/post-breakup-followups.md` (wave progression). The
 filesystem layout (subpackages and their contents) is enumerated
 there; cross-link rather than duplicate. Older entries in this
 file anchor at pre-consolidation paths like

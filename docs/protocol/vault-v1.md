@@ -6,7 +6,7 @@ Scope: HTTP wire shapes for every vault endpoint, capability discovery, error en
 
 This document layers on top of [`protocol.md`](protocol.md). Shapes for transfer, pairing, fasttrack, and device registration live there; this file covers the `/api/vaults/*` namespace and the vault capability bits added to `/api/health`.
 
-When this document disagrees with [`desktop-connector-vault-T0-decisions.md`](../plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md), T0 wins. Byte-exact constructions (AAD strings, HKDF labels, manifest envelope, chunk envelope, recovery envelope, export bundle CBOR records, device-grant material) live in [`vault-v1-formats.md`](vault-v1-formats.md), drafted in T0.3.
+When this document disagrees with [`desktop-connector-vault-T0-decisions.md`](../../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md), T0 wins. Byte-exact constructions (AAD strings, HKDF labels, manifest envelope, chunk envelope, recovery envelope, export bundle CBOR records, device-grant material) live in [`vault-v1-formats.md`](vault-v1-formats.md), drafted in T0.3.
 
 ---
 
@@ -161,7 +161,7 @@ Every vault error response uses the stable envelope from T0:
 - `details` is per-code; fields not listed in the T0 table are reserved. Clients ignore unknown fields.
 - HTTP status codes match the T0 §"Error codes" table.
 
-The full code table — including required `details` fields and retry classes (`auto` / `user-action` / `permanent` / `info`) — lives in [T0 §"Error codes (vault_v1)"](../plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md#error-codes-vault_v1). This document references codes by name. Treat that table as authoritative for retry behavior.
+The full code table — including required `details` fields and retry classes (`auto` / `user-action` / `permanent` / `info`) — lives in [T0 §"Error codes (vault_v1)"](../../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md#error-codes-vault_v1). This document references codes by name. Treat that table as authoritative for retry behavior.
 
 ---
 
@@ -1000,7 +1000,7 @@ Recovery passphrase rotation and Vault Master Key rotation are **out of scope fo
 
 ## 9. Errors
 
-Every error response uses the §4 envelope. The full `code` table — with HTTP status, retry class, and required `details` — lives in [T0 §"Error codes (vault_v1)"](../plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md#error-codes-vault_v1).
+Every error response uses the §4 envelope. The full `code` table — with HTTP status, retry class, and required `details` — lives in [T0 §"Error codes (vault_v1)"](../../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md#error-codes-vault_v1).
 
 This document references codes inline by name. Treat the T0 table as authoritative for retry class. v2+ reserved codes (`vault_key_rotation_in_progress`, `vault_grant_expired`, `vault_grant_revoked`, `vault_folder_locked`, `vault_offline_pending`) are not emitted by v1 servers.
 
@@ -1034,9 +1034,9 @@ Vault endpoints inherit the existing rate-limit middleware where applicable. Vau
 
 ## 11. References
 
-- T0 decisions: [`desktop-connector-vault-T0-decisions.md`](../plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md) — authoritative spec; this document defers to it.
+- T0 decisions: [`desktop-connector-vault-T0-decisions.md`](../../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md) — authoritative spec; this document defers to it.
 - Byte formats: [`vault-v1-formats.md`](vault-v1-formats.md) — AAD strings, HKDF labels, manifest envelope, chunk envelope, recovery envelope, export bundle CBOR records, device grant. *(Drafted in T0.3.)*
 - Test vectors: `tests/protocol/vault-v1/` — JSON test cases exercised by both desktop Python and server PHP. *(Stubbed in T0.4 and populated in T2.)*
 - Base protocol: [`protocol.md`](protocol.md) — device registration, pairing, transfers, fasttrack.
-- Plan files: [`docs/plans/desktop-connector-vault-plan-md/`](../plans/desktop-connector-vault-plan-md/) — narrative architecture (01–11) and the T0 decision lock.
-- Working tracker: [`VAULT-progress.md`](../plans/desktop-connector-vault-plan-md/VAULT-progress.md).
+- Plan files: [`temp/finished-plans/desktop-connector-vault-plan-md/`](../../temp/finished-plans/desktop-connector-vault-plan-md/) — narrative architecture (01–11) and the T0 decision lock. Archived 2026-05-15; canonical overview moved to [`docs/vault-architecture.md`](../vault-architecture.md).
+- Working tracker: [`VAULT-progress.md`](../../temp/finished-plans/desktop-connector-vault-plan-md/VAULT-progress.md).

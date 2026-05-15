@@ -6,7 +6,7 @@ The PHP twin (``server/src/Crypto/VaultCrypto.php``, T2.4) runs the same JSON
 files via PHPUnit so a divergence between the two runtimes breaks the build.
 
 Schema lock: T0 §A18 in
-``docs/plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md``.
+``temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md``.
 Byte-format reference: ``docs/protocol/vault-v1-formats.md``.
 
 Files filled so far:

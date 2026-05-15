@@ -20,11 +20,12 @@ What remains before "v1 ships":
   end-to-end and label every risk as Resolved / Mitigated / Accepted
   / Open against the as-built code. Until that runs, "v1" remains
   unlabelled.
-- **Live-testing roadmap** — seven of the ten flows in
-  `docs/plans/post-breakup-followups.md` §3 still want at least one
+- **Live-testing roadmap** — eight flows in the Backlog section of
+  `docs/plans/live-testing-followup.md` still want at least one
   driven session against the dev twin (eviction, resume-after-kill,
-  cross-device grant, large folder bind, migration switch-back,
-  ransomware detector, scheduled purge). Findings flow into
+  cross-device grant, concurrent edits, large folder bind, migration
+  switch-back, ransomware detector, scheduled purge, debug bundle on
+  a real install). Findings flow into
   `docs/plans/live-testing-followup.md` items 10+.
 - **UI wire-up holes** — a handful of buttons in `tab_maintenance.py`
   + `tab_danger.py` start `sensitive=False` and never enable; the

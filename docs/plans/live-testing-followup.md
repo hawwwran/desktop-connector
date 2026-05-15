@@ -312,7 +312,7 @@ use a different epoch path and were not in the listed scope.
 
 ## 7. Wrong-passphrase rate-limit is Argon2id-implicit, not keyring-backed
 
-**Symptom**: `docs/plans/post-breakup-followups.md` §3 lists
+**Symptom**: `temp/finished-plans/post-breakup-followups.md` §3 listed
 "wrong-passphrase rate-limit — verify the keyring-backed retry budget
 and the human-readable error path" as a candidate live-test flow.
 Reading the code, no such budget exists.
@@ -342,7 +342,8 @@ rate-limit decision.
 `docs/architecture-decisions.md#2026-05-12` (Wrong-passphrase
 rate-limit is Argon2id-implicit). Plan §3 line in
 `post-breakup-followups.md` reworded to drop the
-"keyring-backed retry budget" framing.
+"keyring-backed retry budget" framing (since archived to
+`temp/finished-plans/post-breakup-followups.md`).
 
 ---
 
@@ -447,3 +448,54 @@ mildly sensitive. Worth flagging in the bundle export UI ("your
 binding paths will be included") or trimming to leaf-only on export.
 Design decision, not a bug — but recording here so a future "private
 mode" toggle has a known scope.
+
+---
+
+## Backlog — un-driven flows
+
+Candidate live-test sessions that aren't yet in the chained
+`docs/testing/vault-tests.md` suite. Each is one focused session
+against the dev twin; findings land as items 10+ above.
+
+Migrated 2026-05-15 from the archived
+`temp/finished-plans/post-breakup-followups.md` §3.
+
+- **Eviction under quota pressure.** Fill the relay quota, observe
+  the desktop's eviction pass during upload, verify the right
+  versions get culled (and that "Show deleted" surfaces them).
+- **Resume upload after kill.** Start a multi-GB upload, kill the
+  desktop subprocess mid-chunk, restart, verify the resume banner
+  fires and the upload completes without re-uploading already-stored
+  chunks. Cancel button on the resume banner (the 2026-05-06 fix —
+  commit `2810201`) should also be exercised.
+- **Cross-device grant + accept on a fresh device.** Exercise the
+  QR-grant join flow end-to-end on the dev twin's secondary device.
+- **Concurrent edits with binding sync.** Edit the same file on
+  both devices between syncs; verify the conflict-rename path
+  (`vault/binding/twoway.py`) produces predictable output and the
+  Activity tab logs both branches.
+- **Large folder bind.** Attach a folder with 10k+ small files;
+  verify baseline scan completes, sync up doesn't OOM, manifest
+  publishes successfully. Watch for `vault/binding/scan.py` /
+  `vault/binding/watcher.py` performance cliffs.
+- **Migration switch-back.** Migrate from one relay to another,
+  then switch back, verify both sides agree on manifest revision.
+- **Ransomware detector trip.** Simulate a mass-rewrite event in a
+  bound folder; verify `vault/binding/ransomware_detector.py`
+  pauses sync and surfaces the warning.
+- **Schedule purge.** Set a purge schedule, fast-forward time
+  (mock `_now_rfc3339` if needed), verify the scheduled purge
+  fires and audits correctly.
+- **Debug bundle on a real install.** Generate a bundle, inspect
+  the contents, confirm no plaintext / no keys / no tokens leak
+  per the logging policy in CLAUDE.md. Complements item 9's
+  code-side leak-scan widening with a live-install spot check.
+
+Already-closed candidates (kept for history): **Wrong-passphrase
+rate-limit** — closed as item 7 above on 2026-05-12 (the protection
+is Argon2id-intrinsic; ADR captured at
+`docs/architecture-decisions.md#2026-05-12`).
+
+When a flow lands a finding, write it up as a numbered item above
+with the Symptom / Cause / Fix shape / Acceptance / Status template
+and strike the bullet from this list.

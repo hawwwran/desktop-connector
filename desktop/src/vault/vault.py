@@ -221,7 +221,7 @@ class Vault(RemoteFoldersMixin):
         header, and genesis manifest. The relay POST is deferred until
         :meth:`publish_initial` is called, so the caller can save the local
         device grant first and avoid orphaned relay rows on local-persistence
-        failures (see ``docs/plans/desktop-connector-vault-plan-md/VAULT-progress.md``
+        failures (see ``temp/finished-plans/desktop-connector-vault-plan-md/VAULT-progress.md``
         on the wizard ordering).
 
         ``argon_memory_kib`` / ``argon_iterations`` default to the

@@ -2,7 +2,7 @@
 
 JSON test cases exercised by both the desktop Python crypto (`desktop/src/vault_crypto.py`) and the server PHP crypto (`server/src/Crypto/VaultCrypto.php`). A vector that breaks one side breaks the build.
 
-Schema lock: T0 §A18 (`desktop-connector-vault-T0-decisions.md`). Byte format reference: [`docs/protocol/vault-v1-formats.md`](../../../docs/protocol/vault-v1-formats.md).
+Schema lock: T0 §A18 (`temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md`). Byte format reference: [`docs/protocol/vault-v1-formats.md`](../../../docs/protocol/vault-v1-formats.md). Architecture overview: [`docs/vault-architecture.md`](../../../docs/vault-architecture.md).
 
 ## Files
 
