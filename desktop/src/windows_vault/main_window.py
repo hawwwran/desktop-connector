@@ -21,6 +21,7 @@ from ..brand import (
 )
 from ..windows_common import _make_app
 from ._main_context import MainContext
+from .rollback_banner import build_rollback_banner
 from .tab_activity import build_activity_tab
 from .tab_danger import build_danger_tab
 from .tab_maintenance import build_maintenance_tab
@@ -125,6 +126,25 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
             margin_top=0, margin_bottom=16, margin_start=16, margin_end=16,
         )
         toolbar.set_content(outer)
+
+        # ---- §3.7 rollback banner — appended only when the local
+        # index has a latched rollback for this vault. The CTA jumps
+        # to the Maintenance tab so the user can run the integrity
+        # check. Auto-clears the next time the relay serves a fresh
+        # manifest revision (see Vault.decrypt_manifest).
+        from ..vault.state.local_index import VaultLocalIndex
+        rollback_index = VaultLocalIndex(config_dir)
+
+        def _open_maintenance_tab() -> None:
+            view_stack.set_visible_child_name("maintenance")
+
+        rollback_banner = build_rollback_banner(
+            rollback_index,
+            vault_id_undashed,
+            on_run_integrity_check=_open_maintenance_tab,
+        )
+        if rollback_banner is not None:
+            outer.append(rollback_banner)
 
         # ---- sidebar + stack pane ----
         # Vertical sidebar on the left, page content on the right. Uses

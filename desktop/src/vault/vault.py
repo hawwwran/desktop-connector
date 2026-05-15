@@ -601,6 +601,11 @@ class Vault(RemoteFoldersMixin):
                     "vault.manifest.rollback_detected vault_id=%s served=%d floor=%d",
                     self._vault_id, revision, floor,
                 )
+                local_index.record_manifest_rollback(
+                    self._vault_id,
+                    served_revision=revision,
+                    floor_revision=floor,
+                )
                 raise VaultManifestRollbackError(
                     vault_id=self._vault_id,
                     served_revision=revision,
@@ -608,6 +613,9 @@ class Vault(RemoteFoldersMixin):
                 )
             local_index.refresh_remote_folders_cache(manifest)
             local_index.bump_manifest_revision_floor(self._vault_id, revision)
+            # Self-heal: relay has resumed serving fresh state, drop
+            # any prior latched warning so the banner clears.
+            local_index.clear_manifest_rollback(self._vault_id)
         return manifest
 
     # ---------------------------------------------------------------- close + zeroize

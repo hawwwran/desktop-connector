@@ -30,7 +30,7 @@ Label vocabulary (per the opening plan):
 | §3.4 QR-assisted device joining | Resolved |
 | §3.5 AEAD nonce safety & AAD binding | Resolved |
 | §3.6 Manifest CAS correctness | Resolved |
-| §3.7 Rollback detection | **Open** |
+| §3.7 Rollback detection | Resolved |
 | §3.8 Chunk upload integrity | Resolved |
 | §3.9 Import & merge safety | Mitigated |
 | §3.10 Export protection | Resolved |
@@ -45,12 +45,13 @@ Label vocabulary (per the opening plan):
 | §3.19 Integrity check existence | Resolved (structural) |
 | §3.20 Activity timeline & diagnostics | Resolved (structural) |
 
-**v1 gate:** **1 Open** (§3.7), **3 Mitigated** with named caveats
-(§3.3, §3.9, §3.11). Follow-ups have been spawned in
-[`plans/live-testing-followup.md`](plans/live-testing-followup.md)
-§10 (rollback detection) and §11 (fresh-unlock enforcement in
-import + destructive UI). Once both ship, every risk carries a
-non-Open label and v1 can be stamped.
+**v1 gate (updated 2026-05-15):** **0 Open**, **3 Mitigated** with
+named caveats (§3.3, §3.9, §3.11). §3.7 flipped Open → Resolved
+when the per-device manifest revision floor + rollback banner landed
+(see [`plans/live-testing-followup.md`](plans/live-testing-followup.md)
+§10). The §11 follow-up (fresh-unlock enforcement in import +
+destructive UI) is the remaining gate before the §3.9 / §3.11
+Mitigated labels can flip to Resolved.
 
 ---
 
@@ -198,27 +199,33 @@ cross-runtime vectors at `tests/protocol/vault-v1/manifest_v1.json`.
 
 ## §3.7 — Rollback detection
 
-**Status:** **Open** *(v1-blocker)*
-**Code anchor:** N/A — no "highest revision seen" floor implemented.
-The closest existing check is `desktop/src/vault/ops/integrity.py`
-quick-check, which validates `parent_revision == head_revision - 1`
-(monotonic link within a single served manifest chain) but does
-not detect a downgrade across sessions.
-**Verification:** Grep finds no `highest_seen_revision`,
-`revision_floor`, `last_known_revision`, or any rollback warning
-banner in `desktop/src/vault/state/` or the manifest GET path. A
-relay that serves `revision = K - N` after the client has
-previously seen `revision = K` is silently accepted as the new
-head. The architecture doc (§12) acknowledges the limitation for
-fresh-device restore-only scenarios, but the requirement in the
-risks doc is broader: *every* client should track the highest
-revision it has seen and refuse / warn on a downgrade.
-**Notes:** **Real gap.** Follow-up item at
-[`plans/live-testing-followup.md`](plans/live-testing-followup.md) §10
-proposes a minimal client-side revision floor stored alongside the
-existing local state, with a warning banner on downgrade and an
-`vault.manifest.rollback_detected` activity-log entry. Once that
-lands, this risk re-labels to Resolved.
+**Status:** Resolved *(2026-05-15)*
+**Code anchor:** `desktop/src/vault/state/local_index.py:get_manifest_revision_floor`
++ `:bump_manifest_revision_floor` (per-device floor persistence),
+`desktop/src/vault/vault.py:Vault.decrypt_manifest` (gate site),
+`desktop/src/vault/relay_errors.py:VaultManifestRollbackError`
+(typed exception), `desktop/src/windows_vault/rollback_banner.py`
++ `desktop/src/windows_vault/main_window.py` (persistent banner).
+**Verification:** `vault_manifest_floor` table holds the highest
+AEAD-verified manifest revision this device has ever successfully
+decrypted, keyed by vault ID. `Vault.decrypt_manifest` reads the
+floor when a `local_index` is provided and raises
+`VaultManifestRollbackError(vault_id, served_revision,
+floor_revision)` if the AEAD-bound `manifest["revision"]` is
+strictly less than the stored floor. The local folder cache is
+**not** refreshed before raising, so the served older state cannot
+quietly overwrite trusted local state. A latched
+`vault_manifest_rollback_flag` row drives the persistent
+`Adw.Banner` in Vault Settings; the banner self-clears the moment
+a subsequent successful decrypt advances or matches the floor (the
+relay has resumed serving fresh state). The
+`vault.manifest.rollback_detected` event in
+`docs/diagnostics.events.md` fires on every detection.
+**Notes:** The fresh-device limitation (a brand-new restore-only
+device has no floor yet and cannot detect a relay-served rollback
+on first contact) is explicitly called out in the banner copy. Test
+coverage: `tests/protocol/test_desktop_vault_rollback.py` (20
+tests).
 
 ---
 

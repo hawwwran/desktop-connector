@@ -503,7 +503,15 @@ relay claims.
 - `docs/vault-critical-risks-evaluation.md` §3.7 status flips
   from **Open** to **Resolved** and the summary table updates.
 
-**Status**: **Open** as of 2026-05-15. Blocks Vault v1 stamp.
+**Status (2026-05-15): done** on `tresor-vault`. F-LT10 ships in two
+commits: (1) `feat(vault): manifest rollback detection — per-device
+revision floor` (typed exception + SQLite floor + diagnostic event +
+11 base tests); (2) the latched-flag persistence + `Adw.Banner` in
+Vault Settings (`desktop/src/windows_vault/rollback_banner.py`) +
+self-heal on next successful decrypt. Coverage in
+`tests/protocol/test_desktop_vault_rollback.py` (20 tests).
+`docs/vault-critical-risks-evaluation.md` §3.7 flipped Open →
+Resolved.
 
 ---
 

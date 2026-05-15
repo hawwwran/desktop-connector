@@ -16,14 +16,13 @@ What remains is **one** thread: the critical-risks evaluation gate.
 
 **Status (2026-05-15):** evaluation pass landed at
 [`../vault-critical-risks-evaluation.md`](../vault-critical-risks-evaluation.md).
-14 of 15 risks come back Resolved or Mitigated-with-named-caveat.
-**1 risk is Open (§3.7 rollback detection)**; the two Mitigated
-risks with named code gaps (§3.9 + §3.11 fresh-unlock UI
-enforcement) are tracked together. Both spawned follow-up items
-in [`live-testing-followup.md`](live-testing-followup.md) §10
-(rollback detection) and §11 (fresh-unlock enforcement). When both
-ship, the evaluation doc's summary table flips them to Resolved
-and v1 can be stamped.
+§3.7 rollback detection (was Open) **shipped 2026-05-15** —
+per-device manifest revision floor + persistent `Adw.Banner` +
+self-heal on the next successful decrypt; closed via
+[`live-testing-followup.md`](live-testing-followup.md) §10. The
+remaining gate is the §11 follow-up (fresh-unlock enforcement in
+import + destructive UI), which once shipped flips §3.9 + §3.11
+from Mitigated to Resolved. v1 can be stamped once §11 lands.
 
 ---
 

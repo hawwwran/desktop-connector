@@ -28,6 +28,9 @@ from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.relay_errors import VaultManifestRollbackError  # noqa: E402
 from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
+from src.windows_vault.rollback_banner import (  # noqa: E402
+    build_rollback_banner_text,
+)
 
 
 MASTER_KEY = bytes.fromhex(
@@ -132,6 +135,87 @@ class ManifestRollbackFloorTests(unittest.TestCase):
         # revision than the floor.
         manifest = _vault_at(v2).decrypt_manifest()
         self.assertEqual(int(manifest["revision"]), 2)
+
+
+class ManifestRollbackFlagTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.index = VaultLocalIndex(self._tmp.name)
+
+    def test_no_flag_set_initially(self) -> None:
+        self.assertIsNone(self.index.get_manifest_rollback("ABCD2345WXYZ"))
+
+    def test_decrypt_rollback_records_flag_before_raising(self) -> None:
+        v3 = _vector("manifest-v1-t4-remove-remote-folder")
+        v2 = _vector("manifest-v1-t4-add-remote-folder")
+        _vault_at(v3).decrypt_manifest(local_index=self.index)
+
+        with self.assertRaises(VaultManifestRollbackError):
+            _vault_at(v2).decrypt_manifest(local_index=self.index)
+
+        record = self.index.get_manifest_rollback("ABCD2345WXYZ")
+        self.assertIsNotNone(record)
+        self.assertEqual(record["served_revision"], 2)
+        self.assertEqual(record["floor_revision"], 3)
+        self.assertGreater(record["detected_at"], 0)
+
+    def test_successful_decrypt_clears_latched_flag(self) -> None:
+        v3 = _vector("manifest-v1-t4-remove-remote-folder")
+        v2 = _vector("manifest-v1-t4-add-remote-folder")
+        _vault_at(v3).decrypt_manifest(local_index=self.index)
+        with self.assertRaises(VaultManifestRollbackError):
+            _vault_at(v2).decrypt_manifest(local_index=self.index)
+        self.assertIsNotNone(self.index.get_manifest_rollback("ABCD2345WXYZ"))
+
+        # Relay resumes serving fresh state — same revision counts as
+        # "no rollback" and self-heals the latched warning.
+        _vault_at(v3).decrypt_manifest(local_index=self.index)
+        self.assertIsNone(self.index.get_manifest_rollback("ABCD2345WXYZ"))
+
+    def test_explicit_clear_drops_flag(self) -> None:
+        self.index.record_manifest_rollback(
+            "V1", served_revision=2, floor_revision=5,
+        )
+        self.assertIsNotNone(self.index.get_manifest_rollback("V1"))
+        self.index.clear_manifest_rollback("V1")
+        self.assertIsNone(self.index.get_manifest_rollback("V1"))
+
+    def test_record_is_idempotent_with_latest_pair_winning(self) -> None:
+        self.index.record_manifest_rollback(
+            "V1", served_revision=2, floor_revision=5,
+        )
+        self.index.record_manifest_rollback(
+            "V1", served_revision=3, floor_revision=7,
+        )
+        record = self.index.get_manifest_rollback("V1")
+        self.assertEqual(record["served_revision"], 3)
+        self.assertEqual(record["floor_revision"], 7)
+
+    def test_flag_persists_across_index_reopen(self) -> None:
+        self.index.record_manifest_rollback(
+            "V1", served_revision=2, floor_revision=5,
+        )
+        reopened = VaultLocalIndex(self._tmp.name)
+        record = reopened.get_manifest_rollback("V1")
+        self.assertEqual(record["served_revision"], 2)
+        self.assertEqual(record["floor_revision"], 5)
+
+
+class RollbackBannerTextTests(unittest.TestCase):
+    def test_banner_text_includes_both_revisions(self) -> None:
+        text = build_rollback_banner_text(served_revision=2, floor_revision=5)
+        self.assertIn("revision 2", text)
+        self.assertIn("revision 5", text)
+
+    def test_banner_text_mentions_fresh_device_caveat(self) -> None:
+        text = build_rollback_banner_text(served_revision=2, floor_revision=5)
+        self.assertIn("brand-new device", text)
+
+    def test_banner_text_offers_remediation_actions(self) -> None:
+        text = build_rollback_banner_text(served_revision=2, floor_revision=5)
+        self.assertIn("integrity check", text)
+        self.assertIn("export", text)
 
 
 class ManifestRevisionFloorPersistenceTests(unittest.TestCase):

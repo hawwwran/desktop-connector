@@ -142,6 +142,80 @@ class VaultLocalIndex:
         finally:
             conn.close()
 
+    def record_manifest_rollback(
+        self,
+        vault_id: str,
+        *,
+        served_revision: int,
+        floor_revision: int,
+    ) -> None:
+        """Latch a rollback detection. Idempotent — re-recording the
+        same vault overwrites the previous detection with the latest
+        served/floor pair, so the banner reflects the most recent
+        observation.
+        """
+        now = int(time.time())
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO vault_manifest_rollback_flag (
+                    vault_id, served_revision, floor_revision, detected_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT (vault_id) DO UPDATE SET
+                     served_revision = excluded.served_revision,
+                     floor_revision  = excluded.floor_revision,
+                     detected_at     = excluded.detected_at
+                """,
+                (vault_id, int(served_revision), int(floor_revision), now),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_manifest_rollback(self, vault_id: str) -> dict[str, Any] | None:
+        """Return the latched rollback record for ``vault_id`` or
+        ``None`` if no rollback is currently flagged.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT served_revision, floor_revision, detected_at
+                  FROM vault_manifest_rollback_flag
+                 WHERE vault_id = ?
+                """,
+                (vault_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "vault_id": vault_id,
+            "served_revision": int(row["served_revision"]),
+            "floor_revision": int(row["floor_revision"]),
+            "detected_at": int(row["detected_at"]),
+        }
+
+    def clear_manifest_rollback(self, vault_id: str) -> None:
+        """Drop the rollback flag for ``vault_id``. No-op if no flag
+        is currently set.
+        """
+        conn = self._connect()
+        try:
+            conn.execute(
+                "DELETE FROM vault_manifest_rollback_flag WHERE vault_id = ?",
+                (vault_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def list_remote_folders(self, vault_id: str) -> list[dict[str, Any]]:
         """Return cached remote folders for ``vault_id`` ordered by creation."""
         conn = self._connect()
@@ -212,6 +286,21 @@ class VaultLocalIndex:
                     vault_id              TEXT PRIMARY KEY,
                     highest_seen_revision INTEGER NOT NULL,
                     updated_at            INTEGER NOT NULL
+                )
+                """
+            )
+            # F-LT10: latched rollback flag. Recorded inside
+            # decrypt_manifest the instant a downgrade is detected;
+            # read by the Vault Settings banner; auto-cleared on the
+            # next successful decrypt that advances or matches the
+            # floor (relay has resumed serving fresh state).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vault_manifest_rollback_flag (
+                    vault_id        TEXT PRIMARY KEY,
+                    served_revision INTEGER NOT NULL,
+                    floor_revision  INTEGER NOT NULL,
+                    detected_at     INTEGER NOT NULL
                 )
                 """
             )
