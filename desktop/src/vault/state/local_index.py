@@ -81,6 +81,67 @@ class VaultLocalIndex:
         finally:
             conn.close()
 
+    def get_manifest_revision_floor(self, vault_id: str) -> int:
+        """Return the highest manifest revision this device has ever
+        successfully decrypted for ``vault_id``.
+
+        Zero means the device has never seen a manifest for this vault —
+        a fresh install, a freshly restored device, or a vault that
+        hasn't published its first revision yet. The §3.7 risk
+        evaluation notes this as the only fundamental gap in rollback
+        detection: a brand-new device with no floor cannot detect that
+        the relay served an older state than someone else has already
+        seen.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT highest_seen_revision FROM vault_manifest_floor WHERE vault_id = ?",
+                (vault_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row["highest_seen_revision"]) if row is not None else 0
+
+    def bump_manifest_revision_floor(self, vault_id: str, revision: int) -> bool:
+        """UPSERT the per-vault floor to ``max(stored, revision)``.
+
+        Returns ``True`` if the stored floor moved, ``False`` if the
+        stored floor was already ≥ ``revision`` (no-op). Callers are
+        expected to have AEAD-verified the revision before bumping;
+        the floor is the trust anchor for §3.7 rollback detection.
+        """
+        revision = int(revision)
+        now = int(time.time())
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT highest_seen_revision FROM vault_manifest_floor WHERE vault_id = ?",
+                (vault_id,),
+            ).fetchone()
+            current = int(row["highest_seen_revision"]) if row is not None else 0
+            if revision <= current:
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                INSERT INTO vault_manifest_floor (vault_id, highest_seen_revision, updated_at)
+                     VALUES (?, ?, ?)
+                ON CONFLICT (vault_id) DO UPDATE SET
+                     highest_seen_revision = excluded.highest_seen_revision,
+                     updated_at = excluded.updated_at
+                """,
+                (vault_id, revision, now),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def list_remote_folders(self, vault_id: str) -> list[dict[str, Any]]:
         """Return cached remote folders for ``vault_id`` ordered by creation."""
         conn = self._connect()
@@ -139,6 +200,19 @@ class VaultLocalIndex:
                 """
                 CREATE INDEX IF NOT EXISTS idx_vault_remote_folders_cache_revision
                     ON vault_remote_folders_cache (vault_id, manifest_revision)
+                """
+            )
+            # F-LT10: per-vault manifest revision floor. Trust anchor
+            # for §3.7 rollback detection — bumped on every successful
+            # AEAD-verified manifest decrypt; compared on the next
+            # decrypt to refuse a relay-served downgrade.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vault_manifest_floor (
+                    vault_id              TEXT PRIMARY KEY,
+                    highest_seen_revision INTEGER NOT NULL,
+                    updated_at            INTEGER NOT NULL
+                )
                 """
             )
             # T10.1 — local binding + sync state. Per §A12 the binding's

@@ -438,6 +438,7 @@ relay log (filenames are local-only).
 | `vault.import.cancelled_pre_publish` | desktop | info | `vault`, `chunks_done` | F-U03 — import cancelled after chunks but before merge publish |
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
 | `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
+| `vault.manifest.rollback_detected` | desktop | warning | `vault_id`, `served`, `floor` | §3.7 trust anchor — relay served an AEAD-verified revision strictly less than the persisted per-device floor; manifest not auto-applied, `VaultManifestRollbackError` raised |
 | `vault.migration.committed` | desktop | info | `vault`, `source`, `target` | F-510 — relay migration commit landed; Activity-tab "Relay migration committed" anchor |
 | `vault.migration.committed_callback_failed` | desktop | warning | `vault`, `target`, `error` | F-C15 — caller's ``on_committed`` persistence callback raised; state file kept at ``committed`` so the next run retries the callback before clearing |
 | `vault.migration.committed_source_aligned` | desktop | debug | `vault`, `target` | F-C09 — pre-clear audit: source still reports the same target as we committed to |

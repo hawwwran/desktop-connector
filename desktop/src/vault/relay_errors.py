@@ -86,6 +86,39 @@ class VaultRelayUnexpectedResponseError(RuntimeError):
         super().__init__(message)
 
 
+class VaultManifestRollbackError(RuntimeError):
+    """Relay served a manifest revision older than this device has seen.
+
+    Raised by :meth:`Vault.decrypt_manifest` when the AEAD-verified
+    revision is strictly less than the per-vault floor persisted in
+    :class:`VaultLocalIndex`. Per the §3.7 risk evaluation
+    (`docs/vault-critical-risks-evaluation.md`) the served manifest
+    is **not** auto-applied — the local folder cache stays at the
+    last-good revision so callers can surface a banner and offer
+    the user a chance to investigate (integrity check, export
+    restore, fresh re-pair) before trusting the relay again.
+
+    Carries enough context (``vault_id``, ``served_revision``,
+    ``floor_revision``) for the UI banner copy and the
+    ``vault.manifest.rollback_detected`` diagnostic event.
+    """
+
+    def __init__(
+        self,
+        *,
+        vault_id: str,
+        served_revision: int,
+        floor_revision: int,
+    ) -> None:
+        self.vault_id = str(vault_id)
+        self.served_revision = int(served_revision)
+        self.floor_revision = int(floor_revision)
+        super().__init__(
+            f"vault relay served manifest revision {self.served_revision} "
+            f"but device has previously seen revision {self.floor_revision}"
+        )
+
+
 class VaultCASConflictError(VaultRelayError):
     """Server rejected a manifest publish because the CAS revision moved (HTTP 409).
 

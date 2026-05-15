@@ -580,13 +580,34 @@ class Vault(RemoteFoldersMixin):
         """AEAD-decrypt the current manifest ciphertext and return the
         canonical-JSON-decoded plaintext as a dict.
 
-        Raises ``ValueError`` if the vault is closed.
+        Raises ``ValueError`` if the vault is closed. When
+        ``local_index`` is provided, the AEAD-verified revision is
+        compared against the per-vault floor; a strict downgrade
+        raises :class:`VaultManifestRollbackError` **before** the
+        local folder cache is refreshed, so a relay-served older
+        state cannot quietly overwrite trusted local state. The
+        floor itself only advances on success — this is the trust
+        anchor for §3.7 rollback detection.
         """
         from .ui.browser_model import decrypt_manifest
+        from .relay_errors import VaultManifestRollbackError
 
         manifest = decrypt_manifest(self, self._manifest_ciphertext)
         if local_index is not None:
+            revision = int(manifest.get("revision", 0))
+            floor = local_index.get_manifest_revision_floor(self._vault_id)
+            if revision < floor:
+                log.warning(
+                    "vault.manifest.rollback_detected vault_id=%s served=%d floor=%d",
+                    self._vault_id, revision, floor,
+                )
+                raise VaultManifestRollbackError(
+                    vault_id=self._vault_id,
+                    served_revision=revision,
+                    floor_revision=floor,
+                )
             local_index.refresh_remote_folders_cache(manifest)
+            local_index.bump_manifest_revision_floor(self._vault_id, revision)
         return manifest
 
     # ---------------------------------------------------------------- close + zeroize
