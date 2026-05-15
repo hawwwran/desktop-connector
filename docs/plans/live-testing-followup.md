@@ -451,6 +451,120 @@ mode" toggle has a known scope.
 
 ---
 
+## 10. No client-side manifest-revision floor — rollback undetectable
+
+**Symptom**: surfaced by the 2026-05-15 critical-risks evaluation
+gate (`docs/vault-critical-risks-evaluation.md` §3.7). The
+architecture doc acknowledges that a fresh-device restore cannot
+detect a relay-driven manifest rollback before it has seen any
+state; the risks doc's requirement is broader — *every* client
+should remember the highest manifest revision it has ever seen and
+warn / refuse when the relay serves a lower revision.
+
+**Cause**: grep across `desktop/src/vault/state/` and the manifest
+GET path finds no `highest_seen_revision`, `revision_floor`, or
+`last_known_revision` persistence. The quick integrity check
+(`desktop/src/vault/ops/integrity.py:77–133`) validates
+`parent_revision == head_revision - 1` *within* a served manifest
+chain but not across sessions. A relay that previously served
+revision K can later serve revision K - N and the client accepts
+it silently — the local index simply rebuilds from whatever the
+relay claims.
+
+**Fix shape**:
+
+1. Add a `highest_seen_revision` int column / key alongside the
+   existing local-state persistence (probably
+   `vault-local-index.sqlite3` next to the per-binding rows; the
+   exact home is a design call). Bumped on every successful
+   manifest decrypt.
+2. On manifest GET, compare the served `revision` against the
+   stored floor. If `served < floor`:
+   - log `vault.manifest.rollback_detected
+     served=<N> floor=<K> vault_id=<id>` (event added to
+     `docs/diagnostics.events.md`);
+   - surface a persistent warning banner in Vault Settings
+     ("This relay served an older state than we've seen before
+     — possible relay tampering or data loss. Run integrity
+     check.");
+   - **do not** auto-apply the served manifest until the user
+     either confirms or restores from export.
+3. Document the brand-new-device limitation explicitly in the
+   warning copy: a fresh restore cannot have a floor yet, so the
+   user sees this warning *only* if there is divergence after a
+   prior unlock on this device.
+
+**Acceptance**:
+- Unit test in `tests/protocol/test_desktop_vault_manifest.py`
+  (or a new file) constructs a fake relay that serves revision K
+  then K-1; asserts the second call produces a `RollbackDetected`
+  typed result rather than silent acceptance.
+- Live-test pass updates the warning copy + screenshot.
+- `docs/vault-critical-risks-evaluation.md` §3.7 status flips
+  from **Open** to **Resolved** and the summary table updates.
+
+**Status**: **Open** as of 2026-05-15. Blocks Vault v1 stamp.
+
+---
+
+## 11. Fresh-unlock requirement bypassed in import + destructive UI
+
+**Symptom**: surfaced by the 2026-05-15 critical-risks evaluation
+gate (`docs/vault-critical-risks-evaluation.md` §3.9, §3.11). The
+architecture doc §12 and the risks doc both call for fresh unlock
+on sensitive operations (clear vault, hard purge, rotate access
+secret, revoke device, rotate recovery, import-merge into existing
+vault) **regardless of the unlock timeout setting**. In practice,
+the wizards open the vault via the cached device grant without
+re-prompting for the recovery passphrase.
+
+**Cause**: `open_local_vault_from_grant()` (and the equivalent
+unlock helpers used by `windows_vault_import.py` and
+`tab_danger.py`) load the grant from the system keyring directly.
+There is no "is this within the fresh-unlock window?" check before
+landing on the danger-zone confirm screens or the import-merge
+commit screen. The timeout setting at §13 of the architecture doc
+governs *idle reauth*, not *sensitive-op reauth* — those are
+described as two different gates but the codebase only enforces
+the first.
+
+**Fix shape**:
+
+1. Add a per-process `fresh_unlock_at: float` timestamp set on
+   successful passphrase entry (recovery test, onboarding,
+   explicit "Unlock now"). Stored in memory only — never
+   persisted.
+2. Define `FRESH_UNLOCK_WINDOW_S` (suggestion: 120 s; short
+   enough to mean "the user *just* typed the passphrase", long
+   enough to walk through the typed-confirm UI).
+3. Gate entry to:
+   - `tab_danger.py` clear-folder / clear-vault / schedule-purge
+     button handlers;
+   - `tab_security.py` rotate-access-secret / rotate-recovery /
+     revoke-device handlers (once that tab lands);
+   - `windows_vault_import.py` commit-merge handler.
+   On gate failure, surface an inline "Unlock with recovery
+   passphrase to continue" mini-prompt that re-runs Argon2id and
+   verifies via the existing recovery test path.
+4. The mini-prompt **does not** reset the cached grant — it only
+   stamps `fresh_unlock_at`. Cached grant continues working for
+   non-sensitive ops until the regular timeout fires.
+
+**Acceptance**:
+- Unit / integration test asserts that calling the destructive
+  helpers without a fresh-unlock stamp raises
+  `vault_unlock_required`.
+- Manual live-test: clear-folder dialog refuses to commit
+  without the fresh-unlock mini-prompt; entering the passphrase
+  once stamps the window and subsequent typed-confirm screens
+  reuse the stamp until it expires.
+- `docs/vault-critical-risks-evaluation.md` §3.9 and §3.11 flip
+  from **Mitigated** to **Resolved**; summary table updates.
+
+**Status**: **Open** as of 2026-05-15. Blocks Vault v1 stamp.
+
+---
+
 ## Backlog — un-driven flows
 
 Candidate live-test sessions that aren't yet in the chained

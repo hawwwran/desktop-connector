@@ -18,7 +18,7 @@ current set). Protocol reference docs under
 
 | Plan | Intent | Status |
 |------|--------|--------|
-| [vault-open-items.md](plans/vault-open-items.md) | What's left before "v1" can be stamped on Vault: the critical-risks evaluation gate (re-label 15 risks against as-built code → produce `docs/vault-critical-risks-evaluation.md`). Architecture overview at [`../vault-architecture.md`](vault-architecture.md). | Open |
+| [vault-open-items.md](plans/vault-open-items.md) | What's left before "v1" can be stamped on Vault. Evaluation gate landed 2026-05-15 → [`vault-critical-risks-evaluation.md`](vault-critical-risks-evaluation.md); 14/15 risks Resolved or Mitigated, 1 Open (§3.7 rollback detection) + 2 Mitigated with code gaps (§3.9, §3.11 fresh-unlock UI). Follow-ups in [`plans/live-testing-followup.md`](plans/live-testing-followup.md) §10 + §11. Architecture overview at [`vault-architecture.md`](vault-architecture.md). | Open |
 | [live-testing-followup.md](plans/live-testing-followup.md) | Rolling backlog of UX/correctness items surfaced while driving the dev twin. Items 1–9 shipped; items 10+ accept new findings from the Backlog section's un-driven vault flows (eviction, resume-after-kill, cross-device grant, concurrent edits, large folder bind, migration switch-back, ransomware detector, scheduled purge, debug bundle on a real install). | Open (continuous) |
 | [android-radio-tail-cost.md](plans/android-radio-tail-cost.md) | Android battery investigation: cellular-radio tail driven by phantom delivery-tracker rows. Fix A (absent-row stall safeguard) + Fix B (12 h orphan sweep) shipped 2026-05-13; awaiting `android_logs_10.txt` dumpsys to confirm `mobile_radio ≤ 70 mAh / 10 h`. | Open (awaiting empirical validation) |
 

@@ -14,6 +14,17 @@ threads still to close before stamping "v1"; spot-checks on
 
 What remains is **one** thread: the critical-risks evaluation gate.
 
+**Status (2026-05-15):** evaluation pass landed at
+[`../vault-critical-risks-evaluation.md`](../vault-critical-risks-evaluation.md).
+14 of 15 risks come back Resolved or Mitigated-with-named-caveat.
+**1 risk is Open (§3.7 rollback detection)**; the two Mitigated
+risks with named code gaps (§3.9 + §3.11 fresh-unlock UI
+enforcement) are tracked together. Both spawned follow-up items
+in [`live-testing-followup.md`](live-testing-followup.md) §10
+(rollback detection) and §11 (fresh-unlock enforcement). When both
+ship, the evaluation doc's summary table flips them to Resolved
+and v1 can be stamped.
+
 ---
 
 ## §1. Critical-risks evaluation gate
@@ -39,6 +50,12 @@ Output: a single follow-up document
 `docs/vault-critical-risks-evaluation.md` containing one entry per
 risk in the template below. Until that doc exists and every risk
 carries a label, "v1" stays unlabelled.
+
+**The doc was created on 2026-05-15** —
+[`docs/vault-critical-risks-evaluation.md`](../vault-critical-risks-evaluation.md).
+Read that doc, not the per-risk bullets below, when you need the
+current status of any specific risk; the bullets below are kept
+as a record of what the evaluation was asked to cover.
 
 ### Per-risk template
 
