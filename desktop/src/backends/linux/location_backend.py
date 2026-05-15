@@ -17,7 +17,7 @@ callbacks and updates ``_last_fix`` under a lock.
 the responder's heartbeat thread doesn't race the GLib thread.
 
 GeoClue dependency notes (documented for the runbook in
-``docs/plans/desktop-multi-device-support.md`` M.9 hardening):
+``temp/finished-plans/desktop-multi-device-support.md`` M.9 hardening):
 
 * Distros ship GeoClue under different agent gates. Headless runs
   (no desktop session, no Mozilla Location Service network access)

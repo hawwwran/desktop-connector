@@ -18,10 +18,15 @@ current set). Protocol reference docs under
 
 | Plan | Intent | Status |
 |------|--------|--------|
-| [brand-rollout.md](plans/brand-rollout.md) | Apply `visual-identity-guide.md` across Android, desktop, and server. | Done |
-| [desktop-multi-device-support.md](plans/desktop-multi-device-support.md) | Add desktop support for multiple paired connected devices, target pickers, per-device file-manager actions, and find-device receiver behavior. | Done; manual GTK smoke / lock-screen hardening remain documented follow-ups |
-| [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Done |
-| [desktop-connector-vault-plan-md/](plans/desktop-connector-vault-plan-md/desktop-connector-vault-00-index.md) | 11-part incremental plan to add a persistent, account-less, E2E-encrypted **Vault** with remote folders, browse-only import, versioned upload/delete, export/import bundles, and guarded sync engine. T0 decision lock + tracker live alongside the plan files. | Open |
+| [desktop-connector-vault-plan-md/](plans/desktop-connector-vault-plan-md/desktop-connector-vault-00-index.md) | 11-part incremental plan to add a persistent, account-less, E2E-encrypted **Vault** with remote folders, browse-only import, versioned upload/delete, export/import bundles, and guarded sync engine. T0 decision lock + tracker live alongside the plan files. Desktop phases T0–T14/T17 landed; Android phases T15/T16 explicitly deferred. | Open |
+| [post-breakup-followups.md](plans/post-breakup-followups.md) | Threads spawned by the file-size breakup. §1 (vault package consolidation) and §2 (orphan vault rows) closed; §3 live-testing roadmap stays open as the working sequencing doc. | Open (§3 only) |
+| [live-testing-followup.md](plans/live-testing-followup.md) | Rolling backlog of UX/correctness items surfaced while driving the dev twin. Items 1–9 shipped; items 10+ accept new findings from un-driven vault flows (eviction, resume-after-kill, cross-device grant, large folder bind, migration switch-back, ransomware detector, scheduled purge). | Open (continuous) |
+| [android-radio-tail-cost.md](plans/android-radio-tail-cost.md) | Android battery investigation: cellular-radio tail driven by phantom delivery-tracker rows. Fix A (absent-row stall safeguard) + Fix B (12 h orphan sweep) shipped 2026-05-13; awaiting `android_logs_10.txt` dumpsys to confirm `mobile_radio ≤ 70 mAh / 10 h`. | Open (awaiting empirical validation) |
+
+Older finished plans (brand-rollout, desktop-multi-device-support,
+readme_changes, desktop-file-size-breakup, vault-browser-chrome-redesign,
+and the pre-vault batch) are archived under
+[`temp/finished-plans/`](../temp/finished-plans/).
 
 ## Protocol reference (living docs)
 

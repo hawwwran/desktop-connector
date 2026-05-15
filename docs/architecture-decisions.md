@@ -318,7 +318,7 @@ check resolves the symbol ambiguity.
 
 **Anchor.** `desktop/src/vault/` is the package. The full Wave A–G
 commit range is `dad6a9e^..0f79917`. Plan docs:
-`docs/plans/desktop-file-size-breakup.md` (original scope) +
+`temp/finished-plans/desktop-file-size-breakup.md` (original scope) +
 `docs/plans/post-breakup-followups.md` (wave progression). The
 filesystem layout (subpackages and their contents) is enumerated
 there; cross-link rather than duplicate. Older entries in this

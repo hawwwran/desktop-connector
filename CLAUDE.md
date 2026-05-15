@@ -207,7 +207,7 @@ See [`docs/visual-identity-guide.md`](docs/visual-identity-guide.md). Blue-domin
 
 Monochrome notifications encode state via shape (full sparkle = connected, outline = disconnected). `Notification.Builder.setColor(#2058F0)` tints the shade header brand blue.
 
-**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop and server branding landed on 2026-04-30; see `docs/plans/brand-rollout.md`.
+**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop and server branding landed on 2026-04-30; see `temp/finished-plans/brand-rollout.md`.
 
 ## Project structure
 

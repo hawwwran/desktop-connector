@@ -1,7 +1,7 @@
 """LayoutMixin — header bar chrome + selection-driven action bar + panes.
 
 Wave 1 of the Vault Browser chrome redesign
-(`docs/plans/vault-browser-chrome-redesign.md`, 2026-05-13).
+(`temp/finished-plans/vault-browser-chrome-redesign.md`, 2026-05-13).
 
 The toolbar is no longer a body `Gtk.Box` strip of 8 pill buttons. It
 is now:

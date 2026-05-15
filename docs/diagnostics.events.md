@@ -343,7 +343,7 @@ renamed/restructured.
 ### device (multi-device support)
 
 Desktop multi-device events introduced by the
-`docs/plans/desktop-multi-device-support.md` rollout (M.0–M.10). All
+`temp/finished-plans/desktop-multi-device-support.md` rollout (M.0–M.10). All
 fields are short id (12 chars max) so the same correlation rule
 applies as elsewhere.
 
