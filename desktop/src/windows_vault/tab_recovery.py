@@ -13,6 +13,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
+from ..vault import fresh_unlock
 from ._main_context import MainContext
 
 
@@ -374,6 +375,12 @@ def build_recovery_tab(ctx: MainContext, win: "Adw.ApplicationWindow") -> "Gtk.B
                     config.save()
                     refresh_recovery_summary("Verified", now)
                     set_status(result.message, "success")
+                    # F-LT11: a successful recovery test is the user
+                    # typing the recovery passphrase and Argon2id
+                    # verifying it — same proof the mini-prompt asks
+                    # for. Stamp so the next destructive op in this
+                    # process picks up the active window.
+                    fresh_unlock.stamp_fresh_unlock()
                     if result.wiped:
                         kit_path["path"] = None
                         kit_entry.set_text("")

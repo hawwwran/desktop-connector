@@ -430,6 +430,9 @@ relay log (filenames are local-only).
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal) |
 | `vault.eviction.version_purged` | desktop | info | `vault_id`, `path`, `version_id` | Old version evicted to free space |
 | `vault.folder.cleared` | desktop | info | `remote_folder_id`, `tombstoned`, `author` | T14.1 bulk-soft-delete published |
+| `vault.fresh_unlock.prompt.envelope_meta_missing` | desktop | warning | `operation` | F-LT11 — fresh-unlock mini-prompt opened on a device whose `recovery_envelope_meta` is absent from config; prompt explains the user must finish onboarding before retrying |
+| `vault.fresh_unlock.verified` | desktop | info | `operation` | F-LT11 — user re-typed the recovery passphrase and Argon2id verified it; stamp set for §3.9/§3.11 destructive-op gate |
+| `vault.fresh_unlock.verify_failed` | desktop | info | `operation`, `reason` | F-LT11 — passphrase or kit mismatch on the mini-prompt; gate stays closed, user can retry |
 | `vault.folder_upload.cancelled` | desktop | info | `vault`, `files_done`, `total` | F-U03 — folder upload cancelled between files |
 | `vault.folder_upload.cancelled_pre_publish` | desktop | info | `vault`, `files_done` | F-U03 — folder upload cancelled before the batch CAS publish |
 | `vault.gc.unlink_failed` | server | warning | `plan`, `path` | F-S12 — gcExecute couldn't remove a chunk file |

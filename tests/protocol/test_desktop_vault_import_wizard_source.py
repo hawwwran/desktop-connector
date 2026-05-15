@@ -49,6 +49,21 @@ class VaultImportWizardSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_merge_commit_handler_gated_by_fresh_unlock(self) -> None:
+        """F-LT11 — the import-merge commit handler must funnel through
+        ``require_fresh_unlock_or_prompt`` before kicking off the
+        chunk-upload + manifest-publish worker (mirrors the destructive
+        handlers in ``tab_danger.py``). Source-pinned because the
+        commit handler is GTK-thin and a refactor that lifts the
+        worker out of the gate would silently break the §3.9
+        defence.
+        """
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_import.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("require_fresh_unlock_or_prompt", source)
+        self.assertIn("merge bundle into active vault", source)
+
 
 if __name__ == "__main__":
     unittest.main()

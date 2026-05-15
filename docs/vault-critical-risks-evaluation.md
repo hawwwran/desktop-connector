@@ -32,9 +32,9 @@ Label vocabulary (per the opening plan):
 | §3.6 Manifest CAS correctness | Resolved |
 | §3.7 Rollback detection | Resolved |
 | §3.8 Chunk upload integrity | Resolved |
-| §3.9 Import & merge safety | Mitigated |
+| §3.9 Import & merge safety | Resolved |
 | §3.10 Export protection | Resolved |
-| §3.11 Delete / clear / purge | Mitigated |
+| §3.11 Delete / clear / purge | Resolved |
 | §3.12 Local binding after restore | Resolved |
 | §3.13 Sync defaults | Resolved |
 | §3.14 File stability & critical single-file databases | Resolved |
@@ -45,13 +45,16 @@ Label vocabulary (per the opening plan):
 | §3.19 Integrity check existence | Resolved (structural) |
 | §3.20 Activity timeline & diagnostics | Resolved (structural) |
 
-**v1 gate (updated 2026-05-15):** **0 Open**, **3 Mitigated** with
-named caveats (§3.3, §3.9, §3.11). §3.7 flipped Open → Resolved
-when the per-device manifest revision floor + rollback banner landed
-(see [`plans/live-testing-followup.md`](plans/live-testing-followup.md)
-§10). The §11 follow-up (fresh-unlock enforcement in import +
-destructive UI) is the remaining gate before the §3.9 / §3.11
-Mitigated labels can flip to Resolved.
+**v1 gate (updated 2026-05-15):** **0 Open**, **1 Mitigated** with
+a named caveat (§3.3 — revocation UX wording missing + per-role
+server write gates partial; both deferred to the post-v1 Devices
+tab work). §3.7 closed via
+[`plans/live-testing-followup.md`](plans/live-testing-followup.md)
+§10 (manifest revision floor + banner); §3.9 + §3.11 closed via
+§11 (per-process fresh-unlock stamp + inline mini-prompt at the
+import-merge / clear-folder / clear-vault / schedule-purge gates).
+With all 20 risks at Resolved or Mitigated, Vault v1 can be
+stamped pending the Devices tab follow-ups noted in §3.3.
 
 ---
 
@@ -257,7 +260,7 @@ across process restarts.
 
 ## §3.9 — Import and merge safety
 
-**Status:** Mitigated
+**Status:** Resolved *(2026-05-15)*
 **Code anchor:** `desktop/src/vault/import_/bundle.py::decide_import_action`
 (identity gate), `:_default_conflict_mode = "rename"` (rename default),
 `:find_conflict_batches` (per-folder batching).
@@ -271,19 +274,19 @@ batches surface as one dialog per remote folder with an "Apply to
 remaining folders" checkbox. Test coverage:
 `tests/protocol/test_desktop_vault_import.py` (identity refuse,
 preview rendering, three-mode merge, per-folder batching).
-**Notes:** Two named caveats:
-1. **Fresh-unlock not enforced in import path.** The architecture
-   doc §3 (and the risk requirement) calls for fresh unlock on
-   sensitive operations regardless of the timeout setting. The
-   import wizard opens the vault via cached grant without
-   re-prompting. Spawned as follow-up §11.
-2. `_bundle_overrides_head` computes whether an older export would
-   roll back the active manifest's head, but the result is
-   surfaced only in the preview UI — there is no hard refuse-by-
-   default block on a head-overriding merge. Reasonable for "merge"
-   semantics; flagged here because the risks-doc wording asks for
-   merge-by-default *without* head replacement, which the current
-   code respects via Rename mode but does not enforce structurally.
+**Notes:** Fresh-unlock now enforced in the import path via
+[`plans/live-testing-followup.md`](plans/live-testing-followup.md)
+§11 — `on_import` in `windows_vault_import.py` funnels through
+`require_fresh_unlock_or_prompt`; the inline mini-prompt
+(`desktop/src/windows_vault/fresh_unlock_prompt.py`) re-runs
+Argon2id via the existing `verify_recovery_kit` path before the
+chunk-upload + manifest-publish worker can start. Residual design
+note: `_bundle_overrides_head` computes whether an older export
+would roll back the active manifest's head and surfaces the
+classification in the preview UI; the current code does not hard
+refuse-by-default on a head-overriding merge — reasonable for
+"merge" semantics, respected via Rename mode being the default,
+flagged here as a deliberate scope choice rather than a gap.
 
 ---
 
@@ -315,7 +318,7 @@ screen.
 
 ## §3.11 — Delete, clear, purge
 
-**Status:** Mitigated
+**Status:** Resolved *(2026-05-15)*
 **Code anchor:** `desktop/src/windows_vault/tab_danger.py:build_danger_tab`
 (UI guards), `desktop/src/vault/ops/clear.py:confirm_folder_clear_text_matches`
 + `:confirm_vault_clear_text_matches` (typed-confirm helpers),
@@ -338,20 +341,21 @@ order. Test coverage: `tests/protocol/test_desktop_vault_clear.py`
 24h default, mark-executed / cancel),
 `tests/protocol/test_desktop_vault_danger_zone_source.py` (UI ↔
 backend wiring).
-**Notes:** Two named caveats:
-1. **Fresh-unlock not enforced in destructive-action UI.** Same
-   pattern as §3.9: the architecture doc mandates fresh unlock for
-   clear-vault / hard-purge / rotate-access-secret / revoke-device,
-   but `open_local_vault_from_grant()` loads the cached grant
-   without re-prompting on timeout. Spawned as follow-up §11.
-2. The chunk-state model (`active`, `retained`, `gc_pending`,
-   `purged`) is the structural defence against "GC reclaims a chunk
-   still referenced by a retained version". There is no explicit
-   integration test asserting GC won't reclaim chunks referenced
-   by retained versions — the guarantee is enforced by the chunk
-   states being mutually exclusive and by the GC planner walking
-   the four eviction stages in order. Adding such a test is
-   low-cost and would raise the assurance level.
+**Notes:** Fresh-unlock now enforced in all three destructive
+handlers via
+[`plans/live-testing-followup.md`](plans/live-testing-followup.md)
+§11 — `on_clear_folder`, `on_clear_vault`, and `on_schedule_purge`
+in `tab_danger.py` funnel through `require_fresh_unlock_or_prompt`
+before opening their typed-confirm dialog; the same gate is
+source-pinned in `test_desktop_vault_danger_zone_source.py`.
+Residual design note: the chunk-state model (`active`, `retained`,
+`gc_pending`, `purged`) is the structural defence against "GC
+reclaims a chunk still referenced by a retained version". There
+is no dedicated integration test asserting this; the guarantee is
+enforced by the chunk states being mutually exclusive and by the
+GC planner walking the four eviction stages in order. Adding
+such a test is low-cost and would raise the assurance level — not
+a v1 gate.
 
 ---
 

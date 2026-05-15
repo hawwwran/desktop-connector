@@ -569,7 +569,36 @@ the first.
 - `docs/vault-critical-risks-evaluation.md` §3.9 and §3.11 flip
   from **Mitigated** to **Resolved**; summary table updates.
 
-**Status**: **Open** as of 2026-05-15. Blocks Vault v1 stamp.
+**Status (2026-05-15): done** on `tresor-vault`. F-LT11 ships:
+- `desktop/src/vault/fresh_unlock.py` — per-process in-memory
+  stamp with `FRESH_UNLOCK_WINDOW_S = 120 s`, injectable clock
+  for tests, typed `FreshUnlockRequiredError`.
+- `desktop/src/windows_vault/fresh_unlock_prompt.py` — inline
+  `Adw.Dialog` mini-prompt with kit picker + passphrase entry;
+  re-runs Argon2id via `verify_recovery_kit`; stays open across
+  failed retries; stamps on success.
+- Gate sites: `tab_danger.py` (clear-folder, clear-vault,
+  schedule-purge) and `windows_vault_import.py` (merge-commit)
+  funnel through `require_fresh_unlock_or_prompt` before any
+  destructive worker kicks off. Source-pinned in
+  `test_desktop_vault_danger_zone_source.py` +
+  `test_desktop_vault_import_wizard_source.py`.
+- Stamp also set on successful recovery test in
+  `tab_recovery.py` (same proof, no need to re-prompt within the
+  120-s window).
+- Diagnostic events:
+  `vault.fresh_unlock.{verified,verify_failed,prompt.envelope_meta_missing}`
+  added to `docs/diagnostics.events.md`.
+- 12 new unit tests in
+  `tests/protocol/test_desktop_vault_fresh_unlock.py` cover the
+  stamp lifecycle, the 120-s expiry boundary, restamp refresh,
+  clear, and the typed-error gate.
+- `docs/vault-critical-risks-evaluation.md` §3.9 and §3.11 both
+  flipped Mitigated → Resolved.
+
+With F-LT11 done the evaluation gate reads **0 Open / 1
+Mitigated** (§3.3 — UX wording + per-role server gates, both
+deferred to the post-v1 Devices tab). Vault v1 can be stamped.
 
 ---
 

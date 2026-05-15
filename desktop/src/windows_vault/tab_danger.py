@@ -18,6 +18,7 @@ from ..vault.ops.clear import (
     confirm_vault_clear_text_matches,
 )
 from ..vault.error_messages import humanize
+from .fresh_unlock_prompt import require_fresh_unlock_or_prompt
 from ..vault.ops.purge_schedule import (
     DEFAULT_DELAY_SECONDS,
     PendingPurge,
@@ -164,6 +165,17 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
             return
         display_name, folder_id = entries[idx]
 
+        def proceed() -> None:
+            _open_clear_folder_dialog(display_name, folder_id)
+
+        require_fresh_unlock_or_prompt(
+            win,
+            config=config,
+            operation_label=f"clear folder {display_name!r}",
+            on_success=proceed,
+        )
+
+    def _open_clear_folder_dialog(display_name: str, folder_id: str) -> None:
         dlg = Adw.AlertDialog(
             heading=f"Clear folder {display_name!r}?",
             body=(
@@ -277,6 +289,17 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
     danger.append(clear_vault_btn)
 
     def on_clear_vault(_btn) -> None:
+        def proceed() -> None:
+            _open_clear_vault_dialog()
+
+        require_fresh_unlock_or_prompt(
+            win,
+            config=config,
+            operation_label="clear whole vault",
+            on_success=proceed,
+        )
+
+    def _open_clear_vault_dialog() -> None:
         expected = vault_id_dashed()
         dlg = Adw.AlertDialog(
             heading="Clear whole vault?",
@@ -443,6 +466,18 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
                 "Delay must be non-negative.", "error",
             )
             return
+
+        def proceed() -> None:
+            _open_schedule_purge_dialog(hours)
+
+        require_fresh_unlock_or_prompt(
+            win,
+            config=config,
+            operation_label=f"schedule hard purge ({hours}h delay)",
+            on_success=proceed,
+        )
+
+    def _open_schedule_purge_dialog(hours: int) -> None:
         delay_seconds = hours * 3600
         expected = vault_id_dashed()
 

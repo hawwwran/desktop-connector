@@ -36,6 +36,7 @@ from .vault.export.reminder import normalize_cadence
 from .vault.import_.bundle import ImportMergeResolution
 from .vault.binding.runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
+from .windows_vault.fresh_unlock_prompt import require_fresh_unlock_or_prompt
 
 
 def show_vault_import(config_dir: Path, vault_id_override: str | None = None) -> None:
@@ -306,6 +307,14 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
             threading.Thread(target=worker, daemon=True).start()
 
         def on_import(_btn) -> None:
+            require_fresh_unlock_or_prompt(
+                win,
+                config=config,
+                operation_label="merge bundle into active vault",
+                on_success=_start_import,
+            )
+
+        def _start_import() -> None:
             import_btn.set_sensitive(False)
             progress_label.set_label("Uploading missing chunks…")
             progress_bar.set_fraction(0.0)

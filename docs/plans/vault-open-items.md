@@ -14,15 +14,16 @@ threads still to close before stamping "v1"; spot-checks on
 
 What remains is **one** thread: the critical-risks evaluation gate.
 
-**Status (2026-05-15):** evaluation pass landed at
-[`../vault-critical-risks-evaluation.md`](../vault-critical-risks-evaluation.md).
-§3.7 rollback detection (was Open) **shipped 2026-05-15** —
-per-device manifest revision floor + persistent `Adw.Banner` +
-self-heal on the next successful decrypt; closed via
-[`live-testing-followup.md`](live-testing-followup.md) §10. The
-remaining gate is the §11 follow-up (fresh-unlock enforcement in
-import + destructive UI), which once shipped flips §3.9 + §3.11
-from Mitigated to Resolved. v1 can be stamped once §11 lands.
+**Status (2026-05-15):** evaluation pass at
+[`../vault-critical-risks-evaluation.md`](../vault-critical-risks-evaluation.md)
+reads **0 Open / 1 Mitigated** after the two follow-ups landed:
+- §3.7 (manifest rollback detection) closed via
+  [`live-testing-followup.md`](live-testing-followup.md) §10.
+- §3.9 + §3.11 (fresh-unlock enforcement in import +
+  destructive UI) closed via §11.
+The single remaining Mitigated entry is §3.3 (revocation UX
+wording + per-role server write gates), both deferred to the
+post-v1 Devices tab work. **Vault v1 can be stamped.**
 
 ---
 

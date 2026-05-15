@@ -88,6 +88,22 @@ class DangerZoneRowsPresentTests(unittest.TestCase):
         )
         self.assertIn("set_response_enabled", self.text)
 
+    def test_destructive_handlers_gated_by_fresh_unlock(self) -> None:
+        """F-LT11 — clear-folder / clear-vault / schedule-purge handlers
+        must funnel through ``require_fresh_unlock_or_prompt`` before
+        opening the typed-confirm dialog. Source-pinned so a future
+        refactor that hoists the dialog construction out of the gate
+        is caught here rather than at a live-test pass.
+        """
+        self.assertIn("require_fresh_unlock_or_prompt", self.text)
+        # Three gate sites in tab_danger.py — one per destructive
+        # handler (clear-folder, clear-vault, schedule-purge).
+        self.assertGreaterEqual(
+            self.text.count("require_fresh_unlock_or_prompt"), 3,
+            "F-LT11 expects the fresh-unlock gate at each destructive "
+            "handler entry in tab_danger.py",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

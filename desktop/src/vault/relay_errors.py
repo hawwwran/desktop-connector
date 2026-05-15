@@ -86,6 +86,31 @@ class VaultRelayUnexpectedResponseError(RuntimeError):
         super().__init__(message)
 
 
+class FreshUnlockRequiredError(RuntimeError):
+    """Sensitive vault operation attempted without a fresh-unlock stamp.
+
+    Raised by :func:`desktop.src.vault.fresh_unlock.require_fresh_unlock`
+    at the entry to clear-folder / clear-vault / schedule-purge /
+    import-merge handlers (per the §3.9 / §3.11 risk evaluation and
+    architecture doc §13 — sensitive operations always require fresh
+    unlock regardless of the unlock timeout setting). The caller
+    handles this by surfacing the inline "Unlock with recovery
+    passphrase to continue" mini-prompt and re-trying the operation
+    on successful re-verification; the exception is the typed carrier
+    the gate tests assert on.
+
+    ``operation`` carries a short label (e.g. ``"clear-folder"``) so
+    diagnostic logs can attribute the deny to the specific gate site.
+    """
+
+    def __init__(self, *, operation: str = "") -> None:
+        self.operation = str(operation or "")
+        msg = "fresh-unlock required"
+        if self.operation:
+            msg = f"fresh-unlock required for {self.operation!r}"
+        super().__init__(msg)
+
+
 class VaultManifestRollbackError(RuntimeError):
     """Relay served a manifest revision older than this device has seen.
 
