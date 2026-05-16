@@ -15,7 +15,13 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault.binding.preflight import (  # noqa: E402
+    PER_OP_FLOOR_S,
+    PER_OP_GROWTH_S_PER_ENTRY,
+    WARNING_THRESHOLD_S,
     compute_preflight,
+    count_manifest_entries,
+    estimate_drain_seconds,
+    format_duration,
     render_preflight_text,
 )
 from src.vault.manifest import (  # noqa: E402
@@ -174,6 +180,190 @@ class PreflightTextTests(unittest.TestCase):
         )
         text = render_preflight_text(summary)
         self.assertIn("Warning", text)
+
+
+class BindDurationEstimatorTests(unittest.TestCase):
+    """Phase 1 of ``docs/plans/vault-large-folder-perf.md``.
+
+    The estimator is calibrated against suite 0004 / 2026-05-16 data
+    (the B7 step-ladder run). The tests anchor:
+    - shape of the integral (linear in N for small N; quadratic in N
+      for large N when start_manifest_entries is small);
+    - the warning threshold matches the published 2-minute decision
+      point;
+    - degenerate inputs (zero uploads, negative start) don't blow up.
+    """
+
+    def test_zero_uploads_is_instant(self) -> None:
+        self.assertEqual(
+            estimate_drain_seconds(start_manifest_entries=0, new_uploads=0),
+            0.0,
+        )
+        self.assertEqual(
+            estimate_drain_seconds(
+                start_manifest_entries=10_000, new_uploads=0,
+            ),
+            0.0,
+        )
+
+    def test_negative_start_clamped(self) -> None:
+        # Defensive: a bad manifest count shouldn't surface as a
+        # negative duration (which would print "less than a second"
+        # and silently bypass the warning).
+        out = estimate_drain_seconds(
+            start_manifest_entries=-50, new_uploads=100,
+        )
+        self.assertGreater(out, 0.0)
+
+    def test_100_files_from_empty_below_warning(self) -> None:
+        # Matches suite 0004's 100-file run (~3 s observed; estimator
+        # over-warns at ~5 s by design).
+        seconds = estimate_drain_seconds(
+            start_manifest_entries=0, new_uploads=100,
+        )
+        self.assertGreater(seconds, 2.0)
+        self.assertLess(seconds, 30.0)
+        self.assertLess(seconds, WARNING_THRESHOLD_S)
+
+    def test_2000_files_from_empty_above_warning(self) -> None:
+        # 2 000 files from an empty vault is the rough trigger point
+        # for the 2-minute warning. Pins the threshold so a future
+        # refit doesn't silently slide it below 1 000 files.
+        seconds = estimate_drain_seconds(
+            start_manifest_entries=0, new_uploads=2000,
+        )
+        self.assertGreaterEqual(seconds, WARNING_THRESHOLD_S)
+
+    def test_10k_files_matches_suite_0004_within_30_percent(self) -> None:
+        # Suite 0004 measured 7908 s for 10 000 uploads starting from
+        # a manifest with 1 104 entries. The estimator's job is to
+        # land within ~30 % of that on the conservative side.
+        seconds = estimate_drain_seconds(
+            start_manifest_entries=1104, new_uploads=10000,
+        )
+        # Lower bound: must not under-warn beyond the 30 % tolerance.
+        self.assertGreaterEqual(seconds, 7908 * 0.7)
+        # Upper bound: cap the conservatism so the dialog doesn't
+        # quote 8 hours for a 2-hour run.
+        self.assertLessEqual(seconds, 7908 * 1.4)
+
+    def test_formula_constants_match_documented_fit(self) -> None:
+        # Constants live in source; tests pin the values so they don't
+        # drift without an explicit doc update.
+        self.assertEqual(PER_OP_FLOOR_S, 0.04)
+        self.assertEqual(PER_OP_GROWTH_S_PER_ENTRY, 0.000135)
+        self.assertEqual(WARNING_THRESHOLD_S, 120.0)
+
+    def test_format_duration_thresholds(self) -> None:
+        self.assertEqual(format_duration(0.0), "less than a second")
+        self.assertIn("second", format_duration(5.0))
+        self.assertIn("minute", format_duration(65.0))
+        self.assertIn("hours", format_duration(8000.0))
+
+
+class ManifestEntryCountTests(unittest.TestCase):
+    """``count_manifest_entries`` sums versions across folders.
+
+    The estimator needs the *total* manifest size, not just one
+    folder's entries, because each upload publishes the full
+    manifest envelope.
+    """
+
+    def test_empty_manifest_is_zero(self) -> None:
+        self.assertEqual(count_manifest_entries({}), 0)
+        self.assertEqual(count_manifest_entries({"remote_folders": []}), 0)
+
+    def test_counts_versions_not_entries(self) -> None:
+        manifest = _manifest_with([
+            _entry("a.txt", version_id="fv_v1_a" * 5, size=1),
+            _entry("b.txt", version_id="fv_v1_b" * 5, size=2),
+        ])
+        # add an extra version onto entry "a.txt"
+        for f in manifest["remote_folders"]:
+            for e in f.get("entries", []):
+                if e["path"] == "a.txt":
+                    e["versions"].append({
+                        "version_id": "fv_v1_a2" * 3,
+                        "created_at": "2026-05-01T11:00:00.000Z",
+                        "modified_at": "2026-05-01T11:00:00.000Z",
+                        "logical_size": 1,
+                        "ciphertext_size": 33,
+                        "content_fingerprint": "abc",
+                        "chunks": [],
+                        "author_device_id": AUTHOR,
+                    })
+        # 2 entries × 1 version + 1 extra version = 3
+        self.assertEqual(count_manifest_entries(manifest), 3)
+
+    def test_summary_carries_estimate_and_threshold_flag(self) -> None:
+        """Source-pin: compute_preflight returns the perf estimate alongside
+        the §D15 counts so the connect dialog can gate on a single value.
+        """
+        tmpdir = Path(tempfile.mkdtemp(prefix="vault_estimate_test_"))
+        try:
+            target = tmpdir / "many"
+            target.mkdir()
+            for i in range(5):
+                (target / f"f{i}.txt").write_bytes(b"x")
+            summary = compute_preflight(
+                manifest=_manifest_with([]),
+                remote_folder_id=DOCS_ID,
+                local_root=target,
+            )
+            # 5 files from empty manifest: estimator returns a small
+            # positive duration, threshold not hit.
+            self.assertEqual(summary.local_existing_files, 5)
+            self.assertEqual(summary.starting_manifest_entries, 0)
+            self.assertGreater(summary.projected_upload_drain_seconds, 0.0)
+            self.assertFalse(summary.bind_warning_threshold_hit)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class SlowBindDialogSourceTests(unittest.TestCase):
+    """Source-pin: the slow-bind warning dialog is wired correctly.
+
+    We can't drive an Adw.MessageDialog in a headless test, but we
+    can verify the dialog helper exists, calls Adw.MessageDialog,
+    routes the Cancel response to no-op (no binding row written),
+    and routes Start sync to the existing create-binding worker.
+    """
+
+    def test_connect_dialog_imports_warning_helpers(self) -> None:
+        from _paths import REPO_ROOT
+        source = Path(
+            REPO_ROOT, "desktop/src/vault/folder/connect_dialog.py"
+        ).read_text(encoding="utf-8")
+        for needle in (
+            "format_duration",
+            "_present_slow_bind_confirm",
+            "_UPLOADING_MODES",
+            "Adw.MessageDialog",
+            "Large folder",
+            "Start sync",
+            "bind_warning_threshold_hit",
+        ):
+            with self.subTest(text=needle):
+                self.assertIn(needle, source)
+
+    def test_cancel_path_does_not_call_create_binding(self) -> None:
+        # Pin: only the "start" response triggers the binding create
+        # worker; cancel returns silently (the existing dialog stays
+        # open so the user can pick a different sync mode / folder).
+        from _paths import REPO_ROOT
+        source = Path(
+            REPO_ROOT, "desktop/src/vault/folder/connect_dialog.py"
+        ).read_text(encoding="utf-8")
+        # The slow-bind helper routes only the "start" response to
+        # on_confirm — `_start_create_worker` must be the on_confirm
+        # callback inside on_connect.
+        self.assertIn(
+            'if response == "start":', source,
+        )
+        self.assertIn(
+            "on_confirm=lambda: _start_create_worker(remote, mode)",
+            source,
+        )
 
 
 class ConnectFolderUiSourceTests(unittest.TestCase):

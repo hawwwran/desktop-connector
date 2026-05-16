@@ -29,12 +29,19 @@ from gi.repository import Gtk, Adw, GLib, Pango
 from ..binding.preflight import (
     PreflightSummary,
     compute_preflight,
+    format_duration,
     render_preflight_text,
 )
 from ..binding.bindings import (
     DEFAULT_SYNC_MODE,
     VaultBindingsStore,
 )
+
+# Sync modes that drain local files up to the relay during the
+# initial bind. Used by the slow-bind warning gate so we don't pop
+# the dialog for download-only / paused bindings where the upload
+# cost doesn't apply.
+_UPLOADING_MODES = frozenset({"backup-only", "two-way"})
 
 
 SYNC_MODE_LABELS = [
@@ -206,11 +213,7 @@ def present_connect_folder_dialog(
         # Acceptance: cancellation leaves no rows.
         dialog.close()
 
-    def on_connect(_btn) -> None:
-        remote = selected_remote()
-        if remote is None or state["local_path"] is None:
-            status_label.set_label("Pick both a remote folder and a local path.")
-            return
+    def _start_create_worker(remote: tuple[str, str], mode: str) -> None:
         connect_btn.set_sensitive(False)
         cancel_btn.set_sensitive(False)
         status_label.set_label("Creating binding…")
@@ -222,7 +225,7 @@ def present_connect_folder_dialog(
                     remote_folder_id=remote[1],
                     local_path=str(state["local_path"]),
                     state="needs-preflight",
-                    sync_mode=selected_mode(),
+                    sync_mode=mode,
                 )
             except Exception as exc:
                 msg = str(exc)
@@ -249,6 +252,32 @@ def present_connect_folder_dialog(
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def on_connect(_btn) -> None:
+        remote = selected_remote()
+        if remote is None or state["local_path"] is None:
+            status_label.set_label("Pick both a remote folder and a local path.")
+            return
+        mode = selected_mode()
+        summary = state.get("preflight")
+        # Slow-bind gate (suite 0004 §13 / vault-large-folder-perf.md
+        # Phase 1). Trigger only when the projected upload drain is
+        # ≥ WARNING_THRESHOLD_S **and** the chosen sync mode actually
+        # uploads local files. Mode is only known at click time, so
+        # the gate lives here rather than inside ``compute_preflight``.
+        if (
+            isinstance(summary, PreflightSummary)
+            and summary.bind_warning_threshold_hit
+            and mode in _UPLOADING_MODES
+        ):
+            _present_slow_bind_confirm(
+                parent_window=parent_window,
+                summary=summary,
+                mode=mode,
+                on_confirm=lambda: _start_create_worker(remote, mode),
+            )
+            return
+        _start_create_worker(remote, mode)
+
     folder_dropdown.connect("notify::selected", on_dropdown_changed)
     pick_btn.connect("clicked", on_pick_local)
     cancel_btn.connect("clicked", on_cancel)
@@ -256,6 +285,59 @@ def present_connect_folder_dialog(
 
     refresh_preflight()
     dialog.present(parent_window)
+    return dialog
+
+
+def _present_slow_bind_confirm(
+    *,
+    parent_window: Gtk.Window,
+    summary: PreflightSummary,
+    mode: str,
+    on_confirm: Callable[[], None],
+) -> Adw.MessageDialog:
+    """Phase 1 slow-bind warning.
+
+    Pops a modal Adw.MessageDialog before the binding row is written
+    so a user dropping a 10k-file folder into a vault doesn't kick
+    off a multi-hour drain unaware. ``on_confirm`` runs only when
+    the user clicks **Start sync**; the **Cancel** path returns
+    silently with no binding row created.
+
+    Spec: ``docs/plans/vault-large-folder-perf.md`` Phase 1.
+    """
+    files = summary.local_existing_files
+    size_text = _format_bytes(summary.local_existing_bytes)
+    duration_text = format_duration(summary.projected_upload_drain_seconds)
+
+    heading = "Large folder — initial sync will take a while"
+    body_lines = [
+        f"This folder has {files:,} files ({size_text}).",
+        f"Encrypting and uploading them will take {duration_text}.",
+        "",
+        "During the initial sync your vault is using the desktop's "
+        "CPU and network. You can keep using your computer; the sync "
+        "runs in the background, but the Vault window will say "
+        "\"Syncing X/Y\" until it finishes.",
+    ]
+    body = "\n".join(body_lines)
+
+    dialog = Adw.MessageDialog(
+        transient_for=parent_window,
+        heading=heading,
+        body=body,
+    )
+    dialog.add_response("cancel", "Cancel")
+    dialog.add_response("start", "Start sync")
+    dialog.set_response_appearance("start", Adw.ResponseAppearance.SUGGESTED)
+    dialog.set_default_response("cancel")
+    dialog.set_close_response("cancel")
+
+    def on_response(_dialog: Adw.MessageDialog, response: str) -> None:
+        if response == "start":
+            on_confirm()
+
+    dialog.connect("response", on_response)
+    dialog.present()
     return dialog
 
 

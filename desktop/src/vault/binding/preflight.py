@@ -4,6 +4,13 @@ Pure data: counts what the user is about to bind without touching the
 relay. The connect-folder dialog shows the result; tombstones get
 their own informational line per §D15 ("Deleted files will not be
 applied to your local folder during initial binding").
+
+A Phase 1 duration estimator is folded in alongside the §D15 counts.
+Suite 0004 measured the bind cliff (rate decay 8.5 → 1.3 ops/s as the
+encrypted manifest grew during a 10 000-file backup-only drain). The
+estimator uses a linear-in-manifest-size fit of that data so the
+Connect dialog can warn before the user kicks off a multi-hour
+initial sync. Plan: ``docs/plans/vault-large-folder-perf.md``.
 """
 
 from __future__ import annotations
@@ -15,6 +22,82 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..ui.bytes_format import format_bytes_binary as _format_bytes
+
+
+# Phase 1 estimator (suite 0004 / 2026-05-16 fit). per_op_seconds is
+# modelled as a linear function of manifest_entries_at_publish_time:
+#
+#     per_op_seconds ≈ PER_OP_FLOOR_S + PER_OP_GROWTH_S_PER_ENTRY × N
+#
+# Empirical anchors from
+# temp/automation-tests-results/0004/B7-large-folder/result.md:
+#   N≈1 200  → 0.12 s/op (8.5 ops/s)
+#   N≈6 000  → 0.39 s/op (2.6 ops/s)
+#   N≈11 000 → 0.77 s/op (1.3 ops/s)
+# Constants are tuned slightly conservative so the dialog over-warns
+# rather than under-warns; on a multi-threaded production relay the
+# real cost is lower (SO-1 from §13 amplified the single-threaded
+# php -S baseline).
+PER_OP_FLOOR_S = 0.04
+PER_OP_GROWTH_S_PER_ENTRY = 0.000135
+WARNING_THRESHOLD_S = 120.0   # 2 min — below this we don't pop the dialog.
+
+
+def count_manifest_entries(manifest: dict[str, Any]) -> int:
+    """Count every (file, version) pair in the manifest.
+
+    The bind drain's per-op cost grows with **total** manifest size,
+    not just the entries in the folder being bound. So the estimator
+    sums versions across all remote folders.
+    """
+    total = 0
+    for folder in manifest.get("remote_folders", []) or []:
+        if not isinstance(folder, dict):
+            continue
+        for entry in folder.get("entries", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            versions = entry.get("versions", []) or []
+            total += sum(1 for v in versions if isinstance(v, dict))
+    return total
+
+
+def estimate_drain_seconds(
+    *,
+    start_manifest_entries: int,
+    new_uploads: int,
+) -> float:
+    """Project wall-clock for an upload-only sync drain.
+
+    Integral of ``PER_OP_FLOOR_S + PER_OP_GROWTH_S_PER_ENTRY × k`` over
+    ``k = start..start+new_uploads``. Returns ``0.0`` when there's
+    nothing to upload (e.g. download-only mode or empty folder).
+    """
+    if new_uploads <= 0:
+        return 0.0
+    if start_manifest_entries < 0:
+        start_manifest_entries = 0
+    floor = PER_OP_FLOOR_S * new_uploads
+    growth = PER_OP_GROWTH_S_PER_ENTRY * (
+        new_uploads * start_manifest_entries
+        + (new_uploads * (new_uploads + 1)) / 2
+    )
+    return floor + growth
+
+
+def format_duration(seconds: float) -> str:
+    """Render an estimator output for the Connect dialog UI."""
+    if seconds < 1.0:
+        return "less than a second"
+    if seconds < 60.0:
+        return f"about {int(round(seconds))} second(s)"
+    if seconds < 3600.0:
+        minutes = int(round(seconds / 60.0))
+        return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+    hours = seconds / 3600.0
+    if hours < 10.0:
+        return f"about {hours:.1f} hours"
+    return f"about {int(round(hours))} hours"
 
 
 @dataclass(frozen=True)
@@ -29,6 +112,15 @@ class PreflightSummary:
     local_existing_bytes: int
     local_path_exists: bool
     local_path_writable: bool
+    # Phase 1 duration estimate. ``projected_upload_drain_seconds``
+    # is the worst-case backup-only drain time (uploading every
+    # local file). ``bind_warning_threshold_hit`` is True when that
+    # estimate is ≥ ``WARNING_THRESHOLD_S`` and the caller should
+    # show the slow-bind confirm dialog. ``starting_manifest_entries``
+    # is exposed for tests / diagnostics.
+    projected_upload_drain_seconds: float = 0.0
+    bind_warning_threshold_hit: bool = False
+    starting_manifest_entries: int = 0
 
 
 def compute_preflight(
@@ -92,6 +184,15 @@ def compute_preflight(
     elif local_root.parent.exists():
         local_path_writable = os.access(local_root.parent, os.W_OK)
 
+    starting_manifest_entries = count_manifest_entries(manifest)
+    projected_upload_drain_seconds = estimate_drain_seconds(
+        start_manifest_entries=starting_manifest_entries,
+        new_uploads=local_existing_files,
+    )
+    bind_warning_threshold_hit = (
+        projected_upload_drain_seconds >= WARNING_THRESHOLD_S
+    )
+
     return PreflightSummary(
         remote_folder_display_name=display_name,
         current_files=current_files,
@@ -103,6 +204,9 @@ def compute_preflight(
         local_existing_bytes=local_existing_bytes,
         local_path_exists=local_path_exists,
         local_path_writable=local_path_writable,
+        projected_upload_drain_seconds=projected_upload_drain_seconds,
+        bind_warning_threshold_hit=bind_warning_threshold_hit,
+        starting_manifest_entries=starting_manifest_entries,
     )
 
 
@@ -143,6 +247,11 @@ def render_preflight_text(summary: PreflightSummary) -> str:
             "\nWarning: parent directory is not writable; the binding "
             "would fail when materializing the baseline."
         )
+    if summary.projected_upload_drain_seconds > 0:
+        lines.append(
+            f"\nInitial upload (if backup-only or two-way): "
+            f"{format_duration(summary.projected_upload_drain_seconds)}."
+        )
     return "\n".join(lines)
 
 
@@ -174,7 +283,13 @@ def _walk_local(root: Path, ignore_dotfiles: bool) -> Iterable[Path]:
 
 
 __all__ = [
+    "PER_OP_FLOOR_S",
+    "PER_OP_GROWTH_S_PER_ENTRY",
     "PreflightSummary",
+    "WARNING_THRESHOLD_S",
     "compute_preflight",
+    "count_manifest_entries",
+    "estimate_drain_seconds",
+    "format_duration",
     "render_preflight_text",
 ]

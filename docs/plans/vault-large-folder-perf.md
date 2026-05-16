@@ -135,7 +135,37 @@ No protocol change, no manifest change, no server change.
 
 ### Status
 
-Open.
+**Done 2026-05-16** on `tresor-vault`.
+
+Landed:
+- `desktop/src/vault/binding/preflight.py` — added
+  `PER_OP_FLOOR_S` / `PER_OP_GROWTH_S_PER_ENTRY` /
+  `WARNING_THRESHOLD_S` constants, `count_manifest_entries()` walker,
+  `estimate_drain_seconds()` integral, `format_duration()` helper.
+  Extended `PreflightSummary` with `projected_upload_drain_seconds`,
+  `bind_warning_threshold_hit`, `starting_manifest_entries`.
+  `render_preflight_text()` appends an
+  *"Initial upload (if backup-only or two-way): about N minutes"*
+  line whenever the estimate is positive.
+- `desktop/src/vault/folder/connect_dialog.py` — gated `on_connect`
+  on the threshold flag + chosen sync mode (`_UPLOADING_MODES`).
+  Slow-bind path routes through `_present_slow_bind_confirm()`, a
+  modal `Adw.MessageDialog` carrying the file count + size +
+  estimated duration; Cancel returns silently (no binding row),
+  Start sync runs the existing `_start_create_worker`.
+- `tests/protocol/test_desktop_vault_binding_preflight.py` — added
+  `BindDurationEstimatorTests` (7 tests pinning the integral, the
+  threshold trigger point, suite-0004 calibration, defensive zero +
+  negative inputs, format strings, and the documented constants),
+  `ManifestEntryCountTests` (3 tests pinning per-version counting
+  + summary fields), `SlowBindDialogSourceTests` (2 source-pins
+  for the dialog wiring + Cancel-is-noop contract).
+
+All 19 preflight tests pass; full vault suite stays green (878/878).
+
+Skipped (intentional, listed in §13's SO-X items): progress-bar ETA
+widening — falls naturally out of Phase 2 once batched publishes
+change the rate curve.
 
 ---
 
