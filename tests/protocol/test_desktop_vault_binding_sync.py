@@ -425,6 +425,189 @@ class BackupOnlySyncTests(unittest.TestCase):
         self.assertIsNotNone(ops[0].last_error)
 
 
+class FetchManifestPerOpTests(unittest.TestCase):
+    """SO-2: a backup-only / two-way cycle must not re-fetch the manifest
+    after every successful op.
+
+    Pre-SO-2 each successful op was followed by ``vault.fetch_manifest``,
+    which on a 10k-file initial bind ships the full encrypted manifest
+    envelope ~once per file = O(N²) bytes total (see
+    ``docs/plans/vault-large-folder-perf.md``). The fix is to thread the
+    manifest dict ``publish_manifest`` already returned through the
+    cycle. The re-fetch stays on the failure path because a CAS conflict
+    legitimately means "the world moved, refresh."
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_sync_so2_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.config_dir = self.tmpdir / "config"
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+        self.index = VaultLocalIndex(self.config_dir)
+        self.store = VaultBindingsStore(self.index.db_path)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _empty_remote(self) -> "CountingRelay":
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-16T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-16T12:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        relay = CountingRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
+        vault = _vault()
+        try:
+            vault.publish_manifest(relay, manifest)
+        finally:
+            vault.close()
+        # Discard any get_manifest calls from setup so the assertions
+        # below count *cycle-driven* fetches only.
+        relay.get_manifest_count = 0
+        return relay
+
+    def _make_bound_binding(self, *, last_revision: int) -> "VaultBinding":
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id,
+            state="bound",
+            last_synced_revision=last_revision,
+        )
+        return self.store.get_binding(binding.binding_id)
+
+    def test_backup_only_cycle_does_not_fetch_per_successful_op(self) -> None:
+        relay = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(relay.current_revision))
+
+        # Five tiny files all under one binding.
+        for i in range(5):
+            path = f"f{i}.txt"
+            (self.local_root / path).write_bytes(f"payload-{i}".encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        vault = _vault()
+        try:
+            result = run_backup_only_cycle(
+                vault=vault, relay=relay,
+                store=self.store, binding=binding,
+                author_device_id=OTHER_DEVICE,
+            )
+        finally:
+            vault.close()
+
+        # Sanity: every op succeeded.
+        self.assertEqual(result.succeeded_count, 5)
+        self.assertEqual(result.failed_count, 0)
+        # SO-2: exactly one fetch — the initial head load — regardless
+        # of how many ops the cycle drained. Pre-fix this was 1 + N
+        # (one initial fetch + one per successful publish). The single
+        # remaining fetch happens because the caller didn't pass a
+        # ``manifest`` argument; passing one would zero this out.
+        self.assertEqual(
+            relay.get_manifest_count, 1,
+            "expected exactly one cycle-driven fetch_manifest "
+            f"(initial head); saw {relay.get_manifest_count}. "
+            "Per-op manifest GET regressed — see "
+            "docs/plans/vault-large-folder-perf.md SO-2.",
+        )
+
+    def test_backup_only_cycle_skips_initial_fetch_when_manifest_passed(self) -> None:
+        relay = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(relay.current_revision))
+
+        for i in range(3):
+            path = f"g{i}.txt"
+            (self.local_root / path).write_bytes(b"x" * (10 + i))
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        # Caller supplies the manifest dict, so the cycle never has to
+        # call fetch_manifest at all on the success path.
+        vault = _vault()
+        try:
+            head = vault.fetch_manifest(relay)
+            relay.get_manifest_count = 0  # baseline after this priming fetch
+            run_backup_only_cycle(
+                vault=vault, relay=relay,
+                store=self.store, binding=binding,
+                manifest=head,
+                author_device_id=OTHER_DEVICE,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(
+            relay.get_manifest_count, 0,
+            "with a passed-in manifest the cycle must not call "
+            f"fetch_manifest for any of the N ops; saw {relay.get_manifest_count}",
+        )
+
+    def test_backup_only_cycle_refetches_after_failed_op(self) -> None:
+        relay = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(relay.current_revision))
+
+        (self.local_root / "boom.txt").write_bytes(b"x" * 64)
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="upload",
+            relative_path="boom.txt",
+        )
+
+        # Wedge the relay so the chunk PUT fails (non-CAS).
+        original_put = relay.put_chunk
+        def _explode(*a, **kw):  # noqa: ANN001, ANN002, ANN003
+            raise RuntimeError("network down")
+        relay.put_chunk = _explode  # type: ignore[assignment]
+
+        vault = _vault()
+        try:
+            result = run_backup_only_cycle(
+                vault=vault, relay=relay,
+                store=self.store, binding=binding,
+                author_device_id=OTHER_DEVICE,
+            )
+        finally:
+            vault.close()
+            relay.put_chunk = original_put  # type: ignore[assignment]
+
+        self.assertEqual(result.failed_count, 1)
+        # 2 fetches expected: 1 initial + 1 post-failure refresh (F-Y07
+        # path is preserved for "world changed" recovery).
+        self.assertEqual(
+            relay.get_manifest_count, 2,
+            "expected 1 initial + 1 post-failure fetch_manifest; "
+            f"saw {relay.get_manifest_count}",
+        )
+
+
 class SyncNowToastTests(unittest.TestCase):
     """T10.6: format_sync_outcome_toast → user-facing one-liner."""
 
@@ -656,6 +839,22 @@ def _vault() -> Vault:
         header_revision=1, manifest_revision=1,
         manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
     )
+
+
+class CountingRelay(FakeUploadRelay):
+    """FakeUploadRelay variant that exposes a counter on ``get_manifest``.
+
+    Used by :class:`FetchManifestPerOpTests` to pin SO-2 — every extra
+    GET on the success path is a regression and shows up here.
+    """
+
+    def __init__(self, *, manifest: dict) -> None:
+        super().__init__(manifest=manifest)
+        self.get_manifest_count = 0
+
+    def get_manifest(self, vault_id, vault_access_secret):
+        self.get_manifest_count += 1
+        return super().get_manifest(vault_id, vault_access_secret)
 
 
 if __name__ == "__main__":

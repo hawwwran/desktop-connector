@@ -152,7 +152,7 @@ def run_two_way_cycle(
                 )
                 cancelled = True
                 break
-            outcome = _execute_op(
+            outcome, head = _execute_op(
                 vault=vault,
                 relay=relay,
                 store=store,
@@ -173,15 +173,17 @@ def run_two_way_cycle(
             if outcome.status == "cancelled":
                 cancelled = True
                 break
-            if outcome.status in ("uploaded", "deleted", "failed"):
-                # F-Y07: a failed publish (CAS conflict) is a strong
-                # "the world changed" signal — re-fetch head so the
-                # next op in this iteration sees the new revision.
+            # SO-2: successful publishes thread the new manifest back via
+            # the tuple return. Only re-fetch on failure (typically a
+            # CAS conflict whose inner retry budget was exhausted) so the
+            # next op in this iteration sees the post-conflict revision.
+            # F-Y07.
+            if outcome.status == "failed":
                 try:
                     head = vault.fetch_manifest(relay)
                 except Exception:  # noqa: BLE001
                     log.warning(
-                        "vault.sync.refetch_after_publish_failed binding=%s",
+                        "vault.sync.refetch_after_failure_failed binding=%s",
                         binding.binding_id, exc_info=True,
                     )
         if cancelled:

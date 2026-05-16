@@ -300,7 +300,7 @@ def run_backup_only_cycle(
             )
             cancelled = True
             break
-        outcome = _execute_op(
+        outcome, current_manifest = _execute_op(
             vault=vault,
             relay=relay,
             store=store,
@@ -322,15 +322,17 @@ def run_backup_only_cycle(
             # Chunk-level bail surfaced upward; stop the queue drain.
             cancelled = True
             break
-        # Refresh the manifest if this op published a new revision OR
-        # failed (likely a CAS conflict — refresh so the next op
-        # sees the new world). F-Y07.
-        if outcome.status in ("uploaded", "deleted", "failed"):
+        # SO-2: successful publishes thread the new manifest back via
+        # ``_execute_op``'s return — no per-op GET. Only refresh on
+        # failure (typically a CAS conflict whose inner retry budget
+        # was exhausted) so the next op sees the post-conflict head.
+        # F-Y07.
+        if outcome.status == "failed":
             try:
                 current_manifest = vault.fetch_manifest(relay)
             except Exception:  # noqa: BLE001
                 log.warning(
-                    "vault.sync.refetch_after_publish_failed binding=%s",
+                    "vault.sync.refetch_after_failure_failed binding=%s",
                     binding.binding_id, exc_info=True,
                 )
 
@@ -363,8 +365,17 @@ def _execute_op(
     author_device_id: str,
     chunk_cache_dir: Path | None,
     should_continue: Callable[[], bool] | None = None,
-) -> SyncOpOutcome:
-    """Execute one pending op end-to-end. Errors stay scoped per-op."""
+) -> tuple[SyncOpOutcome, dict[str, Any]]:
+    """Execute one pending op end-to-end. Errors stay scoped per-op.
+
+    SO-2: returns ``(outcome, manifest_after_op)``. ``manifest_after_op``
+    is the newly-published revision when a publish happened (uploaded,
+    deleted, or upload-promoted-to-delete on a previously-synced path);
+    otherwise it is the input ``manifest`` unchanged (skipped, failed
+    before publish, cancelled). Callers that need a fresh view after a
+    CAS-conflict failure must re-fetch explicitly — this helper does
+    not, so success paths skip the redundant per-op GET.
+    """
     relative_path = op.relative_path
     if op.op_type == "upload":
         return _execute_upload(
@@ -382,12 +393,15 @@ def _execute_op(
         )
     # Rename ops aren't part of T10.5's backup-only contract.
     store.mark_op_failed(op.op_id, f"unsupported op_type: {op.op_type}")
-    return SyncOpOutcome(
-        op_id=op.op_id,
-        op_type=op.op_type,
-        relative_path=relative_path,
-        status="failed",
-        error=f"unsupported op_type: {op.op_type}",
+    return (
+        SyncOpOutcome(
+            op_id=op.op_id,
+            op_type=op.op_type,
+            relative_path=relative_path,
+            status="failed",
+            error=f"unsupported op_type: {op.op_type}",
+        ),
+        manifest,
     )
 
 
@@ -403,7 +417,7 @@ def _execute_upload(
     author_device_id: str,
     chunk_cache_dir: Path | None,
     should_continue: Callable[[], bool] | None = None,
-) -> SyncOpOutcome:
+) -> tuple[SyncOpOutcome, dict[str, Any]]:
     relative_path = op.relative_path
     absolute = local_root / relative_path
     if not _file_present_with_atomic_rename_grace(absolute):
@@ -418,10 +432,13 @@ def _execute_upload(
                 binding.binding_id, relative_path,
             )
             store.delete_pending_op(op.op_id)
-            return SyncOpOutcome(
-                op_id=op.op_id, op_type="upload",
-                relative_path=relative_path, status="skipped",
-                error="path_vanished_never_synced",
+            return (
+                SyncOpOutcome(
+                    op_id=op.op_id, op_type="upload",
+                    relative_path=relative_path, status="skipped",
+                    error="path_vanished_never_synced",
+                ),
+                manifest,
             )
         return _promote_to_delete(
             vault=vault, relay=relay, store=store,
@@ -450,19 +467,25 @@ def _execute_upload(
             "vault.sync.upload_cancelled_op binding=%s path=%s",
             binding.binding_id, relative_path,
         )
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="upload",
-            relative_path=relative_path, status="cancelled",
-            error=str(exc),
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="cancelled",
+                error=str(exc),
+            ),
+            manifest,
         )
     except UploadSpecialFileSkipped:
         # F-Y17: never propagate a tombstone for a symlink/FIFO. Drop
         # the op; the file simply isn't part of the vault.
         store.delete_pending_op(op.op_id)
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="upload",
-            relative_path=relative_path, status="skipped",
-            error="special_file",
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="skipped",
+                error="special_file",
+            ),
+            manifest,
         )
     except VaultQuotaExceededError as exc:
         # F-D03: leave the op pending, surface a typed failure so the
@@ -474,10 +497,13 @@ def _execute_upload(
             getattr(exc, "used_bytes", 0),
             getattr(exc, "quota_bytes", 0),
         )
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="upload",
-            relative_path=relative_path, status="failed",
-            error="quota_exceeded",
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="failed",
+                error="quota_exceeded",
+            ),
+            manifest,
         )
     except VaultCASConflictError as exc:
         # T6.3 owns CAS retry; if it bubbles here it means the inner
@@ -487,10 +513,13 @@ def _execute_upload(
             "vault.sync.upload_cas_conflict binding=%s path=%s",
             binding.binding_id, relative_path,
         )
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="upload",
-            relative_path=relative_path, status="failed",
-            error="cas_conflict",
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="failed",
+                error="cas_conflict",
+            ),
+            manifest,
         )
     except Exception as exc:  # noqa: BLE001
         store.mark_op_failed(op.op_id, str(exc))
@@ -498,10 +527,13 @@ def _execute_upload(
             "vault.sync.upload_failed binding=%s path=%s error=%s",
             binding.binding_id, relative_path, exc,
         )
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="upload",
-            relative_path=relative_path, status="failed",
-            error=str(exc),
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="failed",
+                error=str(exc),
+            ),
+            manifest,
         )
 
     new_revision = int(result.manifest.get("revision", manifest.get("revision", 0)))
@@ -520,13 +552,16 @@ def _execute_upload(
         last_synced_revision=new_revision,
     ))
     store.delete_pending_op(op.op_id)
-    return SyncOpOutcome(
-        op_id=op.op_id,
-        op_type="upload",
-        relative_path=relative_path,
-        status="skipped" if result.skipped_identical else "uploaded",
-        bytes_uploaded=int(result.bytes_uploaded),
-        chunks_uploaded=int(result.chunks_uploaded),
+    return (
+        SyncOpOutcome(
+            op_id=op.op_id,
+            op_type="upload",
+            relative_path=relative_path,
+            status="skipped" if result.skipped_identical else "uploaded",
+            bytes_uploaded=int(result.bytes_uploaded),
+            chunks_uploaded=int(result.chunks_uploaded),
+        ),
+        result.manifest,
     )
 
 
@@ -539,7 +574,7 @@ def _execute_delete(
     op: VaultPendingOperation,
     manifest: dict[str, Any],
     author_device_id: str,
-) -> SyncOpOutcome:
+) -> tuple[SyncOpOutcome, dict[str, Any]]:
     relative_path = op.relative_path
     normalized = normalize_manifest_path(relative_path)
     entry = find_file_entry(manifest, binding.remote_folder_id, normalized)
@@ -547,9 +582,12 @@ def _execute_delete(
         # Already gone (or never existed) — clear local + queue rows.
         store.delete_local_entry(binding.binding_id, relative_path)
         store.delete_pending_op(op.op_id)
-        return SyncOpOutcome(
-            op_id=op.op_id, op_type="delete",
-            relative_path=relative_path, status="skipped",
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="delete",
+                relative_path=relative_path, status="skipped",
+            ),
+            manifest,
         )
 
     from datetime import datetime, timezone
@@ -560,7 +598,7 @@ def _execute_delete(
     # never converges; the spec retry budget here matches upload's 5.
     DELETE_CAS_MAX_RETRIES = 5
     current_manifest = manifest
-    last_exc: Exception | None = None
+    published: dict[str, Any] | None = None
     for attempt in range(DELETE_CAS_MAX_RETRIES + 1):
         normalized_path = normalize_manifest_path(relative_path)
         entry_now = find_file_entry(
@@ -569,9 +607,12 @@ def _execute_delete(
         if entry_now is None or bool(entry_now.get("deleted")):
             store.delete_local_entry(binding.binding_id, relative_path)
             store.delete_pending_op(op.op_id)
-            return SyncOpOutcome(
-                op_id=op.op_id, op_type="delete",
-                relative_path=relative_path, status="skipped",
+            return (
+                SyncOpOutcome(
+                    op_id=op.op_id, op_type="delete",
+                    relative_path=relative_path, status="skipped",
+                ),
+                current_manifest,
             )
         parent_revision = int(current_manifest.get("revision", 0))
         next_revision = parent_revision + 1
@@ -587,10 +628,11 @@ def _execute_delete(
         next_manifest["created_at"] = deleted_at
         next_manifest["author_device_id"] = str(author_device_id)
         try:
-            vault.publish_manifest(relay, next_manifest)
+            # SO-2: capture the post-publish manifest so the caller can
+            # thread it into the next op without a separate GET.
+            published = vault.publish_manifest(relay, next_manifest)
             break
         except VaultCASConflictError as exc:
-            last_exc = exc
             log.info(
                 "vault.sync.delete_cas_retry attempt=%d/%d binding=%s path=%s",
                 attempt + 1, DELETE_CAS_MAX_RETRIES,
@@ -602,10 +644,13 @@ def _execute_delete(
                     "vault.sync.delete_cas_exhausted binding=%s path=%s",
                     binding.binding_id, relative_path,
                 )
-                return SyncOpOutcome(
-                    op_id=op.op_id, op_type="delete",
-                    relative_path=relative_path, status="failed",
-                    error="cas_conflict",
+                return (
+                    SyncOpOutcome(
+                        op_id=op.op_id, op_type="delete",
+                        relative_path=relative_path, status="failed",
+                        error="cas_conflict",
+                    ),
+                    current_manifest,
                 )
             try:
                 current_manifest = vault.fetch_manifest(relay)
@@ -615,10 +660,13 @@ def _execute_delete(
                     "vault.sync.delete_refetch_failed binding=%s error=%s",
                     binding.binding_id, fetch_exc,
                 )
-                return SyncOpOutcome(
-                    op_id=op.op_id, op_type="delete",
-                    relative_path=relative_path, status="failed",
-                    error=f"refetch_failed: {fetch_exc}",
+                return (
+                    SyncOpOutcome(
+                        op_id=op.op_id, op_type="delete",
+                        relative_path=relative_path, status="failed",
+                        error=f"refetch_failed: {fetch_exc}",
+                    ),
+                    current_manifest,
                 )
         except Exception as exc:  # noqa: BLE001
             store.mark_op_failed(op.op_id, str(exc))
@@ -626,17 +674,23 @@ def _execute_delete(
                 "vault.sync.delete_failed binding=%s path=%s error=%s",
                 binding.binding_id, relative_path, exc,
             )
-            return SyncOpOutcome(
-                op_id=op.op_id, op_type="delete",
-                relative_path=relative_path, status="failed",
-                error=str(exc),
+            return (
+                SyncOpOutcome(
+                    op_id=op.op_id, op_type="delete",
+                    relative_path=relative_path, status="failed",
+                    error=str(exc),
+                ),
+                current_manifest,
             )
 
     store.delete_local_entry(binding.binding_id, relative_path)
     store.delete_pending_op(op.op_id)
-    return SyncOpOutcome(
-        op_id=op.op_id, op_type="delete",
-        relative_path=relative_path, status="deleted",
+    return (
+        SyncOpOutcome(
+            op_id=op.op_id, op_type="delete",
+            relative_path=relative_path, status="deleted",
+        ),
+        published if published is not None else current_manifest,
     )
 
 
@@ -649,27 +703,30 @@ def _promote_to_delete(
     op: VaultPendingOperation,
     manifest: dict[str, Any],
     author_device_id: str,
-) -> SyncOpOutcome:
+) -> tuple[SyncOpOutcome, dict[str, Any]]:
     log.info(
         "vault.sync.upload_path_vanished_promoted_to_delete "
         "binding=%s path=%s",
         binding.binding_id, op.relative_path,
     )
-    inner = _execute_delete(
+    inner, manifest_after = _execute_delete(
         vault=vault, relay=relay, store=store, binding=binding,
         op=op, manifest=manifest, author_device_id=author_device_id,
     )
     # Ledger view: the op was an "upload" but the outcome was a tombstone.
     # Preserve the original op_type so callers can correlate with the
     # watcher-emitted op log.
-    return SyncOpOutcome(
-        op_id=inner.op_id,
-        op_type=op.op_type,
-        relative_path=inner.relative_path,
-        status=inner.status,
-        error=inner.error,
-        bytes_uploaded=inner.bytes_uploaded,
-        chunks_uploaded=inner.chunks_uploaded,
+    return (
+        SyncOpOutcome(
+            op_id=inner.op_id,
+            op_type=op.op_type,
+            relative_path=inner.relative_path,
+            status=inner.status,
+            error=inner.error,
+            bytes_uploaded=inner.bytes_uploaded,
+            chunks_uploaded=inner.chunks_uploaded,
+        ),
+        manifest_after,
     )
 
 

@@ -410,6 +410,8 @@ relay log (filenames are local-only).
 | `vault.baseline.skip_unsafe` | desktop | warning | `path` | Baseline refused to write a path traversing outside the binding root |
 | `vault.browser.resume_cancel.clear_session_failed` | desktop | warning | `session_id` | Resume-banner Cancel button couldn't unlink the on-disk session JSON; the session will reappear on the next manifest refresh and the user can retry |
 | `vault.browser.skip_unsafe` | desktop | warning | `path` | F-519 — manifest entry contained a `..` component the browser refused to walk |
+| `vault.browser.sync_status_count_failed` | desktop | warning | exception traceback | Ambient "Vault sync K/N" banner couldn't count pending ops for a binding; the count is omitted from this tick but the next refresh retries |
+| `vault.browser.sync_status_tick_failed` | desktop | warning | exception traceback | Ambient sync-status banner refresh tick raised; banner stays on the prior value, next tick retries |
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
 | `vault.delete.cas_exhausted` | desktop | warning | `vault`, `retries` | F-D25 — delete retry budget exhausted; raised the CAS error to caller |
 | `vault.delete.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`/`path_prefix`, `tombstoned` (folder bulk) | F-510 — soft-delete or folder-clear published; Activity-tab "Deleted" anchor |
@@ -430,11 +432,11 @@ relay log (filenames are local-only).
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal) |
 | `vault.eviction.version_purged` | desktop | info | `vault_id`, `path`, `version_id` | Old version evicted to free space |
 | `vault.folder.cleared` | desktop | info | `remote_folder_id`, `tombstoned`, `author` | T14.1 bulk-soft-delete published |
+| `vault.folder_upload.cancelled` | desktop | info | `vault`, `files_done`, `total` | F-U03 — folder upload cancelled between files |
+| `vault.folder_upload.cancelled_pre_publish` | desktop | info | `vault`, `files_done` | F-U03 — folder upload cancelled before the batch CAS publish |
 | `vault.fresh_unlock.prompt.envelope_meta_missing` | desktop | warning | `operation` | F-LT11 — fresh-unlock mini-prompt opened on a device whose `recovery_envelope_meta` is absent from config; prompt explains the user must finish onboarding before retrying |
 | `vault.fresh_unlock.verified` | desktop | info | `operation` | F-LT11 — user re-typed the recovery passphrase and Argon2id verified it; stamp set for §3.9/§3.11 destructive-op gate |
 | `vault.fresh_unlock.verify_failed` | desktop | info | `operation`, `reason` | F-LT11 — passphrase or kit mismatch on the mini-prompt; gate stays closed, user can retry |
-| `vault.folder_upload.cancelled` | desktop | info | `vault`, `files_done`, `total` | F-U03 — folder upload cancelled between files |
-| `vault.folder_upload.cancelled_pre_publish` | desktop | info | `vault`, `files_done` | F-U03 — folder upload cancelled before the batch CAS publish |
 | `vault.gc.unlink_failed` | server | warning | `plan`, `path` | F-S12 — gcExecute couldn't remove a chunk file |
 | `vault.grant.created` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant flow logs through this surface (F-510) |
 | `vault.import.cancelled` | desktop | info | `vault`, `chunks_done`, `total` | F-U03 — import cancelled mid-chunk-upload |
@@ -516,6 +518,7 @@ relay log (filenames are local-only).
 | `vault.sync.ransomware_pause_triggered` | desktop | warning | `binding`, `title`, `body` | F-Y27 — detector tripped; binding paused |
 | `vault.sync.ransomware_threshold_rename_ratio` | desktop | warning | `binding`, `total`, `renames`, `ratio` | T12.3 trip via rename ratio |
 | `vault.sync.ransomware_threshold_total` | desktop | warning | `binding`, `total`, `window_s` | T12.3 trip via total events |
+| `vault.sync.refetch_after_failure_failed` | desktop | warning | `binding` | SO-2 — post-op-failure manifest refresh raised; cycle continues with the stale view |
 | `vault.sync.refetch_after_publish_failed` | desktop | warning | `binding` | Manifest re-fetch after our own publish failed; cycle continues |
 | `vault.sync.refetch_for_next_iter_failed` | desktop | warning | `binding` | Two-way next-iter re-fetch failed |
 | `vault.sync.resume_cancelled` | desktop | info | `vault`, `session`, `chunks_done`, `total` | F-Y08 — resume_upload bailed mid-chunk-loop |
