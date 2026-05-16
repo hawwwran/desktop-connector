@@ -109,18 +109,18 @@ class VaultHttpRelay:
         self._conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
 
     def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
-                     header_hash, initial_manifest_ciphertext, initial_manifest_hash,
-                     *, initial_manifest_revision=None, initial_header_revision=None):
+                     header_hash, initial_root_ciphertext, initial_root_hash,
+                     *, initial_root_revision=None, initial_header_revision=None):
         payload = {
             "vault_id": vault_id,
             "vault_access_token_hash": base64.b64encode(vault_access_token_hash).decode("ascii"),
             "encrypted_header": base64.b64encode(encrypted_header).decode("ascii"),
             "header_hash": header_hash,
-            "initial_manifest_ciphertext": base64.b64encode(initial_manifest_ciphertext).decode("ascii"),
-            "initial_manifest_hash": initial_manifest_hash,
+            "initial_root_ciphertext": base64.b64encode(initial_root_ciphertext).decode("ascii"),
+            "initial_root_hash": initial_root_hash,
         }
-        if initial_manifest_revision is not None:
-            payload["initial_manifest_revision"] = int(initial_manifest_revision)
+        if initial_root_revision is not None:
+            payload["initial_root_revision"] = int(initial_root_revision)
         if initial_header_revision is not None:
             payload["initial_header_revision"] = int(initial_header_revision)
         resp = self._conn.request("POST", "/api/vaults", json=payload)
@@ -198,90 +198,200 @@ class VaultHttpRelay:
             raise RuntimeError("Relay returned an invalid vault header response.") from exc
 
     def get_manifest(self, vault_id, vault_access_secret):
+        """Phase B removed the legacy ``GET /api/vaults/{id}/manifest``
+        endpoint; this method exists only as a typed-error stub so any
+        legacy production caller surfaces a clear "not migrated yet"
+        message instead of a 404. Phase E + F migrate the callers;
+        Phase H removes this stub.
+        """
+        raise NotImplementedError(
+            "VaultHttpRelay.get_manifest was removed in Phase B. "
+            "Migrate the caller to Vault.fetch_unified_manifest "
+            "(or, preferably, fetch_root_manifest + fetch_folder_shard)."
+        )
+
+    def put_manifest(self, vault_id, vault_access_secret, **kwargs):
+        """Same as ``get_manifest`` — Phase B removed the endpoint."""
+        raise NotImplementedError(
+            "VaultHttpRelay.put_manifest was removed in Phase B. "
+            "Migrate the caller to publish_shard_with_root (normal edits), "
+            "publish_root_manifest (folder-set changes), or "
+            "publish_folder_shard (retention-only edits)."
+        )
+
+    def get_root(self, vault_id, vault_access_secret):
         resp = self._conn.request(
             "GET",
-            f"/api/vaults/{vault_id}/manifest",
+            f"/api/vaults/{vault_id}/root",
             headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
         )
         if resp is None:
-            raise RuntimeError("Could not reach the relay while fetching the vault manifest.")
+            raise RuntimeError("Could not reach the relay while fetching the vault root.")
         if resp.status_code != 200:
             raise RuntimeError(
-                f"Relay rejected vault manifest fetch: HTTP {resp.status_code} "
+                f"Relay rejected vault root fetch: HTTP {resp.status_code} "
                 f"{self._error_message(resp)}"
             )
         try:
             body = resp.json()
             data = body["data"]
-            data["manifest_ciphertext"] = base64.b64decode(data["manifest_ciphertext"])
+            data["root_ciphertext"] = base64.b64decode(data["root_ciphertext"])
             return data
         except Exception as exc:
-            raise RuntimeError("Relay returned an invalid vault manifest response.") from exc
+            raise RuntimeError("Relay returned an invalid vault root response.") from exc
 
-    def put_manifest(
+    def put_root(
         self,
         vault_id,
         vault_access_secret,
         *,
-        expected_current_revision,
-        new_revision,
-        parent_revision,
-        manifest_hash,
-        manifest_ciphertext,
+        expected_current_root_revision,
+        new_root_revision,
+        parent_root_revision,
+        root_hash,
+        root_ciphertext,
     ):
         payload = {
-            "expected_current_revision": int(expected_current_revision),
-            "new_revision": int(new_revision),
-            "parent_revision": int(parent_revision),
-            "manifest_hash": manifest_hash,
-            "manifest_ciphertext": base64.b64encode(manifest_ciphertext).decode("ascii"),
+            "expected_current_root_revision": int(expected_current_root_revision),
+            "new_root_revision": int(new_root_revision),
+            "parent_root_revision": int(parent_root_revision),
+            "root_hash": root_hash,
+            "root_ciphertext": base64.b64encode(root_ciphertext).decode("ascii"),
         }
         resp = self._conn.request(
             "PUT",
-            f"/api/vaults/{vault_id}/manifest",
+            f"/api/vaults/{vault_id}/root",
             headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
             json=payload,
         )
+        return self._handle_manifest_like_publish(resp, kind="root")
+
+    def get_shard(self, vault_id, vault_access_secret, remote_folder_id):
+        resp = self._conn.request(
+            "GET",
+            f"/api/vaults/{vault_id}/folders/{remote_folder_id}/shard",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
         if resp is None:
-            raise RuntimeError("Could not reach the relay while publishing the vault manifest.")
+            raise RuntimeError("Could not reach the relay while fetching a folder shard.")
+        if resp.status_code == 404:
+            from ..relay_errors import VaultNotFoundError
+            err = self._extract_error(resp)
+            raise VaultNotFoundError(err.get("message") or f"shard {remote_folder_id} not found")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Relay rejected folder shard fetch: HTTP {resp.status_code} "
+                f"{self._error_message(resp)}"
+            )
+        try:
+            body = resp.json()
+            data = body["data"]
+            data["shard_ciphertext"] = base64.b64decode(data["shard_ciphertext"])
+            return data
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid folder shard response.") from exc
+
+    def put_shard(
+        self,
+        vault_id,
+        vault_access_secret,
+        remote_folder_id,
+        *,
+        expected_current_shard_revision,
+        new_shard_revision,
+        parent_shard_revision,
+        shard_hash,
+        shard_ciphertext,
+    ):
+        payload = {
+            "expected_current_shard_revision": int(expected_current_shard_revision),
+            "new_shard_revision": int(new_shard_revision),
+            "parent_shard_revision": int(parent_shard_revision),
+            "shard_hash": shard_hash,
+            "shard_ciphertext": base64.b64encode(shard_ciphertext).decode("ascii"),
+        }
+        resp = self._conn.request(
+            "PUT",
+            f"/api/vaults/{vault_id}/folders/{remote_folder_id}/shard",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=payload,
+        )
+        return self._handle_manifest_like_publish(resp, kind="shard")
+
+    def put_shard_with_root(
+        self,
+        vault_id,
+        vault_access_secret,
+        remote_folder_id,
+        *,
+        shard,
+        root,
+    ):
+        payload = {
+            "shard": {
+                "expected_current_shard_revision": int(shard["expected_current_shard_revision"]),
+                "new_shard_revision":              int(shard["new_shard_revision"]),
+                "parent_shard_revision":           int(shard["parent_shard_revision"]),
+                "shard_hash":                      shard["shard_hash"],
+                "shard_ciphertext":                base64.b64encode(shard["shard_ciphertext"]).decode("ascii"),
+            },
+            "root": {
+                "expected_current_root_revision": int(root["expected_current_root_revision"]),
+                "new_root_revision":              int(root["new_root_revision"]),
+                "parent_root_revision":           int(root["parent_root_revision"]),
+                "root_hash":                      root["root_hash"],
+                "root_ciphertext":                base64.b64encode(root["root_ciphertext"]).decode("ascii"),
+            },
+        }
+        resp = self._conn.request(
+            "PUT",
+            f"/api/vaults/{vault_id}/folders/{remote_folder_id}/shard-with-root",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=payload,
+        )
+        return self._handle_manifest_like_publish(resp, kind="shard-with-root")
+
+    def _handle_manifest_like_publish(self, resp, *, kind: str):
+        """Shared error mapping for the three CAS-publish endpoints
+        (root / shard / shard-with-root). Mirrors the legacy
+        ``put_manifest`` handling: 409 → VaultCASConflictError,
+        507 → VaultQuotaExceededError, 413/422 → VaultRelayError,
+        anything else → RuntimeError. Returns the success body's
+        ``data`` dict.
+        """
+        if resp is None:
+            raise RuntimeError(
+                f"Could not reach the relay while publishing the vault {kind}.",
+            )
         if resp.status_code == 409:
             from ..relay_errors import VaultCASConflictError
-
             raise VaultCASConflictError(self._extract_error(resp))
         if resp.status_code == 507:
-            # F-D02: quota exceeded at publish time (e.g. a peer's
-            # upload pushed used_bytes past the cap between our
-            # batch-head and our publish). Surface as the typed error so
-            # the sync engine can run an eviction pass.
             from ..relay_errors import VaultQuotaExceededError
-
             raise VaultQuotaExceededError(self._extract_error(resp))
         if resp.status_code in (413, 422):
             from ..relay_errors import VaultRelayError
-
             raise VaultRelayError(
                 self._extract_error(resp), status_code=resp.status_code,
             )
         if resp.status_code != 200:
             raise RuntimeError(
-                f"Relay rejected vault manifest publish: HTTP {resp.status_code} "
+                f"Relay rejected vault {kind} publish: HTTP {resp.status_code} "
                 f"{self._error_message(resp)}"
             )
         try:
             body = resp.json()
         except ValueError as exc:
             from ..relay_errors import VaultRelayUnexpectedResponseError
-
             raise VaultRelayUnexpectedResponseError(
-                "Relay returned a non-JSON vault manifest publish response.",
+                f"Relay returned a non-JSON vault {kind} publish response.",
                 status_code=resp.status_code,
                 response_text=_scrub_secrets(resp.text or ""),
             ) from exc
         if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
             from ..relay_errors import VaultRelayUnexpectedResponseError
-
             raise VaultRelayUnexpectedResponseError(
-                "Relay returned an invalid vault manifest publish response.",
+                f"Relay returned an invalid vault {kind} publish response.",
                 status_code=resp.status_code,
                 response_text=_scrub_secrets(resp.text or ""),
             )
@@ -396,13 +506,13 @@ class VaultHttpRelay:
         except Exception as exc:
             raise RuntimeError("Relay returned an invalid migration-commit response.") from exc
 
-    def gc_plan(self, vault_id, vault_access_secret, *, manifest_revision, candidate_chunk_ids):
+    def gc_plan(self, vault_id, vault_access_secret, *, root_revision, candidate_chunk_ids):
         resp = self._conn.request(
             "POST",
             f"/api/vaults/{vault_id}/gc/plan",
             headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
             json={
-                "manifest_revision": int(manifest_revision),
+                "root_revision": int(root_revision),
                 "candidate_chunk_ids": list(candidate_chunk_ids),
             },
         )
@@ -545,7 +655,7 @@ class VaultLocalDevelopmentRelay:
         self._config = config
 
     def create_vault(self, vault_id, vault_access_token_hash, encrypted_header,
-                     header_hash, initial_manifest_ciphertext, initial_manifest_hash):
+                     header_hash, initial_root_ciphertext, initial_root_hash, **kwargs):
         from .. import crypto as vault_crypto  # noqa: F401
         return {"vault_id": vault_id}
 
@@ -553,10 +663,29 @@ class VaultLocalDevelopmentRelay:
         raise NotImplementedError("local development relay does not support header fetch")
 
     def get_manifest(self, vault_id, vault_access_secret):
-        raise NotImplementedError("local development relay does not support manifest fetch")
+        raise NotImplementedError(
+            "local development relay does not support legacy manifest fetch",
+        )
 
     def put_manifest(self, vault_id, vault_access_secret, **kwargs):
-        raise NotImplementedError("local development relay does not support manifest publish")
+        raise NotImplementedError(
+            "local development relay does not support legacy manifest publish",
+        )
+
+    def get_root(self, vault_id, vault_access_secret):
+        raise NotImplementedError("local development relay does not support root fetch")
+
+    def put_root(self, vault_id, vault_access_secret, **kwargs):
+        raise NotImplementedError("local development relay does not support root publish")
+
+    def get_shard(self, vault_id, vault_access_secret, remote_folder_id):
+        raise NotImplementedError("local development relay does not support shard fetch")
+
+    def put_shard(self, vault_id, vault_access_secret, remote_folder_id, **kwargs):
+        raise NotImplementedError("local development relay does not support shard publish")
+
+    def put_shard_with_root(self, vault_id, vault_access_secret, remote_folder_id, **kwargs):
+        raise NotImplementedError("local development relay does not support shard-with-root publish")
 
     def batch_head_chunks(self, vault_id, vault_access_secret, chunk_ids):
         raise NotImplementedError("local development relay does not support chunk checks")

@@ -57,15 +57,31 @@ from .crypto import (
     build_manifest_aad,
     build_manifest_envelope,
     build_recovery_aad,
+    build_root_aad,
+    build_root_envelope,
+    build_shard_aad,
+    build_shard_envelope,
     derive_recovery_wrap_key,
     derive_subkey,
     normalize_vault_id,
 )
 from .manifest import (
+    assemble_unified_manifest,
     assert_publishable_revision,
+    assert_publishable_root_revision,
+    assert_publishable_shard_revision,
+    bump_root_revision,
+    bump_shard_revision,
     canonical_manifest_json,
+    canonical_root_json,
+    canonical_shard_json,
+    make_folder_shard,
     make_manifest,
+    make_root_folder_pointer,
+    make_root_manifest,
     normalize_manifest_plaintext,
+    normalize_root_manifest_plaintext,
+    normalize_shard_plaintext,
 )
 from .canonical import _canonical_json, _now_rfc3339
 from .ids import _generate_id_v1, _generate_vault_id, _genesis_fingerprint_hex
@@ -288,34 +304,36 @@ class Vault(RemoteFoldersMixin):
         )
         header_hash = hashlib.sha256(header_envelope).hexdigest()
 
-        # Genesis manifest — empty folder list, no op-log entries yet.
+        # Genesis root manifest — empty folder pointer list, no op-log
+        # entries yet. The vault's first shards land later, one per
+        # remote folder add (see `vault_folders/runtime.py`).
         author_device_id = "0" * 32  # caller plugs in a real device id later
-        manifest_plaintext = canonical_manifest_json(make_manifest(
+        root_plaintext = canonical_root_json(make_root_manifest(
             vault_id=vault_id,
-            revision=1,
-            parent_revision=0,
+            root_revision=1,
+            parent_root_revision=0,
             created_at=_now_rfc3339(),
             author_device_id=author_device_id,
             remote_folders=[],
             operation_log_tail=[],
             archived_op_segments=[],
         ))
-        manifest_subkey = derive_subkey("dc-vault-v1/manifest", master_key)
-        manifest_nonce = secrets.token_bytes(24)
-        manifest_aad = build_manifest_aad(
-            vault_id=vault_id, revision=1, parent_revision=0,
+        root_subkey = derive_subkey("dc-vault-v1/root", master_key)
+        root_nonce = secrets.token_bytes(24)
+        root_aad = build_root_aad(
+            vault_id=vault_id, root_revision=1, parent_root_revision=0,
             author_device_id=author_device_id,
         )
-        manifest_ciphertext = aead_encrypt(
-            manifest_plaintext, manifest_subkey, manifest_nonce, manifest_aad,
+        root_ciphertext = aead_encrypt(
+            root_plaintext, root_subkey, root_nonce, root_aad,
         )
-        manifest_envelope = build_manifest_envelope(
-            vault_id=vault_id, revision=1, parent_revision=0,
+        root_envelope = build_root_envelope(
+            vault_id=vault_id, root_revision=1, parent_root_revision=0,
             author_device_id=author_device_id,
-            nonce=manifest_nonce,
-            aead_ciphertext_and_tag=manifest_ciphertext,
+            nonce=root_nonce,
+            aead_ciphertext_and_tag=root_ciphertext,
         )
-        manifest_hash = hashlib.sha256(manifest_envelope).hexdigest()
+        root_hash = hashlib.sha256(root_envelope).hexdigest()
 
         log.info("vault.prepare.ok vault_id=%s", vault_id[:8] + "…")
         instance = cls(
@@ -325,7 +343,7 @@ class Vault(RemoteFoldersMixin):
             vault_access_secret=vault_access_secret,
             header_revision=1,
             manifest_revision=1,
-            manifest_ciphertext=manifest_envelope,
+            manifest_ciphertext=root_envelope,
             crypto=crypto,
             recovery_envelope_meta={
                 "envelope_id": recovery_envelope_id,
@@ -338,14 +356,15 @@ class Vault(RemoteFoldersMixin):
         )
         # Publish payload is held on the instance so a later
         # publish_initial() retry uses byte-identical bundles. Cleared
-        # after a successful POST.
+        # after a successful POST. Field names mirror the new wire
+        # contract (``initial_root_*``).
         instance._pending_publish = {
             "vault_id": vault_id,
             "vault_access_token_hash": token_hash,
             "encrypted_header": header_envelope,
             "header_hash": header_hash,
-            "initial_manifest_ciphertext": manifest_envelope,
-            "initial_manifest_hash": manifest_hash,
+            "initial_root_ciphertext": root_envelope,
+            "initial_root_hash": root_hash,
         }
         return instance
 
@@ -497,8 +516,269 @@ class Vault(RemoteFoldersMixin):
 
     # ---------------------------------------------------------------- manifest helpers
 
+    def fetch_root_manifest(self, relay: RelayProtocol, *, local_index=None) -> dict:
+        """Fetch + decrypt the current root manifest envelope.
+
+        Returns the canonical-JSON-decoded plaintext as a dict. The
+        envelope bytes are cached on the instance under
+        ``_root_envelope`` so the legacy ``fetch_unified_manifest``
+        path can hash-verify each shard against the trusted root
+        without a second fetch.
+        """
+        if self._closed:
+            raise ValueError("vault is closed")
+        resp = relay.get_root(self._vault_id, self._vault_access_secret)
+        envelope = resp.get("root_ciphertext")
+        if not isinstance(envelope, (bytes, bytearray)):
+            raise ValueError("relay returned an invalid root ciphertext")
+        envelope_bytes = bytes(envelope)
+        self._root_envelope = envelope_bytes
+        self._root_revision = int(resp.get("root_revision", 0))
+        # The manifest_ciphertext slot historically held the legacy
+        # vault-wide manifest envelope. After Phase D the root is the
+        # authoritative top-level envelope; keep the alias populated so
+        # decrypt_manifest's local_index path still has a revision to
+        # check against the rollback floor.
+        self._manifest_ciphertext = envelope_bytes
+        self._manifest_revision = self._root_revision
+
+        plaintext = aead_decrypt(
+            envelope_bytes[85:],  # skip the 85-byte plaintext header
+            derive_subkey("dc-vault-v1/root", bytes(self._master_key)),
+            envelope_bytes[61:85],   # nonce position
+            build_root_aad(
+                vault_id=self._vault_id,
+                root_revision=self._root_revision,
+                parent_root_revision=int.from_bytes(envelope_bytes[21:29], "big"),
+                author_device_id=envelope_bytes[29:61].decode("ascii"),
+            ),
+        )
+        root = json.loads(plaintext.decode("utf-8"))
+        root = normalize_root_manifest_plaintext(root)
+        if local_index is not None:
+            self._verify_root_floor_or_raise(root, local_index)
+        return root
+
+    def publish_root_manifest(
+        self,
+        relay: RelayProtocol,
+        root: dict,
+        *,
+        local_index=None,
+    ) -> dict:
+        """Encrypt + CAS-publish a new root revision.
+
+        F-Y21 invariant: ``root_revision == parent_root_revision + 1``
+        is enforced before any AEAD encryption.
+        """
+        if self._closed or not self._master_key:
+            raise ValueError("vault is closed")
+
+        normalized = normalize_root_manifest_plaintext(root)
+        assert_publishable_root_revision(normalized)
+        revision = int(normalized["root_revision"])
+        parent_revision = int(normalized["parent_root_revision"])
+        author_device_id = str(normalized["author_device_id"])
+
+        envelope_bytes, envelope_hash = self._encrypt_root_envelope(
+            normalized, revision, parent_revision, author_device_id,
+        )
+
+        relay.put_root(
+            self._vault_id,
+            self._vault_access_secret,
+            expected_current_root_revision=parent_revision,
+            new_root_revision=revision,
+            parent_root_revision=parent_revision,
+            root_hash=envelope_hash,
+            root_ciphertext=envelope_bytes,
+        )
+        self._root_envelope = envelope_bytes
+        self._root_revision = revision
+        self._manifest_ciphertext = envelope_bytes
+        self._manifest_revision = revision
+        return normalized
+
+    def fetch_folder_shard(
+        self,
+        relay: RelayProtocol,
+        remote_folder_id: str,
+    ) -> dict:
+        """Fetch + decrypt a folder shard envelope.
+
+        Per §10.C the caller is expected to verify
+        ``sha256(envelope) == root.remote_folders[i].shard_hash`` against
+        the trusted root before consuming entries; this method returns
+        the decrypted plaintext but does **not** automatically check the
+        hash chain (the caller has the matching root pointer; the Vault
+        doesn't keep one in memory). ``fetch_unified_manifest`` is the
+        compat surface that runs the chain check.
+        """
+        if self._closed:
+            raise ValueError("vault is closed")
+        resp = relay.get_shard(self._vault_id, self._vault_access_secret, remote_folder_id)
+        envelope = resp.get("shard_ciphertext")
+        if not isinstance(envelope, (bytes, bytearray)):
+            raise ValueError("relay returned an invalid shard ciphertext")
+        envelope_bytes = bytes(envelope)
+        shard_revision = int(resp.get("shard_revision", 0))
+        parent_shard_revision = int(resp.get("parent_shard_revision", 0))
+        plaintext = aead_decrypt(
+            envelope_bytes[115:],
+            derive_subkey("dc-vault-v1/shard", bytes(self._master_key)),
+            envelope_bytes[91:115],
+            build_shard_aad(
+                vault_id=self._vault_id,
+                remote_folder_id=remote_folder_id,
+                shard_revision=shard_revision,
+                parent_shard_revision=parent_shard_revision,
+                author_device_id=envelope_bytes[59:91].decode("ascii"),
+            ),
+        )
+        shard = json.loads(plaintext.decode("utf-8"))
+        return normalize_shard_plaintext(shard)
+
+    def publish_folder_shard(
+        self,
+        relay: RelayProtocol,
+        remote_folder_id: str,
+        shard: dict,
+    ) -> dict:
+        """Encrypt + CAS-publish a new shard revision for one folder.
+
+        Strongly discouraged for normal edits — use
+        :meth:`publish_shard_with_root` so the root's shard_hash stays
+        in sync. The standalone publish is for retention-purge passes
+        that touch only the shard.
+        """
+        if self._closed or not self._master_key:
+            raise ValueError("vault is closed")
+        normalized = normalize_shard_plaintext(shard)
+        assert_publishable_shard_revision(normalized)
+        revision = int(normalized["shard_revision"])
+        parent_revision = int(normalized["parent_shard_revision"])
+        author_device_id = str(normalized["author_device_id"])
+
+        envelope_bytes, envelope_hash = self._encrypt_shard_envelope(
+            normalized, remote_folder_id, revision, parent_revision, author_device_id,
+        )
+        relay.put_shard(
+            self._vault_id,
+            self._vault_access_secret,
+            remote_folder_id,
+            expected_current_shard_revision=parent_revision,
+            new_shard_revision=revision,
+            parent_shard_revision=parent_revision,
+            shard_hash=envelope_hash,
+            shard_ciphertext=envelope_bytes,
+        )
+        return normalized
+
+    def publish_shard_with_root(
+        self,
+        relay: RelayProtocol,
+        remote_folder_id: str,
+        shard: dict,
+        root: dict,
+    ) -> dict:
+        """Atomic per-folder shard + root publish (§6.8).
+
+        The **primary** publish path for sync engines. The client is
+        responsible for keeping ``root.remote_folders[i].shard_hash``
+        consistent with ``sha256(shard_envelope)`` — the relay can't
+        cross-check that (the root plaintext is sealed). Returns the
+        normalized shard + root dicts as a tuple of two dicts.
+        """
+        if self._closed or not self._master_key:
+            raise ValueError("vault is closed")
+
+        shard_n = normalize_shard_plaintext(shard)
+        assert_publishable_shard_revision(shard_n)
+        s_rev = int(shard_n["shard_revision"])
+        s_parent = int(shard_n["parent_shard_revision"])
+        s_author = str(shard_n["author_device_id"])
+        shard_env_bytes, shard_env_hash = self._encrypt_shard_envelope(
+            shard_n, remote_folder_id, s_rev, s_parent, s_author,
+        )
+
+        root_n = normalize_root_manifest_plaintext(root)
+        assert_publishable_root_revision(root_n)
+        r_rev = int(root_n["root_revision"])
+        r_parent = int(root_n["parent_root_revision"])
+        r_author = str(root_n["author_device_id"])
+        root_env_bytes, root_env_hash = self._encrypt_root_envelope(
+            root_n, r_rev, r_parent, r_author,
+        )
+
+        relay.put_shard_with_root(
+            self._vault_id,
+            self._vault_access_secret,
+            remote_folder_id,
+            shard={
+                "expected_current_shard_revision": s_parent,
+                "new_shard_revision": s_rev,
+                "parent_shard_revision": s_parent,
+                "shard_hash": shard_env_hash,
+                "shard_ciphertext": shard_env_bytes,
+            },
+            root={
+                "expected_current_root_revision": r_parent,
+                "new_root_revision": r_rev,
+                "parent_root_revision": r_parent,
+                "root_hash": root_env_hash,
+                "root_ciphertext": root_env_bytes,
+            },
+        )
+        self._root_envelope = root_env_bytes
+        self._root_revision = r_rev
+        self._manifest_ciphertext = root_env_bytes
+        self._manifest_revision = r_rev
+        return shard_n, root_n
+
+    def fetch_unified_manifest(
+        self,
+        relay: RelayProtocol,
+        *,
+        local_index=None,
+    ) -> dict:
+        """Compat surface: fetch the root, then every listed shard, and
+        assemble into the legacy unified manifest shape that
+        ``Vault.fetch_manifest`` historically returned.
+
+        Used by callers that haven't been ported to the shard-aware
+        fetch path yet (Phase E + F migrate them; Phase H removes this
+        method). Hash-chains each shard against the root before
+        decrypt — same trust pattern as §10.C.
+        """
+        root = self.fetch_root_manifest(relay, local_index=local_index)
+        shards_by_id: dict[str, dict] = {}
+        for pointer in root.get("remote_folders", []):
+            rf_id = str(pointer.get("remote_folder_id", ""))
+            shard = self.fetch_folder_shard(relay, rf_id)
+            shards_by_id[rf_id] = shard
+        return assemble_unified_manifest(root, shards_by_id)
+
+    # -- Legacy fetch_manifest / publish_manifest (Phase D back-compat) --
+    #
+    # During Phase D these continue to talk to the legacy relay methods
+    # (``get_manifest`` / ``put_manifest``). The production
+    # ``VaultHttpRelay`` keeps those methods on its surface as raise-
+    # NotImplementedError stubs because the matching server endpoints
+    # were removed in Phase B — production callers that haven't been
+    # migrated yet will crash at runtime. Tests use fake relays that
+    # implement the legacy interface byte-identically to the
+    # pre-sharding code, so the protocol suite stays green. Phase E
+    # ports the sync engine; Phase F ports cross-shard ops; Phase H
+    # removes these legacy methods + the unified-manifest assembler.
+
     def fetch_manifest(self, relay: RelayProtocol, *, local_index=None) -> dict:
-        """Fetch, store, decrypt, and optionally cache the current manifest."""
+        """Fetch, store, decrypt, and optionally cache the current manifest.
+
+        Legacy compat surface (see method-block comment above). New code
+        should call ``fetch_root_manifest`` + ``fetch_folder_shard``
+        directly so only the relevant folder's shard ships over the
+        wire.
+        """
         if self._closed:
             raise ValueError("vault is closed")
         resp = relay.get_manifest(self._vault_id, self._vault_access_secret)
@@ -516,17 +796,12 @@ class Vault(RemoteFoldersMixin):
         *,
         local_index=None,
     ) -> dict:
-        """Encrypt and CAS-publish a new manifest revision.
+        """Encrypt and CAS-publish a new (legacy unified) manifest revision.
 
-        F-Y21: enforces the §A8 revision invariant
-        (``revision == parent_revision + 1``) at the publish boundary.
-        Callers that mutate the manifest body (tombstone / restore /
-        folder add/remove / merge) own the revision bump; passing in a
-        manifest whose revision pair is inconsistent with the bump
-        raises :class:`ManifestRevisionInvariantError` *before* any
-        AEAD encryption or relay POST. The enforcement is here rather
-        than scattered across every helper because every code path
-        eventually reaches this method to publish.
+        Legacy compat surface (see method-block comment above). New code
+        should call ``publish_shard_with_root`` for normal edits;
+        ``publish_root_manifest`` for folder-set changes;
+        ``publish_folder_shard`` for retention-only edits.
         """
         if self._closed or not self._master_key:
             raise ValueError("vault is closed")
@@ -573,6 +848,93 @@ class Vault(RemoteFoldersMixin):
         if local_index is not None:
             local_index.refresh_remote_folders_cache(normalized)
         return normalized
+
+    # -- Internal envelope-builders --
+
+    def _encrypt_root_envelope(
+        self,
+        plaintext_dict: dict,
+        revision: int,
+        parent_revision: int,
+        author_device_id: str,
+    ) -> tuple[bytes, str]:
+        plaintext = canonical_root_json(plaintext_dict)
+        key = derive_subkey("dc-vault-v1/root", bytes(self._master_key))
+        nonce = secrets.token_bytes(24)
+        aad = build_root_aad(
+            vault_id=self._vault_id,
+            root_revision=revision,
+            parent_root_revision=parent_revision,
+            author_device_id=author_device_id,
+        )
+        ct = aead_encrypt(plaintext, key, nonce, aad)
+        env = build_root_envelope(
+            vault_id=self._vault_id,
+            root_revision=revision,
+            parent_root_revision=parent_revision,
+            author_device_id=author_device_id,
+            nonce=nonce,
+            aead_ciphertext_and_tag=ct,
+        )
+        return env, hashlib.sha256(env).hexdigest()
+
+    def _encrypt_shard_envelope(
+        self,
+        plaintext_dict: dict,
+        remote_folder_id: str,
+        revision: int,
+        parent_revision: int,
+        author_device_id: str,
+    ) -> tuple[bytes, str]:
+        plaintext = canonical_shard_json(plaintext_dict)
+        key = derive_subkey("dc-vault-v1/shard", bytes(self._master_key))
+        nonce = secrets.token_bytes(24)
+        aad = build_shard_aad(
+            vault_id=self._vault_id,
+            remote_folder_id=remote_folder_id,
+            shard_revision=revision,
+            parent_shard_revision=parent_revision,
+            author_device_id=author_device_id,
+        )
+        ct = aead_encrypt(plaintext, key, nonce, aad)
+        env = build_shard_envelope(
+            vault_id=self._vault_id,
+            remote_folder_id=remote_folder_id,
+            shard_revision=revision,
+            parent_shard_revision=parent_revision,
+            author_device_id=author_device_id,
+            nonce=nonce,
+            aead_ciphertext_and_tag=ct,
+        )
+        return env, hashlib.sha256(env).hexdigest()
+
+    def _verify_root_floor_or_raise(self, root: dict, local_index) -> None:
+        """Run the §3.7 rollback floor check against a freshly-fetched root."""
+        from .relay_errors import VaultManifestRollbackError
+        revision = int(root.get("root_revision", 0))
+        floor = local_index.get_manifest_revision_floor(self._vault_id)
+        if revision < floor:
+            log.warning(
+                "vault.manifest.rollback_detected vault_id=%s served=%d floor=%d",
+                self._vault_id, revision, floor,
+            )
+            local_index.record_manifest_rollback(
+                self._vault_id,
+                served_revision=revision,
+                floor_revision=floor,
+            )
+            raise VaultManifestRollbackError(
+                vault_id=self._vault_id,
+                served_revision=revision,
+                floor_revision=floor,
+            )
+        local_index.bump_manifest_revision_floor(self._vault_id, revision)
+        local_index.clear_manifest_rollback(self._vault_id)
+        # NOTE: refresh_remote_folders_cache uses the legacy unified
+        # shape (one ``remote_folders`` array with ``entries[]``). It is
+        # invoked by the unified-manifest assembly path, not here, so
+        # the cache stays consistent with the legacy view consumed by
+        # Phase F-era browsers.
 
     # ---------------------------------------------------------------- decryption helpers
 

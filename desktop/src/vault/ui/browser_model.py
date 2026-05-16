@@ -16,10 +16,15 @@ from typing import Any, Protocol
 from ..crypto import (
     aead_decrypt,
     build_manifest_aad,
+    build_root_aad,
     derive_subkey,
     normalize_vault_id,
 )
-from ..manifest import normalize_manifest_plaintext
+from ..manifest import (
+    assemble_unified_manifest,
+    normalize_manifest_plaintext,
+    normalize_root_manifest_plaintext,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +38,20 @@ class ManifestVault(Protocol):
 
 
 def decrypt_manifest(vault: ManifestVault, ciphertext: bytes | bytearray) -> dict[str, Any]:
-    """Decrypt one manifest envelope with ``vault``'s in-memory key."""
+    """Decrypt one manifest-shaped envelope with ``vault``'s in-memory key.
+
+    Phase D: ``Vault.prepare_new`` now writes a **root** envelope
+    (``dc-vault-root-v1`` schema) into ``_manifest_ciphertext`` and
+    ``Vault.fetch_manifest`` (legacy compat path) still receives a
+    *legacy* manifest envelope (``dc-vault-manifest-v1`` schema) from
+    fake test relays. Both envelope kinds share the byte-shape of
+    their 85-byte deterministic prefix, so this helper tries root
+    decryption first and falls back to manifest decryption on AEAD
+    failure. The returned dict is always in the legacy *unified*
+    shape — root decrypts get passed through
+    ``assemble_unified_manifest`` with an empty shard map, mirroring
+    what callers used to see.
+    """
     if vault.master_key is None:
         raise ValueError("vault is closed")
     envelope = bytes(ciphertext)
@@ -57,6 +75,27 @@ def decrypt_manifest(vault: ManifestVault, ciphertext: bytes | bytearray) -> dic
     author_device_id = envelope[29:61].decode("ascii")
     nonce = envelope[61:85]
     encrypted_body = envelope[85:]
+
+    # Try the root subkey + AAD first. New vaults (Phase D+) produce
+    # root envelopes; legacy fake-relay tests store unified-manifest
+    # envelopes. The two schemas use disjoint HKDF labels + disjoint
+    # AAD prefixes ("dc-vault-root-v1" vs "dc-vault-manifest-v1"), so
+    # a wrong-kind decrypt fails closed with a CryptoError that we
+    # catch and retry under the manifest subkey.
+    import nacl.exceptions  # local import to avoid touching module head
+    try:
+        subkey = derive_subkey("dc-vault-v1/root", vault.master_key)
+        aad = build_root_aad(
+            vault_id=expected_vault_id,
+            root_revision=revision,
+            parent_root_revision=parent_revision,
+            author_device_id=author_device_id,
+        )
+        plaintext = aead_decrypt(encrypted_body, subkey, nonce, aad)
+        root = normalize_root_manifest_plaintext(json.loads(plaintext.decode("utf-8")))
+        return assemble_unified_manifest(root, {})
+    except nacl.exceptions.CryptoError:
+        pass
 
     subkey = derive_subkey("dc-vault-v1/manifest", vault.master_key)
     aad = build_manifest_aad(

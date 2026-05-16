@@ -48,23 +48,19 @@ class FakeRelay:
         vault_access_token_hash: bytes,
         encrypted_header: bytes,
         header_hash: str,
-        initial_manifest_ciphertext: bytes,
-        initial_manifest_hash: str,
+        initial_root_ciphertext: bytes,
+        initial_root_hash: str,
     ) -> dict:
-        # Stash everything the test will need on reopen. We also
-        # extract the recovery envelope from the header plaintext
-        # JSON; in production, the relay would emit it as a parallel
-        # field after a header-write sets it. The vault module's open
-        # path expects the field, so we synthesize it here.
-        # Note: we can't actually decrypt the header to read the
-        # envelope's metadata — we capture it from the create-time
-        # caller. This fake relay is collaborative with the test, not
-        # an HTTP-faithful mock.
+        # Stash everything the test will need on reopen.
+        # Phase D: ``initial_root_*`` replaces ``initial_manifest_*``;
+        # the fake stores the root envelope under the historical
+        # ``manifest_envelope_bytes`` key so the legacy fetch_manifest
+        # compat path can still read it without further changes.
         self.vaults[vault_id] = {
             "encrypted_header": encrypted_header,
             "header_hash": header_hash,
             "header_revision": 1,
-            "manifest_envelope_bytes": initial_manifest_ciphertext,
+            "manifest_envelope_bytes": initial_root_ciphertext,
             "manifest_revision": 1,
         }
         return {"vault_id": vault_id}
