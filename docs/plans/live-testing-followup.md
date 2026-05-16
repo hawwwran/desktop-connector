@@ -634,7 +634,7 @@ Driven 2026-05-16 on suite 0003; full result writeup at
 
 **Three minor UX gaps** (none block B8 PASS):
 
-1. **Stale dev-twin keyring entries survive suite-start wipes**
+1. **SO-1 — Stale dev-twin keyring entries survive suite-start wipes**
    (harness bug, not vault bug). `rm -rf ~/.config/desktop-connector-dev`
    does not clear the `desktop-connector-dev` keyring service.
    Cross-suite cruft (`auth_token`, `private_key:pem`, `device_id`,
@@ -646,15 +646,15 @@ Driven 2026-05-16 on suite 0003; full result writeup at
    `docs/testing/vault-tests.md`'s suite-start block, or have
    `Config.__init__` clear the secret store when the config dir
    doesn't exist on disk.
-2. **Cancel status text doesn't mention orphan chunks.** After
+2. **SO-2 — Cancel status text doesn't mention orphan chunks.** After
    Cancel the relay still holds the chunks that were PUT before
    the abort — by design, they're claimed by storage maintenance.
    The current "Discarded N interrupted upload sessions" doesn't
    say so; consider widening to "Discarded N interrupted uploads.
    Any chunks already uploaded will be cleaned up by storage
    maintenance." (one-line change in `resume_banner.py:91-94`).
-3. **Browser doesn't render the newly-uploaded file inline after
-   Resume.** Resume worker sets `self.state.manifest = last_manifest`
+3. **SO-3 — Browser doesn't render the newly-uploaded file inline
+   after Resume.** Resume worker sets `self.state.manifest = last_manifest`
    and calls `_render_all()` on the GLib.idle_add path, but the
    root-folder view doesn't pick up the new manifest's folder
    contents — only the detail pane refreshes. Re-launching the
