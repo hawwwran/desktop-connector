@@ -24,22 +24,33 @@ from typing import Any, Iterable
 from ..ui.bytes_format import format_bytes_binary as _format_bytes
 
 
-# Phase 1 estimator (suite 0004 / 2026-05-16 fit). per_op_seconds is
-# modelled as a linear function of manifest_entries_at_publish_time:
+# Phase 1 estimator (re-fit 2026-05-16 after Phase 2 SO-2 + SO-3
+# shipped). per_op_seconds is modelled as a linear function of
+# ``manifest_entries_at_publish_time``:
 #
 #     per_op_seconds ≈ PER_OP_FLOOR_S + PER_OP_GROWTH_S_PER_ENTRY × N
 #
-# Empirical anchors from
-# temp/automation-tests-results/0004/B7-large-folder/result.md:
-#   N≈1 200  → 0.12 s/op (8.5 ops/s)
-#   N≈6 000  → 0.39 s/op (2.6 ops/s)
-#   N≈11 000 → 0.77 s/op (1.3 ops/s)
-# Constants are tuned slightly conservative so the dialog over-warns
-# rather than under-warns; on a multi-threaded production relay the
-# real cost is lower (SO-1 from §13 amplified the single-threaded
-# php -S baseline).
-PER_OP_FLOOR_S = 0.04
-PER_OP_GROWTH_S_PER_ENTRY = 0.000135
+# Empirical anchors from the 2026-05-16 live re-test against the
+# post-SO-2+SO-3 cycle (clean dev twin, ``php -S``):
+#
+#   1k bind drain: 15.6 s for 1 000 ops from empty → 0.0156 s/op avg
+#                  → per_op_avg = a + b × 500
+#   10k bind drain: 1 216 s for 10 000 ops from empty → 0.122 s/op avg
+#                   → per_op_avg = a + b × 5 000
+#
+# Solving the system: a ≈ 0.004, b ≈ 2.4e-5. Rounding to slightly
+# conservative round numbers so the warning over-predicts rather than
+# under-predicts on a faster relay (Apache mod_php). The 1k case
+# stays below the warning threshold; trigger fires at ~3 000 files
+# from an empty vault, which matches the original Phase 1 intent
+# ("only pop the dialog for truly painful durations").
+#
+# Pre-SO-2+SO-3 anchors (kept for historical reference, see
+# ``temp/automation-tests-results/0004/B7-large-folder/result.md``):
+#   N≈1 200  → 0.12 s/op  (baseline rate 8.5 ops/s)
+#   N≈11 000 → 0.77 s/op  (baseline rate 1.3 ops/s)
+PER_OP_FLOOR_S = 0.005
+PER_OP_GROWTH_S_PER_ENTRY = 0.000025
 WARNING_THRESHOLD_S = 120.0   # 2 min — below this we don't pop the dialog.
 
 

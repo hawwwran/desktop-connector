@@ -74,6 +74,125 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-16 — Vault binding cycle batches manifest publishes at K=50
+
+**Status:** accepted.
+
+**Context.** Suite 0004 B7 (2026-05-16) measured a 10 000-file
+initial bind at **2 h 11 min** against `php -S`, with the per-op
+rate decaying 8.5 → 1.3 ops/s as the encrypted manifest grew. Two
+cliffs: every successful op did one redundant `fetch_manifest`
+even though `publish_manifest` already returned the new manifest
+(SO-2); and every file got its own CAS publish (10 000 publishes,
+each shipping the full encrypted envelope = `O(N²)` bytes) (SO-3).
+
+**Decision.** Two client-only changes on `desktop/src/vault/binding/sync.py`:
+
+1. **SO-2**: `_execute_op` and its `_execute_upload` /
+   `_execute_delete` / `_promote_to_delete` helpers now return
+   `tuple[SyncOpOutcome, dict[str, Any]]` so the cycle threads the
+   post-publish manifest forward without a separate GET. F-Y07
+   refresh stays on `status == "failed"` (CAS conflict recovery).
+2. **SO-3**: `run_backup_only_cycle` accumulates per-op chunk-PUT
+   results into a `_BatchEntry` list (default `PUBLISH_BATCH_SIZE =
+   50`); every K ops the batch flushes through
+   `_publish_batch_with_cas_retry`, which folds the batched
+   mutations onto the parent manifest with idempotent helpers
+   (`add_or_append_file_version` is a no-op on duplicate
+   `version_id`, tombstone helpers tolerate already-tombstoned
+   paths) and runs one CAS publish. Partial batch always flushes at
+   cycle-end; F-Y08 cancel still in effect → single attempt, no
+   retry storm. `twoway.py` Phase B stays single-publish for now —
+   conflict-rename detection in two-way inspects the manifest per
+   file and is harder to batch safely.
+
+**Rejected alternatives.**
+- *Server-side batched-publish endpoint.* Would trim bandwidth
+  further (delta-only) but doesn't fix the cliff; client batching
+  uses the existing CAS contract.
+- *Manifest sharding (per-folder envelopes).* Worth a separate
+  design doc once empirical numbers show this is the limit. Real
+  architectural change; not the cliff fix.
+- *Batching the two-way conflict path.* The per-file conflict-
+  rename detector would need refactoring into a K-op replay; too
+  invasive for this pass.
+
+**Empirical result.** 10k bind drops to **20 m 31 s** (6.4×). 1k
+bind 70.4 s → 17.0 s (4.1×). Manifest publishes drop 50× as
+predicted; chunk-PUT serial cost on single-threaded `php -S` now
+dominates the residual. Apache mod_php (real deployment) should
+land closer to the predicted ceiling.
+
+**Anchor.** `desktop/src/vault/binding/sync.py`:`run_backup_only_cycle` /
+`_BatchEntry` / `_prepare_op_for_batch` / `_apply_batch_to_manifest` /
+`_publish_batch_with_cas_retry` / `_flush_batch`.
+`desktop/src/vault/upload/single_file.py`:`prepare_upload_for_batch`.
+Commits: `8ffba34` (SO-2), `a93ba08` (SO-3), `08401d5`
+(review fixes). Tests:
+`tests/protocol/test_desktop_vault_binding_batched_publish.py`,
+`FetchManifestPerOpTests` in `test_desktop_vault_binding_sync.py`,
+`TwoWayFetchManifestPerOpTests` in `test_desktop_vault_binding_twoway.py`.
+
+### 2026-05-16 — Per-file dedupe stub pins `version_id` across kill-mid-batch
+
+**Status:** accepted.
+
+**Context.** The SO-3 plan assumed chunks would dedupe on retry
+via the relay's content-addressed `chunk_id`. That premise broke
+because `chunk_id = HMAC(content, version_id, index)` and
+`version_id` is freshly random per `prepare_upload_for_batch`
+call. Without intervention, a kill-mid-batch retry would re-encrypt
+each file with a fresh `version_id`, producing fresh `chunk_id`s
+and orphaning the previously-PUT chunks on the relay (~50 chunks
+× per-chunk size per kill). The relay's GC eventually reclaims
+orphans, but storage drift under repeated kills is observable and
+the user pays for unnecessary network traffic on retry.
+
+**Decision.** Persist a lightweight `BatchedUploadStub` per file
+in `<cache_dir>/batched/<session_id>.json` keyed by `(vault_id,
+remote_path, content_fingerprint)`. The stub records `entry_id`
+and `version_id` allocated on the first prep attempt. On retry,
+`find_matching_stub` returns the same ids → same chunk_ids →
+relay's `batch_head_chunks` reports `present: True` for everything
+already PUT → no re-upload. Stubs in the `batched/` subdirectory
+are invisible to `list_resumable_sessions` (which scans only the
+parent), so the user's resume banner is unaffected. The cycle
+clears stubs after a successful batch publish; on failure they
+survive for the retry. Stale stubs (content edited between
+attempts) are reaped inline by `reap_stubs_for_path` when prep
+allocates fresh ids. Per-binding reap on disconnect drops stubs
+for that binding's dropped pending-op paths; a 14-day TTL sweep
+runs once per vault open as belt-and-braces for orphans the
+per-path reapers miss.
+
+**Rejected alternatives.**
+- *Deterministic `version_id` derived from `(path, fingerprint)`.*
+  Would make `chunk_id` stable across runs without disk state, but
+  changes manifest version-history semantics: a file edited back
+  to a prior content reuses that prior version's `version_id`
+  rather than appending a fresh entry, losing the audit trail of
+  "the file went A → B → A".
+- *Accept chunk waste; rely on GC.* Server-side GC is user-
+  triggered (eviction UI), not automatic. Storage drift is
+  bounded but real under churn.
+- *Reuse the existing `UploadSession` JSON.* Would conflate
+  single-file resume (which the banner surfaces to the user) with
+  batched-cycle internals (which it shouldn't). Separate
+  subdirectory + separate dataclass keeps the two namespaces
+  apart.
+
+**Anchor.** `desktop/src/vault/upload/batch_session.py` (new module:
+`BatchedUploadStub`, `find_matching_stub`, `save_stub`,
+`clear_stub`, `reap_stubs_for_path`, `reap_expired_stubs`,
+`default_batch_cache_dir`). Used by
+`desktop/src/vault/upload/single_file.py:prepare_upload_for_batch`
+and cleared by `desktop/src/vault/binding/sync.py:_flush_batch`.
+Reaping wired into
+`desktop/src/vault/binding/lifecycle.py:disconnect_binding` and
+`desktop/src/vault/binding/runtime_watchers.py:VaultWatcherRuntime.start_for_active_bindings`.
+Tests: `KillMidBatchResumeTests` and `StubReuseDirectTests` in
+`tests/protocol/test_desktop_vault_binding_batched_publish.py`.
+
 ### 2026-05-13 — Android delivery tracker gives up on absent rows + 12h orphan sweep
 
 **Status:** accepted.

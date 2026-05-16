@@ -705,25 +705,47 @@ vault on a single-threaded php -S relay.
 
 **Three improvement targets** (none block B7 functional PASS):
 
-1. **Redundant manifest GET per op.** `run_backup_only_cycle`
+1. **Redundant manifest GET per op.** ~~`run_backup_only_cycle`
    (sync.py:328-336) does `vault.fetch_manifest(relay)` after every
    successful op for the next op's view — even though
    `publish_manifest` already returned the updated manifest dict and
    the loop has it in `current_manifest`. Per-op cost is 2 manifest
    round-trips where 1 would do. **Expected ~2× speedup** by trusting
    the publish_manifest return value (re-fetch only when a CAS
-   conflict signals divergence).
-2. **No batched-publish path.** Every file is its own manifest
+   conflict signals divergence).~~ **DONE 2026-05-16** as SO-2 on
+   `tresor-vault` (commit `8ffba34`).
+2. **No batched-publish path.** ~~Every file is its own manifest
    revision. Total bytes shipped scales as `O(N²)`. A future
    "accumulate K ops, publish one combined manifest revision" API
    would collapse 10k revisions into 100 (K=100), dramatically
-   shortening initial-bind time.
+   shortening initial-bind time.~~ **DONE 2026-05-16** as SO-3 on
+   `tresor-vault` (commit `a93ba08` + review fixes `08401d5`).
 3. **Initial-bind UX has no rich progress.** A user dropping a
    Documents folder into a binding will wait ~2 h with only an
    "X/Y synced" counter — no ETA, no warning. Worth either a
    one-time toast ("Large folder; this may take a while — N files
    queued") at bind time, or a richer progress widget that
    surfaces the rate trajectory.
+   Phase 1 of the perf plan (commit `c61bc42`) added the slow-bind
+   warning dialog + Phase 1.5 (`0da1736`) added the ambient
+   "Vault sync K/N" banner. ETA suffix in the banner is still open
+   (low-priority; the now-much-faster 21 min bind reduces the need).
+
+**Post-SO-2/SO-3 numbers** (clean dev twin, `php -S`,
+2026-05-16):
+
+| | Baseline | Post-fix | Speedup |
+|---|---|---|---|
+| 1k bind | 70.4 s | 17.0 s | 4.1× |
+| 10k bind | 7908 s (2 h 11 min) | 1230 s (20 m 31 s) | 6.4× |
+| 10k publishes | 10 000 | 200 (K=50) | 50× fewer |
+
+All ops uploaded, zero failures, manifest CAS-published cleanly.
+The 6.4× combined result (vs the plan's predicted ~50×) reveals
+that manifest publishes were one cliff but chunk-PUT serial cost
+on single-threaded `php -S` is now the next one — Apache mod_php
+should land closer to the predicted ceiling. Estimator calibration
+follow-up in the perf plan's "Open questions".
 
 **SO-1 (B7) — Stray dev twins survive `kill $stored_pid`**: while
 setting the test up, four orphan headless `src.main` processes

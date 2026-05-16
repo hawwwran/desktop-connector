@@ -306,8 +306,62 @@ resume banner extension.
 
 ### Status
 
-Open. SO-2 first (low risk, validates the measurement loop).
-SO-3 lands after, on a separate commit.
+**Done 2026-05-16** on `tresor-vault`. Three commits:
+
+- `8ffba34` SO-2 — drop redundant per-op `fetch_manifest`.
+- `a93ba08` SO-3 — batched manifest publish at K=50 + per-file
+  dedupe stub.
+- `08401d5` review-feedback fixes (stub leak reaping on disconnect
+  + 14-day TTL sweep; F-Y08 cancel-flush limited to a single
+  publish attempt; steamroll log; tag normalization;
+  `_validate_local_for_upload` helper; 3-tuple → 2-tuple).
+
+**Measured speedup** (clean dev twin, `php -S` single-threaded relay):
+
+| | Baseline | Post-SO-2+SO-3 | Speedup |
+|---|---|---|---|
+| 1k bind wall-clock | 70.4 s | 17.0 s | **4.1×** |
+| 1k publishes | 1000 | **20** (=1000/50) | 50× fewer |
+| 1k start / end rate | 26.7 / 14.2 ops/s | 63 / 59 ops/s | 2.4× / 4.1× |
+| 10k bind wall-clock | **7908 s** (2 h 11 min) | **1230 s** (20 m 31 s) | **6.4×** |
+| 10k publishes | 10 000 | **200** | 50× fewer |
+| 10k start / end rate | 8.5 / 1.3 ops/s | 63 / 8.1 ops/s | 7.4× / 6.2× |
+| 10k RSS peak | 210 MiB | 176.7 MiB | match |
+| All ops uploaded / failed | 10000 / 0 | **10000 / 0** | reliability holds |
+
+Predicted 50× from SO-3 alone; measured 6.4× combined. The cliff
+was real but not purely manifest-publish-bound — manifest
+round-trips dropped 50× as predicted, but chunk-PUT serial cost on
+single-threaded `php -S` now dominates. Apache mod_php (real
+deployment) should land closer to the predicted ceiling.
+
+**Plan correction (dedupe stub).** The original Phase 2 design said
+"Simplest path: drop the batch on kill and re-encrypt next time
+(chunks are idempotently dedupe'd by `chunk_id`)." That premise was
+wrong — `chunk_id = HMAC(content, version_id, index)` and
+`version_id` is fresh per upload, so re-encrypting after a kill
+produces fresh chunk_ids and the relay sees them as new. Fixed by
+persisting a lightweight `BatchedUploadStub` keyed by `(vault,
+remote_path, content_fingerprint) → (entry_id, version_id)` in
+`<cache_dir>/batched/<session_id>.json`. Retry finds the stub,
+reuses the same ids, chunk PUTs HEAD-and-skip. The subdirectory
+keeps stubs invisible to `list_resumable_sessions`. Stubs clear on
+successful batch publish, are reaped per-path on binding disconnect,
+and a 14-day TTL sweep catches orphans the per-path reaper misses.
+
+**Acceptance — what landed**:
+- `tests/protocol/test_desktop_vault_binding_batched_publish.py` —
+  4 plan-required vectors (clean batch / CAS conflict mid-batch /
+  mixed upload+delete / kill-mid-batch resume) plus 3 review-
+  added gaps (cycle-end cancel-flush success + cancel-flush
+  CAS-conflict-drop / in-batch skipped-identical /
+  direct stub-reuse assertion via on-disk read).
+- `tests/protocol/test_desktop_vault_binding_sync.py:FetchManifestPerOpTests`
+  — SO-2 pin: counts `get_manifest` calls (5 successful ops → 1
+  fetch).
+- `tests/protocol/test_desktop_vault_binding_twoway.py:TwoWayFetchManifestPerOpTests`
+  — same SO-2 pin for Phase B (Phase B reuses `_execute_op`).
+- 890/890 vault tests green; 1510/1510 full protocol suite green.
 
 ---
 

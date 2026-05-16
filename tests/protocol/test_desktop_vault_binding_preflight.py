@@ -216,42 +216,64 @@ class BindDurationEstimatorTests(unittest.TestCase):
         self.assertGreater(out, 0.0)
 
     def test_100_files_from_empty_below_warning(self) -> None:
-        # Matches suite 0004's 100-file run (~3 s observed; estimator
-        # over-warns at ~5 s by design).
+        # Matches the post-SO-2+SO-3 100-file run (~1.7 s observed).
+        # Estimator stays well below the warning threshold.
         seconds = estimate_drain_seconds(
             start_manifest_entries=0, new_uploads=100,
         )
-        self.assertGreater(seconds, 2.0)
+        self.assertGreater(seconds, 0.0)
         self.assertLess(seconds, 30.0)
         self.assertLess(seconds, WARNING_THRESHOLD_S)
 
-    def test_2000_files_from_empty_above_warning(self) -> None:
-        # 2 000 files from an empty vault is the rough trigger point
-        # for the 2-minute warning. Pins the threshold so a future
-        # refit doesn't silently slide it below 1 000 files.
+    def test_1k_files_from_empty_matches_post_so23_within_50_percent(self) -> None:
+        # Post-SO-2+SO-3 1k bind drain: 15.6 s for 1 000 ops from
+        # empty (2026-05-16 live re-test). Estimator's job is to land
+        # in the same ballpark; conservative side is fine.
         seconds = estimate_drain_seconds(
-            start_manifest_entries=0, new_uploads=2000,
+            start_manifest_entries=0, new_uploads=1000,
+        )
+        self.assertGreaterEqual(seconds, 15.6 * 0.5)
+        self.assertLessEqual(seconds, 15.6 * 2.0)
+        # Still below the warning threshold — 1 000 files isn't
+        # "painful" anymore post-Phase-2.
+        self.assertLess(seconds, WARNING_THRESHOLD_S)
+
+    def test_3000_files_from_empty_above_warning(self) -> None:
+        # ~3 000 files from an empty vault is the post-Phase-2 trigger
+        # point for the 2-minute warning (the dialog still fires for
+        # the genuinely-slow case; we just don't warn on what's now
+        # a fast bind). Pins the threshold so a future refit doesn't
+        # silently slide it below 1 000 files (where users would see
+        # the dialog for a 20-second op — annoying).
+        seconds = estimate_drain_seconds(
+            start_manifest_entries=0, new_uploads=3000,
         )
         self.assertGreaterEqual(seconds, WARNING_THRESHOLD_S)
-
-    def test_10k_files_matches_suite_0004_within_30_percent(self) -> None:
-        # Suite 0004 measured 7908 s for 10 000 uploads starting from
-        # a manifest with 1 104 entries. The estimator's job is to
-        # land within ~30 % of that on the conservative side.
-        seconds = estimate_drain_seconds(
-            start_manifest_entries=1104, new_uploads=10000,
+        # And from 1 000, we explicitly stay BELOW threshold.
+        below = estimate_drain_seconds(
+            start_manifest_entries=0, new_uploads=1000,
         )
-        # Lower bound: must not under-warn beyond the 30 % tolerance.
-        self.assertGreaterEqual(seconds, 7908 * 0.7)
-        # Upper bound: cap the conservatism so the dialog doesn't
-        # quote 8 hours for a 2-hour run.
-        self.assertLessEqual(seconds, 7908 * 1.4)
+        self.assertLess(below, WARNING_THRESHOLD_S)
+
+    def test_10k_files_matches_post_so23_within_50_percent(self) -> None:
+        # Post-SO-2+SO-3 10k bind drain: 1 216 s (~20 min) for 10 000
+        # uploads from empty (2026-05-16 live re-test).
+        seconds = estimate_drain_seconds(
+            start_manifest_entries=0, new_uploads=10000,
+        )
+        # Lower bound: must not under-warn beyond the 50 % tolerance.
+        # (Multi-device contention or a slow relay can make reality
+        # exceed the estimate.)
+        self.assertGreaterEqual(seconds, 1216 * 0.5)
+        # Upper bound: cap conservatism so the dialog doesn't quote
+        # 2 hours for what is now a 20-minute op.
+        self.assertLessEqual(seconds, 1216 * 2.0)
 
     def test_formula_constants_match_documented_fit(self) -> None:
         # Constants live in source; tests pin the values so they don't
         # drift without an explicit doc update.
-        self.assertEqual(PER_OP_FLOOR_S, 0.04)
-        self.assertEqual(PER_OP_GROWTH_S_PER_ENTRY, 0.000135)
+        self.assertEqual(PER_OP_FLOOR_S, 0.005)
+        self.assertEqual(PER_OP_GROWTH_S_PER_ENTRY, 0.000025)
         self.assertEqual(WARNING_THRESHOLD_S, 120.0)
 
     def test_format_duration_thresholds(self) -> None:
