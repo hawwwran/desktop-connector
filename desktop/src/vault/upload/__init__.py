@@ -18,6 +18,7 @@ from .batch_session import (
     clear_stub,
     find_matching_stub,
     make_stub,
+    reap_expired_stubs,
     reap_stubs_for_path,
     save_stub,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "list_resumable_sessions",
     "make_conflict_renamed_path",
     "make_stub",
+    "reap_expired_stubs",
     "reap_stubs_for_path",
     "prepare_upload_for_batch",
     "resume_upload",

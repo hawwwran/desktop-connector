@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +130,76 @@ def find_matching_stub(
     return None
 
 
+_STUB_TTL_DAYS_DEFAULT = 14
+
+
+def reap_expired_stubs(
+    cache_dir: Path,
+    *,
+    ttl_days: int = _STUB_TTL_DAYS_DEFAULT,
+    now: datetime | None = None,
+) -> int:
+    """Drop every stub older than ``ttl_days`` regardless of vault / path.
+
+    Belt-and-braces for stubs the per-path / per-binding reapers can't
+    catch — e.g. a file the user deleted before its batch published,
+    where no pending-op row remains to anchor a per-path reap. 14 days
+    is generous enough to never collide with a healthy retry while
+    keeping ``<cache_dir>/batched/`` bounded under churn. Corrupt or
+    unparseable stubs are reaped too — they're either bit-rot or
+    schema-version drift and unsafe to keep indefinitely.
+    """
+    batch_dir = default_batch_cache_dir(cache_dir)
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(
+        days=max(0, int(ttl_days)),
+    )
+    removed = 0
+    for path in sorted(batch_dir.glob("*.json")):
+        try:
+            with open(path, "rb") as fh:
+                data = json.loads(fh.read().decode("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+            continue
+        try:
+            stub = BatchedUploadStub.from_json(data)
+        except (KeyError, TypeError, ValueError):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+            continue
+        try:
+            raw = (
+                stub.created_at.replace("Z", "+00:00")
+                if stub.created_at.endswith("Z")
+                else stub.created_at
+            )
+            when = datetime.fromisoformat(raw)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+        except (ValueError, AttributeError):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+            continue
+        if when >= cutoff:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def reap_stubs_for_path(
     *,
     vault_id: str,
@@ -198,6 +268,7 @@ __all__ = [
     "default_batch_cache_dir",
     "find_matching_stub",
     "make_stub",
+    "reap_expired_stubs",
     "reap_stubs_for_path",
     "save_stub",
 ]

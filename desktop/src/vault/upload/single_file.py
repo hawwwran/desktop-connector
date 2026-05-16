@@ -57,42 +57,18 @@ from .session import UploadSession, default_upload_resume_dir, clear_session, sa
 log = logging.getLogger(__name__)
 
 
-def upload_file(
-    *,
-    vault: UploadVault,
-    relay: UploadRelay,
-    manifest: dict[str, Any],
-    local_path: Path,
-    remote_folder_id: str,
-    remote_path: str,
-    author_device_id: str,
-    mode: UploadMode = "new_file_or_version",
-    chunk_size: int = CHUNK_SIZE,
-    created_at: str | None = None,
-    progress: Callable[[UploadProgress], None] | None = None,
-    local_index: Any = None,
-    resume_cache_dir: Path | None = None,
-    should_continue: Callable[[], bool] | None = None,
-) -> UploadResult:
-    """Encrypt + upload ``local_path`` and CAS-publish a new manifest revision.
+def _validate_local_for_upload(local_path: Path) -> int:
+    """Run the lstat-classify + size-cap checks both upload paths share.
 
-    The function does not retry on ``VaultCASConflictError`` — that's
-    T6.3's job. On any error after the manifest mutation step, partial
-    state is bounded to chunks already PUT to the relay; nothing local
-    is touched.
+    Returns the observed file size on success. Raises the same
+    typed exceptions ``upload_file`` and ``prepare_upload_for_batch``
+    would have raised inline; both callers re-raise upward without
+    translation.
 
-    F-Y08: ``should_continue`` is consulted between every chunk PUT
-    and once before the CAS publish. When it returns ``False`` the
-    function raises :class:`vault_binding_lifecycle.SyncCancelledError`;
-    the upload session is already saved per chunk so the next
-    :func:`resume_upload` picks up exactly where the bail happened
-    (relay-side dedup means re-PUTting a completed chunk is a 200 OK
-    no-op). Pass ``None`` (the default) for "always continue".
+    Extracted so a future security fix (a new special-file rejection,
+    a tightened size cap, etc.) lands in one place instead of drifting
+    across two near-duplicates.
     """
-    if vault.master_key is None or vault.vault_access_secret is None:
-        raise ValueError("vault is closed")
-
-    local_path = Path(local_path)
     # F-Y17: lstat first to reject symlinks / FIFOs / sockets / device
     # files. ``is_file()`` follows symlinks, which would silently
     # upload the symlink target's contents as if they belonged to the
@@ -133,6 +109,46 @@ def upload_file(
             f"{local_path} is {observed_size} bytes, "
             f"max per-file is {MAX_FILE_BYTES_DEFAULT}"
         )
+    return observed_size
+
+
+def upload_file(
+    *,
+    vault: UploadVault,
+    relay: UploadRelay,
+    manifest: dict[str, Any],
+    local_path: Path,
+    remote_folder_id: str,
+    remote_path: str,
+    author_device_id: str,
+    mode: UploadMode = "new_file_or_version",
+    chunk_size: int = CHUNK_SIZE,
+    created_at: str | None = None,
+    progress: Callable[[UploadProgress], None] | None = None,
+    local_index: Any = None,
+    resume_cache_dir: Path | None = None,
+    should_continue: Callable[[], bool] | None = None,
+) -> UploadResult:
+    """Encrypt + upload ``local_path`` and CAS-publish a new manifest revision.
+
+    The function does not retry on ``VaultCASConflictError`` — that's
+    T6.3's job. On any error after the manifest mutation step, partial
+    state is bounded to chunks already PUT to the relay; nothing local
+    is touched.
+
+    F-Y08: ``should_continue`` is consulted between every chunk PUT
+    and once before the CAS publish. When it returns ``False`` the
+    function raises :class:`vault_binding_lifecycle.SyncCancelledError`;
+    the upload session is already saved per chunk so the next
+    :func:`resume_upload` picks up exactly where the bail happened
+    (relay-side dedup means re-PUTting a completed chunk is a 200 OK
+    no-op). Pass ``None`` (the default) for "always continue".
+    """
+    if vault.master_key is None or vault.vault_access_secret is None:
+        raise ValueError("vault is closed")
+
+    local_path = Path(local_path)
+    _validate_local_for_upload(local_path)
 
     normalized_remote_path = normalize_manifest_path(remote_path)
     existing_entry = find_file_entry(manifest, remote_folder_id, normalized_remote_path)
@@ -377,37 +393,7 @@ def prepare_upload_for_batch(
         raise ValueError("vault is closed")
 
     local_path = Path(local_path)
-    try:
-        st = local_path.lstat()
-    except OSError as exc:
-        raise FileNotFoundError(f"local file not found: {local_path}") from exc
-    mode_bits = st.st_mode
-    if (
-        _stat.S_ISLNK(mode_bits)
-        or _stat.S_ISFIFO(mode_bits)
-        or _stat.S_ISSOCK(mode_bits)
-        or _stat.S_ISCHR(mode_bits)
-        or _stat.S_ISBLK(mode_bits)
-    ):
-        log.info(
-            "vault.sync.special_file_skipped path=%s reason=non-regular",
-            local_path,
-        )
-        raise UploadSpecialFileSkipped(
-            f"refusing to upload non-regular file: {local_path}"
-        )
-    if not local_path.is_file():
-        raise FileNotFoundError(f"local file not found: {local_path}")
-
-    try:
-        observed_size = int(local_path.stat().st_size)
-    except OSError as exc:
-        raise FileNotFoundError(f"local file not found: {local_path}") from exc
-    if observed_size > MAX_FILE_BYTES_DEFAULT:
-        raise UploadFileTooLargeError(
-            f"{local_path} is {observed_size} bytes, "
-            f"max per-file is {MAX_FILE_BYTES_DEFAULT}"
-        )
+    _validate_local_for_upload(local_path)
 
     normalized_remote_path = normalize_manifest_path(remote_path)
     existing_entry = find_file_entry(manifest, remote_folder_id, normalized_remote_path)

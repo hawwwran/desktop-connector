@@ -476,6 +476,260 @@ class KillMidBatchResumeTests(_BatchTestBase):
         self.assertEqual(len(relay.published_manifests), 1)
 
 
+class CycleEndCancelFlushTests(_BatchTestBase):
+    """F-Y08 carve-out for SO-3: when cancellation is still active at
+    cycle-end, the partial batch publishes with the CAS retry budget
+    set to zero (single attempt, no retry storm). A conflict drops
+    the batch; success commits it. The chunks are PUT either way, so
+    the next cycle's prep re-uses the dedupe stub.
+    """
+
+    def test_cancel_with_uncontended_publish_commits_partial_batch(self) -> None:
+        """No CAS contention — single attempt succeeds, partial batch
+        commits, all batched ops report uploaded."""
+        relay, manifest = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
+
+        for path in ("a.txt", "b.txt", "c.txt"):
+            (self.local_root / path).write_bytes(path.encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        ticks = {"n": 0}
+        def gate() -> bool:
+            ticks["n"] += 1
+            # Allow ops 1+2 to prep, then deny op 3. Each op takes
+            # 3 should_continue calls (outer pre-op + chunk + pre-
+            # publish). 2 ops × 3 + 1 outer = 7 ticks. Ticks <= 6
+            # pass; tick 7 (outer at op 3 start) bails.
+            return ticks["n"] <= 6
+
+        vault = _vault()
+        try:
+            result = run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=10,
+                should_continue=gate,
+            )
+        finally:
+            vault.close()
+
+        self.assertTrue(result.cancelled)
+        # Single publish attempt at cycle-end — the two prepped ops
+        # commit. The third never entered prep.
+        uploaded = [o for o in result.outcomes if o.status == "uploaded"]
+        self.assertEqual(len(uploaded), 2)
+        self.assertEqual(relay.put_manifest_attempt_count, 1)
+        # Op 3 stays queued for the next cycle.
+        remaining = self.store.list_pending_ops(binding.binding_id)
+        self.assertEqual(len(remaining), 1)
+
+    def test_cancel_with_cas_conflict_drops_batch_no_retry_storm(self) -> None:
+        """CAS conflict on the cancel-flush publish — single attempt,
+        no retries, batch dropped, all ops survive in the queue."""
+        relay, manifest = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
+
+        for path in ("c1.txt", "c2.txt", "c3.txt"):
+            (self.local_root / path).write_bytes(path.encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        # Healthy cycles use CAS_MAX_RETRIES retries (5 + 1 final = 6
+        # attempts). A cancelled cycle should attempt exactly once.
+        # Inject many conflicts; the count is the bail-out probe.
+        relay.cas_conflicts_to_inject = 99
+
+        ticks = {"n": 0}
+        def gate() -> bool:
+            ticks["n"] += 1
+            return ticks["n"] <= 6
+
+        vault = _vault()
+        try:
+            result = run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=10,
+                should_continue=gate,
+            )
+        finally:
+            vault.close()
+
+        self.assertTrue(result.cancelled)
+        # Single publish attempt — proves we didn't burn the retry
+        # budget after the user clicked Pause (F-Y08).
+        self.assertEqual(
+            relay.put_manifest_attempt_count, 1,
+            "cancel-flush published more than once — retry storm "
+            "leaked through F-Y08 gate",
+        )
+        # Conflict → batch failed; all batched ops surface as failed
+        # (their pending-op rows survive for the next cycle).
+        failed = [o for o in result.outcomes if o.status == "failed"]
+        self.assertGreaterEqual(len(failed), 1)
+        # The 99 injected conflicts proves no retry — we consumed 1.
+        self.assertEqual(relay.cas_conflicts_to_inject, 98)
+
+
+class SkippedIdenticalInsideBatchTests(_BatchTestBase):
+    """SO-3 short-circuit: when a batched upload's bytes already match
+    the remote's latest version, prep returns ``skipped_identical=True``
+    immediately. The cycle records the outcome + stamps local-entry +
+    drops the pending op without growing the batch.
+    """
+
+    def test_identical_bytes_skip_does_not_grow_batch(self) -> None:
+        relay, manifest = self._empty_remote()
+        # Seed the remote at one path with content X.
+        manifest = self._seed_remote_file(
+            relay, manifest, path="same.txt", content=b"already-here",
+        )
+        relay.put_manifest_attempt_count = 0
+        relay.published_manifests = []
+
+        binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
+        # Stage a local file with identical content + queue an upload
+        # op. Prep should detect the match via content_fingerprint.
+        (self.local_root / "same.txt").write_bytes(b"already-here")
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="upload",
+            relative_path="same.txt",
+        )
+        # A second op with new content, to confirm we still publish
+        # when there's *something* to put in the batch.
+        (self.local_root / "new.txt").write_bytes(b"new content")
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="upload",
+            relative_path="new.txt",
+        )
+
+        vault = _vault()
+        try:
+            result = run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=10,
+            )
+        finally:
+            vault.close()
+
+        # same.txt: skipped (identical bytes); new.txt: uploaded.
+        statuses = sorted(o.status for o in result.outcomes)
+        self.assertEqual(statuses, ["skipped", "uploaded"])
+        # Exactly one publish (covers new.txt only — same.txt didn't
+        # enter the batch).
+        self.assertEqual(relay.put_manifest_attempt_count, 1)
+        # Both pending ops dequeued; both local entries stamped.
+        self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
+        same_entry = self.store.get_local_entry(binding.binding_id, "same.txt")
+        new_entry = self.store.get_local_entry(binding.binding_id, "new.txt")
+        self.assertIsNotNone(same_entry)
+        self.assertIsNotNone(new_entry)
+
+
+class StubReuseDirectTests(_BatchTestBase):
+    """SO-3 dedupe stub: a kill-mid-batch retry must reuse the prior
+    ``version_id`` so the chunk_ids match. The kill-mid-batch test
+    asserts dedupe indirectly via ``new_puts == []``; this test reads
+    the persisted stub directly to confirm the cycle's prep made the
+    same id-allocation decision twice.
+    """
+
+    def test_stub_persists_same_version_id_across_kill(self) -> None:
+        import json
+
+        relay, manifest = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
+
+        (self.local_root / "stable.txt").write_bytes(b"stable-content")
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="upload",
+            relative_path="stable.txt",
+        )
+
+        original_put_manifest = relay.put_manifest
+        def _kill(*a, **kw):  # noqa: ANN001, ANN002, ANN003
+            raise RuntimeError("simulated kill")
+        relay.put_manifest = _kill  # type: ignore[assignment]
+
+        vault = _vault()
+        try:
+            run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=10,
+            )
+        finally:
+            vault.close()
+
+        # The stub should have been written by prep and survived the
+        # failed publish. Read it from disk.
+        from src.vault.upload.batch_session import default_batch_cache_dir
+        from src.vault.upload.session import default_upload_resume_dir
+        stub_dir = default_batch_cache_dir(default_upload_resume_dir())
+        stubs = sorted(stub_dir.glob("*.json"))
+        self.assertEqual(len(stubs), 1, "expected exactly one stub after kill")
+        first_stub = json.loads(stubs[0].read_text())
+        first_version_id = first_stub["version_id"]
+        first_entry_id = first_stub["entry_id"]
+        self.assertTrue(first_version_id.startswith("fv_v1_"))
+        self.assertTrue(first_entry_id.startswith("fe_v1_"))
+
+        # Restore the relay; re-run prep against the same file. The
+        # stub mechanism must hand back the same ids.
+        relay.put_manifest = original_put_manifest  # type: ignore[assignment]
+        binding = self.store.get_binding(binding.binding_id)
+        vault = _vault()
+        try:
+            result = run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=10,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.succeeded_count, 1)
+        # The successful publish should have cleared the stub.
+        self.assertEqual(list(stub_dir.glob("*.json")), [])
+
+        # The published manifest's stable.txt version_id should be
+        # the same one the prior cycle's stub recorded.
+        from src.vault.ui.browser_model import decrypt_manifest
+        observer = _vault()
+        try:
+            current = decrypt_manifest(observer, relay.current_envelope)
+        finally:
+            observer.close()
+        folder = next(
+            f for f in current["remote_folders"]
+            if f["remote_folder_id"] == DOCS_ID
+        )
+        target = next(e for e in folder["entries"] if e["path"] == "stable.txt")
+        published_version_id = target["versions"][-1]["version_id"]
+        self.assertEqual(
+            published_version_id, first_version_id,
+            "stub mechanism didn't preserve version_id across kill — "
+            "chunk dedupe would have broken on the retry",
+        )
+        published_entry_id = target["entry_id"]
+        self.assertEqual(
+            published_entry_id, first_entry_id,
+            "stub mechanism didn't preserve entry_id across kill",
+        )
+
+
 def _vault() -> Vault:
     return Vault(
         vault_id=VAULT_ID, master_key=MASTER_KEY,

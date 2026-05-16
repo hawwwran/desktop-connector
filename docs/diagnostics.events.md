@@ -486,15 +486,20 @@ relay log (filenames are local-only).
 | `vault.sync.autosync_list_bindings_failed` | desktop | error | exception traceback | F-LT06 — bindings store query raised; tick skipped, retried on next interval |
 | `vault.sync.autosync_state_subscribe_failed` | desktop | error | exception traceback | F-LT06 — `conn.on_state_change` registration raised; the autosync loop still starts but won't be kicked on reconnect (next interval tick still drains) |
 | `vault.sync.autosync_tick_failed` | desktop | error | exception traceback | F-LT06 — `watcher_runtime.tick_all()` raised; flush attempt still proceeds |
+| `vault.sync.batch_cas_conflict` | desktop | warning | `binding`, `batch_size` | SO-3 — caller-visible end of the batch publish loop after exhausting CAS retries; every batched op rolls back to "failed" |
 | `vault.sync.batch_cas_exhausted` | desktop | warning | `batch_size`, `retries` | SO-3 — batched manifest publish exhausted its CAS retry budget; each batched op is recorded as failed and its pending-op row survives for the next cycle |
 | `vault.sync.batch_cas_retry` | desktop | info | `attempt`, `max_retries`, `batch_size` | SO-3 — batched publish hit a CAS conflict; refetched server head and replayed the batch idempotently |
-| `vault.sync.batch_publish_cas_conflict` | desktop | warning | `binding`, `batch_size` | SO-3 — caller-visible end of the batch publish loop after exhausting CAS retries; every batched op rolls back to "failed" |
-| `vault.sync.batch_publish_failed` | desktop | warning | `binding`, `batch_size`, `error` | SO-3 — non-CAS exception during batched publish (network, encrypt, etc.); pending-ops survive for retry |
+| `vault.sync.batch_cas_steamroll` | desktop | info | `path`, `kind`, `over`, `server_latest_version_id`, `our_version_id` | SO-3 — batch CAS retry detected a concurrent writer's work on a batched path; the replay will demote that writer's version (or revive a tombstone). Backup-only's last-writer-wins behavior; logged for operator correlation with "my other desktop's upload isn't the latest anymore" reports |
+| `vault.sync.batch_failed` | desktop | warning | `binding`, `batch_size`, `error` | SO-3 — non-CAS exception during batched publish (network, encrypt, etc.); pending-ops survive for retry |
 | `vault.sync.batch_published` | desktop | info | `binding`, `batch_size`, `new_revision` | SO-3 — batched manifest publish landed; the K batched ops are now finalized at `new_revision` |
+| `vault.sync.batch_stubs_ttl_reap_failed` | desktop | error | `vault`, exception traceback | SO-3 — TTL sweep raised; the vault opens anyway and stale stubs stay on disk for the next try |
+| `vault.sync.batch_stubs_ttl_reaped` | desktop | info | `vault`, `count` | SO-3 — TTL sweep removed stale batched-upload stubs (>14 days old) from `<cache_dir>/batched/`; runs once per vault open |
 | `vault.sync.binding_disconnect_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — disconnect cancelled an in-flight cycle via the registry |
 | `vault.sync.binding_disconnect_dropping_op` | desktop | info | `binding`, `op_type`, `path`, `attempts` | F-Y30 — per-op audit trail emitted before disconnect drops a pending op |
 | `vault.sync.binding_disconnect_dropping_op_truncated` | desktop | info | `binding`, `logged`, `total` | F-Y30 — per-op audit log capped; summary follows on `binding_disconnected` |
 | `vault.sync.binding_disconnect_noop` | desktop | info | `binding` | Disconnect on already-unbound binding |
+| `vault.sync.binding_disconnect_reaped_batch_stubs` | desktop | info | `binding`, `count` | SO-3 — disconnect reaped batched-upload stubs whose pending-ops were just dropped, preventing `<cache_dir>/batched/` growth across disconnect+reconnect churn |
+| `vault.sync.binding_disconnect_stub_reap_failed` | desktop | error | `binding`, `path`, exception traceback | SO-3 — per-path stub reap raised during disconnect; one stub stays on disk, the TTL reaper will catch it on next vault open |
 | `vault.sync.binding_disconnected` | desktop | info | `binding`, `sync_mode`, `local_entries_preserved`, `pending_ops_dropped` | T12.5 disconnect |
 | `vault.sync.binding_pause_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — pause cancelled an in-flight cycle via the registry |
 | `vault.sync.binding_pause_noop` | desktop | info | `binding` | Pause on already-paused binding |
@@ -503,6 +508,7 @@ relay log (filenames are local-only).
 | `vault.sync.binding_resumed` | desktop | info | `binding`, `sync_mode`, `pending_ops` | T12.4 resume |
 | `vault.sync.conflict_naming_attempts_exhausted` | desktop | warning | `kind`, `path`, `attempts` | F-Y12 — `_unique_conflict_path` hit the 20-attempt cap; returning the last candidate so the caller still gets a destination |
 | `vault.sync.cycle_cancelled_between_ops` | desktop | info | `binding`, `remaining` | F-Y08 — backup-only loop bailed before the next op |
+| `vault.sync.cycle_cancelled_partial_batch_dropped` | desktop | info | `binding`, `batch_size` | SO-3 — cycle was cancelled with a partial batch ready to publish; the batch was dropped rather than published (F-Y08 "bail within ~1 chunk"). Chunks are PUT so the next cycle re-preps via the dedupe stub and HEAD-and-skips |
 | `vault.sync.delete_cas_exhausted` | desktop | warning | `binding`, `path` | F-Y06 — tombstone retry budget exhausted |
 | `vault.sync.delete_cas_retry` | desktop | info | `attempt`, `binding`, `path` | F-Y06 — tombstone publish hit CAS race; retrying |
 | `vault.sync.delete_failed` | desktop | warning | `binding`, `path`, `error` | Delete op left in queue with attempts++ |

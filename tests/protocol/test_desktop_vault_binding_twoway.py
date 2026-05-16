@@ -674,5 +674,129 @@ class TwoWayCycleTests(unittest.TestCase):
             vault.close()
 
 
+class TwoWayFetchManifestPerOpTests(unittest.TestCase):
+    """SO-2 mirror of ``FetchManifestPerOpTests`` for ``run_two_way_cycle``.
+
+    Two-way's Phase B drains the same pending-ops queue backup-only
+    does, so the same fix applies: the loop must consume the manifest
+    ``_execute_op`` returns rather than re-fetch the head after every
+    successful op. If that regressed, this test counts the extra GETs
+    and fails.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_twoway_so2_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.config_dir = self.tmpdir / "config"
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+        self.index = VaultLocalIndex(self.config_dir)
+        self.store = VaultBindingsStore(self.index.db_path)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _empty_remote(self) -> "_CountingTwoWayRelay":
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-16T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-16T12:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        relay = _CountingTwoWayRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
+        vault = _vault()
+        try:
+            vault.publish_manifest(relay, manifest)
+        finally:
+            vault.close()
+        # Discard setup-time get_manifest calls so the assertions count
+        # only Phase A + Phase B traffic.
+        relay.get_manifest_count = 0
+        return relay
+
+    def _make_two_way_binding(self, *, last_revision: int):
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id,
+            state="bound",
+            sync_mode="two-way",
+            last_synced_revision=last_revision,
+        )
+        return self.store.get_binding(binding.binding_id)
+
+    def test_phase_b_does_not_fetch_per_successful_op(self) -> None:
+        relay = self._empty_remote()
+        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+
+        for i in range(5):
+            path = f"tw{i}.txt"
+            (self.local_root / path).write_bytes(f"payload-{i}".encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        vault = _vault()
+        try:
+            result = run_two_way_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.succeeded_count, 5)
+        self.assertEqual(result.failed_count, 0)
+        # Phase A fetches the head once. The convergence loop may
+        # re-fetch once at end-of-iteration to observe any concurrent
+        # writes. Both are bounded. Critically: there is NO per-op
+        # GET inside the Phase B drain. The 5-op loop should
+        # contribute zero additional fetches; the total stays small
+        # (1 initial + 1 end-of-iter refresh = 2).
+        #
+        # Pre-SO-2 this would be ≥ 1 + N (= 6) because every
+        # ``outcome.status in {"uploaded","deleted","failed"}`` triggered
+        # ``head = vault.fetch_manifest(relay)`` inside the inner loop.
+        self.assertLessEqual(
+            relay.get_manifest_count, 2,
+            "two-way Phase B is calling fetch_manifest per op; "
+            f"saw {relay.get_manifest_count} fetches for 5 successful "
+            "ops — SO-2 regression",
+        )
+
+
+class _CountingTwoWayRelay(FakeUploadRelay):
+    """``FakeUploadRelay`` that counts ``get_manifest`` for SO-2 pinning."""
+
+    def __init__(self, *, manifest: dict) -> None:
+        super().__init__(manifest=manifest)
+        self.get_manifest_count = 0
+
+    def get_manifest(self, vault_id, vault_access_secret):
+        self.get_manifest_count += 1
+        return super().get_manifest(vault_id, vault_access_secret)
+
+
 if __name__ == "__main__":
     unittest.main()

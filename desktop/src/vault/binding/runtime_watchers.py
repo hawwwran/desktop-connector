@@ -65,6 +65,12 @@ class VaultWatcherRuntime:
 
         Idempotent: already-started bindings are skipped. Returns the
         count of newly-started observers.
+
+        Also drives a TTL-based sweep of orphan SO-3 batched-upload
+        stubs (14-day default). Per-path and per-binding reapers cover
+        the common cases; this catches stubs that escaped them — e.g.
+        a file the user deleted *and* whose binding lost its pending-op
+        row through some path that didn't run a per-path reap.
         """
         started = 0
         with self._lock:
@@ -81,6 +87,19 @@ class VaultWatcherRuntime:
             log.info(
                 "vault.sync.watchers_started vault=%s count=%d",
                 self.vault_id, started,
+            )
+        try:
+            from ..upload import default_upload_resume_dir, reap_expired_stubs
+            reaped = reap_expired_stubs(default_upload_resume_dir())
+            if reaped:
+                log.info(
+                    "vault.sync.batch_stubs_ttl_reaped vault=%s count=%d",
+                    self.vault_id, reaped,
+                )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "vault.sync.batch_stubs_ttl_reap_failed vault=%s",
+                self.vault_id,
             )
         return started
 

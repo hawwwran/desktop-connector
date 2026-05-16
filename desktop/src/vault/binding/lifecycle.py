@@ -307,6 +307,38 @@ def disconnect_binding(
         )
     for op in pending:
         store.delete_pending_op(op.op_id)
+    # SO-3 dedupe stubs for these dropped ops are orphans now — no one
+    # will retry them, so reap them here to keep ``<cache_dir>/batched/``
+    # from growing monotonically across disconnect+reconnect churn.
+    # Per-path reaping is bounded by the pending-ops queue and avoids
+    # over-reaping when the same vault has another active binding (a
+    # rare multi-folder setup). Stubs for paths the user just deleted
+    # but never queued land in the next prep's stale-fingerprint reap
+    # already; we don't need to chase them here.
+    if pending:
+        from ..upload import default_upload_resume_dir, reap_stubs_for_path
+
+        stub_dir = default_upload_resume_dir()
+        reaped_stubs = 0
+        for op in pending:
+            try:
+                reaped_stubs += reap_stubs_for_path(
+                    vault_id=binding.vault_id,
+                    remote_path=op.relative_path,
+                    cache_dir=stub_dir,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "vault.sync.binding_disconnect_stub_reap_failed "
+                    "binding=%s path=%s",
+                    binding_id, op.relative_path,
+                )
+        if reaped_stubs:
+            log.info(
+                "vault.sync.binding_disconnect_reaped_batch_stubs "
+                "binding=%s count=%d",
+                binding_id, reaped_stubs,
+            )
     store.update_binding_state(binding_id, state="unbound")
     log.info(
         "vault.sync.binding_disconnected binding=%s sync_mode=%s "

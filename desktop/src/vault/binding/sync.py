@@ -387,7 +387,7 @@ def run_backup_only_cycle(
             cancelled = True
             break
 
-        immediate_outcome, batch_entry, current_manifest = _prepare_op_for_batch(
+        immediate_outcome, batch_entry = _prepare_op_for_batch(
             vault=vault,
             relay=relay,
             store=store,
@@ -449,16 +449,26 @@ def run_backup_only_cycle(
                     )
 
     # Cycle-end flush: any partial batch still pending publishes now.
-    # This handles two cases:
-    #   1. Steady-state "one new file" — a single op landed, K-1 didn't
-    #      arrive, so we publish what we have rather than sitting on it.
-    #   2. Cancellation between ops — when ``should_continue`` flipped
-    #      false after some ops had already finished their chunk PUTs,
-    #      we still publish the ready batch so the work isn't wasted
-    #      (F-Y08's "bail within ~1 chunk" is enforced inside
-    #      ``prepare_upload_for_batch``; an op that bailed mid-chunk
-    #      surfaces a "cancelled" outcome and never enters the batch).
+    #
+    # Healthy cycle: full CAS retry budget. Steady-state "one new
+    # file" flushes too — no batch sits forever waiting for K-1
+    # more files.
+    #
+    # Cancelled cycle: F-Y08 says "bail within ~1 chunk", and a busy
+    # multi-device vault could otherwise burn many seconds in the §D4
+    # retry loop after the user clicked Pause. Compromise: attempt a
+    # single publish (one round-trip, bounded by manifest size) but
+    # skip the retry budget. If it conflicts, we drop the batch
+    # rather than burning 5+ extra round-trips. Chunks are already
+    # PUT (idempotent), pending-ops survive on drop, and the next
+    # cycle's prep re-uses the batched-upload stubs so chunk PUTs
+    # dedupe via HEAD-and-skip — worst case the K-1 ops re-encrypt
+    # on the next run, never re-upload.
     if batch:
+        cancelled_still_active = cancelled and (
+            should_continue is None or not should_continue()
+        )
+        flush_max_retries = 0 if cancelled_still_active else CAS_MAX_RETRIES
         batch_outcomes, current_manifest, batch_failed = _flush_batch(
             vault=vault,
             relay=relay,
@@ -468,7 +478,14 @@ def run_backup_only_cycle(
             current_manifest=current_manifest,
             batch=batch,
             author_device_id=author_device_id,
+            max_retries=flush_max_retries,
         )
+        if cancelled_still_active and batch_failed:
+            log.info(
+                "vault.sync.cycle_cancelled_partial_batch_dropped "
+                "binding=%s batch_size=%d",
+                binding.binding_id, len(batch),
+            )
         for outcome in batch_outcomes:
             _emit(outcome)
         batch = []
@@ -510,17 +527,15 @@ def _prepare_op_for_batch(
     author_device_id: str,
     chunk_cache_dir: Path | None,
     should_continue: Callable[[], bool] | None,
-) -> tuple[SyncOpOutcome | None, _BatchEntry | None, dict[str, Any]]:
+) -> tuple[SyncOpOutcome | None, _BatchEntry | None]:
     """SO-3: prepare one op for inclusion in a batched manifest publish.
 
-    Returns ``(immediate_outcome, batch_entry, manifest_after_prep)``.
-
-    Exactly one of ``immediate_outcome`` and ``batch_entry`` is
+    Returns ``(immediate_outcome, batch_entry)``. Exactly one is
     non-None when the op was handled (the caller emits the outcome or
     appends the entry); both may be ``None`` if the op was a defensive
-    soft-skip. ``manifest_after_prep`` is the input ``manifest``
-    unchanged — prep never publishes, so the cycle's view of the head
-    is stable until the next batch flush.
+    soft-skip. Prep never publishes, so the cycle's view of the head
+    is stable until the next batch flush — that's why the manifest
+    isn't threaded back.
 
     The immediate-outcome path covers ops that don't contribute to a
     batch: identical-bytes skip (no manifest mutation), special-file
@@ -557,7 +572,6 @@ def _prepare_op_for_batch(
             error=f"unsupported op_type: {op.op_type}",
         ),
         None,
-        manifest,
     )
 
 
@@ -573,7 +587,7 @@ def _prepare_upload_for_batch(
     author_device_id: str,
     chunk_cache_dir: Path | None,
     should_continue: Callable[[], bool] | None,
-) -> tuple[SyncOpOutcome | None, _BatchEntry | None, dict[str, Any]]:
+) -> tuple[SyncOpOutcome | None, _BatchEntry | None]:
     """Prep an upload op for batching: run chunk PUTs, return a batch entry.
 
     Identical-bytes shortcut: when the file's keyed fingerprint already
@@ -608,7 +622,6 @@ def _prepare_upload_for_batch(
                     error="path_vanished_never_synced",
                 ),
                 None,
-                manifest,
             )
         log.info(
             "vault.sync.upload_path_vanished_promoted_to_delete "
@@ -627,7 +640,6 @@ def _prepare_upload_for_batch(
                     relative_path=relative_path, status="skipped",
                 ),
                 None,
-                manifest,
             )
         from datetime import datetime, timezone
         deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -638,7 +650,6 @@ def _prepare_upload_for_batch(
                 deleted_at=deleted_at,
                 promoted_from_upload=True,
             ),
-            manifest,
         )
 
     try:
@@ -665,7 +676,6 @@ def _prepare_upload_for_batch(
                 error=str(exc),
             ),
             None,
-            manifest,
         )
     except UploadSpecialFileSkipped:
         store.delete_pending_op(op.op_id)
@@ -676,7 +686,6 @@ def _prepare_upload_for_batch(
                 error="special_file",
             ),
             None,
-            manifest,
         )
     except UploadFileTooLargeError as exc:
         store.mark_op_failed(op.op_id, str(exc))
@@ -691,7 +700,6 @@ def _prepare_upload_for_batch(
                 error=str(exc),
             ),
             None,
-            manifest,
         )
     except VaultQuotaExceededError as exc:
         log.warning(
@@ -707,7 +715,6 @@ def _prepare_upload_for_batch(
                 error="quota_exceeded",
             ),
             None,
-            manifest,
         )
     except VaultCASConflictError as exc:
         # ``prepare_upload_for_batch`` does not publish, so a CAS
@@ -725,7 +732,6 @@ def _prepare_upload_for_batch(
                 error="cas_conflict",
             ),
             None,
-            manifest,
         )
     except Exception as exc:  # noqa: BLE001
         store.mark_op_failed(op.op_id, str(exc))
@@ -740,7 +746,6 @@ def _prepare_upload_for_batch(
                 error=str(exc),
             ),
             None,
-            manifest,
         )
 
     if prepared.skipped_identical:
@@ -771,7 +776,6 @@ def _prepare_upload_for_batch(
                 chunks_uploaded=int(prepared.chunks_uploaded),
             ),
             None,
-            manifest,
         )
 
     return (
@@ -781,7 +785,6 @@ def _prepare_upload_for_batch(
             prepared=prepared,
             absolute_path=absolute,
         ),
-        manifest,
     )
 
 
@@ -791,7 +794,7 @@ def _prepare_delete_for_batch(
     binding: VaultBinding,
     op: VaultPendingOperation,
     manifest: dict[str, Any],
-) -> tuple[SyncOpOutcome | None, _BatchEntry | None, dict[str, Any]]:
+) -> tuple[SyncOpOutcome | None, _BatchEntry | None]:
     """Prep a delete op for batching: build a tombstone entry, or
     short-circuit when the remote entry is already gone."""
     relative_path = op.relative_path
@@ -806,14 +809,12 @@ def _prepare_delete_for_batch(
                 relative_path=relative_path, status="skipped",
             ),
             None,
-            manifest,
         )
     from datetime import datetime, timezone
     deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     return (
         None,
         _BatchEntry(op=op, kind="delete", deleted_at=deleted_at),
-        manifest,
     )
 
 
@@ -913,6 +914,18 @@ def _publish_batch_with_cas_retry(
                 "vault.sync.batch_cas_retry attempt=%d/%d batch_size=%d",
                 attempt + 1, max_retries, len(batch),
             )
+            # Backup-only is last-writer-wins; the replay below will
+            # land our version on top of the server head, demoting any
+            # concurrent writer's version on the same path to a prior
+            # version (or reviving a tombstone we're re-uploading over).
+            # Surface that per-path so an operator can correlate a
+            # "my other desktop's upload isn't the latest anymore"
+            # report against this cycle's CAS retry.
+            _log_batch_cas_steamrolls(
+                batch=batch,
+                server_head=server_head,
+                remote_folder_id=remote_folder_id,
+            )
             candidate = _apply_batch_to_manifest(
                 server_head, batch,
                 remote_folder_id=remote_folder_id,
@@ -929,6 +942,77 @@ def _publish_batch_with_cas_retry(
         raise
 
 
+def _log_batch_cas_steamrolls(
+    *,
+    batch: list[_BatchEntry],
+    server_head: dict[str, Any],
+    remote_folder_id: str,
+) -> None:
+    """Emit one ``vault.sync.batch_cas_steamroll`` line per batched op
+    whose replay onto the server head will overwrite a concurrent
+    writer's work at the same path. For uploads, that means the server
+    entry already has a version_id that isn't in our batch. For
+    deletes, that means the server entry is still alive at publish-
+    refetch time. Either case is correct backup-only semantics (last
+    writer wins) — the log just makes the loss observable so an
+    operator can answer "why isn't my other desktop's upload the
+    latest anymore" without spelunking through manifest history.
+    """
+    folder: dict[str, Any] | None = None
+    for f in server_head.get("remote_folders") or []:
+        if isinstance(f, dict) and f.get("remote_folder_id") == remote_folder_id:
+            folder = f
+            break
+    if folder is None:
+        return
+    entries_by_path: dict[str, dict[str, Any]] = {}
+    for entry in folder.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path", ""))
+        if path:
+            entries_by_path[path] = entry
+    our_version_ids = {
+        entry.prepared.version_id
+        for entry in batch
+        if entry.kind == "upload" and entry.prepared is not None
+    }
+    for entry in batch:
+        if entry.kind == "upload" and entry.prepared is not None:
+            path = entry.prepared.normalized_remote_path
+            our_version = entry.prepared.version_id
+        else:
+            path = normalize_manifest_path(entry.op.relative_path)
+            our_version = ""
+        server_entry = entries_by_path.get(path)
+        if server_entry is None:
+            continue
+        server_latest = str(server_entry.get("latest_version_id", ""))
+        server_deleted = bool(server_entry.get("deleted"))
+        if entry.kind == "upload":
+            if server_deleted:
+                # Reviving a tombstone is a steamroll over the
+                # concurrent delete.
+                log.info(
+                    "vault.sync.batch_cas_steamroll path=%s kind=upload "
+                    "over=tombstone our_version_id=%s",
+                    path, our_version[:20],
+                )
+            elif server_latest and server_latest not in our_version_ids:
+                log.info(
+                    "vault.sync.batch_cas_steamroll path=%s kind=upload "
+                    "over=version server_latest_version_id=%s our_version_id=%s",
+                    path, server_latest[:20], our_version[:20],
+                )
+        elif entry.kind == "delete":
+            if not server_deleted and server_latest:
+                log.info(
+                    "vault.sync.batch_cas_steamroll path=%s kind=delete "
+                    "over=version server_latest_version_id=%s",
+                    path, server_latest[:20],
+                )
+
+
 def _flush_batch(
     *,
     vault: SyncVault,
@@ -939,6 +1023,7 @@ def _flush_batch(
     current_manifest: dict[str, Any],
     batch: list[_BatchEntry],
     author_device_id: str,
+    max_retries: int = CAS_MAX_RETRIES,
 ) -> tuple[list[SyncOpOutcome], dict[str, Any], bool]:
     """Publish the accumulated batch and run post-publish bookkeeping.
 
@@ -948,6 +1033,11 @@ def _flush_batch(
     On CAS exhaustion (or any other publish error), every batched op
     is marked "failed" so the cycle's failed_count reflects reality;
     pending-op rows survive for the next cycle.
+
+    ``max_retries`` caps the §D4 CAS retry budget. The cycle-end
+    flush passes ``0`` when a cancel is still active so we attempt
+    one publish but don't burn a retry storm after the user clicked
+    Pause (F-Y08).
     """
     if not batch:
         return [], current_manifest, False
@@ -960,10 +1050,11 @@ def _flush_batch(
             batch=batch,
             remote_folder_id=binding.remote_folder_id,
             author_device_id=author_device_id,
+            max_retries=max_retries,
         )
     except VaultCASConflictError as exc:
         log.warning(
-            "vault.sync.batch_publish_cas_conflict binding=%s batch_size=%d",
+            "vault.sync.batch_cas_conflict binding=%s batch_size=%d",
             binding.binding_id, len(batch),
         )
         outcomes: list[SyncOpOutcome] = []
@@ -973,7 +1064,7 @@ def _flush_batch(
         return outcomes, current_manifest, True
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "vault.sync.batch_publish_failed binding=%s batch_size=%d error=%s",
+            "vault.sync.batch_failed binding=%s batch_size=%d error=%s",
             binding.binding_id, len(batch), exc,
         )
         outcomes = []
@@ -1068,13 +1159,25 @@ def _execute_op(
 ) -> tuple[SyncOpOutcome, dict[str, Any]]:
     """Execute one pending op end-to-end. Errors stay scoped per-op.
 
-    SO-2: returns ``(outcome, manifest_after_op)``. ``manifest_after_op``
-    is the newly-published revision when a publish happened (uploaded,
-    deleted, or upload-promoted-to-delete on a previously-synced path);
-    otherwise it is the input ``manifest`` unchanged (skipped, failed
-    before publish, cancelled). Callers that need a fresh view after a
-    CAS-conflict failure must re-fetch explicitly — this helper does
-    not, so success paths skip the redundant per-op GET.
+    SO-2: returns ``(outcome, manifest_after_op)``. The second element is:
+
+    - The newly-published revision for ops that did publish — uploaded,
+      deleted, or upload-promoted-to-delete on a previously-synced path.
+    - The input ``manifest`` unchanged for ops that short-circuited
+      without publishing (skipped, cancelled, failed before any
+      publish attempt — e.g. quota, special file, non-CAS errors).
+    - **The latest server head observed inside the helper** for ops
+      that hit a CAS conflict and walked the delete-side CAS-retry
+      loop. In particular ``_execute_delete``'s ``cas_exhausted`` and
+      ``refetch_failed`` exits return the post-refetch ``current_manifest``,
+      not the input — so a caller that takes the F-Y07 refresh path on
+      ``status == "failed"`` may re-fetch a head it already had.
+      That's harmless (one extra GET) and not worth the complexity of
+      distinguishing the two failure flavors.
+
+    Callers that need a fresh view after any ``status == "failed"``
+    should still re-fetch explicitly; this helper does not, so success
+    paths skip the redundant per-op GET.
 
     SO-3 retained this single-op path for ``twoway.py`` — the two-way
     conflict-rename detector in Phase A inspects the manifest per file
@@ -1107,7 +1210,6 @@ def _execute_op(
             status="failed",
             error=f"unsupported op_type: {op.op_type}",
         ),
-        manifest,
     )
 
 
@@ -1144,7 +1246,6 @@ def _execute_upload(
                     relative_path=relative_path, status="skipped",
                     error="path_vanished_never_synced",
                 ),
-                manifest,
             )
         return _promote_to_delete(
             vault=vault, relay=relay, store=store,
@@ -1179,7 +1280,6 @@ def _execute_upload(
                 relative_path=relative_path, status="cancelled",
                 error=str(exc),
             ),
-            manifest,
         )
     except UploadSpecialFileSkipped:
         # F-Y17: never propagate a tombstone for a symlink/FIFO. Drop
@@ -1191,7 +1291,6 @@ def _execute_upload(
                 relative_path=relative_path, status="skipped",
                 error="special_file",
             ),
-            manifest,
         )
     except VaultQuotaExceededError as exc:
         # F-D03: leave the op pending, surface a typed failure so the
@@ -1209,7 +1308,6 @@ def _execute_upload(
                 relative_path=relative_path, status="failed",
                 error="quota_exceeded",
             ),
-            manifest,
         )
     except VaultCASConflictError as exc:
         # T6.3 owns CAS retry; if it bubbles here it means the inner
@@ -1225,7 +1323,6 @@ def _execute_upload(
                 relative_path=relative_path, status="failed",
                 error="cas_conflict",
             ),
-            manifest,
         )
     except Exception as exc:  # noqa: BLE001
         store.mark_op_failed(op.op_id, str(exc))
@@ -1239,7 +1336,6 @@ def _execute_upload(
                 relative_path=relative_path, status="failed",
                 error=str(exc),
             ),
-            manifest,
         )
 
     new_revision = int(result.manifest.get("revision", manifest.get("revision", 0)))
@@ -1293,7 +1389,6 @@ def _execute_delete(
                 op_id=op.op_id, op_type="delete",
                 relative_path=relative_path, status="skipped",
             ),
-            manifest,
         )
 
     from datetime import datetime, timezone
