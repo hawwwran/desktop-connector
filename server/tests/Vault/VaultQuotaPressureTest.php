@@ -29,7 +29,7 @@ final class VaultQuotaPressureTest extends TestCase
     private const VAULT_ID_DASHED = 'ABCD-2345-WXYZ';
     private const VAULT_SECRET    = 'pressure-test-secret';
     private const HEADER_HASH     = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
-    private const MFST_HASH       = 'eeff00112233445566778899aabbccdd00112233445566778899aabbccddeeff';
+    private const ROOT_HASH       = 'eeff00112233445566778899aabbccdd00112233445566778899aabbccddeeff';
     private const NOW             = 1714680000;
     private const DEVICE_ID       = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
     private const DEVICE_TOKEN    = 'device-bearer-token';
@@ -53,10 +53,10 @@ final class VaultQuotaPressureTest extends TestCase
         );
         (new VaultsRepository($this->db))->create(
             self::VAULT_ID, hash('sha256', self::VAULT_SECRET, true),
-            "\x01header", self::HEADER_HASH, self::MFST_HASH, self::NOW
+            "\x01header", self::HEADER_HASH, self::ROOT_HASH, self::NOW
         );
-        (new VaultManifestsRepository($this->db))->create(
-            self::VAULT_ID, 1, 0, self::MFST_HASH, "\x02manifest", 8,
+        (new VaultRootManifestsRepository($this->db))->create(
+            self::VAULT_ID, 1, 0, self::ROOT_HASH, "\x02root", 5,
             self::DEVICE_ID, self::NOW
         );
 
@@ -257,26 +257,29 @@ final class VaultQuotaPressureTest extends TestCase
         }
     }
 
-    public function test_oversized_manifest_returns_413(): void
+    public function test_oversized_shard_returns_413(): void
     {
-        // MAX_MANIFEST_BYTES is 16 MiB. We don't actually need to
-        // build a real envelope — guardEnvelopeSize fires before any
-        // parsing. base64 inflates by ~33%, so the over-cap source
-        // bytes ÷ 0.75 wraps comfortably above the cap when decoded.
-        $rawSize = VaultController::MAX_MANIFEST_BYTES + 1;
+        // MAX_SHARD_BYTES is 16 MiB. We don't actually need to build a
+        // real envelope — guardEnvelopeSize fires before any parsing.
+        // base64 inflates by ~33%, so the over-cap source bytes ÷ 0.75
+        // wraps comfortably above the cap when decoded.
+        $rawSize = VaultController::MAX_SHARD_BYTES + 1;
         $body = [
-            'expected_current_revision' => 1,
-            'new_revision'              => 2,
-            'parent_revision'           => 1,
-            'manifest_ciphertext'       => base64_encode(str_repeat('x', $rawSize)),
-            'manifest_hash'             => str_repeat('a', 64),
+            'expected_current_shard_revision' => 0,
+            'new_shard_revision'              => 1,
+            'parent_shard_revision'           => 0,
+            'shard_ciphertext'                => base64_encode(str_repeat('x', $rawSize)),
+            'shard_hash'                      => str_repeat('a', 64),
         ];
         try {
-            VaultController::putManifest(
+            VaultController::putShard(
                 $this->db,
                 new RequestContext(
                     method: 'PUT',
-                    params: ['vault_id' => self::VAULT_ID],
+                    params: [
+                        'vault_id' => self::VAULT_ID,
+                        'folder_id' => 'rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa',
+                    ],
                     bodyOverride: json_encode($body),
                 ),
             );
@@ -284,7 +287,7 @@ final class VaultQuotaPressureTest extends TestCase
         } catch (VaultPayloadTooLargeError $exc) {
             self::assertSame(413, $exc->status);
             self::assertSame('vault_payload_too_large', $exc->errorCode);
-            self::assertSame('manifest', $exc->details['kind']);
+            self::assertSame('shard', $exc->details['kind']);
         }
     }
 

@@ -37,12 +37,17 @@ class VaultsRepository
         string $vaultAccessTokenHash,
         string $encryptedHeader,
         string $headerHash,
-        string $initialManifestHash,
+        string $initialRootHash,
         int $now,
         int $initialHeaderRevision = 1,
-        int $initialManifestRevision = 1,
+        int $initialRootRevision = 1,
         ?string $purgeTokenHash = null
     ): void {
+        // ``current_manifest_revision`` / ``current_manifest_hash`` are
+        // legacy columns kept on disk for older migrations' sake; the
+        // new code path reads only ``current_root_*``. We populate both
+        // so a partial roll-forward (new code reading an older row)
+        // doesn't see a NULL on either pair. F-S15.
         $this->db->execute(
             'INSERT INTO vaults (
                 vault_id,
@@ -52,6 +57,8 @@ class VaultsRepository
                 header_hash,
                 current_manifest_revision,
                 current_manifest_hash,
+                current_root_revision,
+                current_root_hash,
                 used_ciphertext_bytes,
                 chunk_count,
                 purge_token_hash,
@@ -63,8 +70,10 @@ class VaultsRepository
                 :enc_header,
                 :header_rev,
                 :header_hash,
-                :manifest_rev,
-                :manifest_hash,
+                :root_rev,
+                :root_hash,
+                :root_rev,
+                :root_hash,
                 0,
                 0,
                 :purge_hash,
@@ -72,15 +81,15 @@ class VaultsRepository
                 :now
              )',
             [
-                ':vault_id'      => $vaultId,
-                ':token_hash'    => new Blob($vaultAccessTokenHash),
-                ':enc_header'    => new Blob($encryptedHeader),
-                ':header_rev'    => $initialHeaderRevision,
-                ':header_hash'   => $headerHash,
-                ':manifest_rev'  => $initialManifestRevision,
-                ':manifest_hash' => $initialManifestHash,
-                ':purge_hash'    => $purgeTokenHash !== null ? new Blob($purgeTokenHash) : null,
-                ':now'           => $now,
+                ':vault_id'    => $vaultId,
+                ':token_hash'  => new Blob($vaultAccessTokenHash),
+                ':enc_header'  => new Blob($encryptedHeader),
+                ':header_rev'  => $initialHeaderRevision,
+                ':header_hash' => $headerHash,
+                ':root_rev'    => $initialRootRevision,
+                ':root_hash'   => $initialRootHash,
+                ':purge_hash'  => $purgeTokenHash !== null ? new Blob($purgeTokenHash) : null,
+                ':now'         => $now,
             ]
         );
     }
@@ -95,6 +104,7 @@ class VaultsRepository
             'SELECT vault_id, vault_access_token_hash, encrypted_header,
                     header_revision, header_hash,
                     current_manifest_revision, current_manifest_hash,
+                    current_root_revision, current_root_hash,
                     used_ciphertext_bytes, chunk_count, quota_ciphertext_bytes,
                     purge_token_hash,
                     migrated_to, migrated_at, previous_relay_url,
@@ -115,7 +125,7 @@ class VaultsRepository
     {
         return $this->db->queryAll(
             'SELECT vault_id,
-                    current_manifest_revision,
+                    current_root_revision,
                     used_ciphertext_bytes,
                     chunk_count,
                     quota_ciphertext_bytes,

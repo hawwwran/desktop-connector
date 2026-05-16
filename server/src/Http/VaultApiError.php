@@ -375,6 +375,97 @@ class VaultManifestTamperedError extends VaultApiError
 }
 
 /**
+ * 422 vault_root_tampered. Root manifest envelope's deterministic prefix
+ * disagrees with the body claims (or with the URL-supplied vault id).
+ * Permanent — never retried.
+ */
+class VaultRootTamperedError extends VaultApiError
+{
+    public function __construct(string $reason)
+    {
+        parent::__construct(
+            status: 422,
+            errorCode: 'vault_root_tampered',
+            message: $reason,
+            details: ['reason' => $reason],
+        );
+    }
+}
+
+/**
+ * 422 vault_shard_tampered. Folder shard envelope's deterministic prefix
+ * disagrees with the body claims (or with the URL-supplied folder id).
+ * Permanent — never retried.
+ */
+class VaultShardTamperedError extends VaultApiError
+{
+    public function __construct(string $reason)
+    {
+        parent::__construct(
+            status: 422,
+            errorCode: 'vault_shard_tampered',
+            message: $reason,
+            details: ['reason' => $reason],
+        );
+    }
+}
+
+/**
+ * 409 vault_root_conflict. CAS mismatch on PUT /root. Inline the §A1-root
+ * payload (`current_root_*` fields) so the client can run §D4 merge in
+ * one round-trip — no follow-up GET.
+ */
+class VaultRootConflictError extends VaultApiError
+{
+    public function __construct(array $details, string $message = 'The vault root manifest changed on the server.')
+    {
+        parent::__construct(
+            status: 409,
+            errorCode: 'vault_root_conflict',
+            message: $message,
+            details: $details,
+        );
+    }
+}
+
+/**
+ * 409 vault_shard_conflict. CAS mismatch on PUT /folders/{id}/shard.
+ * Inline the §A1-shard payload (`current_shard_*` fields + the
+ * `remote_folder_id` so the client knows which shard is stale).
+ */
+class VaultShardConflictError extends VaultApiError
+{
+    public function __construct(array $details, string $message = 'The folder\'s shard manifest changed on the server.')
+    {
+        parent::__construct(
+            status: 409,
+            errorCode: 'vault_shard_conflict',
+            message: $message,
+            details: $details,
+        );
+    }
+}
+
+/**
+ * 409 vault_shard_root_conflict. The atomic `shard-with-root` publish
+ * saw both sides stale. Inlines both `current_shard_*` and
+ * `current_root_*` payloads so the retry can re-merge against both new
+ * heads in one round-trip.
+ */
+class VaultShardRootConflictError extends VaultApiError
+{
+    public function __construct(array $details, string $message = 'Both the shard and root manifest changed on the server.')
+    {
+        parent::__construct(
+            status: 409,
+            errorCode: 'vault_shard_root_conflict',
+            message: $message,
+            details: $details,
+        );
+    }
+}
+
+/**
  * 413 vault_payload_too_large. Chunk envelope exceeds 8 MiB plaintext or
  * manifest envelope exceeds 16 MiB. Permanent — clients can't recover
  * by retrying with the same body.

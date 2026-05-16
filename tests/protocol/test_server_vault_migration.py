@@ -64,8 +64,8 @@ class ServerVaultMigrationTests(unittest.TestCase):
                 "vault_access_token_hash": base64.b64encode(secret_hash).decode("ascii"),
                 "encrypted_header": base64.b64encode(b"header-bytes-stub").decode("ascii"),
                 "header_hash": "a" * 64,
-                "initial_manifest_ciphertext": base64.b64encode(b"manifest-stub").decode("ascii"),
-                "initial_manifest_hash": "b" * 64,
+                "initial_root_ciphertext": base64.b64encode(b"root-stub").decode("ascii"),
+                "initial_root_hash": "b" * 64,
             },
         )
         self.assertEqual(status, 201, body)
@@ -162,7 +162,9 @@ class ServerVaultMigrationTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         self.assertEqual(body["data"]["target_relay_url"], target)
-        self.assertEqual(body["data"]["manifest_hash"], "b" * 64)
+        self.assertEqual(body["data"]["root_hash"], "b" * 64)
+        self.assertEqual(body["data"]["root_revision"], 1)
+        self.assertEqual(body["data"]["shard_hashes"], {})
         self.assertEqual(body["data"]["chunk_count"], 0)
         self.assertEqual(body["data"]["used_ciphertext_bytes"], 0)
 
@@ -179,15 +181,15 @@ class ServerVaultMigrationTests(unittest.TestCase):
         # Post-commit, the source is read-only — write attempts get 409
         # with vault_migration_in_progress per §H2.
         status, body = self._vault_request(
-            "PUT", f"/api/vaults/{VAULT_ID_BARE}/manifest",
+            "PUT", f"/api/vaults/{VAULT_ID_BARE}/root",
             device_id=device_id, device_token=device_token,
             vault_secret=vault_secret,
             body={
-                "expected_current_revision": 1,
-                "new_revision": 2,
-                "parent_revision": 1,
-                "manifest_hash": "c" * 64,
-                "manifest_ciphertext": base64.b64encode(b"new-manifest").decode("ascii"),
+                "expected_current_root_revision": 1,
+                "new_root_revision": 2,
+                "parent_root_revision": 1,
+                "root_hash": "c" * 64,
+                "root_ciphertext": base64.b64encode(b"new-root").decode("ascii"),
             },
         )
         self.assertEqual(status, 409, body)

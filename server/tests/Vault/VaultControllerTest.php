@@ -35,7 +35,9 @@ final class VaultControllerTest extends TestCase
     private const VAULT_ID        = 'ABCD2345WXYZ';
     private const VAULT_SECRET    = 'super-high-entropy-secret';
     private const HEADER_HASH     = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
-    private const MFST_HASH       = 'eeff00112233445566778899aabbccdd00112233445566778899aabbccddeeff';
+    private const ROOT_HASH       = 'eeff00112233445566778899aabbccdd00112233445566778899aabbccddeeff';
+    private const FOLDER_A        = 'rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa';
+    private const FOLDER_B        = 'rf_v1_bbbbbbbbbbbbbbbbbbbbbbbb';
     private const NOW             = 1714680000;
 
     private const DEVICE_ID    = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6';
@@ -68,16 +70,16 @@ final class VaultControllerTest extends TestCase
             hash('sha256', self::VAULT_SECRET, true),
             "\x01header",
             self::HEADER_HASH,
-            self::MFST_HASH,
+            self::ROOT_HASH,
             self::NOW
         );
-        (new VaultManifestsRepository($this->db))->create(
+        (new VaultRootManifestsRepository($this->db))->create(
             self::VAULT_ID,
             1,
             0,
-            self::MFST_HASH,
-            "\x02manifest",
-            8,
+            self::ROOT_HASH,
+            "\x02root",
+            5,
             self::DEVICE_ID,
             self::NOW
         );
@@ -187,17 +189,36 @@ final class VaultControllerTest extends TestCase
      * For an existing real-AEAD round-trip baseline see
      * ``test_full_aead_round_trip_smoke`` below.
      */
-    private function manifestEnvelope(
-        int $revision,
-        int $parentRevision,
+    private function rootEnvelope(
+        int $rootRevision,
+        int $parentRootRevision,
         string $authorDeviceId = self::DEVICE_ID,
         string $vaultId = self::VAULT_ID,
         string $aeadCiphertextAndTag = "stub-ciphertext"
     ): string {
-        return VaultCrypto::buildManifestEnvelope(
+        return VaultCrypto::buildRootEnvelope(
             $vaultId,
-            $revision,
-            $parentRevision,
+            $rootRevision,
+            $parentRootRevision,
+            $authorDeviceId,
+            str_repeat("\0", 24),
+            $aeadCiphertextAndTag,
+        );
+    }
+
+    private function shardEnvelope(
+        string $remoteFolderId,
+        int $shardRevision,
+        int $parentShardRevision,
+        string $authorDeviceId = self::DEVICE_ID,
+        string $vaultId = self::VAULT_ID,
+        string $aeadCiphertextAndTag = "stub-ciphertext"
+    ): string {
+        return VaultCrypto::buildShardEnvelope(
+            $vaultId,
+            $remoteFolderId,
+            $shardRevision,
+            $parentShardRevision,
             $authorDeviceId,
             str_repeat("\0", 24),
             $aeadCiphertextAndTag,
@@ -298,15 +319,17 @@ final class VaultControllerTest extends TestCase
     public function test_create_happy_path(): void
     {
         $this->db->execute('DELETE FROM vaults');
-        $this->db->execute('DELETE FROM vault_manifests');
+        $this->db->execute('DELETE FROM vault_root_manifests');
+        $this->db->execute('DELETE FROM vault_folder_shards');
+        $this->db->execute('DELETE FROM vault_folder_shard_heads');
 
         $body = [
-            'vault_id'                    => self::VAULT_ID_DASHED,
-            'vault_access_token_hash'     => base64_encode(hash('sha256', 'fresh-secret', true)),
-            'encrypted_header'            => base64_encode("\x01\x02header-bytes"),
-            'header_hash'                 => self::HEADER_HASH,
-            'initial_manifest_ciphertext' => base64_encode("\x03\x04manifest"),
-            'initial_manifest_hash'       => self::MFST_HASH,
+            'vault_id'                => self::VAULT_ID_DASHED,
+            'vault_access_token_hash' => base64_encode(hash('sha256', 'fresh-secret', true)),
+            'encrypted_header'        => base64_encode("\x01\x02header-bytes"),
+            'header_hash'             => self::HEADER_HASH,
+            'initial_root_ciphertext' => base64_encode("\x03\x04root"),
+            'initial_root_hash'       => self::ROOT_HASH,
         ];
 
         $res = $this->invoke(fn() => VaultController::create(
@@ -317,6 +340,7 @@ final class VaultControllerTest extends TestCase
         self::assertTrue($res['json']['ok']);
         self::assertSame(self::VAULT_ID_DASHED, $res['json']['data']['vault_id']);
         self::assertSame(1, $res['json']['data']['header_revision']);
+        self::assertSame(1, $res['json']['data']['root_revision']);
         self::assertSame(1073741824, $res['json']['data']['quota_ciphertext_bytes']);
         self::assertSame(0, $res['json']['data']['used_ciphertext_bytes']);
     }
@@ -324,12 +348,12 @@ final class VaultControllerTest extends TestCase
     public function test_create_returns_409_vault_already_exists(): void
     {
         $body = [
-            'vault_id'                    => self::VAULT_ID_DASHED,
-            'vault_access_token_hash'     => base64_encode(hash('sha256', 'x', true)),
-            'encrypted_header'            => base64_encode('h'),
-            'header_hash'                 => self::HEADER_HASH,
-            'initial_manifest_ciphertext' => base64_encode('m'),
-            'initial_manifest_hash'       => self::MFST_HASH,
+            'vault_id'                => self::VAULT_ID_DASHED,
+            'vault_access_token_hash' => base64_encode(hash('sha256', 'x', true)),
+            'encrypted_header'        => base64_encode('h'),
+            'header_hash'             => self::HEADER_HASH,
+            'initial_root_ciphertext' => base64_encode('r'),
+            'initial_root_hash'       => self::ROOT_HASH,
         ];
 
         try {
@@ -345,12 +369,12 @@ final class VaultControllerTest extends TestCase
     public function test_create_400_on_invalid_vault_id(): void
     {
         $body = [
-            'vault_id'                    => 'not-a-vault-id',
-            'vault_access_token_hash'     => base64_encode(hash('sha256', 'x', true)),
-            'encrypted_header'            => base64_encode('h'),
-            'header_hash'                 => self::HEADER_HASH,
-            'initial_manifest_ciphertext' => base64_encode('m'),
-            'initial_manifest_hash'       => self::MFST_HASH,
+            'vault_id'                => 'not-a-vault-id',
+            'vault_access_token_hash' => base64_encode(hash('sha256', 'x', true)),
+            'encrypted_header'        => base64_encode('h'),
+            'header_hash'             => self::HEADER_HASH,
+            'initial_root_ciphertext' => base64_encode('r'),
+            'initial_root_hash'       => self::ROOT_HASH,
         ];
 
         $this->expectException(VaultInvalidRequestError::class);
@@ -476,120 +500,261 @@ final class VaultControllerTest extends TestCase
     }
 
     // ===================================================================
-    //  6.4 GET /api/vaults/{id}/manifest
+    //  6.4 GET /api/vaults/{id}/root
     // ===================================================================
 
-    public function test_getManifest_happy_path(): void
+    public function test_getRoot_happy_path(): void
     {
-        $res = $this->invoke(fn() => VaultController::getManifest(
+        $res = $this->invoke(fn() => VaultController::getRoot(
             $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID])
         ));
 
         self::assertSame(200, $res['status']);
-        self::assertSame(1, $res['json']['data']['revision']);
-        self::assertSame(0, $res['json']['data']['parent_revision']);
-        self::assertSame(self::MFST_HASH, $res['json']['data']['manifest_hash']);
-        self::assertSame(base64_encode("\x02manifest"), $res['json']['data']['manifest_ciphertext']);
-        self::assertSame(8, $res['json']['data']['manifest_size']);
+        self::assertSame(1, $res['json']['data']['root_revision']);
+        self::assertSame(0, $res['json']['data']['parent_root_revision']);
+        self::assertSame(self::ROOT_HASH, $res['json']['data']['root_hash']);
+        self::assertSame(base64_encode("\x02root"), $res['json']['data']['root_ciphertext']);
+        self::assertSame(5, $res['json']['data']['root_size']);
     }
 
-    public function test_getManifest_404_unknown_vault(): void
+    public function test_getRoot_404_unknown_vault(): void
     {
         $this->expectException(VaultNotFoundError::class);
-        VaultController::getManifest($this->db, $this->ctx('GET', ['vault_id' => 'AAAAAAAAAAAA']));
+        VaultController::getRoot($this->db, $this->ctx('GET', ['vault_id' => 'AAAAAAAAAAAA']));
     }
 
     // ===================================================================
-    //  6.6 PUT /api/vaults/{id}/manifest (CAS, A1 conflict)
+    //  6.6 PUT /api/vaults/{id}/root (CAS, §A1-root conflict)
     // ===================================================================
 
-    public function test_putManifest_happy_path_advances_head(): void
+    public function test_putRoot_happy_path_advances_head(): void
     {
         $newHash = str_repeat('1', 64);
         $body = [
-            'expected_current_revision' => 1,
-            'new_revision'              => 2,
-            'parent_revision'           => 1,
-            'manifest_hash'             => $newHash,
-            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
+            'expected_current_root_revision' => 1,
+            'new_root_revision'              => 2,
+            'parent_root_revision'           => 1,
+            'root_hash'                      => $newHash,
+            'root_ciphertext'                => base64_encode($this->rootEnvelope(2, 1)),
         ];
 
-        $res = $this->invoke(fn() => VaultController::putManifest(
+        $res = $this->invoke(fn() => VaultController::putRoot(
             $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
         ));
 
         self::assertSame(200, $res['status']);
-        self::assertSame(2, $res['json']['data']['revision']);
-        self::assertSame($newHash, $res['json']['data']['manifest_hash']);
+        self::assertSame(2, $res['json']['data']['root_revision']);
+        self::assertSame($newHash, $res['json']['data']['root_hash']);
     }
 
-    public function test_putManifest_400_when_envelope_revision_disagrees(): void
+    public function test_putRoot_422_when_envelope_revision_disagrees(): void
     {
-        // Body says revision=2 / parent=1; envelope says revision=99 / parent=98.
         $body = [
-            'expected_current_revision' => 1,
-            'new_revision'              => 2,
-            'parent_revision'           => 1,
-            'manifest_hash'             => str_repeat('1', 64),
-            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(99, 98)),
+            'expected_current_root_revision' => 1,
+            'new_root_revision'              => 2,
+            'parent_root_revision'           => 1,
+            'root_hash'                      => str_repeat('1', 64),
+            'root_ciphertext'                => base64_encode($this->rootEnvelope(99, 98)),
         ];
         try {
-            VaultController::putManifest(
+            VaultController::putRoot(
                 $this->db,
                 $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
             );
-            self::fail('expected VaultManifestTamperedError');
-        } catch (VaultManifestTamperedError $e) {
+            self::fail('expected VaultRootTamperedError');
+        } catch (VaultRootTamperedError $e) {
             self::assertSame(422, $e->status);
-            self::assertSame('vault_manifest_tampered', $e->errorCode);
+            self::assertSame('vault_root_tampered', $e->errorCode);
         }
     }
 
-    public function test_putManifest_400_when_envelope_author_disagrees(): void
+    public function test_putRoot_422_when_envelope_author_disagrees(): void
     {
-        // Envelope's author_device_id differs from the X-Device-ID header.
         $body = [
-            'expected_current_revision' => 1,
-            'new_revision'              => 2,
-            'parent_revision'           => 1,
-            'manifest_hash'             => str_repeat('1', 64),
-            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(
+            'expected_current_root_revision' => 1,
+            'new_root_revision'              => 2,
+            'parent_root_revision'           => 1,
+            'root_hash'                      => str_repeat('1', 64),
+            'root_ciphertext'                => base64_encode($this->rootEnvelope(
                 2, 1, str_repeat('f', 32)
             )),
         ];
         try {
-            VaultController::putManifest(
+            VaultController::putRoot(
                 $this->db,
                 $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
             );
-            self::fail('expected VaultManifestTamperedError');
-        } catch (VaultManifestTamperedError $e) {
+            self::fail('expected VaultRootTamperedError');
+        } catch (VaultRootTamperedError $e) {
             self::assertSame(422, $e->status);
             self::assertStringContainsString('author_device_id', $e->details['reason']);
         }
     }
 
-    public function test_putManifest_409_a1_conflict_payload(): void
+    public function test_putRoot_409_a1_root_conflict_payload(): void
     {
         $body = [
-            'expected_current_revision' => 99,
-            'new_revision'              => 100,
-            'parent_revision'           => 99,
-            'manifest_hash'             => str_repeat('2', 64),
-            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(100, 99)),
+            'expected_current_root_revision' => 99,
+            'new_root_revision'              => 100,
+            'parent_root_revision'           => 99,
+            'root_hash'                      => str_repeat('2', 64),
+            'root_ciphertext'                => base64_encode($this->rootEnvelope(100, 99)),
         ];
 
         try {
-            VaultController::putManifest($this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body));
-            self::fail('expected VaultManifestConflictError with A1 payload');
-        } catch (VaultManifestConflictError $e) {
-            self::assertSame('vault_manifest_conflict', $e->errorCode);
-            self::assertSame(1, $e->details['current_revision']);
-            self::assertSame(99, $e->details['expected_revision']);
-            self::assertSame(self::MFST_HASH, $e->details['current_manifest_hash']);
-            self::assertSame(base64_encode("\x02manifest"), $e->details['current_manifest_ciphertext']);
-            self::assertSame(8, $e->details['current_manifest_size']);
+            VaultController::putRoot($this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body));
+            self::fail('expected VaultRootConflictError with A1-root payload');
+        } catch (VaultRootConflictError $e) {
+            self::assertSame('vault_root_conflict', $e->errorCode);
+            self::assertSame(1, $e->details['current_root_revision']);
+            self::assertSame(99, $e->details['expected_root_revision']);
+            self::assertSame(self::ROOT_HASH, $e->details['current_root_hash']);
+            self::assertSame(base64_encode("\x02root"), $e->details['current_root_ciphertext']);
+            self::assertSame(5, $e->details['current_root_size']);
         }
+    }
+
+    // ===================================================================
+    //  6.5 GET /api/vaults/{id}/folders/{folder_id}/shard
+    //  6.7 PUT /api/vaults/{id}/folders/{folder_id}/shard
+    //  6.8 PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root
+    // ===================================================================
+
+    public function test_putShardWithRoot_genesis_shard_for_new_folder(): void
+    {
+        $shardHash = str_repeat('a', 64);
+        $rootHash  = str_repeat('b', 64);
+        $body = [
+            'shard' => [
+                'expected_current_shard_revision' => 0,
+                'new_shard_revision'              => 1,
+                'parent_shard_revision'           => 0,
+                'shard_hash'                      => $shardHash,
+                'shard_ciphertext'                => base64_encode($this->shardEnvelope(self::FOLDER_A, 1, 0)),
+            ],
+            'root' => [
+                'expected_current_root_revision' => 1,
+                'new_root_revision'              => 2,
+                'parent_root_revision'           => 1,
+                'root_hash'                      => $rootHash,
+                'root_ciphertext'                => base64_encode($this->rootEnvelope(2, 1)),
+            ],
+        ];
+
+        $res = $this->invoke(fn() => VaultController::putShardWithRoot(
+            $this->db,
+            $this->jctx('PUT', [
+                'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A,
+            ], $body),
+        ));
+
+        self::assertSame(200, $res['status']);
+        self::assertSame(1, $res['json']['data']['shard_revision']);
+        self::assertSame(2, $res['json']['data']['root_revision']);
+        self::assertSame($shardHash, $res['json']['data']['shard_hash']);
+        self::assertSame($rootHash, $res['json']['data']['root_hash']);
+    }
+
+    public function test_getShard_after_atomic_publish(): void
+    {
+        $this->seedShard(self::FOLDER_A, 1, 0, 'SHARD-CONTENT');
+        $res = $this->invoke(fn() => VaultController::getShard(
+            $this->db,
+            $this->ctx('GET', ['vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A]),
+        ));
+        self::assertSame(200, $res['status']);
+        self::assertSame(self::FOLDER_A, $res['json']['data']['remote_folder_id']);
+        self::assertSame(1, $res['json']['data']['shard_revision']);
+        self::assertSame(base64_encode('SHARD-CONTENT'), $res['json']['data']['shard_ciphertext']);
+    }
+
+    public function test_getShard_404_unknown_folder(): void
+    {
+        $this->expectException(VaultNotFoundError::class);
+        VaultController::getShard($this->db, $this->ctx('GET', [
+            'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_B,
+        ]));
+    }
+
+    public function test_putShardWithRoot_409_shard_root_conflict_when_both_stale(): void
+    {
+        // Advance shard + root out-of-band so the request's expectations
+        // are stale on both sides.
+        $this->seedShard(self::FOLDER_A, 1, 0, 'EXISTING');
+        (new VaultRootManifestsRepository($this->db))->tryCAS(
+            self::VAULT_ID, 1, 2, str_repeat('z', 64), 'NEWROOT', 7, self::DEVICE_ID, self::NOW + 5,
+        );
+
+        $body = [
+            'shard' => [
+                'expected_current_shard_revision' => 0,
+                'new_shard_revision'              => 1,
+                'parent_shard_revision'           => 0,
+                'shard_hash'                      => str_repeat('a', 64),
+                'shard_ciphertext'                => base64_encode($this->shardEnvelope(self::FOLDER_A, 1, 0)),
+            ],
+            'root' => [
+                'expected_current_root_revision' => 1,
+                'new_root_revision'              => 2,
+                'parent_root_revision'           => 1,
+                'root_hash'                      => str_repeat('b', 64),
+                'root_ciphertext'                => base64_encode($this->rootEnvelope(2, 1)),
+            ],
+        ];
+
+        try {
+            VaultController::putShardWithRoot(
+                $this->db,
+                $this->jctx('PUT', [
+                    'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A,
+                ], $body),
+            );
+            self::fail('expected VaultShardRootConflictError');
+        } catch (VaultShardRootConflictError $e) {
+            self::assertSame('vault_shard_root_conflict', $e->errorCode);
+            self::assertSame(self::FOLDER_A, $e->details['remote_folder_id']);
+            self::assertSame(1, $e->details['current_shard_revision']);
+            self::assertSame(2, $e->details['current_root_revision']);
+        }
+    }
+
+    public function test_putShard_409_shard_conflict_per_folder_scoped(): void
+    {
+        $this->seedShard(self::FOLDER_A, 1, 0, 'CURRENT');
+        $body = [
+            'expected_current_shard_revision' => 0,  // stale
+            'new_shard_revision'              => 1,
+            'parent_shard_revision'           => 0,
+            'shard_hash'                      => str_repeat('a', 64),
+            'shard_ciphertext'                => base64_encode($this->shardEnvelope(self::FOLDER_A, 1, 0)),
+        ];
+        try {
+            VaultController::putShard(
+                $this->db,
+                $this->jctx('PUT', [
+                    'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A,
+                ], $body),
+            );
+            self::fail('expected VaultShardConflictError');
+        } catch (VaultShardConflictError $e) {
+            self::assertSame('vault_shard_conflict', $e->errorCode);
+            self::assertSame(self::FOLDER_A, $e->details['remote_folder_id']);
+            self::assertSame(1, $e->details['current_shard_revision']);
+        }
+    }
+
+    /**
+     * Seed a current shard for the given folder via the repo so tests can
+     * exercise the read endpoints without going through the atomic publish
+     * path (which would also bump the root revision).
+     */
+    private function seedShard(string $folderId, int $rev, int $parent, string $cipher): void
+    {
+        $hash = hash('sha256', $cipher);
+        (new VaultFolderShardsRepository($this->db))->tryCAS(
+            self::VAULT_ID, $folderId, $parent, $rev, $hash, $cipher, strlen($cipher),
+            self::DEVICE_ID, self::NOW + 1,
+        );
     }
 
     // ===================================================================
@@ -763,7 +928,7 @@ final class VaultControllerTest extends TestCase
         $res = $this->invoke(fn() => VaultController::gcPlan(
             $this->db,
             $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
-                'manifest_revision'   => 1,
+                'root_revision'       => 1,
                 'encrypted_gc_auth'   => 'opaque',
                 'candidate_chunk_ids' => [$cid],
             ])
@@ -775,11 +940,11 @@ final class VaultControllerTest extends TestCase
         self::assertNotEmpty($res['json']['data']['plan_id']);
     }
 
-    public function test_gcPlan_400_on_unknown_manifest_revision(): void
+    public function test_gcPlan_400_on_unknown_root_revision(): void
     {
         $this->expectException(VaultInvalidRequestError::class);
         VaultController::gcPlan($this->db, $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
-            'manifest_revision'   => 9999,
+            'root_revision'       => 9999,
             'encrypted_gc_auth'   => 'opaque',
             'candidate_chunk_ids' => [],
         ]));
@@ -798,7 +963,7 @@ final class VaultControllerTest extends TestCase
         $planRes = $this->invoke(fn() => VaultController::gcPlan(
             $this->db,
             $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
-                'manifest_revision'   => 1,
+                'root_revision'       => 1,
                 'encrypted_gc_auth'   => 'x',
                 'candidate_chunk_ids' => [$cid],
             ])
@@ -836,7 +1001,7 @@ final class VaultControllerTest extends TestCase
         $planRes = $this->invoke(fn() => VaultController::gcPlan(
             $this->db,
             $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
-                'manifest_revision'   => 1,
+                'root_revision'       => 1,
                 'encrypted_gc_auth'   => 'x',
                 'candidate_chunk_ids' => [],
             ])
@@ -911,18 +1076,18 @@ final class VaultControllerTest extends TestCase
         }
     }
 
-    public function test_putManifest_forbidden_for_read_only(): void
+    public function test_putRoot_forbidden_for_read_only(): void
     {
         $this->demoteCaller('read-only');
         $body = [
-            'expected_current_revision' => 1,
-            'new_revision'              => 2,
-            'parent_revision'           => 1,
-            'manifest_hash'             => str_repeat('1', 64),
-            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
+            'expected_current_root_revision' => 1,
+            'new_root_revision'              => 2,
+            'parent_root_revision'           => 1,
+            'root_hash'                      => str_repeat('1', 64),
+            'root_ciphertext'                => base64_encode($this->rootEnvelope(2, 1)),
         ];
         try {
-            VaultController::putManifest(
+            VaultController::putRoot(
                 $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
             );
             self::fail('expected VaultAccessDeniedError');
@@ -948,17 +1113,17 @@ final class VaultControllerTest extends TestCase
         }
     }
 
-    public function test_putManifest_works_for_browse_upload_role(): void
+    public function test_putRoot_works_for_browse_upload_role(): void
     {
         $this->demoteCaller('browse-upload');
         $body = [
-            'expected_current_revision' => 1,
-            'new_revision'              => 2,
-            'parent_revision'           => 1,
-            'manifest_hash'             => str_repeat('1', 64),
-            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
+            'expected_current_root_revision' => 1,
+            'new_root_revision'              => 2,
+            'parent_root_revision'           => 1,
+            'root_hash'                      => str_repeat('1', 64),
+            'root_ciphertext'                => base64_encode($this->rootEnvelope(2, 1)),
         ];
-        $res = $this->invoke(fn() => VaultController::putManifest(
+        $res = $this->invoke(fn() => VaultController::putRoot(
             $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
         ));
         self::assertSame(200, $res['status']);
@@ -971,7 +1136,7 @@ final class VaultControllerTest extends TestCase
             VaultController::gcPlan(
                 $this->db,
                 $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
-                    'manifest_revision'   => 1,
+                    'root_revision'       => 1,
                     'candidate_chunk_ids' => [],
                 ])
             );
@@ -994,14 +1159,14 @@ final class VaultControllerTest extends TestCase
             ]
         );
         $body = [
-            'expected_current_revision' => 1,
-            'new_revision'              => 2,
-            'parent_revision'           => 1,
-            'manifest_hash'             => str_repeat('1', 64),
-            'manifest_ciphertext'       => base64_encode($this->manifestEnvelope(2, 1)),
+            'expected_current_root_revision' => 1,
+            'new_root_revision'              => 2,
+            'parent_root_revision'           => 1,
+            'root_hash'                      => str_repeat('1', 64),
+            'root_ciphertext'                => base64_encode($this->rootEnvelope(2, 1)),
         ];
         try {
-            VaultController::putManifest(
+            VaultController::putRoot(
                 $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
             );
             self::fail('expected VaultAccessDeniedError');
@@ -1013,17 +1178,19 @@ final class VaultControllerTest extends TestCase
 
     public function test_create_auto_inserts_admin_grant_for_creator(): void
     {
-        $this->db->execute('DELETE FROM vault_manifests');
+        $this->db->execute('DELETE FROM vault_root_manifests');
+        $this->db->execute('DELETE FROM vault_folder_shards');
+        $this->db->execute('DELETE FROM vault_folder_shard_heads');
         $this->db->execute('DELETE FROM vault_device_grants');
         $this->db->execute('DELETE FROM vaults');
 
         $body = [
-            'vault_id'                    => self::VAULT_ID_DASHED,
-            'vault_access_token_hash'     => base64_encode(hash('sha256', 'fresh-secret', true)),
-            'encrypted_header'            => base64_encode('header'),
-            'header_hash'                 => self::HEADER_HASH,
-            'initial_manifest_ciphertext' => base64_encode('manifest'),
-            'initial_manifest_hash'       => self::MFST_HASH,
+            'vault_id'                => self::VAULT_ID_DASHED,
+            'vault_access_token_hash' => base64_encode(hash('sha256', 'fresh-secret', true)),
+            'encrypted_header'        => base64_encode('header'),
+            'header_hash'             => self::HEADER_HASH,
+            'initial_root_ciphertext' => base64_encode('root'),
+            'initial_root_hash'       => self::ROOT_HASH,
         ];
         $this->invoke(fn() => VaultController::create(
             $this->db, $this->jctx('POST', [], $body)

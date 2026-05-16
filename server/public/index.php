@@ -34,7 +34,8 @@ require_once __DIR__ . '/../src/Repositories/ChunkRepository.php';
 require_once __DIR__ . '/../src/Repositories/FasttrackRepository.php';
 require_once __DIR__ . '/../src/Repositories/PingRateRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultsRepository.php';
-require_once __DIR__ . '/../src/Repositories/VaultManifestsRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultRootManifestsRepository.php';
+require_once __DIR__ . '/../src/Repositories/VaultFolderShardsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultChunksRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultGcJobsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultMigrationIntentsRepository.php';
@@ -197,14 +198,20 @@ $router->vaultGet('/api/vaults/{vault_id}/header', function (RequestContext $ctx
 $router->vaultPut('/api/vaults/{vault_id}/header', function (RequestContext $ctx) use ($db) {
     VaultController::putHeader($db, $ctx);
 });
-$router->vaultGet('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
-    VaultController::getManifest($db, $ctx);
+$router->vaultGet('/api/vaults/{vault_id}/root', function (RequestContext $ctx) use ($db) {
+    VaultController::getRoot($db, $ctx);
 });
-$router->vaultGet('/api/vaults/{vault_id}/manifest/revisions/{revision}', function (RequestContext $ctx) use ($db) {
-    VaultController::getManifestRevision($db, $ctx);
+$router->vaultPut('/api/vaults/{vault_id}/root', function (RequestContext $ctx) use ($db) {
+    VaultController::putRoot($db, $ctx);
 });
-$router->vaultPut('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
-    VaultController::putManifest($db, $ctx);
+$router->vaultGet('/api/vaults/{vault_id}/folders/{folder_id}/shard', function (RequestContext $ctx) use ($db) {
+    VaultController::getShard($db, $ctx);
+});
+$router->vaultPut('/api/vaults/{vault_id}/folders/{folder_id}/shard', function (RequestContext $ctx) use ($db) {
+    VaultController::putShard($db, $ctx);
+});
+$router->vaultPut('/api/vaults/{vault_id}/folders/{folder_id}/shard-with-root', function (RequestContext $ctx) use ($db) {
+    VaultController::putShardWithRoot($db, $ctx);
 });
 $router->vaultPut('/api/vaults/{vault_id}/chunks/{chunk_id}', function (RequestContext $ctx) use ($db) {
     VaultController::putChunk($db, $ctx);

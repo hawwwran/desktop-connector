@@ -39,7 +39,7 @@ final class VaultGrantsControllerTest extends TestCase
     private const CLAIMANT_TOKEN = 'claimant-bearer-token';
     private const NON_ADMIN_TOKEN = 'non-admin-bearer-token';
     private const HEADER_HASH = 'aabbccdd11223344aabbccdd11223344aabbccdd11223344aabbccdd11223344';
-    private const MFST_HASH = 'eeff00112233445566778899aabbccdd00112233445566778899aabbccddeeff';
+    private const ROOT_HASH   = 'eeff00112233445566778899aabbccdd00112233445566778899aabbccddeeff';
     private const NOW = 1714680000;
 
     protected function setUp(): void
@@ -61,11 +61,11 @@ final class VaultGrantsControllerTest extends TestCase
             hash('sha256', self::VAULT_SECRET, true),
             "\x01header",
             self::HEADER_HASH,
-            self::MFST_HASH,
+            self::ROOT_HASH,
             self::NOW
         );
-        (new VaultManifestsRepository($this->db))->create(
-            self::VAULT_ID, 1, 0, self::MFST_HASH, "\x02manifest", 8,
+        (new VaultRootManifestsRepository($this->db))->create(
+            self::VAULT_ID, 1, 0, self::ROOT_HASH, "\x02root", 5,
             self::ADMIN_DEVICE, self::NOW,
         );
 

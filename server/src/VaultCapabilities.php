@@ -10,8 +10,8 @@
  *
  *   - The aggregate `vault_v1` bit flips on **only** when every T1
  *     mandatory sub-bit is present (per D12: `vault_create_v1`,
- *     `vault_header_v1`, `vault_manifest_cas_v1`, `vault_chunk_v1`,
- *     `vault_gc_v1`). Clients gating on `vault_v1` get a complete v1
+ *     `vault_header_v1`, `vault_root_cas_v1`, `vault_shard_cas_v1`,
+ *     `vault_chunk_v1`, `vault_gc_v1`). Clients gating on `vault_v1` get a complete v1
  *     surface; clients gating on a finer bit get the corresponding
  *     feature without depending on later phases.
  *
@@ -32,7 +32,8 @@ class VaultCapabilities
     private const T1_BITS = [
         'vault_create_v1',
         'vault_header_v1',
-        'vault_manifest_cas_v1',
+        'vault_root_cas_v1',
+        'vault_shard_cas_v1',
         'vault_chunk_v1',
         'vault_gc_v1',
     ];

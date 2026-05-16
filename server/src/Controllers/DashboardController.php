@@ -147,7 +147,7 @@ class DashboardController
         foreach ($vaults as $v) {
             $vaultId = self::formatVaultId((string)$v['vault_id']);
             $fullVaultId = htmlspecialchars((string)$v['vault_id']);
-            $rev = (int)$v['current_manifest_revision'];
+            $rev = (int)$v['current_root_revision'];
             $chunksCount = (int)$v['chunk_count'];
             $used = self::formatBytes((int)$v['used_ciphertext_bytes']);
             $quota = self::formatBytes((int)$v['quota_ciphertext_bytes']);

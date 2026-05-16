@@ -804,8 +804,8 @@ class ServerProtocolContractTests(unittest.TestCase):
                 "vault_access_token_hash": base64.b64encode(os.urandom(32)).decode("ascii"),
                 "encrypted_header": base64.b64encode(b"header").decode("ascii"),
                 "header_hash": "a" * 64,
-                "initial_manifest_ciphertext": base64.b64encode(b"manifest").decode("ascii"),
-                "initial_manifest_hash": "b" * 64,
+                "initial_root_ciphertext": base64.b64encode(b"root").decode("ascii"),
+                "initial_root_hash": "b" * 64,
             },
         )
         self.assertEqual(status, 201)

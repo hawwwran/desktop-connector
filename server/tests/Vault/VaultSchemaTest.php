@@ -45,17 +45,23 @@ final class VaultSchemaTest extends TestCase
     public function test_live_vault_tables_still_exist(): void
     {
         // Sentinel: the F-S16 cleanup must NOT take down any live
-        // tables. The set below is the production schema.
+        // tables. The set below is the production schema. Phase B
+        // (2026-05-16) replaced ``vault_manifests`` with
+        // ``vault_root_manifests`` + ``vault_folder_shards`` +
+        // ``vault_folder_shard_heads`` per the manifest-sharding work
+        // (use case B); the legacy table is no longer expected.
         $tables = $this->existingTables();
         $expected = [
             'vault_access_secret_rotations',
             'vault_chunks',
             'vault_device_grants',
+            'vault_folder_shard_heads',
+            'vault_folder_shards',
             'vault_gc_jobs',
             'vault_join_requests',
-            'vault_manifests',
             'vault_migration_intents',
             'vault_op_log_segments',
+            'vault_root_manifests',
             'vaults',
         ];
         foreach ($expected as $table) {
@@ -64,6 +70,10 @@ final class VaultSchemaTest extends TestCase
                 "F-S16 reaper must not have dropped {$table}"
             );
         }
+        self::assertNotContains(
+            'vault_manifests', $tables,
+            'legacy single-manifest history table should be gone post Phase B',
+        );
     }
 
     public function test_dead_schema_drop_is_idempotent_when_table_already_absent(): void

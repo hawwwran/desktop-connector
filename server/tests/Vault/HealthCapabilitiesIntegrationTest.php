@@ -79,7 +79,8 @@ final class HealthCapabilitiesIntegrationTest extends TestCase
         VaultCapabilities::setDisabled([
             'vault_create_v1',
             'vault_header_v1',
-            'vault_manifest_cas_v1',
+            'vault_root_cas_v1',
+            'vault_shard_cas_v1',
             'vault_chunk_v1',
             'vault_gc_v1',
             'vault_soft_delete_v1',

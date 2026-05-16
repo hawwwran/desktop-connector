@@ -23,10 +23,14 @@ class VaultController
      * Hard size caps from spec §10. Chunk envelopes are 8 MiB plaintext
      * + AEAD tag + envelope metadata; the 9 MiB ceiling absorbs
      * formatter-side variation while still failing fast on attackers
-     * trying to OOM the relay. Manifest envelopes are 16 MiB.
+     * trying to OOM the relay. The root envelope is metadata-only
+     * (4 MiB cap absorbs ≈ 50 k folder pointers before pressure);
+     * folder shards carry per-folder file entries (16 MiB cap, same
+     * as the pre-sharding single-manifest ceiling).
      */
     public const MAX_CHUNK_BYTES    = 9 * 1024 * 1024;
-    public const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
+    public const MAX_ROOT_BYTES     = 4 * 1024 * 1024;
+    public const MAX_SHARD_BYTES    = 16 * 1024 * 1024;
     public const MAX_HEADER_BYTES   = 64 * 1024;
     public const SUPPORTED_FORMAT_VERSION = 1;
 
@@ -131,9 +135,9 @@ class VaultController
         self::guardEnvelopeSize('header', strlen($encHeader), self::MAX_HEADER_BYTES);
         $headerHash = self::vaultRequireNonEmptyString($body, 'header_hash');
 
-        $manifestCipher = self::decodeBase64Field($body, 'initial_manifest_ciphertext');
-        self::guardEnvelopeSize('manifest', strlen($manifestCipher), self::MAX_MANIFEST_BYTES);
-        $manifestHash = self::vaultRequireNonEmptyString($body, 'initial_manifest_hash');
+        $rootCipher = self::decodeBase64Field($body, 'initial_root_ciphertext');
+        self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
+        $rootHash = self::vaultRequireNonEmptyString($body, 'initial_root_hash');
 
         // F-S11: persist the recovery-derived purge_token_hash so the
         // T14 hard-purge path can authenticate `purge_secret`. Optional
@@ -144,17 +148,17 @@ class VaultController
         }
 
         // T9.3 — relay-to-relay migration bootstraps the target at the
-        // source's revision so manifest envelope AAD (which carries
-        // revision/parent_revision) round-trips verbatim. Defaults to 1
-        // for the standard create path.
-        $initialManifestRevision = isset($body['initial_manifest_revision'])
-            ? self::vaultRequireInt($body, 'initial_manifest_revision') : 1;
+        // source's revision so root envelope AAD (which carries
+        // root_revision/parent_root_revision) round-trips verbatim.
+        // Defaults to 1 for the standard create path.
+        $initialRootRevision = isset($body['initial_root_revision'])
+            ? self::vaultRequireInt($body, 'initial_root_revision') : 1;
         $initialHeaderRevision = isset($body['initial_header_revision'])
             ? self::vaultRequireInt($body, 'initial_header_revision') : 1;
-        if ($initialManifestRevision < 1 || $initialHeaderRevision < 1) {
+        if ($initialRootRevision < 1 || $initialHeaderRevision < 1) {
             throw new VaultInvalidRequestError(
                 'initial_*_revision must be >= 1',
-                'initial_manifest_revision'
+                'initial_root_revision'
             );
         }
 
@@ -165,18 +169,18 @@ class VaultController
 
         $now = time();
         $vaultsRepo->create(
-            $vaultId, $tokenHash, $encHeader, $headerHash, $manifestHash, $now,
-            $initialHeaderRevision, $initialManifestRevision, $purgeTokenHash,
+            $vaultId, $tokenHash, $encHeader, $headerHash, $rootHash, $now,
+            $initialHeaderRevision, $initialRootRevision, $purgeTokenHash,
         );
 
-        $manifestsRepo = new VaultManifestsRepository($db);
-        $manifestsRepo->create(
+        $rootRepo = new VaultRootManifestsRepository($db);
+        $rootRepo->create(
             $vaultId,
-            $initialManifestRevision,
-            $initialManifestRevision - 1,
-            $manifestHash,
-            $manifestCipher,
-            strlen($manifestCipher),
+            $initialRootRevision,
+            $initialRootRevision - 1,
+            $rootHash,
+            $rootCipher,
+            strlen($rootCipher),
             $deviceId,
             $now
         );
@@ -209,7 +213,7 @@ class VaultController
             'data' => [
                 'vault_id'               => self::dashedVaultId($vaultId),
                 'header_revision'        => $initialHeaderRevision,
-                'manifest_revision'      => $initialManifestRevision,
+                'root_revision'          => $initialRootRevision,
                 'quota_ciphertext_bytes' => $quotaBytes,
                 'used_ciphertext_bytes'  => 0,
                 'created_at'             => self::ts($now),
@@ -312,18 +316,18 @@ class VaultController
     }
 
     // ===================================================================
-    //  6.4  GET /api/vaults/{vault_id}/manifest
+    //  6.4  GET /api/vaults/{vault_id}/root
     // ===================================================================
 
-    public static function getManifest(Database $db, RequestContext $ctx): void
+    public static function getRoot(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
-        $manifestsRepo = new VaultManifestsRepository($db);
-        $current = $manifestsRepo->getCurrent($vaultId);
+        $rootRepo = new VaultRootManifestsRepository($db);
+        $current = $rootRepo->getCurrent($vaultId);
         if ($current === null) {
-            // A vault that exists but has no manifest is malformed; surface
+            // A vault that exists but has no root is malformed; surface
             // as not-found rather than 500.
             throw new VaultNotFoundError($vaultId);
         }
@@ -331,53 +335,49 @@ class VaultController
         Router::json([
             'ok' => true,
             'data' => [
-                'revision'            => (int)$current['revision'],
-                'parent_revision'     => (int)$current['parent_revision'],
-                'manifest_hash'       => (string)$current['manifest_hash'],
-                'manifest_ciphertext' => base64_encode((string)$current['manifest_ciphertext']),
-                'manifest_size'       => (int)$current['manifest_size'],
+                'root_revision'        => (int)$current['root_revision'],
+                'parent_root_revision' => (int)$current['parent_root_revision'],
+                'root_hash'            => (string)$current['root_hash'],
+                'root_ciphertext'      => base64_encode((string)$current['root_ciphertext']),
+                'root_size'            => (int)$current['root_size'],
             ],
         ], 200);
     }
 
     // ===================================================================
-    //  6.5  GET /api/vaults/{vault_id}/manifest/revisions/{revision}
+    //  6.5  GET /api/vaults/{vault_id}/folders/{folder_id}/shard
     // ===================================================================
 
-    public static function getManifestRevision(Database $db, RequestContext $ctx): void
+    public static function getShard(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
-        $revisionRaw = (string) ($ctx->params['revision'] ?? '');
-        if ($revisionRaw === '' || !ctype_digit($revisionRaw)) {
-            throw new VaultInvalidRequestError(
-                'revision must be a non-negative integer', 'revision',
-            );
-        }
-        $revision = (int) $revisionRaw;
+        $folderId = self::normalizeRemoteFolderId((string)($ctx->params['folder_id'] ?? ''));
         VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
-        $manifestsRepo = new VaultManifestsRepository($db);
-        $row = $manifestsRepo->getByRevision($vaultId, $revision);
-        if ($row === null) {
-            throw new VaultNotFoundError("manifest revision {$revision} for {$vaultId}");
+        $shardsRepo = new VaultFolderShardsRepository($db);
+        $current = $shardsRepo->getCurrent($vaultId, $folderId);
+        if ($current === null) {
+            throw new VaultNotFoundError("shard {$folderId} for {$vaultId}");
         }
+
         Router::json([
             'ok' => true,
             'data' => [
-                'revision'            => (int) $row['revision'],
-                'parent_revision'     => (int) $row['parent_revision'],
-                'manifest_hash'       => (string) $row['manifest_hash'],
-                'manifest_ciphertext' => base64_encode((string) $row['manifest_ciphertext']),
-                'manifest_size'       => (int) $row['manifest_size'],
+                'remote_folder_id'      => (string)$current['remote_folder_id'],
+                'shard_revision'        => (int)$current['shard_revision'],
+                'parent_shard_revision' => (int)$current['parent_shard_revision'],
+                'shard_hash'            => (string)$current['shard_hash'],
+                'shard_ciphertext'      => base64_encode((string)$current['shard_ciphertext']),
+                'shard_size'            => (int)$current['shard_size'],
             ],
         ], 200);
     }
 
     // ===================================================================
-    //  6.6  PUT /api/vaults/{vault_id}/manifest (CAS, A1 conflict)
+    //  6.6  PUT /api/vaults/{vault_id}/root (CAS, §A1-root conflict)
     // ===================================================================
 
-    public static function putManifest(Database $db, RequestContext $ctx): void
+    public static function putRoot(Database $db, RequestContext $ctx): void
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
@@ -385,97 +385,387 @@ class VaultController
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
-        // F-S04: vault routes must use vault-shaped errors. Wrap the
-        // legacy validators so any "missing field" emits the vault_v1
-        // envelope, not the legacy {"error":"…"} shape.
-        $expected     = self::vaultRequireInt($body, 'expected_current_revision');
-        $newRev       = self::vaultRequireInt($body, 'new_revision');
-        $parentRev    = self::vaultRequireInt($body, 'parent_revision');
-        $manifestHash = self::vaultRequireNonEmptyString($body, 'manifest_hash');
-        $manifestCipher = self::decodeBase64Field($body, 'manifest_ciphertext');
-        self::guardEnvelopeSize('manifest', strlen($manifestCipher), self::MAX_MANIFEST_BYTES);
+        $expected   = self::vaultRequireInt($body, 'expected_current_root_revision');
+        $newRev     = self::vaultRequireInt($body, 'new_root_revision');
+        $parentRev  = self::vaultRequireInt($body, 'parent_root_revision');
+        $rootHash   = self::vaultRequireNonEmptyString($body, 'root_hash');
+        $rootCipher = self::decodeBase64Field($body, 'root_ciphertext');
+        self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
 
         if ($parentRev !== $expected) {
             throw new VaultInvalidRequestError(
-                'parent_revision must equal expected_current_revision',
-                'parent_revision'
+                'parent_root_revision must equal expected_current_root_revision',
+                'parent_root_revision'
             );
         }
         if ($newRev !== $expected + 1) {
             throw new VaultInvalidRequestError(
-                'new_revision must be expected_current_revision + 1',
-                'new_revision'
+                'new_root_revision must be expected_current_root_revision + 1',
+                'new_root_revision'
             );
         }
 
-        $manifestsRepo = new VaultManifestsRepository($db);
-        // F-S21: ``requireVaultAuth`` populates ``$ctx->deviceId`` from
-        // the validated AuthIdentity, so the controller no longer needs
-        // a fallback into ``$_SERVER`` via ``callerDeviceId()``.
+        $rootRepo = new VaultRootManifestsRepository($db);
         $authorDeviceId = (string)($ctx->deviceId ?? '');
 
-        // Authoritatively read (vault_id, revision, parent_revision,
-        // author_device_id) from the envelope's deterministic 61-byte
-        // prefix (formats §10.1). The relay decides CAS off these bytes
-        // rather than the JSON body, turning a class of envelope/body
-        // drift bugs into 400s instead of a poisoned manifest chain.
+        // F-S09 + envelope/body consistency check — same shape as the
+        // legacy putManifest path. Reading from envelope bytes makes
+        // body/envelope drift bugs surface as 422 rather than poisoning
+        // the chain.
         try {
-            $envManifest = VaultCrypto::parseManifestEnvelopeHeader($manifestCipher);
+            $envRoot = VaultCrypto::parseRootEnvelopeHeader($rootCipher);
         } catch (InvalidArgumentException $e) {
-            throw new VaultInvalidRequestError($e->getMessage(), 'manifest_ciphertext');
+            throw new VaultInvalidRequestError($e->getMessage(), 'root_ciphertext');
         }
-        // F-S09: reject unsupported format versions before the body is
-        // committed. A v2 envelope cannot be stored on a v1 server.
-        self::guardFormatVersion('manifest', (int) $envManifest['format_version']);
-        if ($envManifest['vault_id'] !== $vaultId) {
-            throw new VaultManifestTamperedError(
-                'manifest envelope vault_id does not match path vault_id',
+        self::guardFormatVersion('root', (int) $envRoot['format_version']);
+        if ($envRoot['vault_id'] !== $vaultId) {
+            throw new VaultRootTamperedError(
+                'root envelope vault_id does not match path vault_id',
             );
         }
-        if ($envManifest['revision'] !== $newRev) {
-            throw new VaultManifestTamperedError(
-                'manifest envelope revision does not match new_revision',
+        if ($envRoot['root_revision'] !== $newRev) {
+            throw new VaultRootTamperedError(
+                'root envelope root_revision does not match new_root_revision',
             );
         }
-        if ($envManifest['parent_revision'] !== $parentRev) {
-            throw new VaultManifestTamperedError(
-                'manifest envelope parent_revision does not match body parent_revision',
+        if ($envRoot['parent_root_revision'] !== $parentRev) {
+            throw new VaultRootTamperedError(
+                'root envelope parent_root_revision does not match body parent_root_revision',
             );
         }
-        if ($authorDeviceId !== '' && $envManifest['author_device_id'] !== $authorDeviceId) {
-            throw new VaultManifestTamperedError(
-                'manifest envelope author_device_id does not match X-Device-ID',
+        if ($authorDeviceId !== '' && $envRoot['author_device_id'] !== $authorDeviceId) {
+            throw new VaultRootTamperedError(
+                'root envelope author_device_id does not match X-Device-ID',
             );
         }
 
         $now = time();
-        $conflict = $manifestsRepo->tryCAS(
+        $conflict = $rootRepo->tryCAS(
             $vaultId,
             $expected,
             $newRev,
-            $manifestHash,
-            $manifestCipher,
-            strlen($manifestCipher),
+            $rootHash,
+            $rootCipher,
+            strlen($rootCipher),
             $authorDeviceId,
             $now
         );
         if ($conflict !== null) {
-            throw new VaultManifestConflictError([
-                'current_revision'             => (int)$conflict['current_revision'],
-                'expected_revision'            => $expected,
-                'current_manifest_hash'        => (string)$conflict['current_manifest_hash'],
-                'current_manifest_ciphertext'  => base64_encode((string)$conflict['current_manifest_ciphertext']),
-                'current_manifest_size'        => (int)$conflict['current_manifest_size'],
+            throw new VaultRootConflictError([
+                'current_root_revision'    => (int)$conflict['current_root_revision'],
+                'expected_root_revision'   => $expected,
+                'current_root_hash'        => (string)$conflict['current_root_hash'],
+                'current_root_ciphertext'  => base64_encode((string)$conflict['current_root_ciphertext']),
+                'current_root_size'        => (int)$conflict['current_root_size'],
             ]);
         }
 
         Router::json([
             'ok' => true,
             'data' => [
-                'revision'      => $newRev,
-                'manifest_hash' => $manifestHash,
+                'root_revision' => $newRev,
+                'root_hash'     => $rootHash,
             ],
         ], 200);
+    }
+
+    // ===================================================================
+    //  6.7  PUT /api/vaults/{vault_id}/folders/{folder_id}/shard
+    //         (CAS, §A1-shard conflict)
+    // ===================================================================
+
+    public static function putShard(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $folderId = self::normalizeRemoteFolderId((string)($ctx->params['folder_id'] ?? ''));
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'browse-upload');
+        self::guardReadOnly($vault);
+
+        $body = $ctx->jsonBody();
+        $expected    = self::vaultRequireInt($body, 'expected_current_shard_revision');
+        $newRev      = self::vaultRequireInt($body, 'new_shard_revision');
+        $parentRev   = self::vaultRequireInt($body, 'parent_shard_revision');
+        $shardHash   = self::vaultRequireNonEmptyString($body, 'shard_hash');
+        $shardCipher = self::decodeBase64Field($body, 'shard_ciphertext');
+        self::guardEnvelopeSize('shard', strlen($shardCipher), self::MAX_SHARD_BYTES);
+
+        if ($parentRev !== $expected) {
+            throw new VaultInvalidRequestError(
+                'parent_shard_revision must equal expected_current_shard_revision',
+                'parent_shard_revision'
+            );
+        }
+        if ($newRev !== $expected + 1) {
+            throw new VaultInvalidRequestError(
+                'new_shard_revision must be expected_current_shard_revision + 1',
+                'new_shard_revision'
+            );
+        }
+
+        $shardsRepo = new VaultFolderShardsRepository($db);
+        $authorDeviceId = (string)($ctx->deviceId ?? '');
+
+        self::validateShardEnvelopeAgainstBody(
+            $shardCipher, $vaultId, $folderId, $newRev, $parentRev, $authorDeviceId,
+        );
+
+        $now = time();
+        $conflict = $shardsRepo->tryCAS(
+            $vaultId,
+            $folderId,
+            $expected,
+            $newRev,
+            $shardHash,
+            $shardCipher,
+            strlen($shardCipher),
+            $authorDeviceId,
+            $now
+        );
+        if ($conflict !== null) {
+            throw new VaultShardConflictError([
+                'remote_folder_id'         => (string)$conflict['remote_folder_id'],
+                'current_shard_revision'   => (int)$conflict['current_shard_revision'],
+                'expected_shard_revision'  => $expected,
+                'current_shard_hash'       => (string)$conflict['current_shard_hash'],
+                'current_shard_ciphertext' => base64_encode((string)$conflict['current_shard_ciphertext']),
+                'current_shard_size'       => (int)$conflict['current_shard_size'],
+            ]);
+        }
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'shard_revision' => $newRev,
+                'shard_hash'     => $shardHash,
+            ],
+        ], 200);
+    }
+
+    // ===================================================================
+    //  6.8  PUT /api/vaults/{vault_id}/folders/{folder_id}/shard-with-root
+    //         (atomic shard + root CAS — primary publish path)
+    // ===================================================================
+
+    public static function putShardWithRoot(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $folderId = self::normalizeRemoteFolderId((string)($ctx->params['folder_id'] ?? ''));
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'browse-upload');
+        self::guardReadOnly($vault);
+
+        $body = $ctx->jsonBody();
+        if (!isset($body['shard']) || !is_array($body['shard'])) {
+            throw new VaultInvalidRequestError('shard is required and must be an object', 'shard');
+        }
+        if (!isset($body['root']) || !is_array($body['root'])) {
+            throw new VaultInvalidRequestError('root is required and must be an object', 'root');
+        }
+        $shardBody = $body['shard'];
+        $rootBody  = $body['root'];
+
+        $expectedShardRev = self::vaultRequireInt($shardBody, 'expected_current_shard_revision');
+        $newShardRev      = self::vaultRequireInt($shardBody, 'new_shard_revision');
+        $parentShardRev   = self::vaultRequireInt($shardBody, 'parent_shard_revision');
+        $shardHash        = self::vaultRequireNonEmptyString($shardBody, 'shard_hash');
+        $shardCipher      = self::decodeBase64Field($shardBody, 'shard_ciphertext');
+        self::guardEnvelopeSize('shard', strlen($shardCipher), self::MAX_SHARD_BYTES);
+
+        $expectedRootRev = self::vaultRequireInt($rootBody, 'expected_current_root_revision');
+        $newRootRev      = self::vaultRequireInt($rootBody, 'new_root_revision');
+        $parentRootRev   = self::vaultRequireInt($rootBody, 'parent_root_revision');
+        $rootHash        = self::vaultRequireNonEmptyString($rootBody, 'root_hash');
+        $rootCipher      = self::decodeBase64Field($rootBody, 'root_ciphertext');
+        self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
+
+        if ($parentShardRev !== $expectedShardRev || $newShardRev !== $expectedShardRev + 1) {
+            throw new VaultInvalidRequestError(
+                'shard revision pair invariant violated', 'shard',
+            );
+        }
+        if ($parentRootRev !== $expectedRootRev || $newRootRev !== $expectedRootRev + 1) {
+            throw new VaultInvalidRequestError(
+                'root revision pair invariant violated', 'root',
+            );
+        }
+
+        $authorDeviceId = (string)($ctx->deviceId ?? '');
+        self::validateShardEnvelopeAgainstBody(
+            $shardCipher, $vaultId, $folderId, $newShardRev, $parentShardRev, $authorDeviceId,
+        );
+        self::validateRootEnvelopeAgainstBody(
+            $rootCipher, $vaultId, $newRootRev, $parentRootRev, $authorDeviceId,
+        );
+
+        $shardsRepo = new VaultFolderShardsRepository($db);
+        $rootRepo   = new VaultRootManifestsRepository($db);
+        $now = time();
+
+        $conflict = $shardsRepo->tryAtomicShardWithRootCAS(
+            vaultId: $vaultId,
+            remoteFolderId: $folderId,
+            expectedCurrentShardRevision: $expectedShardRev,
+            newShardRevision: $newShardRev,
+            shardHash: $shardHash,
+            shardCiphertext: $shardCipher,
+            shardSize: strlen($shardCipher),
+            expectedCurrentRootRevision: $expectedRootRev,
+            newRootRevision: $newRootRev,
+            rootHash: $rootHash,
+            rootCiphertext: $rootCipher,
+            rootSize: strlen($rootCipher),
+            authorDeviceId: $authorDeviceId,
+            now: $now,
+            rootRepo: $rootRepo,
+        );
+
+        if ($conflict !== null) {
+            $kind = (string)($conflict['kind'] ?? '');
+            if ($kind === 'shard_root') {
+                $sc = $conflict['shard'];
+                $rc = $conflict['root'];
+                throw new VaultShardRootConflictError([
+                    'remote_folder_id'         => (string)$sc['remote_folder_id'],
+                    'current_shard_revision'   => (int)$sc['current_shard_revision'],
+                    'expected_shard_revision'  => $expectedShardRev,
+                    'current_shard_hash'       => (string)$sc['current_shard_hash'],
+                    'current_shard_ciphertext' => base64_encode((string)$sc['current_shard_ciphertext']),
+                    'current_shard_size'       => (int)$sc['current_shard_size'],
+                    'current_root_revision'    => (int)$rc['current_root_revision'],
+                    'expected_root_revision'   => $expectedRootRev,
+                    'current_root_hash'        => (string)$rc['current_root_hash'],
+                    'current_root_ciphertext'  => base64_encode((string)$rc['current_root_ciphertext']),
+                    'current_root_size'        => (int)$rc['current_root_size'],
+                ]);
+            }
+            if ($kind === 'shard') {
+                $sc = $conflict['shard'];
+                throw new VaultShardConflictError([
+                    'remote_folder_id'         => (string)$sc['remote_folder_id'],
+                    'current_shard_revision'   => (int)$sc['current_shard_revision'],
+                    'expected_shard_revision'  => $expectedShardRev,
+                    'current_shard_hash'       => (string)$sc['current_shard_hash'],
+                    'current_shard_ciphertext' => base64_encode((string)$sc['current_shard_ciphertext']),
+                    'current_shard_size'       => (int)$sc['current_shard_size'],
+                ]);
+            }
+            // root-only
+            $rc = $conflict['root'];
+            throw new VaultRootConflictError([
+                'current_root_revision'    => (int)$rc['current_root_revision'],
+                'expected_root_revision'   => $expectedRootRev,
+                'current_root_hash'        => (string)$rc['current_root_hash'],
+                'current_root_ciphertext'  => base64_encode((string)$rc['current_root_ciphertext']),
+                'current_root_size'        => (int)$rc['current_root_size'],
+            ]);
+        }
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'shard_revision' => $newShardRev,
+                'shard_hash'     => $shardHash,
+                'root_revision'  => $newRootRev,
+                'root_hash'      => $rootHash,
+            ],
+        ], 200);
+    }
+
+    /**
+     * Common envelope-vs-body consistency check for shard publishes.
+     * Mirrors the legacy ``putManifest`` envelope-header validation
+     * shape so envelope/body drift surfaces as a 422 before any DB
+     * write touches the shard chain.
+     */
+    private static function validateShardEnvelopeAgainstBody(
+        string $shardCipher,
+        string $vaultId,
+        string $folderId,
+        int $newShardRev,
+        int $parentShardRev,
+        string $authorDeviceId,
+    ): void {
+        try {
+            $env = VaultCrypto::parseShardEnvelopeHeader($shardCipher);
+        } catch (InvalidArgumentException $e) {
+            throw new VaultInvalidRequestError($e->getMessage(), 'shard_ciphertext');
+        }
+        self::guardFormatVersion('shard', (int) $env['format_version']);
+        if ($env['vault_id'] !== $vaultId) {
+            throw new VaultShardTamperedError(
+                'shard envelope vault_id does not match path vault_id',
+            );
+        }
+        if ($env['remote_folder_id'] !== $folderId) {
+            throw new VaultShardTamperedError(
+                'shard envelope remote_folder_id does not match path folder_id',
+            );
+        }
+        if ($env['shard_revision'] !== $newShardRev) {
+            throw new VaultShardTamperedError(
+                'shard envelope shard_revision does not match new_shard_revision',
+            );
+        }
+        if ($env['parent_shard_revision'] !== $parentShardRev) {
+            throw new VaultShardTamperedError(
+                'shard envelope parent_shard_revision does not match body parent_shard_revision',
+            );
+        }
+        if ($authorDeviceId !== '' && $env['author_device_id'] !== $authorDeviceId) {
+            throw new VaultShardTamperedError(
+                'shard envelope author_device_id does not match X-Device-ID',
+            );
+        }
+    }
+
+    /**
+     * Common envelope-vs-body consistency check for root publishes.
+     */
+    private static function validateRootEnvelopeAgainstBody(
+        string $rootCipher,
+        string $vaultId,
+        int $newRootRev,
+        int $parentRootRev,
+        string $authorDeviceId,
+    ): void {
+        try {
+            $env = VaultCrypto::parseRootEnvelopeHeader($rootCipher);
+        } catch (InvalidArgumentException $e) {
+            throw new VaultInvalidRequestError($e->getMessage(), 'root_ciphertext');
+        }
+        self::guardFormatVersion('root', (int) $env['format_version']);
+        if ($env['vault_id'] !== $vaultId) {
+            throw new VaultRootTamperedError(
+                'root envelope vault_id does not match path vault_id',
+            );
+        }
+        if ($env['root_revision'] !== $newRootRev) {
+            throw new VaultRootTamperedError(
+                'root envelope root_revision does not match new_root_revision',
+            );
+        }
+        if ($env['parent_root_revision'] !== $parentRootRev) {
+            throw new VaultRootTamperedError(
+                'root envelope parent_root_revision does not match body parent_root_revision',
+            );
+        }
+        if ($authorDeviceId !== '' && $env['author_device_id'] !== $authorDeviceId) {
+            throw new VaultRootTamperedError(
+                'root envelope author_device_id does not match X-Device-ID',
+            );
+        }
+    }
+
+    /** Validate + normalize an rf_v1_<24base32> remote folder id from the URL. */
+    private static function normalizeRemoteFolderId(string $raw): string
+    {
+        if (!preg_match('/^rf_v1_[a-z2-7]{24}$/', $raw)) {
+            throw new VaultInvalidRequestError(
+                'folder_id must match ^rf_v1_[a-z2-7]{24}$', 'folder_id',
+            );
+        }
+        return $raw;
     }
 
     // ===================================================================
@@ -722,7 +1012,7 @@ class VaultController
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
-        $manifestRevision = Validators::requireInt($body, 'manifest_revision');
+        $rootRevision = Validators::requireInt($body, 'root_revision');
         $candidateIds = $body['candidate_chunk_ids'] ?? null;
         if (!is_array($candidateIds)) {
             throw new VaultInvalidRequestError('candidate_chunk_ids must be array', 'candidate_chunk_ids');
@@ -736,12 +1026,12 @@ class VaultController
             }
         }
 
-        // Validate the manifest revision exists.
-        $manifestsRepo = new VaultManifestsRepository($db);
-        if ($manifestsRepo->getByRevision($vaultId, $manifestRevision) === null) {
+        // Validate the root revision exists.
+        $rootRepo = new VaultRootManifestsRepository($db);
+        if ($rootRepo->getByRevision($vaultId, $rootRevision) === null) {
             throw new VaultInvalidRequestError(
-                "manifest_revision {$manifestRevision} unknown",
-                'manifest_revision'
+                "root_revision {$rootRevision} unknown",
+                'root_revision'
             );
         }
 
@@ -1076,8 +1366,8 @@ class VaultController
             );
         }
 
-        $manifestHash = $vault['current_manifest_hash'] !== null
-            ? (string)$vault['current_manifest_hash'] : '';
+        $rootHash = $vault['current_root_hash'] !== null
+            ? (string)$vault['current_root_hash'] : '';
         $chunkCount = (int)($vault['chunk_count'] ?? 0);
         $usedBytes  = (int)($vault['used_ciphertext_bytes'] ?? 0);
 
@@ -1089,12 +1379,31 @@ class VaultController
             ? (int)$persistedIntent['verified_at']
             : time();
 
+        // Per-shard hash map mirrors the root's encrypted
+        // `remote_folders[*].shard_hash` so the migration verify path
+        // can compare without re-decrypting the root.
+        $shardHashes = [];
+        $rows = $db->queryAll(
+            'SELECT remote_folder_id, current_shard_hash
+             FROM vault_folder_shard_heads
+             WHERE vault_id = :id
+             ORDER BY remote_folder_id ASC',
+            [':id' => $vaultId],
+        );
+        foreach ($rows as $row) {
+            $shardHashes[(string)$row['remote_folder_id']] = (string)$row['current_shard_hash'];
+        }
+        // Cast to object so json_encode emits `{}` instead of `[]` when
+        // empty (clients consume this as a map keyed by remote_folder_id).
+        $shardHashesJson = empty($shardHashes) ? (object)[] : $shardHashes;
+
         Router::json([
             'ok' => true,
             'data' => [
                 'vault_id'                 => self::dashedVaultId($vaultId),
-                'manifest_revision'        => (int)($vault['current_manifest_revision'] ?? 0),
-                'manifest_hash'            => $manifestHash,
+                'root_revision'            => (int)($vault['current_root_revision'] ?? 0),
+                'root_hash'                => $rootHash,
+                'shard_hashes'             => $shardHashesJson,
                 'chunk_count'              => $chunkCount,
                 'used_ciphertext_bytes'    => $usedBytes,
                 'target_relay_url'         => (string)$intent['target_relay_url'],

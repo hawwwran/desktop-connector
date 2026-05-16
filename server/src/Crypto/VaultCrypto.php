@@ -44,7 +44,9 @@ class VaultCrypto
     private const DEVICE_GRANT_WRAP_LABEL = 'dc-vault-v1/device-grant-wrap';
 
     // Schema strings — locked in formats §6.x; never trim, never re-case.
-    private const MANIFEST_AAD_SCHEMA      = 'dc-vault-manifest-v1';      // 20 bytes
+    private const MANIFEST_AAD_SCHEMA      = 'dc-vault-manifest-v1';      // 20 bytes (legacy)
+    private const ROOT_AAD_SCHEMA          = 'dc-vault-root-v1';          // 16 bytes
+    private const SHARD_AAD_SCHEMA         = 'dc-vault-shard-v1';         // 17 bytes
     private const CHUNK_AAD_SCHEMA         = 'dc-vault-chunk-v1';         // 17 bytes
     private const HEADER_AAD_SCHEMA        = 'dc-vault-header-v1';        // 18 bytes
     private const RECOVERY_AAD_SCHEMA      = 'dc-vault-recovery-v1';      // 20 bytes
@@ -329,6 +331,189 @@ class VaultCrypto
             'vault_id'        => $vaultIdBytes,
             'header_revision' => (int)$unpackedRev[1],
         ];
+    }
+
+    /**
+     * Parse the first 61 bytes of a root manifest envelope (formats §10.A.1).
+     * Same shape as the legacy manifest header — format_version(1) +
+     * vault_id(12) + root_revision(8) + parent_root_revision(8) +
+     * author_device_id(32). The relay sources CAS state from the envelope
+     * bytes, never from the JSON body, so a mismatch surfaces as 422
+     * `vault_root_tampered` before the row is committed.
+     *
+     * @return array{format_version: int, vault_id: string, root_revision: int, parent_root_revision: int, author_device_id: string}
+     */
+    public static function parseRootEnvelopeHeader(string $envelope): array
+    {
+        if (strlen($envelope) < 61) {
+            throw new InvalidArgumentException(
+                'root envelope is shorter than the 61-byte deterministic prefix'
+            );
+        }
+        $formatVersion = ord($envelope[0]);
+        $vaultIdBytes = substr($envelope, 1, 12);
+        if (!preg_match('/^[A-Z2-7]{12}$/', $vaultIdBytes)) {
+            throw new InvalidArgumentException('root envelope vault_id is not base32');
+        }
+        $authorRaw = substr($envelope, 29, 32);
+        if (!preg_match('/^[a-f0-9]{32}$/', $authorRaw)) {
+            throw new InvalidArgumentException(
+                'root envelope author_device_id is not 32 lowercase hex chars'
+            );
+        }
+        $unpackedRev    = unpack('J', substr($envelope, 13, 8));
+        $unpackedParent = unpack('J', substr($envelope, 21, 8));
+        return [
+            'format_version'       => $formatVersion,
+            'vault_id'             => $vaultIdBytes,
+            'root_revision'        => (int)$unpackedRev[1],
+            'parent_root_revision' => (int)$unpackedParent[1],
+            'author_device_id'     => $authorRaw,
+        ];
+    }
+
+    /**
+     * Parse the first 91 bytes of a folder shard envelope (formats
+     * §10.B.1). Layout: format_version(1) + vault_id(12) +
+     * remote_folder_id(30) + shard_revision(8) + parent_shard_revision(8)
+     * + author_device_id(32). The remote_folder_id is the per-folder
+     * CAS discriminator; the controller validates that this value
+     * matches the URL-supplied folder id (forged envelopes can't be
+     * CAS'd against a different folder's revision counter).
+     *
+     * @return array{format_version: int, vault_id: string, remote_folder_id: string, shard_revision: int, parent_shard_revision: int, author_device_id: string}
+     */
+    public static function parseShardEnvelopeHeader(string $envelope): array
+    {
+        if (strlen($envelope) < 91) {
+            throw new InvalidArgumentException(
+                'shard envelope is shorter than the 91-byte deterministic prefix'
+            );
+        }
+        $formatVersion = ord($envelope[0]);
+        $vaultIdBytes  = substr($envelope, 1, 12);
+        if (!preg_match('/^[A-Z2-7]{12}$/', $vaultIdBytes)) {
+            throw new InvalidArgumentException('shard envelope vault_id is not base32');
+        }
+        $remoteFolderId = substr($envelope, 13, 30);
+        if (!preg_match('/^rf_v1_[a-z2-7]{24}$/', $remoteFolderId)) {
+            throw new InvalidArgumentException(
+                'shard envelope remote_folder_id is not in the rf_v1_<24 base32> form'
+            );
+        }
+        $authorRaw = substr($envelope, 59, 32);
+        if (!preg_match('/^[a-f0-9]{32}$/', $authorRaw)) {
+            throw new InvalidArgumentException(
+                'shard envelope author_device_id is not 32 lowercase hex chars'
+            );
+        }
+        $unpackedRev    = unpack('J', substr($envelope, 43, 8));
+        $unpackedParent = unpack('J', substr($envelope, 51, 8));
+        return [
+            'format_version'        => $formatVersion,
+            'vault_id'              => $vaultIdBytes,
+            'remote_folder_id'      => $remoteFolderId,
+            'shard_revision'        => (int)$unpackedRev[1],
+            'parent_shard_revision' => (int)$unpackedParent[1],
+            'author_device_id'      => $authorRaw,
+        ];
+    }
+
+    public static function buildRootAad(
+        string $vaultId,
+        int $rootRevision,
+        int $parentRootRevision,
+        string $authorDeviceId,
+    ): string {
+        $canonical = self::normalizeVaultId($vaultId);
+        if (strlen($canonical) !== 12) {
+            throw new InvalidArgumentException("vault_id must canonicalize to 12 bytes");
+        }
+        if (!preg_match('/^[a-f0-9]{32}$/', $authorDeviceId)) {
+            throw new InvalidArgumentException("author_device_id must be 32 lowercase hex chars");
+        }
+        return self::ROOT_AAD_SCHEMA
+            . $canonical
+            . self::packBeU64($rootRevision)
+            . self::packBeU64($parentRootRevision)
+            . $authorDeviceId;
+    }
+
+    public static function buildRootEnvelope(
+        string $vaultId,
+        int $rootRevision,
+        int $parentRootRevision,
+        string $authorDeviceId,
+        string $nonce,
+        string $aeadCiphertextAndTag,
+        int $formatVersion = 1,
+    ): string {
+        if ($formatVersion < 0 || $formatVersion > 0xFF) {
+            throw new InvalidArgumentException("format_version must fit in u8");
+        }
+        if (strlen($nonce) !== self::XCHACHA20_NONCE_BYTES) {
+            throw new InvalidArgumentException("nonce must be 24 bytes");
+        }
+        $canonical = self::normalizeVaultId($vaultId);
+        return chr($formatVersion)
+            . $canonical
+            . self::packBeU64($rootRevision)
+            . self::packBeU64($parentRootRevision)
+            . $authorDeviceId
+            . $nonce
+            . $aeadCiphertextAndTag;
+    }
+
+    public static function buildShardAad(
+        string $vaultId,
+        string $remoteFolderId,
+        int $shardRevision,
+        int $parentShardRevision,
+        string $authorDeviceId,
+    ): string {
+        $canonical = self::normalizeVaultId($vaultId);
+        if (strlen($canonical) !== 12) {
+            throw new InvalidArgumentException("vault_id must canonicalize to 12 bytes");
+        }
+        if (strlen($remoteFolderId) !== 30) {
+            throw new InvalidArgumentException("remote_folder_id must be 30 bytes");
+        }
+        if (!preg_match('/^[a-f0-9]{32}$/', $authorDeviceId)) {
+            throw new InvalidArgumentException("author_device_id must be 32 lowercase hex chars");
+        }
+        return self::SHARD_AAD_SCHEMA
+            . $canonical
+            . $remoteFolderId
+            . self::packBeU64($shardRevision)
+            . self::packBeU64($parentShardRevision)
+            . $authorDeviceId;
+    }
+
+    public static function buildShardEnvelope(
+        string $vaultId,
+        string $remoteFolderId,
+        int $shardRevision,
+        int $parentShardRevision,
+        string $authorDeviceId,
+        string $nonce,
+        string $aeadCiphertextAndTag,
+        int $formatVersion = 1,
+    ): string {
+        if ($formatVersion < 0 || $formatVersion > 0xFF) {
+            throw new InvalidArgumentException("format_version must fit in u8");
+        }
+        if (strlen($nonce) !== self::XCHACHA20_NONCE_BYTES) {
+            throw new InvalidArgumentException("nonce must be 24 bytes");
+        }
+        $canonical = self::normalizeVaultId($vaultId);
+        return chr($formatVersion)
+            . $canonical
+            . $remoteFolderId
+            . self::packBeU64($shardRevision)
+            . self::packBeU64($parentShardRevision)
+            . $authorDeviceId
+            . $nonce
+            . $aeadCiphertextAndTag;
     }
 
     // ---------------------------------------------------------------- Chunk AAD + envelope

@@ -536,9 +536,8 @@ The client computes the new shard envelope first, takes its sha256 to fill the r
 
 1. CAS on the shard (`expected_current_shard_revision`) — 409 `vault_shard_conflict` if stale.
 2. CAS on the root (`expected_current_root_revision`) — 409 `vault_root_conflict` if stale.
-3. Cross-check: parsed `root.remote_folders[i].shard_hash` for `folder_id` must equal the request's `shard_hash` — mismatch returns 422 `vault_shard_hash_mismatch` (this catches the "I rebuilt the root against an earlier shard" client bug before it pollutes the hash chain). The relay performs the parse on the body bytes server-side without decrypting; the `shard_hash` lives in the encrypted root plaintext, so this check verifies the client supplied the same value in the shard request as the AEAD-sealed root carries.
 
-Both writes commit together or both abort.
+Both writes commit together or both abort. The relay cannot cross-validate that the encrypted root's `remote_folders[i].shard_hash` matches the request's `shard.shard_hash` — the root plaintext is AEAD-sealed. **Consistency is enforced at the next reader's §10.C hash chain check**: a reader decrypts the root, reads the expected hash, fetches the shard, and verifies `sha256(shard_envelope) == expected_hash` before consuming entries. A client that publishes a mismatched pair triggers `vault_shard_tampered` on the next reader's decrypt path. This is the same "self-correcting hash chain on read" pattern T0 §3.7 uses for `manifest_revision_floor`.
 
 Success: **200 OK**
 
@@ -558,10 +557,7 @@ Success: **200 OK**
 
 This is the **primary** publish path for sync engines — every batched mutation that touches file entries reaches the relay through here.
 
-Errors specific to the atomic path:
-- 422 `vault_shard_hash_mismatch` — `root.remote_folders[i].shard_hash ≠ request.shard.shard_hash`. Client rebuilt the root against a different shard than it actually published; recompute and retry.
-
-Otherwise: same superset as §6.6 + §6.7.
+Errors: same superset as §6.6 + §6.7. The relay does not emit `vault_shard_hash_mismatch` (the root plaintext is encrypted; the cross-check happens at the reader's §10.C decrypt path — see above).
 
 ### 6.9 Get archived op-log segment
 
@@ -1163,7 +1159,7 @@ This document references codes inline by name. Treat the T0 table as authoritati
 - `vault_root_conflict` carries the **current** root ciphertext (§A1-root); `vault_shard_conflict` carries the current shard ciphertext (§A1-shard); the atomic-publish `vault_shard_root_conflict` carries both. Clients never need to follow up with a GET after a 409 — they have everything needed to run the §D4 merge and retry in one round-trip.
 - `vault_quota_exceeded` carries `eviction_available: bool` — drives whether the client's eviction pass (§D2) runs or whether the "vault full, sync stopped" terminal banner is surfaced (§A6).
 - `vault_chunk_missing` is `auto`-retry up to the existing transfer retry budget; only after exhaustion does it become permanent.
-- `vault_shard_hash_mismatch` (422) signals the atomic shard-with-root request supplied a `shard_hash` that doesn't match the `remote_folders[i].shard_hash` inside the request's root ciphertext. Client recomputes the root against the actual shard hash and retries; this surfaces a client bug rather than relay tampering.
+- Hash-chain consistency between the root's encrypted `remote_folders[i].shard_hash` and the published shard envelope is enforced at the **reader's** §10.C decrypt path, not by the relay (which cannot read the encrypted root). A client that publishes a mismatched pair triggers `vault_shard_tampered` 422 on the next reader's decrypt — at that point the reader treats the relay as suspect (legitimate clients never publish inconsistent pairs).
 
 ---
 

@@ -30,7 +30,8 @@ final class VaultCapabilitiesTest extends TestCase
         self::assertContains('vault_v1', $bits);
         self::assertContains('vault_create_v1', $bits);
         self::assertContains('vault_header_v1', $bits);
-        self::assertContains('vault_manifest_cas_v1', $bits);
+        self::assertContains('vault_root_cas_v1', $bits);
+        self::assertContains('vault_shard_cas_v1', $bits);
         self::assertContains('vault_chunk_v1', $bits);
         self::assertContains('vault_gc_v1', $bits);
     }
@@ -44,11 +45,12 @@ final class VaultCapabilitiesTest extends TestCase
         self::assertNotContains('vault_v1', $bits);
         self::assertNotContains('vault_chunk_v1', $bits);
 
-        // The other four T1 sub-bits are still advertised so a client
+        // The other five T1 sub-bits are still advertised so a client
         // that only needs them can gate on the finer bit.
         self::assertContains('vault_create_v1', $bits);
         self::assertContains('vault_header_v1', $bits);
-        self::assertContains('vault_manifest_cas_v1', $bits);
+        self::assertContains('vault_root_cas_v1', $bits);
+        self::assertContains('vault_shard_cas_v1', $bits);
         self::assertContains('vault_gc_v1', $bits);
     }
 
@@ -60,7 +62,8 @@ final class VaultCapabilitiesTest extends TestCase
         $allT1 = [
             'vault_create_v1',
             'vault_header_v1',
-            'vault_manifest_cas_v1',
+            'vault_root_cas_v1',
+            'vault_shard_cas_v1',
             'vault_chunk_v1',
             'vault_gc_v1',
         ];
@@ -86,7 +89,8 @@ final class VaultCapabilitiesTest extends TestCase
         VaultCapabilities::setDisabled([
             'vault_create_v1',
             'vault_header_v1',
-            'vault_manifest_cas_v1',
+            'vault_root_cas_v1',
+            'vault_shard_cas_v1',
             'vault_chunk_v1',
             'vault_gc_v1',
             'vault_soft_delete_v1',

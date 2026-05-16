@@ -592,10 +592,11 @@ The root carries `remote_folders[i].shard_hash` for every active shard. The hash
 
 Every legitimate publish updates both surfaces atomically (§6.8 of `vault-v1.md`'s `PUT /folders/{folder_id}/shard-with-root`):
 
-1. New shard ciphertext lands at `vault_folder_shards.envelope_blob`.
-2. Server computes `envelope_hash = sha256(envelope_blob)` and stores it in the same row.
-3. Server validates `root.remote_folders[i].shard_hash == envelope_hash`. Mismatch aborts the whole transaction with 422 `vault_shard_hash_mismatch` — neither side lands. The client fixes its publish payload and retries.
-4. Both writes commit in a single SQLite transaction; readers between the two are impossible.
+1. New shard ciphertext lands at `vault_folder_shards.shard_ciphertext`.
+2. New root ciphertext lands at `vault_root_manifests.root_ciphertext` with `vaults.current_root_revision` flipped in the same transaction.
+3. Both writes commit in a single SQLite IMMEDIATE transaction; readers between the two are impossible.
+
+The relay does **not** open the root ciphertext to verify `remote_folders[i].shard_hash == sha256(shard envelope)` — the root is AEAD-sealed and the relay is blind by design. Cross-consistency is enforced at the **reader's** decrypt path:
 
 Client-side, before consuming a shard's entries, decoders **must**:
 

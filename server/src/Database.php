@@ -179,6 +179,47 @@ class Database
         if ($grantsSql !== false) {
             $this->db->exec($grantsSql);
         }
+
+        // Phase B (2026-05-16) — manifest sharding. Drops the legacy
+        // single-manifest history, adds root + folder shard history
+        // tables + per-folder head pointer, and grows the `vaults` row
+        // with current_root_revision / current_root_hash. ``vault_v1``
+        // has never shipped, so the legacy `vault_manifests` data is
+        // discarded; the dev twin re-seeds its vault via the suite-
+        // start setup.
+        $shardingSql = file_get_contents(__DIR__ . '/../migrations/005_vault_manifest_shards.sql');
+        if ($shardingSql !== false) {
+            // ``ALTER TABLE ADD COLUMN`` fails if the column already
+            // exists; on fresh installs the column is brand-new, on
+            // upgrades from a prior dev twin it might already exist.
+            // SQLite doesn't support ``IF NOT EXISTS`` for ALTER, so
+            // we probe via ``PRAGMA table_info`` and route the run
+            // through one of two branches.
+            $hasRootColumns = false;
+            $info = $this->db->query("PRAGMA table_info(vaults)");
+            while ($row = $info->fetchArray(SQLITE3_ASSOC)) {
+                if ($row['name'] === 'current_root_revision') {
+                    $hasRootColumns = true;
+                    break;
+                }
+            }
+            // Finalize the PRAGMA cursor before any DDL runs — leaving
+            // it open holds a read lock that fights the migration's
+            // ``DROP TABLE`` statement and emits a "database table is
+            // locked" warning under PHPUnit's strict-warning mode.
+            $info->finalize();
+            if (!$hasRootColumns) {
+                $this->db->exec($shardingSql);
+            } else {
+                // Re-run only the CREATE TABLE / INDEX statements (all
+                // idempotent via IF NOT EXISTS); skip the ALTER TABLE
+                // statements that would fail.
+                $createOnly = preg_replace(
+                    '/ALTER TABLE [^;]+;/i', '', $shardingSql,
+                );
+                $this->db->exec($createOnly);
+            }
+        }
     }
 
     public function query(string $sql, array $params = []): SQLite3Result
