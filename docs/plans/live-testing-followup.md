@@ -602,6 +602,76 @@ deferred to the post-v1 Devices tab). Vault v1 can be stamped.
 
 ---
 
+## 12. Resume-after-kill banner — pass with three minor UX gaps (was B8)
+
+**Symptom**: B8 in the backlog ("Start a multi-GB upload, kill the
+desktop subprocess mid-chunk, restart, verify the resume banner fires
+and the upload completes without re-uploading already-stored chunks").
+Driven 2026-05-16 on suite 0003; full result writeup at
+`temp/automation-tests-results/0003/B8-resume/result.md`.
+
+**Cause / Verification**:
+- `vault/upload/single_file.py:259` rewrites the
+  `<session_id>.json` atomically after every chunk PUT, so a SIGKILL
+  or `SyncCancelledError` exit leaves the same on-disk shape. The
+  banner's `list_resumable_sessions(vault_id, cache_dir)` filter
+  picks any session where `phase != "complete"`.
+- Drove a 150 MB random file (75 × 2 MiB chunks) via a direct
+  `upload_file()` call with `should_continue` returning False after
+  25 chunks. Session JSON `7ce097c51aafd2ea.json` written
+  (`phase="uploading"`, chunks 25/75 done).
+- Vault Browser launched: banner renders the exact copy from
+  `resume_banner.py:51-57` — *"1 upload was interrupted — click
+  Resume to finish it, or Cancel to discard."*
+- **Resume**: 50 new chunk PUTs (no re-upload — `batch_head_chunks`
+  HEAD-and-skip honored), manifest CAS-published as revision 3,
+  session JSON cleared. Server `vault_chunks` count: 25 → 75.
+- **Cancel** (second iteration with a different file so the
+  same-fingerprint `skipped_identical` path doesn't short-circuit):
+  session JSON cleared, banner hidden, server-side chunks **not**
+  deleted (95 → 95 — matches the `resume_banner.py:67-69`
+  docstring; eviction/retention claims them later).
+
+**Three minor UX gaps** (none block B8 PASS):
+
+1. **Stale dev-twin keyring entries survive suite-start wipes**
+   (harness bug, not vault bug). `rm -rf ~/.config/desktop-connector-dev`
+   does not clear the `desktop-connector-dev` keyring service.
+   Cross-suite cruft (`auth_token`, `private_key:pem`, `device_id`,
+   `vault_grant:*` for vault ids the relay no longer knows about)
+   made the dev twin boot reporting *"Already registered as …"*
+   while the server `devices` table was empty, then 401 on every
+   call. Suite 0003 worked around it explicitly; add a "clear
+   dev-twin keyring service" step to
+   `docs/testing/vault-tests.md`'s suite-start block, or have
+   `Config.__init__` clear the secret store when the config dir
+   doesn't exist on disk.
+2. **Cancel status text doesn't mention orphan chunks.** After
+   Cancel the relay still holds the chunks that were PUT before
+   the abort — by design, they're claimed by storage maintenance.
+   The current "Discarded N interrupted upload sessions" doesn't
+   say so; consider widening to "Discarded N interrupted uploads.
+   Any chunks already uploaded will be cleaned up by storage
+   maintenance." (one-line change in `resume_banner.py:91-94`).
+3. **Browser doesn't render the newly-uploaded file inline after
+   Resume.** Resume worker sets `self.state.manifest = last_manifest`
+   and calls `_render_all()` on the GLib.idle_add path, but the
+   root-folder view doesn't pick up the new manifest's folder
+   contents — only the detail pane refreshes. Re-launching the
+   browser shows the file. Same shape as item 4 (focus-based
+   refresh); likely a follow-up there.
+
+**Acceptance**: see assertions in
+`temp/automation-tests-results/0003/B8-resume/result.md`. All eight
+assertions pass; the three UX gaps are listed as side observations
+SO-1, SO-2, SO-3.
+
+**Status (2026-05-16): done** on `tresor-vault`. B8 backlog item
+struck. Three follow-up nudges (SO-1/2/3) recorded in the result
+file; if they become work, they get their own numbered items.
+
+---
+
 ## Backlog — un-driven flows
 
 Candidate live-test sessions that aren't yet in the chained
@@ -611,36 +681,49 @@ against the dev twin; findings land as items 10+ above.
 Migrated 2026-05-15 from the archived
 `temp/finished-plans/post-breakup-followups.md` §3.
 
-- **Eviction under quota pressure.** Fill the relay quota, observe
-  the desktop's eviction pass during upload, verify the right
-  versions get culled (and that "Show deleted" surfaces them).
-- **Resume upload after kill.** Start a multi-GB upload, kill the
-  desktop subprocess mid-chunk, restart, verify the resume banner
-  fires and the upload completes without re-uploading already-stored
-  chunks. Cancel button on the resume banner (the 2026-05-06 fix —
-  commit `2810201`) should also be exercised.
-- **Cross-device grant + accept on a fresh device.** Exercise the
-  QR-grant join flow end-to-end on the dev twin's secondary device.
-- **Concurrent edits with binding sync.** Edit the same file on
-  both devices between syncs; verify the conflict-rename path
-  (`vault/binding/twoway.py`) produces predictable output and the
-  Activity tab logs both branches.
-- **Large folder bind.** Attach a folder with 10k+ small files;
+Ordered by priority (2026-05-16). Tier 1 = exercises core daily flows
+that block real use if broken. Tier 2 = silent-data-loss risk if a
+correctness path misbehaves. Tier 3 = ops/support/edge-case flows that
+matter but aren't day-one blockers. Identifiers descend down the list:
+**B7 is highest priority, B1 is lowest** (B8 closed 2026-05-16 — see
+§12 above). When a flow lands, write it up as a numbered item above;
+its B# stays attached for cross-doc references.
+
+**Tier 1 — core daily flows**
+
+- ~~**B8 — Resume upload after kill.**~~ Closed 2026-05-16 — see §12.
+- **B7 — Large folder bind.** Attach a folder with 10k+ small files;
   verify baseline scan completes, sync up doesn't OOM, manifest
   publishes successfully. Watch for `vault/binding/scan.py` /
-  `vault/binding/watcher.py` performance cliffs.
-- **Migration switch-back.** Migrate from one relay to another,
-  then switch back, verify both sides agree on manifest revision.
-- **Ransomware detector trip.** Simulate a mass-rewrite event in a
+  `vault/binding/watcher.py` performance cliffs. Gates whether real
+  user folders (Documents, photo libraries) are usable at all.
+
+**Tier 2 — silent data-loss risk**
+
+- **B6 — Concurrent edits with binding sync.** Edit the same file on
+  both devices between syncs; verify the conflict-rename path
+  (`vault/binding/twoway.py`) produces predictable output and the
+  Activity tab logs both branches. Highest-frequency data-loss vector.
+- **B5 — Eviction under quota pressure.** Fill the relay quota, observe
+  the desktop's eviction pass during upload, verify the right
+  versions get culled (and that "Show deleted" surfaces them). Wrong
+  eviction picks = silent version loss.
+- **B4 — Ransomware detector trip.** Simulate a mass-rewrite event in a
   bound folder; verify `vault/binding/ransomware_detector.py`
-  pauses sync and surfaces the warning.
-- **Schedule purge.** Set a purge schedule, fast-forward time
-  (mock `_now_rfc3339` if needed), verify the scheduled purge
-  fires and audits correctly.
-- **Debug bundle on a real install.** Generate a bundle, inspect
+  pauses sync and surfaces the warning. Last-line safety net against
+  worst-case cloud-replication of ransomware damage.
+
+**Tier 3 — ops / support / edge cases**
+
+- **B3 — Migration switch-back.** Migrate from one relay to another,
+  then switch back, verify both sides agree on manifest revision.
+- **B2 — Debug bundle on a real install.** Generate a bundle, inspect
   the contents, confirm no plaintext / no keys / no tokens leak
   per the logging policy in CLAUDE.md. Complements item 9's
   code-side leak-scan widening with a live-install spot check.
+- **B1 — Schedule purge.** Set a purge schedule, fast-forward time
+  (mock `_now_rfc3339` if needed), verify the scheduled purge
+  fires and audits correctly.
 
 Already-closed candidates (kept for history): **Wrong-passphrase
 rate-limit** — closed as item 7 above on 2026-05-12 (the protection
@@ -649,4 +732,33 @@ is Argon2id-intrinsic; ADR captured at
 
 When a flow lands a finding, write it up as a numbered item above
 with the Symptom / Cause / Fix shape / Acceptance / Status template
-and strike the bullet from this list.
+and strike the **B#** bullet from this list. Keep the identifier
+visible in the writeup so cross-doc references stay resolvable even
+after a flow has moved out of the backlog.
+
+---
+
+## Possible future improvements (not v1 backlog)
+
+Items that came up while triaging the backlog but aren't in scope for
+v1 live-testing. Recorded here so they're not lost.
+
+- **QR-assisted cross-device grant (UI surface).** The wire protocol
+  is implemented and unit-tested — `desktop/src/vault/grant/qr.py`,
+  `vault/grant/wrap.py`, server endpoints `/api/vaults/{id}/join-requests`
+  + `/device-grants`, capability `vault_grant_qr_v1`. But no UI in
+  the shipped app calls `make_join_url` / `parse_join_url`; the
+  Devices tab is a deliberate `vault-architecture.md` placeholder
+  ("This panel is reserved for later development"). The v1 cross-
+  device story is **user-driven**: carry the recovery kit + recovery
+  passphrase to the second device, run the import wizard
+  (`windows_vault_import.py`) against the same vault id. That path
+  works today and is the documented happy path. QR-join is a UX
+  upgrade for v1.x — it would replace "type your recovery passphrase
+  on every new device" with "show a QR on device A, scan/paste on
+  device B". Closes `vault-critical-risks-evaluation.md §3.3`
+  caveat (UX wording + per-role write gates) at the same time.
+  Migrated out of the live-test backlog 2026-05-16 (was B9) — see
+  user note in conversation: "Right now, it's up to user to connect
+  to existing vault from other device. User has the keys and
+  recovery kit file."
