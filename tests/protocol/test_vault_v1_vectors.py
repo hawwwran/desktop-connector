@@ -10,8 +10,11 @@ Schema lock: T0 §A18 in
 Byte-format reference: ``docs/protocol/vault-v1-formats.md``.
 
 Files filled so far:
-    manifest_v1.json (T2.2 + T4.1) — base manifest vectors plus T4
-    remote-folder add/remove cases.
+    root_v1.json + shard_v1.json (2026-05-16) — manifest sharding pair
+    that replaces the legacy single-envelope manifest_v1.json. The
+    latter survives on disk only as a transitional fixture for tests
+    that haven't moved off the pre-sharding Vault.publish_manifest
+    flow yet; see ``vault-v1/README.md``.
 """
 
 from __future__ import annotations
@@ -43,10 +46,12 @@ from src.vault.crypto import (  # noqa: E402
     build_export_wrap_aad,
     build_header_aad,
     build_header_envelope,
-    build_manifest_aad,
-    build_manifest_envelope,
     build_recovery_aad,
     build_recovery_envelope,
+    build_root_aad,
+    build_root_envelope,
+    build_shard_aad,
+    build_shard_envelope,
     derive_content_fingerprint_key,
     derive_device_grant_wrap_key,
     derive_export_wrap_key,
@@ -58,7 +63,8 @@ from src.vault.crypto import (  # noqa: E402
 VECTORS_DIR = os.path.join(os.path.dirname(__file__), "vault-v1")
 
 EXPECTED_FILES = (
-    "manifest_v1.json",
+    "root_v1.json",
+    "shard_v1.json",
     "chunk_v1.json",
     "header_v1.json",
     "recovery_envelope_v1.json",
@@ -96,8 +102,8 @@ def _validate_case_shape(filename: str, index: int, case: dict[str, Any]) -> Non
 # ====================================================================
 
 
-def _run_manifest_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
-    """Verify one manifest_v1.json case end-to-end against vault_crypto.
+def _run_root_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
+    """Verify one root_v1.json case end-to-end against vault_crypto.
 
     Positive cases assert byte-exact outputs at every stage (AAD, subkey,
     AEAD ciphertext, envelope) and round-trip-decrypt to the original
@@ -110,29 +116,26 @@ def _run_manifest_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
 
     master_key = bytes.fromhex(inputs["vault_master_key"])
     nonce = bytes.fromhex(inputs["nonce"])
-    plaintext = base64.b64decode(inputs["manifest_plaintext"])
+    plaintext = base64.b64decode(inputs["root_plaintext"])
 
-    # Compute AAD + subkey + ciphertext + envelope from the inputs alone.
-    aad = build_manifest_aad(
+    aad = build_root_aad(
         vault_id=inputs["vault_id"],
-        revision=int(inputs["revision"]),
-        parent_revision=int(inputs["parent_revision"]),
+        root_revision=int(inputs["root_revision"]),
+        parent_root_revision=int(inputs["parent_root_revision"]),
         author_device_id=inputs["author_device_id"],
     )
-    subkey = derive_subkey("dc-vault-v1/manifest", master_key)
+    subkey = derive_subkey("dc-vault-v1/root", master_key)
     ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
-    envelope = build_manifest_envelope(
+    envelope = build_root_envelope(
         vault_id=inputs["vault_id"],
-        revision=int(inputs["revision"]),
-        parent_revision=int(inputs["parent_revision"]),
+        root_revision=int(inputs["root_revision"]),
+        parent_root_revision=int(inputs["parent_root_revision"]),
         author_device_id=inputs["author_device_id"],
         nonce=nonce,
         aead_ciphertext_and_tag=ciphertext,
     )
 
     if "expected_error" in expected:
-        # Negative case: apply the tampering, attempt decryption, assert
-        # it fails closed.
         tamper = case.get("tamper", {})
         decrypt_aad = aad
         decrypt_envelope = envelope
@@ -145,26 +148,22 @@ def _run_manifest_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
             buf = bytearray(envelope)
             buf[offset] ^= xor_byte
             decrypt_envelope = bytes(buf)
-            # Manifest envelope plaintext header already includes the
-            # nonce; byte 85 is the AEAD ciphertext start.
+            # Root envelope plaintext header is 85 bytes (1+12+8+8+32+24);
+            # offset 85 is the AEAD ciphertext start.
             decrypt_ct = decrypt_envelope[85:]
 
         if "aad_override" in tamper:
             decrypt_aad = bytes.fromhex(tamper["aad_override"])
 
         if expected["expected_error"] == "vault_format_version_unsupported":
-            # F-T02: format-version byte is plaintext (not in AAD), so
-            # bumping it would NOT cause AEAD to fail. Readers MUST stop
-            # before AEAD via the format-version guard.
             with test.assertRaises(VaultFormatVersionUnsupported):
-                assert_supported_format_version(decrypt_envelope, kind="manifest")
+                assert_supported_format_version(decrypt_envelope, kind="root")
             return
 
         with test.assertRaises(nacl.exceptions.CryptoError):
             aead_decrypt(decrypt_ct, subkey, nonce, decrypt_aad)
         return
 
-    # Positive case: every expected.* must match byte-exact.
     if "aad" in expected:
         test.assertEqual(aad.hex(), expected["aad"], "AAD mismatch")
     if "subkey" in expected:
@@ -178,7 +177,84 @@ def _run_manifest_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
     if "envelope_bytes" in expected:
         test.assertEqual(envelope.hex(), expected["envelope_bytes"], "envelope mismatch")
 
-    # Round-trip: decrypt and verify plaintext is recovered.
+    recovered = aead_decrypt(ciphertext, subkey, nonce, aad)
+    test.assertEqual(recovered, plaintext, "round-trip plaintext mismatch")
+
+
+def _run_shard_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
+    """Verify one shard_v1.json case end-to-end against vault_crypto.
+
+    Same pattern as ``_run_root_case`` but for shard envelopes — the
+    envelope plaintext header is 115 bytes (extra 30-byte
+    ``remote_folder_id`` after the vault_id) so the ciphertext starts at
+    offset 115.
+    """
+    inputs = case["inputs"]
+    expected = case["expected"]
+
+    master_key = bytes.fromhex(inputs["vault_master_key"])
+    nonce = bytes.fromhex(inputs["nonce"])
+    plaintext = base64.b64decode(inputs["shard_plaintext"])
+
+    aad = build_shard_aad(
+        vault_id=inputs["vault_id"],
+        remote_folder_id=inputs["remote_folder_id"],
+        shard_revision=int(inputs["shard_revision"]),
+        parent_shard_revision=int(inputs["parent_shard_revision"]),
+        author_device_id=inputs["author_device_id"],
+    )
+    subkey = derive_subkey("dc-vault-v1/shard", master_key)
+    ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+    envelope = build_shard_envelope(
+        vault_id=inputs["vault_id"],
+        remote_folder_id=inputs["remote_folder_id"],
+        shard_revision=int(inputs["shard_revision"]),
+        parent_shard_revision=int(inputs["parent_shard_revision"]),
+        author_device_id=inputs["author_device_id"],
+        nonce=nonce,
+        aead_ciphertext_and_tag=ciphertext,
+    )
+
+    if "expected_error" in expected:
+        tamper = case.get("tamper", {})
+        decrypt_aad = aad
+        decrypt_envelope = envelope
+        decrypt_ct = ciphertext
+
+        if "envelope_byte_xor" in tamper:
+            spec = tamper["envelope_byte_xor"]
+            offset = int(spec["offset"])
+            xor_byte = int(spec["xor"], 16)
+            buf = bytearray(envelope)
+            buf[offset] ^= xor_byte
+            decrypt_envelope = bytes(buf)
+            decrypt_ct = decrypt_envelope[115:]
+
+        if "aad_override" in tamper:
+            decrypt_aad = bytes.fromhex(tamper["aad_override"])
+
+        if expected["expected_error"] == "vault_format_version_unsupported":
+            with test.assertRaises(VaultFormatVersionUnsupported):
+                assert_supported_format_version(decrypt_envelope, kind="shard")
+            return
+
+        with test.assertRaises(nacl.exceptions.CryptoError):
+            aead_decrypt(decrypt_ct, subkey, nonce, decrypt_aad)
+        return
+
+    if "aad" in expected:
+        test.assertEqual(aad.hex(), expected["aad"], "AAD mismatch")
+    if "subkey" in expected:
+        test.assertEqual(subkey.hex(), expected["subkey"], "subkey mismatch")
+    if "aead_ciphertext_and_tag" in expected:
+        test.assertEqual(
+            ciphertext.hex(),
+            expected["aead_ciphertext_and_tag"],
+            "ciphertext mismatch",
+        )
+    if "envelope_bytes" in expected:
+        test.assertEqual(envelope.hex(), expected["envelope_bytes"], "envelope mismatch")
+
     recovered = aead_decrypt(ciphertext, subkey, nonce, aad)
     test.assertEqual(recovered, plaintext, "round-trip plaintext mismatch")
 
@@ -469,7 +545,8 @@ def _run_content_fingerprint_case(test: unittest.TestCase, case: dict[str, Any])
 # Map filename → runner. Every primitive file has a runner now; T2.4
 # adds the PHP twin so the same JSON files exercise both runtimes.
 _RUNNERS = {
-    "manifest_v1.json": _run_manifest_case,
+    "root_v1.json": _run_root_case,
+    "shard_v1.json": _run_shard_case,
     "chunk_v1.json": _run_chunk_case,
     "header_v1.json": _run_header_case,
     "recovery_envelope_v1.json": _run_recovery_case,
@@ -517,16 +594,21 @@ class VaultV1VectorsTests(unittest.TestCase):
     # second pattern. To add a vector, append it to the JSON file AND
     # add the name here in the same commit; the test failure message
     # tells you exactly which side is out of sync.
-    EXPECTED_MANIFEST_V1_CASES = frozenset({
-        "manifest-v1-genesis-happy-path",
-        "manifest-v1-tombstone-only",
-        "manifest-v1-oplog-tail-with-archived-segments",
-        "manifest-v1-legacy-no-remote-folders",
-        "manifest-v1-t4-add-remote-folder",
-        "manifest-v1-t4-remove-remote-folder",
-        "manifest-v1-tampered-ciphertext",
-        "manifest-v1-wrong-aad-revision",
-        "manifest-v1-format-version-bumped",
+    EXPECTED_ROOT_V1_CASES = frozenset({
+        "root-v1-genesis-happy-path",
+        "root-v1-multi-folder",
+        "root-v1-folder-removed",
+        "root-v1-tampered-ciphertext",
+        "root-v1-wrong-aad-revision",
+        "root-v1-format-version-bumped",
+    })
+    EXPECTED_SHARD_V1_CASES = frozenset({
+        "shard-v1-genesis-happy-path",
+        "shard-v1-tombstone-only",
+        "shard-v1-empty-newly-added-folder",
+        "shard-v1-tampered-ciphertext",
+        "shard-v1-wrong-aad-folder-id",
+        "shard-v1-format-version-bumped",
     })
     EXPECTED_CHUNK_V1_CASES = frozenset({
         "chunk-v1-small",
@@ -577,14 +659,23 @@ class VaultV1VectorsTests(unittest.TestCase):
             "frozenset in the same commit.",
         )
 
-    def test_manifest_v1_cases_round_trip_byte_exact(self) -> None:
-        cases = _load_cases("manifest_v1.json")
+    def test_root_v1_cases_round_trip_byte_exact(self) -> None:
+        cases = _load_cases("root_v1.json")
         self._assert_case_names(
-            "manifest_v1.json", cases, self.EXPECTED_MANIFEST_V1_CASES,
+            "root_v1.json", cases, self.EXPECTED_ROOT_V1_CASES,
         )
         for case in cases:
             with self.subTest(case=case["name"]):
-                _run_manifest_case(self, case)
+                _run_root_case(self, case)
+
+    def test_shard_v1_cases_round_trip_byte_exact(self) -> None:
+        cases = _load_cases("shard_v1.json")
+        self._assert_case_names(
+            "shard_v1.json", cases, self.EXPECTED_SHARD_V1_CASES,
+        )
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                _run_shard_case(self, case)
 
     def test_chunk_v1_cases(self) -> None:
         cases = _load_cases("chunk_v1.json")

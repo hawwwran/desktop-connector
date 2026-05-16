@@ -10,14 +10,20 @@ One file per primitive:
 
 | File | Primitive | Spec |
 |---|---|---|
-| `manifest_v1.json` | Manifest envelope | formats §10 |
+| `root_v1.json` | Root manifest envelope (metadata + folder pointers) | formats §10.A |
+| `shard_v1.json` | Folder shard envelope (per-folder file entries) | formats §10.B |
 | `chunk_v1.json` | Chunk envelope | formats §11 |
 | `header_v1.json` | Vault header envelope | formats §9 |
 | `recovery_envelope_v1.json` | Recovery envelope | formats §12 |
 | `device_grant_v1.json` | Device grant envelope | formats §14 |
 | `export_bundle_v1.json` | Export bundle (outer + records) | formats §16 |
+| `content_fingerprint_v1.json` | Keyed file content fingerprint HMAC | formats §10.B.2 |
 
-`op_log_segment_v1.json` is **deferred to v1.5** — segment archival is not emitted by v1 writers (the in-manifest op log carries the lifetime), so neither the JSON vectors nor `GET /api/vaults/{id}/op-log-segments/{segment_id}` are wired in v1. F-T17.
+The single legacy `manifest_v1.json` file was replaced by `root_v1.json` + `shard_v1.json` on 2026-05-16 as part of the manifest-sharding work (use case B — multi-folder vaults). vault_v1 had never shipped; the wire format was altered in place.
+
+> `manifest_v1.json` is **kept on disk** as a transitional fixture for tests under `test_desktop_vault_{browser_model,manifest,rollback}.py` that still exercise the legacy single-envelope `Vault.publish_manifest` flow. It is **not** loaded by the cross-runtime harness (`test_vault_v1_vectors.py`); the harness's `EXPECTED_FILES` set is the new pair. The file will be deleted in Phase H once the entry-level helpers + browser fixtures move to the shard-aware model.
+
+`op_log_segment_v1.json` is **deferred to v1.5** — segment archival is not emitted by v1 writers (the in-root / in-shard op log tail carries the lifetime), so neither the JSON vectors nor `GET /api/vaults/{id}/op-log-segments/{segment_id}` are wired in v1. F-T17.
 
 ## Case shape
 

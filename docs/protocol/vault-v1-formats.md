@@ -118,9 +118,10 @@ Device IDs are inherited from the existing pairing protocol: 32 lowercase hex ch
          HKDF-SHA256 with info label per purpose:
                     │              │              │
                     ▼              ▼              ▼
-          k_header        k_manifest       k_chunk
-          k_op_log        k_folder_wrap    k_device_grant_admin
-          k_export                          (one per active subkey)
+          k_root          k_shard          k_chunk
+          k_header        k_op_log         k_folder_wrap
+          k_export        k_device_grant_admin
+                                          (one per active subkey)
 ```
 
 The Vault Master Key is generated client-side at `POST /api/vaults` time via CSPRNG. It is never sent to the relay. The master key is wrapped at rest:
@@ -149,10 +150,11 @@ All labels are the literal UTF-8 string. Never trim, never re-case.
 | Subkey | Label (UTF-8) | AEAD scope |
 |---|---|---|
 | `k_header` | `dc-vault-v1/header` | Vault header envelope (§9) |
-| `k_manifest` | `dc-vault-v1/manifest` | Manifest envelope (§10) |
+| `k_root` | `dc-vault-v1/root` | Vault root manifest envelope (§10.A). Replaces the v0 `k_manifest` label when sharding lands. |
+| `k_shard` | `dc-vault-v1/shard` | Per-folder shard manifest envelope (§10.B). |
 | `k_chunk` | `dc-vault-v1/chunk` | Chunk envelope (§11) |
-| `k_op_log_segment_<segment_id>` | `dc-vault-v1/op-log-segment/<segment_id>` | One per segment (§D14, §10.4 below). The `<segment_id>` substitution is the literal 30-byte segment_id string. |
-| `k_folder_wrap` | `dc-vault-v1/folder-wrap` | Reserved for v1.5 per-folder key splits — not used in v1 (folder data is encrypted under `k_manifest` directly). |
+| `k_op_log_segment_<segment_id>` | `dc-vault-v1/op-log-segment/<segment_id>` | One per segment (§D14, §10.D below). The `<segment_id>` substitution is the literal 30-byte segment_id string. |
+| `k_folder_wrap` | `dc-vault-v1/folder-wrap` | Reserved for v1.5 per-folder key splits — not used in v1 (per-folder file entries are encrypted under `k_shard`). |
 | `k_export_record` | `dc-vault-v1/export-record` | Per-record key inside the export bundle stream (§16). |
 | `k_qr_verification` | `dc-vault-v1/qr-verification` | Verification code (§13.4). Derived from the X25519 shared secret, not the master key. |
 | `k_device_grant_wrap` | `dc-vault-v1/device-grant-wrap` | Wrap key for device-grant material (§14). Derived from the QR X25519 shared secret. |
@@ -160,7 +162,7 @@ All labels are the literal UTF-8 string. Never trim, never re-case.
 | `k_export_wrap` | `dc-vault-v1/export-wrap` | Wrap key for the export bundle's wrapped key envelope (§16). Derived from Argon2id output of the export passphrase. |
 | `k_chunk_id` | `dc-vault-v1/chunk-id` | HMAC key for keyed chunk-id derivation (T6.5 idempotent resume). Per-vault, derived from `vault_master_key`. |
 | `k_chunk_nonce` | `dc-vault-v1/chunk-nonce` | HMAC key for deterministic chunk-nonce derivation (T6.5). Re-encrypting the same plaintext under the same `(file_version_id, chunk_index)` produces a byte-identical envelope. |
-| `k_content_fp` | `dc-vault-v1/content-fingerprint` | HMAC key for keyed file content fingerprints (§10.2, §A7). Used to detect "this upload's bytes match an existing version" without round-tripping plaintext outside the vault. |
+| `k_content_fp` | `dc-vault-v1/content-fingerprint` | HMAC key for keyed file content fingerprints (§10.B.2, §A7). Used to detect "this upload's bytes match an existing version" without round-tripping plaintext outside the vault. |
 
 Future versions add labels under the same `dc-vault-v1/...` namespace; renaming or repurposing existing labels is forbidden.
 
@@ -190,16 +192,30 @@ Every AAD is a **deterministic byte concatenation of fixed-length-encoded fields
 
 For each envelope type below, the AAD's total byte length is constant. A second implementer can build a bit-identical AAD given the same field values.
 
-### 6.1 Manifest AAD (80 bytes)
+### 6.1 Root manifest AAD (76 bytes)
 
 ```text
-aad_manifest := utf8("dc-vault-manifest-v1")    # 20 bytes
-             ‖ vault_id_bytes                    # 12 bytes (UTF-8, no dashes, uppercase)
-             ‖ revision_be64                     # 8 bytes (big-endian uint64)
-             ‖ parent_revision_be64              # 8 bytes (0x0000000000000000 for genesis)
-             ‖ author_device_id_bytes            # 32 bytes (UTF-8 hex)
-                                                 # total: 80 bytes
+aad_root := utf8("dc-vault-root-v1")            # 16 bytes
+         ‖ vault_id_bytes                        # 12 bytes (UTF-8, no dashes, uppercase)
+         ‖ root_revision_be64                    # 8 bytes (big-endian uint64)
+         ‖ parent_root_revision_be64             # 8 bytes (0x0000000000000000 for genesis)
+         ‖ author_device_id_bytes                # 32 bytes (UTF-8 hex)
+                                                 # total: 76 bytes
 ```
+
+### 6.1a Folder shard AAD (107 bytes)
+
+```text
+aad_shard := utf8("dc-vault-shard-v1")          # 17 bytes
+          ‖ vault_id_bytes                       # 12 bytes
+          ‖ remote_folder_id_bytes               # 30 bytes (rf_v1_…)
+          ‖ shard_revision_be64                  # 8 bytes
+          ‖ parent_shard_revision_be64           # 8 bytes
+          ‖ author_device_id_bytes               # 32 bytes
+                                                 # total: 107 bytes
+```
+
+The two AAD shapes share the manifest-envelope skeleton (schema string, vault id, revision pair, author device id) and diverge only in their schema strings and the shard's per-folder discriminator. The schema string makes them non-substitutable: an AEAD-encrypted root envelope decrypted under a shard AAD fails closed (and vice-versa), so the relay can't covertly serve one in place of the other.
 
 ### 6.2 Chunk AAD (135 bytes)
 
@@ -284,7 +300,8 @@ A reader that sees an unknown format version MUST stop **before** attempting AEA
 | Envelope | Version byte | Notes |
 |---|---|---|
 | Vault header | `0x01` | Increment for any change to the §9 layout. |
-| Manifest | `0x01` | Plain `manifest_format_version` per T0 §A3 / §D1. |
+| Root manifest | `0x01` | Plain `manifest_format_version` per T0 §A3 / §D1. Echoed inside the encrypted plaintext too. |
+| Folder shard | `0x01` | Same `manifest_format_version`; root and shard always ship the same value. |
 | Op-log segment | `0x01` | |
 | Chunk | (no version byte) | Format is bound to the chunk-id `v1` namespace; future v2 chunks use `ch_v2_…` prefix and a different envelope. |
 | Recovery envelope | `0x01` | |
@@ -305,7 +322,7 @@ Generated once at `POST /api/vaults`. Never transmitted in plaintext. Stored:
 - Wrapped per-device in the OS keyring (or encrypted local fallback) — not protocol-visible.
 - Wrapped in **device grants** during QR join (§14).
 
-All other vault keys (`k_manifest`, `k_chunk`, …) derive from this master key via HKDF (§4).
+All other vault keys (`k_root`, `k_shard`, `k_chunk`, …) derive from this master key via HKDF (§4).
 
 ### 8.1 Genesis fingerprint
 
@@ -378,7 +395,7 @@ Notes:
 - `vault_id` here is the wire form (no dashes, uppercase) so it round-trips cleanly through canonical JSON.
 - `recovery_envelopes` is a list because v1 may carry multiple envelopes if the user re-runs recovery setup (e.g., after a passphrase change in v1.5+). v1 always writes exactly one entry on `POST /api/vaults` and never mutates this list — passphrase rotation is v1.5.
 - `recovery_envelopes` here is an **informational duplicate**; the authoritative copy lives in the recovery kit file (§12.5). Cold recovery on a fresh device needs the kit-side copy because reading this list requires the master key, and the master key is only obtainable by unwrapping a recovery envelope. Paired devices already hold the master key and use either source interchangeably.
-- `manifest_format_version` is **echoed** here for fast-failure on opening — clients can refuse the vault before any manifest fetch if they don't support the version. The authoritative copy lives in each manifest envelope's plaintext header (§10.1).
+- `manifest_format_version` is **echoed** here for fast-failure on opening — clients can refuse the vault before any root fetch if they don't support the version. The authoritative copy lives in each root + shard envelope's plaintext header (§10.A.1 / §10.B.1).
 
 ### 9.3 AEAD parameters
 
@@ -391,39 +408,52 @@ plain = canonical_json(header_plaintext)
 
 ---
 
-## 10. Manifest envelope
+## 10. Root manifest and folder shard envelopes
 
-### 10.1 Layout
+The vault's per-cycle bandwidth is dominated by manifest-shaped envelopes. v1 splits that envelope along the natural folder boundary so an edit in one folder doesn't ship the rest of the vault's file entries on every publish. Two envelope kinds participate:
+
+- The **root manifest envelope** (§10.A) lists the folders, advertises each folder's currently-published shard revision + hash, and carries vault-wide policy + the vault-scoped op log.
+- A **folder shard envelope** (§10.B) holds the file entries for one `remote_folder_id`. There is one shard envelope per remote folder, identified by `(vault_id, remote_folder_id)`.
+
+A new client cold-starts with one root fetch followed by lazy shard fetches keyed off the root's folder list. Every shard publish atomically re-publishes the root so the root's `shard_hash` always matches the latest published shard envelope (§10.C hash chain). The relay sees the atomic update as one CAS-protected wire call (`PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root`); see `vault-v1.md` §6.6+.
+
+### 10.A Root manifest envelope
+
+#### 10.A.1 Layout
 
 ```text
-manifest_envelope := format_version_u8        # 1 byte (0x01) — manifest_format_version
-                  ‖ vault_id_bytes             # 12 bytes
-                  ‖ revision_be64              # 8 bytes
-                  ‖ parent_revision_be64       # 8 bytes
-                  ‖ author_device_id_bytes     # 32 bytes
-                  ‖ nonce                       # 24 bytes
-                  ‖ aead_ciphertext_and_tag     # variable
-                                                # ───────────
-                                                # total: 85 + N bytes
+root_envelope := format_version_u8        # 1 byte (0x01) — manifest_format_version
+              ‖ vault_id_bytes             # 12 bytes
+              ‖ root_revision_be64         # 8 bytes
+              ‖ parent_root_revision_be64  # 8 bytes
+              ‖ author_device_id_bytes     # 32 bytes
+              ‖ nonce                       # 24 bytes
+              ‖ aead_ciphertext_and_tag     # variable
+                                            # ───────────
+                                            # total: 85 + N bytes
 ```
 
-The first 85 bytes are deterministic from the field values. The relay parses the first 61 bytes to extract revision / parent_revision for CAS checks. Per T0 §A3, `manifest_format_version` is **plaintext, not AAD-bound** — old clients reject before decryption.
+The first 85 bytes are deterministic from the field values; layout is byte-exact with the legacy single-manifest envelope shape. The relay parses the first 21 bytes (version + vault_id + root_revision) for CAS checks. Per T0 §A3, `manifest_format_version` is **plaintext, not AAD-bound** — old clients reject before decryption.
 
-### 10.2 Plaintext (canonical JSON)
+#### 10.A.2 Plaintext (canonical JSON)
 
 ```json
 {
-  "schema": "dc-vault-manifest-v1",
+  "schema": "dc-vault-root-v1",
   "vault_id": "ABCD2345WXYZ",
-  "revision": 42,
-  "parent_revision": 41,
+  "root_revision": 42,
+  "parent_root_revision": 41,
   "created_at": "2026-05-02T10:00:00.000Z",
   "author_device_id": "<32 hex>",
   "manifest_format_version": 1,
+  "retention_policy": {
+    "keep_deleted_days": 30,
+    "keep_versions": 10
+  },
   "remote_folders": [
     {
       "remote_folder_id": "rf_v1_…",
-      "display_name_enc": "<opaque client string protected by the manifest envelope>",
+      "display_name_enc": "<opaque client string protected by the root envelope>",
       "created_at": "2026-05-02T10:00:00.000Z",
       "created_by_device_id": "<32 hex>",
       "state": "active",
@@ -432,27 +462,93 @@ The first 85 bytes are deterministic from the field values. The relay parses the
         "keep_versions": 10
       },
       "ignore_patterns": [".git/", "node_modules/", "*.tmp"],
-      "entries": [
+      "shard_revision": 7,
+      "shard_hash": "<hex sha-256 of the shard envelope bytes>"
+    }
+  ],
+  "operation_log_tail": [
+    {
+      "operation_id": "op_v1_…",
+      "kind": "remote_folder_added",
+      "timestamp": "2026-05-02T10:00:00.123Z",
+      "device_id": "<32 hex>",
+      "remote_folder_id": "rf_v1_…"
+    }
+  ],
+  "archived_op_segments": [
+    { "seq": 7, "first_ts": "2026-04-15T08:30:00.000Z", "last_ts": "2026-04-22T14:12:00.000Z", "segment_id": "os_v1_…", "hash": "<32 hex>" }
+  ]
+}
+```
+
+Field-by-field notes:
+
+- `root_revision` / `parent_root_revision` chain the root's CAS history (genesis `root_revision = 1`, `parent_root_revision = 0`).
+- `retention_policy` at the top level is the **vault-wide** default; per-folder overrides live on the matching `remote_folders[]` entry.
+- `remote_folders[]` no longer carries an `entries` array. The list is metadata only: identity, display name, policy, plus the **`shard_revision` + `shard_hash` pair** that anchors the hash chain (§10.C). A client reads this list to learn which shards exist and what to expect when it fetches each.
+- `state`: `"active" | "deleted" | "draining"`. `"deleted"` shards persist long enough for retention purge to walk their entries; the entries themselves stay accessible via shard fetch until retention elapses.
+- `operation_log_tail` is **vault-wide** — folder add/remove/rename, retention policy changes, key rotations. File-scoped events live in the relevant shard's op-log tail (§10.B.2).
+- `archived_op_segments` follows the same newest-seq-first ordering as the legacy single manifest (T0 §D14).
+
+#### 10.A.3 AEAD parameters
+
+```text
+key   = HKDF-SHA256(salt=b"", ikm=vault_master_key, info=utf8("dc-vault-v1/root"), L=32)
+nonce = 24 random bytes (lives in plaintext header)
+aad   = aad_root (§6.1, 76 bytes)
+plain = canonical_json(root_plaintext)
+```
+
+### 10.B Folder shard envelope
+
+#### 10.B.1 Layout
+
+```text
+shard_envelope := format_version_u8        # 1 byte (0x01) — manifest_format_version
+               ‖ vault_id_bytes             # 12 bytes
+               ‖ remote_folder_id_bytes     # 30 bytes (rf_v1_…)
+               ‖ shard_revision_be64        # 8 bytes
+               ‖ parent_shard_revision_be64 # 8 bytes
+               ‖ author_device_id_bytes     # 32 bytes
+               ‖ nonce                       # 24 bytes
+               ‖ aead_ciphertext_and_tag     # variable
+                                             # ───────────
+                                             # total: 115 + N bytes
+```
+
+The first 115 bytes are deterministic from the field values. The relay reads bytes 1..43 (vault_id + remote_folder_id) plus the 8-byte `shard_revision` at offset 43 to validate the CAS request against the URL-supplied folder id. The remote folder id appears redundantly in the URL and the envelope header so a forged envelope can't be CAS-CASed against a different folder's revision counter.
+
+#### 10.B.2 Plaintext (canonical JSON)
+
+```json
+{
+  "schema": "dc-vault-shard-v1",
+  "vault_id": "ABCD2345WXYZ",
+  "remote_folder_id": "rf_v1_…",
+  "shard_revision": 7,
+  "parent_shard_revision": 6,
+  "created_at": "2026-05-02T10:00:00.000Z",
+  "author_device_id": "<32 hex>",
+  "manifest_format_version": 1,
+  "entries": [
+    {
+      "entry_id": "fe_v1_…",
+      "type": "file",
+      "path": "Invoices/2026/example.pdf",
+      "latest_version_id": "fv_v1_…",
+      "deleted": false,
+      "versions": [
         {
-          "entry_id": "fe_v1_…",
-          "type": "file",
-          "path": "Invoices/2026/example.pdf",
-          "latest_version_id": "fv_v1_…",
-          "deleted": false,
-          "versions": [
-            {
-              "version_id": "fv_v1_…",
-              "created_at": "2026-05-02T10:00:00.123Z",
-              "modified_at": "2026-05-02T09:50:00.000Z",
-              "logical_size": 123456,
-              "ciphertext_size": 124004,
-              "content_fingerprint": "<base64>",
-              "chunks": [
-                { "chunk_id": "ch_v1_…", "index": 0, "plaintext_size": 123456, "ciphertext_size": 123500 }
-              ],
-              "author_device_id": "<32 hex>"
-            }
-          ]
+          "version_id": "fv_v1_…",
+          "created_at": "2026-05-02T10:00:00.123Z",
+          "modified_at": "2026-05-02T09:50:00.000Z",
+          "logical_size": 123456,
+          "ciphertext_size": 124004,
+          "content_fingerprint": "<base64>",
+          "chunks": [
+            { "chunk_id": "ch_v1_…", "index": 0, "plaintext_size": 123456, "ciphertext_size": 123500 }
+          ],
+          "author_device_id": "<32 hex>"
         }
       ]
     }
@@ -468,35 +564,57 @@ The first 85 bytes are deterministic from the field values. The relay parses the
       "version_id": "fv_v1_…"
     }
   ],
-  "archived_op_segments": [
-    { "seq": 7, "first_ts": "2026-04-15T08:30:00.000Z", "last_ts": "2026-04-22T14:12:00.000Z", "segment_id": "os_v1_…", "hash": "<32 hex>" }
-  ]
+  "archived_op_segments": []
 }
 ```
 
-Field-by-field byte-level notes:
+Field-by-field notes:
 
-- `created_at` / `modified_at` / `timestamp`: RFC 3339, ms precision, UTC. Used for `(timestamp, device_id_hash)` tie-breakers per T0 §A7.
-- `remote_folders[].display_name_enc`: opaque client-owned display-name payload inside the encrypted manifest. T4.5 folder rename changes this field only; local bindings remain tied to `remote_folder_id`.
-- `remote_folders[].retention_policy`: immutable after folder creation in v1. Defaults: `keep_deleted_days = 30`, `keep_versions = 10`.
-- `remote_folders[].entries`: optional until the browser/upload phases populate file entries. Missing `remote_folders` on early manifests normalizes to `[]` after decrypt.
-- `content_fingerprint`: 32 bytes of HMAC-SHA256 over the plaintext file (key = `HKDF(ikm=master_key, info="dc-vault-v1/content-fingerprint")`). Encoded base64 in plaintext JSON.
-- `chunks[].plaintext_size` is exact; `chunks[].ciphertext_size` = plaintext_size + 16 (AEAD tag) + 0 (no per-chunk plaintext header).
-- `archived_op_segments` is **newest seq first** per T0 §D14.
-- The `operation_log_tail` array MUST be ≤ 1000 entries (T0 §D14 / §A13). At rollover, the writer archives the oldest 500 into a new `os_v1_…` segment in the same CAS publish.
+- `shard_revision` / `parent_shard_revision` chain the **per-folder** CAS history. Each shard has its own sequence; folder A's revision 7 is unrelated to folder B's revision 7.
+- `entries` is the file list for this folder only. All entry-shaped fields (`entry_id`, `path`, `latest_version_id`, `deleted`, `versions[]`, `chunks[]`, `content_fingerprint`) keep the byte-level semantics they had in the legacy single-manifest shape — only the parent container changed.
+- `operation_log_tail` is **shard-scoped**: file uploaded, version added, tombstoned, restored. Vault-wide events live on the root.
+- `archived_op_segments` follows the same rollover rule as the root (newest-seq-first), but ranges over folder-scoped segments. An empty list is permitted and common — most folders never accumulate enough events to trigger rollover.
 
-### 10.3 AEAD parameters
+#### 10.B.3 AEAD parameters
 
 ```text
-key   = HKDF-SHA256(salt=b"", ikm=vault_master_key, info=utf8("dc-vault-v1/manifest"), L=32)
+key   = HKDF-SHA256(salt=b"", ikm=vault_master_key, info=utf8("dc-vault-v1/shard"), L=32)
 nonce = 24 random bytes (lives in plaintext header)
-aad   = aad_manifest (§6.1, 80 bytes)
-plain = canonical_json(manifest_plaintext)
+aad   = aad_shard (§6.1a, 107 bytes)
+plain = canonical_json(shard_plaintext)
 ```
 
-### 10.4 Op-log segment envelope
+The shard subkey is **not** keyed by remote_folder_id; the AAD's embedded `remote_folder_id` makes a cross-folder substitution fail closed. (A future v1.x may shift to per-folder subkeys; the AAD-bound id provides the cryptographic discriminator either way.)
 
-A separate envelope, written when the writer archives the oldest 500 entries. Stored in the relay's `vault_op_log_segments` table, fetched on demand via `GET /api/vaults/{id}/op-log-segments/{segment_id}` (§6.7 of vault-v1.md).
+### 10.C Hash chain invariant
+
+The root carries `remote_folders[i].shard_hash` for every active shard. The hash is **`sha256(shard_envelope_bytes)`** — the full wire envelope, including its plaintext header, nonce, and AEAD output.
+
+Every legitimate publish updates both surfaces atomically (§6.8 of `vault-v1.md`'s `PUT /folders/{folder_id}/shard-with-root`):
+
+1. New shard ciphertext lands at `vault_folder_shards.envelope_blob`.
+2. Server computes `envelope_hash = sha256(envelope_blob)` and stores it in the same row.
+3. Server validates `root.remote_folders[i].shard_hash == envelope_hash`. Mismatch aborts the whole transaction with 422 `vault_shard_hash_mismatch` — neither side lands. The client fixes its publish payload and retries.
+4. Both writes commit in a single SQLite transaction; readers between the two are impossible.
+
+Client-side, before consuming a shard's entries, decoders **must**:
+
+```python
+fetched_root = vault.fetch_root_manifest(relay)
+fetched_shard_envelope = vault.fetch_folder_shard_envelope(relay, folder_id)
+
+expected_hash = root.remote_folders[i].shard_hash    # for folder_id
+actual_hash   = sha256(fetched_shard_envelope).hexdigest()
+assert expected_hash == actual_hash, "vault_shard_tampered"
+
+decrypt(shard_envelope, key=k_shard, aad=aad_shard)  # then consume entries
+```
+
+A relay that serves an older shard envelope passes the AEAD check (it was once a legitimate envelope from the same vault key) but fails this hash compare against the trusted root. The shape is the same rollback-anti-pattern detection that §3.7 / `manifest_revision_floor` runs against the root itself.
+
+### 10.D Op-log segment envelope
+
+A separate envelope, written when either the root's or a shard's `operation_log_tail` rolls over (oldest 500 archived). Stored in the relay's `vault_op_log_segments` table, fetched on demand via `GET /api/vaults/{id}/op-log-segments/{segment_id}` (§6.7 of vault-v1.md). Same byte shape regardless of whether the segment originated on the root or a shard; the segment plaintext schema includes a `parent` field discriminating the two so a reader can attribute archived events.
 
 ```text
 op_log_segment_envelope := format_version_u8     # 1 byte (0x01)
@@ -509,7 +627,7 @@ op_log_segment_envelope := format_version_u8     # 1 byte (0x01)
                                                     # total: 75 + N bytes
 ```
 
-Plaintext is canonical JSON: `{"schema": "dc-vault-op-log-v1", "segment_id": "...", "seq": 7, "first_ts": "...", "last_ts": "...", "entries": [<op-log entry shape, same as manifest's tail>]}`.
+Plaintext is canonical JSON: `{"schema": "dc-vault-op-log-v1", "segment_id": "...", "seq": 7, "parent": {"kind": "root"} | {"kind": "shard", "remote_folder_id": "rf_v1_…"}, "first_ts": "...", "last_ts": "...", "entries": [<op-log entry shape, same as the root or shard tail>]}`.
 
 ```text
 key   = HKDF-SHA256(salt=b"", ikm=vault_master_key,
@@ -920,10 +1038,11 @@ ciphertext_i         := AEAD-XChaCha20-Poly1305(
 |:---:|---|---|
 | `1` | `export_header` | UTF-8 JSON (§16.4) — canonical per §17. |
 | `2` | `bundle_index` | reserved for v1.5; v1 writers do not emit it, v1 readers ignore it if encountered. |
-| `3` | `manifest` | bytes — exact manifest envelope from §10.1 |
-| `4` | `op_log_segment` | reserved for v1.5; v1 writers do not emit it (op-log archives ship in-manifest). |
+| `3` | `root` | bytes — exact root manifest envelope from §10.A.1. Exactly one per bundle. |
+| `4` | `op_log_segment` | reserved for v1.5; v1 writers do not emit it (op-log archives ship in-root or in-shard). |
 | `5` | `chunk` | bytes — `chunk_id_ascii(30)` followed by exact chunk envelope from §11.1. |
 | `6` | `footer` | bytes — see §16.7 |
+| `7` | `shard` | bytes — `remote_folder_id_ascii(30)` followed by the exact shard envelope from §10.B.1. One record per active folder. |
 
 `inner_payload_length` MUST equal the length of `inner_payload` bytes (used as a redundant sanity check by readers).
 
@@ -933,7 +1052,11 @@ ciphertext_i         := AEAD-XChaCha20-Poly1305(
 {
   "schema": "dc-vault-export-v1",
   "vault_id": "ABCD2345WXYZ",
-  "manifest_revision": 5,
+  "root_revision": 5,
+  "shard_revisions": {
+    "rf_v1_…": 12,
+    "rf_v1_…": 4
+  },
   "format_version": 1,
   "exported_at": "2026-05-02T10:00:00.000Z"
 }
@@ -955,7 +1078,7 @@ chunk_id_ascii (30 bytes) ‖ chunk_envelope (variable, formats §11.1)
 
 The 30-byte ASCII chunk_id at offset 0 lets the reader recover the chunk's identity without re-deriving the keyed chunk-id (which would require the master key). The envelope bytes are the exact response that `GET /api/vaults/{id}/chunks/{chunk_id}` would return on the source relay.
 
-> **v1 verifiability gap.** v1 omits the per-chunk SHA-256 hash from the bundle (T0 §A10 expected one). The chunk's identity is still cryptographically pinned by the AAD-bound `chunk_id` plus the manifest's `chunks[*].chunk_id` reference, and the chunk envelope's own AEAD verifies on import. v1.5 adds an explicit `hash` field once it lands in `bundle_index` so per-chunk `hash == sha256(envelope_bytes)` verification is callable without decrypting the manifest.
+> **v1 verifiability gap.** v1 omits the per-chunk SHA-256 hash from the bundle (T0 §A10 expected one). The chunk's identity is still cryptographically pinned by the AAD-bound `chunk_id` plus the relevant shard's `chunks[*].chunk_id` reference, and the chunk envelope's own AEAD verifies on import. v1.5 adds an explicit `hash` field once it lands in `bundle_index` so per-chunk `hash == sha256(envelope_bytes)` verification is callable without decrypting any shard.
 
 ### 16.7 footer payload (bytes)
 
@@ -968,18 +1091,19 @@ footer_payload := overall_hash (32 bytes, SHA-256)
 
 `overall_hash` is the SHA-256 over each preceding record's on-disk bytes (the `record_byte_length_be32 || nonce || ciphertext+tag` triple, in order). It does NOT include the outer header / wrapped-key prefix — the magic-bytes check at file open already covers those.
 
-`predecessor_record_count_be32` is the count of records preceding the footer (so a v1 bundle with header + manifest + N chunks + footer has `predecessor_record_count == 2 + N`).
+`predecessor_record_count_be32` is the count of records preceding the footer (so a v1 bundle with header + root + M shards + N chunks + footer has `predecessor_record_count == 2 + M + N`).
 
 ### 16.8 Verification on import
 
 After AEAD-decrypting each record, the reader:
 
 1. Verifies the inner `inner_payload_length` matches the actual payload bytes length.
-2. For `manifest` records: verifies the corresponding envelope's AEAD with the vault's master key (post-import, after the user supplied the recovery material to unlock the vault on the target side).
-3. For `chunk` records: AEAD-verifies the chunk envelope on import (§11.1) — failure surfaces as `vault_chunk_tampered` rather than a bundle-level error.
-4. Footer: re-computes `overall_hash` over each preceding record's on-disk bytes and verifies. Count must equal the actual number of records before the footer. Mismatch → `vault_export_tampered` with `details.section = "footer"`.
+2. For `root` records: verifies the root envelope's AEAD with the vault's master key (post-import, after the user supplied the recovery material to unlock the vault on the target side).
+3. For `shard` records: verifies the shard envelope's AEAD, **and** verifies `sha256(shard_envelope) == root.remote_folders[i].shard_hash` for the matching `remote_folder_id` (§10.C hash chain). Mismatch → `vault_shard_tampered`.
+4. For `chunk` records: AEAD-verifies the chunk envelope on import (§11.1) — failure surfaces as `vault_chunk_tampered` rather than a bundle-level error.
+5. Footer: re-computes `overall_hash` over each preceding record's on-disk bytes and verifies. Count must equal the actual number of records before the footer. Mismatch → `vault_export_tampered` with `details.section = "footer"`.
 
-Any AEAD failure during streaming → `vault_export_tampered` with `details.section ∈ {"envelope", "header", "manifest", "chunk", "footer"}`.
+Any AEAD failure during streaming → `vault_export_tampered` with `details.section ∈ {"envelope", "header", "root", "shard", "chunk", "footer"}`.
 
 ### 16.9 Resumability
 
@@ -1029,49 +1153,53 @@ All CBOR used in the export bundle MUST be produced and parsed using **RFC 8949 
 Test vectors live at `tests/protocol/vault-v1/`. One file per primitive:
 
 ```text
-manifest_v1.json
+root_v1.json
+shard_v1.json
 chunk_v1.json
 header_v1.json
 op_log_segment_v1.json        # added in T2
 recovery_envelope_v1.json
 device_grant_v1.json
 export_bundle_v1.json
+content_fingerprint_v1.json
 ```
 
-Each file is a JSON array of cases. Each case:
+Each file is a JSON array of cases. Each case (root example):
 
 ```json
 {
-  "name": "manifest-v1-genesis-happy-path",
-  "description": "Happy-path encryption + decryption of a genesis manifest with one folder and one file.",
+  "name": "root-v1-genesis-happy-path",
+  "description": "Happy-path encryption + decryption of a genesis root with one folder pointer.",
   "inputs": {
     "vault_master_key": "<hex 64 chars>",
     "vault_id": "ABCD2345WXYZ",
-    "revision": 1,
-    "parent_revision": 0,
+    "root_revision": 1,
+    "parent_root_revision": 0,
     "author_device_id": "<hex 32 chars>",
     "nonce": "<hex 48 chars>",
-    "manifest_plaintext": "<base64 of canonical JSON bytes>",
-    "expected_aad": "<hex of the 80-byte AAD construction>"
+    "root_plaintext": "<base64 of canonical JSON bytes>",
+    "expected_aad": "<hex of the 76-byte AAD construction>"
   },
   "expected": {
     "envelope_bytes": "<hex of full envelope>",
     "subkey": "<hex 64 chars; HKDF output>",
     "ciphertext_and_tag": "<hex>"
   },
-  "notes": "Exercises §6.1 + §10."
+  "notes": "Exercises §6.1 + §10.A."
 }
 ```
+
+Shard cases add `remote_folder_id`, `shard_revision`, `parent_shard_revision`, and `shard_plaintext` keys (and the AAD is 107 bytes); see §6.1a and §10.B for the layouts.
 
 Negative cases use `expected.expected_error: "vault_..."` (a string from the T0 error-code table) instead of byte outputs:
 
 ```json
 {
-  "name": "manifest-v1-tampered-aad",
-  "description": "Manifest decrypts with a tampered AAD (wrong author_device_id) — must fail closed.",
+  "name": "root-v1-tampered-aad",
+  "description": "Root decrypts with a tampered AAD (wrong author_device_id) — must fail closed.",
   "inputs": { "...": "..." },
   "expected": {
-    "expected_error": "vault_manifest_tampered"
+    "expected_error": "vault_root_tampered"
   }
 }
 ```

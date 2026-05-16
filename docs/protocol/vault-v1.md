@@ -21,7 +21,8 @@ The `vault_v1` aggregate bit is **only** present when the relay implements every
 | `vault_v1` | T1 | Aggregate: relay supports the v1 vault surface (implies all T1 bits below). |
 | `vault_create_v1` | T1 | `POST /api/vaults`. |
 | `vault_header_v1` | T1 | `GET/PUT /api/vaults/{id}/header`. |
-| `vault_manifest_cas_v1` | T1 | Manifest CAS PUT with `expected_current_revision` (§A1 conflict shape). |
+| `vault_root_cas_v1` | T1 | Root manifest CAS PUT (§6.4 / §6.6). Carries `expected_current_root_revision`. |
+| `vault_shard_cas_v1` | T1 | Per-folder shard CAS PUT (§6.5 / §6.7) + atomic `shard-with-root` (§6.8). Replaces the v0 `vault_manifest_cas_v1` bit. |
 | `vault_chunk_v1` | T1 | Chunk PUT/GET/HEAD + `chunks/batch-head`. |
 | `vault_gc_v1` | T1 | `POST /api/vaults/{id}/gc/plan` + `…/gc/execute` + `…/gc/cancel`. |
 | `vault_soft_delete_v1` | T7 | Server understands tombstone retention semantics for GC. |
@@ -53,7 +54,8 @@ GET /api/health
     "vault_v1",
     "vault_create_v1",
     "vault_header_v1",
-    "vault_manifest_cas_v1",
+    "vault_root_cas_v1",
+    "vault_shard_cas_v1",
     "vault_chunk_v1",
     "vault_gc_v1",
     "vault_migration_v1",
@@ -171,7 +173,9 @@ The full code table — including required `details` fields and retry classes (`
 |---|:---:|---|
 | `POST /api/vaults` | no | Re-creating with the same `vault_id` returns 409 `vault_already_exists`. |
 | `PUT /api/vaults/{id}/header` | yes (CAS) | `expected_header_revision` mismatch returns 409 `vault_manifest_conflict`. |
-| `PUT /api/vaults/{id}/manifest` | yes (CAS) | `expected_current_revision` mismatch returns 409 with the §A1 shape. |
+| `PUT /api/vaults/{id}/root` | yes (CAS) | `expected_current_root_revision` mismatch returns 409 `vault_root_conflict` carrying the current root envelope inline (§A1-root shape). |
+| `PUT /api/vaults/{id}/folders/{folder_id}/shard` | yes (CAS) | `expected_current_shard_revision` mismatch returns 409 `vault_shard_conflict` carrying the current shard envelope inline (§A1-shard shape). |
+| `PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root` | yes (atomic CAS) | Either both publishes land or neither; 409 carries the side that conflicted plus that side's current envelope inline. Mismatched `shard_hash` aborts with 422 `vault_shard_hash_mismatch`. |
 | `PUT /api/vaults/{id}/chunks/{chunk_id}` | yes | Same `chunk_id` + same ciphertext: 200 OK. Same id + different ciphertext: 422 `vault_chunk_size_mismatch` or `vault_chunk_tampered`. |
 | `GET` / `HEAD` (any) | yes | Pure reads. |
 | `POST /chunks/batch-head` | yes | Pure read; no state. |
@@ -213,10 +217,12 @@ Request:
   "vault_access_token_hash": "<base64 hash(vault_access_secret) — server stores as-is>",
   "encrypted_header": "<base64 ciphertext>",
   "header_hash": "<hex sha-256>",
-  "initial_manifest_ciphertext": "<base64 ciphertext>",
-  "initial_manifest_hash": "<hex sha-256>"
+  "initial_root_ciphertext": "<base64 ciphertext>",
+  "initial_root_hash": "<hex sha-256>"
 }
 ```
+
+The initial root carries an empty `remote_folders` list (no shards yet). Folders are added one at a time via `PUT /root` (§6.6); each add publishes the root with the new folder entry and an empty shard via §6.8 (`shard-with-root`) so the hash chain stays consistent from genesis. A vault with zero shards is valid — useful for clients that want to provision the vault before deciding which local folders to bind.
 
 Success: **201 Created**
 
@@ -226,7 +232,7 @@ Success: **201 Created**
   "data": {
     "vault_id": "ABCD-2345-WXYZ",
     "header_revision": 1,
-    "manifest_revision": 1,
+    "root_revision": 1,
     "quota_ciphertext_bytes": 1073741824,
     "used_ciphertext_bytes": 0,
     "created_at": "2026-05-02T10:00:00Z"
@@ -309,14 +315,14 @@ CAS-protected. On revision mismatch returns 409 `vault_manifest_conflict` with `
 
 Header changes are admin-tier because they include `migrated_to` and other vault-bedrock state.
 
-### 6.4 Get current manifest
+### 6.4 Get current root manifest
 
 ```http
-GET /api/vaults/{vault_id}/manifest
+GET /api/vaults/{vault_id}/root
 ```
 
 **Auth**: vault auth, any role.
-**Capability**: `vault_manifest_cas_v1`.
+**Capability**: `vault_root_cas_v1`.
 
 Success: **200 OK**
 
@@ -324,48 +330,66 @@ Success: **200 OK**
 {
   "ok": true,
   "data": {
-    "revision": 42,
-    "parent_revision": 41,
-    "manifest_hash": "<hex>",
-    "manifest_ciphertext": "<base64>",
-    "manifest_size": 184320
+    "root_revision": 42,
+    "parent_root_revision": 41,
+    "root_hash": "<hex>",
+    "root_ciphertext": "<base64>",
+    "root_size": 4920
   }
 }
 ```
 
-`manifest_size` is the ciphertext byte length (used by the client for memory preflight before decoding base64).
+`root_size` is the ciphertext byte length (used by the client for memory preflight before decoding base64). The root carries metadata + the `remote_folders[*].shard_revision` + `shard_hash` references but no file entries — see formats §10.A. For the per-folder file entries, fetch the matching shard (§6.5).
 
-### 6.5 Get specific manifest revision
+### 6.5 Get current folder shard
 
 ```http
-GET /api/vaults/{vault_id}/manifest/revisions/{revision}
+GET /api/vaults/{vault_id}/folders/{folder_id}/shard
 ```
 
 **Auth**: vault auth, any role.
-**Capability**: `vault_manifest_cas_v1`.
+**Capability**: `vault_shard_cas_v1`.
 
-Same response shape as §6.4. Used by the activity timeline (T17.1) and "restore folder to date" (T11.5). Returns 404 `vault_not_found` (with `details.revision`) for unknown revisions.
+Success: **200 OK**
 
-Revisions are immutable once written. Servers retain every revision referenced by any current op-log segment or by the activity-window policy.
+```json
+{
+  "ok": true,
+  "data": {
+    "remote_folder_id": "rf_v1_…",
+    "shard_revision": 7,
+    "parent_shard_revision": 6,
+    "shard_hash": "<hex>",
+    "shard_ciphertext": "<base64>",
+    "shard_size": 184320
+  }
+}
+```
 
-### 6.6 Publish manifest (CAS)
+The relay only serves shard envelopes whose `(vault_id, remote_folder_id)` match the URL. The client verifies `sha256(shard_ciphertext) == root.remote_folders[i].shard_hash` for the same `remote_folder_id` before consuming the entries (formats §10.C hash chain) — a relay-side rollback that returns an older shard envelope fails this compare even though AEAD verification on the envelope would otherwise pass.
+
+Errors:
+- 404 `vault_not_found` with `details.remote_folder_id` if the folder isn't listed in the current root or has been hard-deleted.
+- 422 `vault_format_version_unsupported`, 422 `vault_shard_tampered`.
+
+### 6.6 Publish root manifest (CAS)
 
 ```http
-PUT /api/vaults/{vault_id}/manifest
+PUT /api/vaults/{vault_id}/root
 ```
 
 **Auth**: vault auth, role `browse-upload` or higher.
-**Capability**: `vault_manifest_cas_v1`.
+**Capability**: `vault_root_cas_v1`.
 
 Request:
 
 ```json
 {
-  "expected_current_revision": 42,
-  "new_revision": 43,
-  "parent_revision": 42,
-  "manifest_hash": "<hex>",
-  "manifest_ciphertext": "<base64>"
+  "expected_current_root_revision": 42,
+  "new_root_revision": 43,
+  "parent_root_revision": 42,
+  "root_hash": "<hex>",
+  "root_ciphertext": "<base64>"
 }
 ```
 
@@ -375,13 +399,13 @@ Success: **200 OK**
 {
   "ok": true,
   "data": {
-    "revision": 43,
-    "manifest_hash": "<hex>"
+    "root_revision": 43,
+    "root_hash": "<hex>"
   }
 }
 ```
 
-**Conflict (CAS mismatch) — §A1 shape:**
+**Conflict (CAS mismatch) — §A1-root shape:**
 
 ```http
 HTTP/1.1 409 Conflict
@@ -391,36 +415,162 @@ HTTP/1.1 409 Conflict
 {
   "ok": false,
   "error": {
-    "code": "vault_manifest_conflict",
-    "message": "The vault manifest changed on the server.",
+    "code": "vault_root_conflict",
+    "message": "The vault root manifest changed on the server.",
     "details": {
-      "current_revision": 44,
-      "expected_revision": 42,
-      "current_manifest_hash": "<hex>",
-      "current_manifest_ciphertext": "<base64>",
-      "current_manifest_size": 192384
+      "current_root_revision": 44,
+      "expected_root_revision": 42,
+      "current_root_hash": "<hex>",
+      "current_root_ciphertext": "<base64>",
+      "current_root_size": 5012
     }
   }
 }
 ```
 
-The server returns the **current** manifest ciphertext + hash + revision in the error. The client never has to issue a follow-up `GET /manifest` after a 409 — it has everything it needs to run the §D4 merge algorithm and retry. This keeps the retry loop one round-trip and removes the race between 409 and a separate GET landing on a yet-newer revision.
+The server returns the **current** root ciphertext inline so the client can run the §D4 merge algorithm and retry in one round-trip. The shape mirrors the legacy `vault_manifest_conflict` exactly; only the field prefix shifts (`current_root_*` vs `current_manifest_*`).
 
-If the new manifest references chunks not yet uploaded, **or** would push `used_ciphertext_bytes > quota_ciphertext_bytes`, the server may reject before storing the manifest:
+Other errors: 401 `vault_auth_failed`, 403 `vault_access_denied`, 422 `vault_root_tampered`, 422 `vault_format_version_unsupported`.
+
+Root-only publishes apply to folder set changes (add / remove / rename) or vault-wide policy tweaks. **Edits to a folder's file entries MUST go through `PUT /folders/{folder_id}/shard-with-root` (§6.8)** so the root's `shard_hash` stays consistent with the published shard.
+
+### 6.7 Publish folder shard (CAS)
+
+```http
+PUT /api/vaults/{vault_id}/folders/{folder_id}/shard
+```
+
+**Auth**: vault auth, role `browse-upload` or higher.
+**Capability**: `vault_shard_cas_v1`.
+
+Request:
+
+```json
+{
+  "expected_current_shard_revision": 6,
+  "new_shard_revision": 7,
+  "parent_shard_revision": 6,
+  "shard_hash": "<hex>",
+  "shard_ciphertext": "<base64>"
+}
+```
+
+Success: **200 OK**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "shard_revision": 7,
+    "shard_hash": "<hex>"
+  }
+}
+```
+
+**Conflict (CAS mismatch) — §A1-shard shape:**
+
+```http
+HTTP/1.1 409 Conflict
+```
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "vault_shard_conflict",
+    "message": "The folder's shard manifest changed on the server.",
+    "details": {
+      "remote_folder_id": "rf_v1_…",
+      "current_shard_revision": 8,
+      "expected_shard_revision": 6,
+      "current_shard_hash": "<hex>",
+      "current_shard_ciphertext": "<base64>",
+      "current_shard_size": 192384
+    }
+  }
+}
+```
+
+The server returns the **current** shard ciphertext + hash inline so the retry stays one round-trip. CAS conflicts are scoped per shard — folder A's conflict doesn't invalidate folder B's queued publish.
+
+If the new shard references chunks not yet uploaded, **or** would push `used_ciphertext_bytes > quota_ciphertext_bytes`, the server may reject before storing:
 
 - 422 `vault_chunk_missing` with `details.chunk_id` (first missing chunk encountered). Client uploads the chunk(s) and re-publishes.
 - 507 `vault_quota_exceeded` with `details.{used_bytes, quota_bytes, eviction_available}`. Client runs the §D2 eviction pass (when `eviction_available=true`) or surfaces "vault full, sync stopped".
 
-Other errors: 401 `vault_auth_failed`, 403 `vault_access_denied`, 422 `vault_manifest_tampered`, 422 `vault_format_version_unsupported`.
+Direct shard-only publishes are **strongly discouraged** for normal edits — they leave the root's `shard_revision` + `shard_hash` references stale until the next root publish, and a partial cycle leaves multi-device readers seeing the new shard via §6.5 but the stale revision via §6.4. Use §6.8 for any flow that adds, modifies, or tombstones file entries. The shard-only endpoint exists for retention-purge passes that don't change the root's view of the folder (`shard_revision` advances on the root in the next CAS publish).
 
-### 6.7 Get archived op-log segment
+Other errors: 401 `vault_auth_failed`, 403 `vault_access_denied`, 422 `vault_shard_tampered`, 422 `vault_format_version_unsupported`.
+
+### 6.8 Publish shard + root atomically
+
+```http
+PUT /api/vaults/{vault_id}/folders/{folder_id}/shard-with-root
+```
+
+**Auth**: vault auth, role `browse-upload` or higher.
+**Capability**: `vault_shard_cas_v1`.
+
+Request:
+
+```json
+{
+  "shard": {
+    "expected_current_shard_revision": 6,
+    "new_shard_revision": 7,
+    "parent_shard_revision": 6,
+    "shard_hash": "<hex>",
+    "shard_ciphertext": "<base64>"
+  },
+  "root": {
+    "expected_current_root_revision": 42,
+    "new_root_revision": 43,
+    "parent_root_revision": 42,
+    "root_hash": "<hex>",
+    "root_ciphertext": "<base64>"
+  }
+}
+```
+
+The client computes the new shard envelope first, takes its sha256 to fill the root's `remote_folders[i].shard_hash` for this folder, then computes the new root envelope. The relay validates atomicity in a single SQLite transaction:
+
+1. CAS on the shard (`expected_current_shard_revision`) — 409 `vault_shard_conflict` if stale.
+2. CAS on the root (`expected_current_root_revision`) — 409 `vault_root_conflict` if stale.
+3. Cross-check: parsed `root.remote_folders[i].shard_hash` for `folder_id` must equal the request's `shard_hash` — mismatch returns 422 `vault_shard_hash_mismatch` (this catches the "I rebuilt the root against an earlier shard" client bug before it pollutes the hash chain). The relay performs the parse on the body bytes server-side without decrypting; the `shard_hash` lives in the encrypted root plaintext, so this check verifies the client supplied the same value in the shard request as the AEAD-sealed root carries.
+
+Both writes commit together or both abort.
+
+Success: **200 OK**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "shard_revision": 7,
+    "shard_hash": "<hex>",
+    "root_revision": 43,
+    "root_hash": "<hex>"
+  }
+}
+```
+
+**Conflict** carries whichever side(s) drifted; the 409 body inlines both `current_shard_*` and `current_root_*` when both stale (with separate `code = "vault_shard_root_conflict"`) so the retry path can re-merge against both new heads.
+
+This is the **primary** publish path for sync engines — every batched mutation that touches file entries reaches the relay through here.
+
+Errors specific to the atomic path:
+- 422 `vault_shard_hash_mismatch` — `root.remote_folders[i].shard_hash ≠ request.shard.shard_hash`. Client rebuilt the root against a different shard than it actually published; recompute and retry.
+
+Otherwise: same superset as §6.6 + §6.7.
+
+### 6.9 Get archived op-log segment
 
 ```http
 GET /api/vaults/{vault_id}/op-log-segments/{segment_id}
 ```
 
 **Auth**: vault auth, any role.
-**Capability**: `vault_v1` (no separate bit; segments are part of the manifest model per §D14).
+**Capability**: `vault_v1` (no separate bit; segments are part of the root + shard manifest model per §D14).
 
 Success: **200 OK**
 
@@ -439,9 +589,9 @@ Success: **200 OK**
 }
 ```
 
-Segments are immutable once written. Clients fetch on demand based on the `archived_op_segments` list in the current manifest header. Returns 404 `vault_not_found` (with `details.segment_id`) if the segment is unknown — this can happen on a segment garbage-collected after no current manifest references it (T0 §D14).
+Segments are immutable once written. Clients fetch on demand based on the `archived_op_segments` list in the current root or shard plaintext. Returns 404 `vault_not_found` (with `details.segment_id`) if the segment is unknown — this can happen on a segment garbage-collected after no current root/shard references it (T0 §D14).
 
-### 6.8 Upload chunk
+### 6.10 Upload chunk
 
 ```http
 PUT /api/vaults/{vault_id}/chunks/{chunk_id}
@@ -476,7 +626,7 @@ Errors:
 - 507 `vault_quota_exceeded` — write would exceed quota; per-chunk evaluation per H3.
 - 503 `vault_storage_unavailable` — relay-side I/O issue.
 
-### 6.9 Download chunk
+### 6.11 Download chunk
 
 ```http
 GET /api/vaults/{vault_id}/chunks/{chunk_id}
@@ -491,7 +641,7 @@ Errors:
 - 404 `vault_chunk_missing` — referenced chunk not present (transient during another writer's upload window; client retries within budget then surfaces as permanent).
 - 422 `vault_chunk_tampered` / `vault_chunk_size_mismatch` — server-side integrity check failed at fetch time.
 
-### 6.10 Head chunk
+### 6.12 Head chunk
 
 ```http
 HEAD /api/vaults/{vault_id}/chunks/{chunk_id}
@@ -507,7 +657,7 @@ Returns headers only:
 
 Used to skip already-uploaded chunks before issuing PUT.
 
-### 6.11 Batch chunk head
+### 6.13 Batch chunk head
 
 ```http
 POST /api/vaults/{vault_id}/chunks/batch-head
@@ -550,7 +700,7 @@ Used by upload (skip already-stored chunks), migration verify (§7.2), and resum
 Errors:
 - 400 `vault_invalid_request` — any single id fails the regex; `details.field = "chunk_ids"`, `details.bad_id = "<offender>"`.
 
-### 6.12 GC plan
+### 6.14 GC plan
 
 ```http
 POST /api/vaults/{vault_id}/gc/plan
@@ -563,7 +713,7 @@ Request:
 
 ```json
 {
-  "manifest_revision": 60,
+  "root_revision": 60,
   "encrypted_gc_auth": "<base64 — vault-derived authorization material>",
   "candidate_chunk_ids": [
     "ch_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
@@ -572,7 +722,7 @@ Request:
 }
 ```
 
-The client provides candidate chunks it has determined are no longer referenced (by walking decrypted manifests + retention policy). The server cross-checks against every manifest revision it currently retains: a chunk is safe to delete only if no retained revision references it.
+The client provides candidate chunks it has determined are no longer referenced (by walking the decrypted root + every shard it lists + retention policy). The server cross-checks against every root revision **and every shard revision referenced from those roots** that it currently retains: a chunk is safe to delete only if no retained shard references it.
 
 Success: **200 OK**
 
@@ -590,13 +740,13 @@ Success: **200 OK**
 
 `plan_id` + `expires_at` (15 minutes default) bind the plan to a subsequent execute. Plans not executed within their TTL are silently dropped server-side; the client must re-plan.
 
-Triggers per §A16: sync-driven (every manifest fetch), eviction-driven (D2 step 1), manual (Maintenance → "Optimize storage now"). All three call the same endpoint.
+Triggers per §A16: sync-driven (every root fetch), eviction-driven (D2 step 1), manual (Maintenance → "Optimize storage now"). All three call the same endpoint.
 
 Errors:
 - 403 `vault_access_denied` — caller's role < `sync`.
-- 422 `vault_manifest_tampered` — `manifest_revision` not in the chain.
+- 422 `vault_root_tampered` — `root_revision` not in the chain.
 
-### 6.13 GC execute
+### 6.15 GC execute
 
 ```http
 POST /api/vaults/{vault_id}/gc/execute
@@ -638,7 +788,7 @@ Errors:
 - 403 `vault_purge_not_allowed` — `purge_secret` required by the plan and caller is not admin (or `purge_secret` invalid).
 - 404 `vault_not_found` — plan expired or unknown `plan_id`.
 
-### 6.14 GC cancel
+### 6.16 GC cancel
 
 ```http
 POST /api/vaults/{vault_id}/gc/cancel
@@ -674,7 +824,7 @@ idle → started → copying → verified → committed → idle (on new relay)
          └──────────  rollback ───────────┘ (only from started/copying/verified)
 ```
 
-Chunks copy via the standard §6.8 PUT on the **target** relay. There is no migration-specific upload endpoint — the same chunk store handles both first-write and migration-write.
+Chunks copy via the standard §6.10 PUT on the **target** relay. There is no migration-specific upload endpoint — the same chunk store handles both first-write and migration-write.
 
 All endpoints in §7 require vault auth on the **source** relay, role `admin`, and capability `vault_migration_v1`.
 
@@ -721,8 +871,12 @@ Success: **200 OK**
 {
   "ok": true,
   "data": {
-    "manifest_revision": 60,
-    "manifest_hash": "<hex>",
+    "root_revision": 60,
+    "root_hash": "<hex>",
+    "shard_hashes": {
+      "rf_v1_…": "<hex>",
+      "rf_v1_…": "<hex>"
+    },
     "chunk_count": 12483,
     "ciphertext_byte_total": 8589934592,
     "header_hash": "<hex>"
@@ -730,7 +884,7 @@ Success: **200 OK**
 }
 ```
 
-Client compares against the target relay's `GET /api/vaults/{id}/manifest` + `POST /chunks/batch-head`. Mismatches surface client-side as `vault_migration_verify_failed` with `details.mismatch ∈ ["manifest_hash", "chunk_count", "byte_total", "chunk_sample"]`.
+`shard_hashes` mirrors the root's `remote_folders[*].shard_hash` so the migration verify path can compare per-shard hashes without re-decrypting the root. Client compares against the target relay's `GET /api/vaults/{id}/root` + `GET /folders/{folder_id}/shard` (per folder) + `POST /chunks/batch-head`. Mismatches surface client-side as `vault_migration_verify_failed` with `details.mismatch ∈ ["root_hash", "shard_hash", "chunk_count", "byte_total", "chunk_sample"]`.
 
 ### 7.3 Commit migration
 
@@ -1006,9 +1160,10 @@ This document references codes inline by name. Treat the T0 table as authoritati
 
 **Critical retry-loop semantics** (covered above but worth highlighting):
 
-- `vault_manifest_conflict` carries the **current** ciphertext — clients never need to follow up with `GET /manifest` after a 409 (§A1).
+- `vault_root_conflict` carries the **current** root ciphertext (§A1-root); `vault_shard_conflict` carries the current shard ciphertext (§A1-shard); the atomic-publish `vault_shard_root_conflict` carries both. Clients never need to follow up with a GET after a 409 — they have everything needed to run the §D4 merge and retry in one round-trip.
 - `vault_quota_exceeded` carries `eviction_available: bool` — drives whether the client's eviction pass (§D2) runs or whether the "vault full, sync stopped" terminal banner is surfaced (§A6).
 - `vault_chunk_missing` is `auto`-retry up to the existing transfer retry budget; only after exhaustion does it become permanent.
+- `vault_shard_hash_mismatch` (422) signals the atomic shard-with-root request supplied a `shard_hash` that doesn't match the `remote_folders[i].shard_hash` inside the request's root ciphertext. Client recomputes the root against the actual shard hash and retries; this surfaces a client bug rather than relay tampering.
 
 ---
 
@@ -1025,8 +1180,9 @@ Vault endpoints inherit the existing rate-limit middleware where applicable. Vau
 | Pending join requests (per vault) | 5 simultaneous | `POST /join-requests` | 409 `vault_invalid_request` with `details.field = "pending_count"`. |
 | Chunks per `batch-head` request | 1024 | `POST /chunks/batch-head` | 400 `vault_invalid_request` with `details.field = "chunk_ids"`. |
 | Max chunk ciphertext size | per `vault-v1-formats.md` | `PUT /chunks/{id}` | 413 `payload_too_large` (existing relay-wide code; not vault-specific). |
-| Max manifest ciphertext size | 16 MiB | `PUT /manifest` | 413 `payload_too_large`. |
-| Incomplete-upload TTL | 24 h | Chunks not referenced by any retained manifest revision | Server-side cleanup; clients never see it. |
+| Max root ciphertext size | 4 MiB | `PUT /root`, `PUT /folders/{id}/shard-with-root` | 413 `payload_too_large`. The root is metadata + folder pointers; 4 MiB caps the folder count below pathological levels (≈ 50 k folders before pressure). |
+| Max shard ciphertext size | 16 MiB | `PUT /folders/{id}/shard`, `PUT /folders/{id}/shard-with-root` | 413 `payload_too_large`. Single-folder file-entry ceiling; equivalent to the pre-sharding manifest cap. |
+| Incomplete-upload TTL | 24 h | Chunks not referenced by any retained root + shard revision pair | Server-side cleanup; clients never see it. |
 
 `vault_rate_limited` always carries `details.retry_after_ms` — more precise than the HTTP `Retry-After` header. Per-vault and per-device limits compose multiplicatively.
 
@@ -1035,7 +1191,7 @@ Vault endpoints inherit the existing rate-limit middleware where applicable. Vau
 ## 11. References
 
 - T0 decisions: [`desktop-connector-vault-T0-decisions.md`](../../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-T0-decisions.md) — authoritative spec; this document defers to it.
-- Byte formats: [`vault-v1-formats.md`](vault-v1-formats.md) — AAD strings, HKDF labels, manifest envelope, chunk envelope, recovery envelope, export bundle CBOR records, device grant. *(Drafted in T0.3.)*
+- Byte formats: [`vault-v1-formats.md`](vault-v1-formats.md) — AAD strings, HKDF labels, root + shard manifest envelopes, chunk envelope, recovery envelope, export bundle records, device grant. *(Drafted in T0.3, sharded manifest format added 2026-05-16.)*
 - Test vectors: `tests/protocol/vault-v1/` — JSON test cases exercised by both desktop Python and server PHP. *(Stubbed in T0.4 and populated in T2.)*
 - Base protocol: [`protocol.md`](protocol.md) — device registration, pairing, transfers, fasttrack.
 - Plan files: [`temp/finished-plans/desktop-connector-vault-plan-md/`](../../temp/finished-plans/desktop-connector-vault-plan-md/) — narrative architecture (01–11) and the T0 decision lock. Archived 2026-05-15; canonical overview moved to [`docs/vault-architecture.md`](../vault-architecture.md).

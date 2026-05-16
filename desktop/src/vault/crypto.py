@@ -422,6 +422,178 @@ def build_manifest_envelope(
     )
 
 
+# ---------------------------------------------------------------- Root manifest AAD + envelope (formats §6.1, §10.A)
+
+_ROOT_AAD_SCHEMA = b"dc-vault-root-v1"     # 16 bytes
+
+
+def build_root_aad(
+    vault_id: str,
+    root_revision: int,
+    parent_root_revision: int,
+    author_device_id: str,
+) -> bytes:
+    """Construct the 76-byte root manifest AAD per formats §6.1.
+
+    Layout:
+        utf8("dc-vault-root-v1")             # 16 bytes
+        || vault_id_bytes                     # 12 bytes (canonical, undashed, uppercase)
+        || root_revision_be64                 # 8 bytes
+        || parent_root_revision_be64          # 8 bytes
+        || author_device_id_bytes             # 32 bytes (UTF-8 hex)
+                                               total: 76 bytes
+    """
+    canonical = normalize_vault_id(vault_id)
+    if len(canonical) != 12:
+        raise ValueError(f"vault_id must canonicalize to 12 bytes; got {len(canonical)}")
+    if len(author_device_id) != 32:
+        raise ValueError(f"author_device_id must be 32 hex chars; got {len(author_device_id)}")
+    if root_revision < 0 or root_revision > 0xFFFF_FFFF_FFFF_FFFF:
+        raise ValueError(f"root_revision out of u64 range: {root_revision}")
+    if parent_root_revision < 0 or parent_root_revision > 0xFFFF_FFFF_FFFF_FFFF:
+        raise ValueError(f"parent_root_revision out of u64 range: {parent_root_revision}")
+    return (
+        _ROOT_AAD_SCHEMA
+        + canonical.encode("ascii")
+        + root_revision.to_bytes(8, "big")
+        + parent_root_revision.to_bytes(8, "big")
+        + author_device_id.encode("ascii")
+    )
+
+
+def build_root_envelope(
+    *,
+    vault_id: str,
+    root_revision: int,
+    parent_root_revision: int,
+    author_device_id: str,
+    nonce: bytes,
+    aead_ciphertext_and_tag: bytes,
+    format_version: int = 1,
+) -> bytes:
+    """Assemble the root manifest envelope wire bytes per formats §10.A.1.
+
+    Layout:
+        format_version_u8                     # 1 byte (0x01)
+        || vault_id_bytes                     # 12 bytes
+        || root_revision_be64                 # 8 bytes
+        || parent_root_revision_be64          # 8 bytes
+        || author_device_id_bytes             # 32 bytes
+        || nonce                              # 24 bytes
+        || aead_ciphertext_and_tag            # variable
+                                               total: 85 + N bytes
+    """
+    if not (0 <= format_version <= 0xFF):
+        raise ValueError(f"format_version must fit in u8; got {format_version}")
+    if len(nonce) != XCHACHA20_NONCE_BYTES:
+        raise ValueError(f"nonce must be {XCHACHA20_NONCE_BYTES} bytes; got {len(nonce)}")
+    canonical = normalize_vault_id(vault_id)
+    if len(canonical) != 12:
+        raise ValueError(f"vault_id must canonicalize to 12 bytes; got {len(canonical)}")
+    if len(author_device_id) != 32:
+        raise ValueError(f"author_device_id must be 32 hex chars; got {len(author_device_id)}")
+    return (
+        bytes([format_version])
+        + canonical.encode("ascii")
+        + root_revision.to_bytes(8, "big")
+        + parent_root_revision.to_bytes(8, "big")
+        + author_device_id.encode("ascii")
+        + nonce
+        + aead_ciphertext_and_tag
+    )
+
+
+# ---------------------------------------------------------------- Folder shard AAD + envelope (formats §6.1a, §10.B)
+
+_SHARD_AAD_SCHEMA = b"dc-vault-shard-v1"   # 17 bytes
+
+
+def build_shard_aad(
+    vault_id: str,
+    remote_folder_id: str,
+    shard_revision: int,
+    parent_shard_revision: int,
+    author_device_id: str,
+) -> bytes:
+    """Construct the 107-byte folder shard AAD per formats §6.1a.
+
+    Layout:
+        utf8("dc-vault-shard-v1")            # 17 bytes
+        || vault_id_bytes                     # 12 bytes
+        || remote_folder_id_bytes             # 30 bytes (rf_v1_…)
+        || shard_revision_be64                # 8 bytes
+        || parent_shard_revision_be64         # 8 bytes
+        || author_device_id_bytes             # 32 bytes (UTF-8 hex)
+                                               total: 107 bytes
+    """
+    canonical = normalize_vault_id(vault_id)
+    if len(canonical) != 12:
+        raise ValueError(f"vault_id must canonicalize to 12 bytes; got {len(canonical)}")
+    if len(remote_folder_id) != 30:
+        raise ValueError(f"remote_folder_id must be 30 bytes; got {len(remote_folder_id)}")
+    if len(author_device_id) != 32:
+        raise ValueError(f"author_device_id must be 32 hex chars; got {len(author_device_id)}")
+    if shard_revision < 0 or shard_revision > 0xFFFF_FFFF_FFFF_FFFF:
+        raise ValueError(f"shard_revision out of u64 range: {shard_revision}")
+    if parent_shard_revision < 0 or parent_shard_revision > 0xFFFF_FFFF_FFFF_FFFF:
+        raise ValueError(f"parent_shard_revision out of u64 range: {parent_shard_revision}")
+    return (
+        _SHARD_AAD_SCHEMA
+        + canonical.encode("ascii")
+        + remote_folder_id.encode("ascii")
+        + shard_revision.to_bytes(8, "big")
+        + parent_shard_revision.to_bytes(8, "big")
+        + author_device_id.encode("ascii")
+    )
+
+
+def build_shard_envelope(
+    *,
+    vault_id: str,
+    remote_folder_id: str,
+    shard_revision: int,
+    parent_shard_revision: int,
+    author_device_id: str,
+    nonce: bytes,
+    aead_ciphertext_and_tag: bytes,
+    format_version: int = 1,
+) -> bytes:
+    """Assemble the folder shard envelope wire bytes per formats §10.B.1.
+
+    Layout:
+        format_version_u8                     # 1 byte (0x01)
+        || vault_id_bytes                     # 12 bytes
+        || remote_folder_id_bytes             # 30 bytes
+        || shard_revision_be64                # 8 bytes
+        || parent_shard_revision_be64         # 8 bytes
+        || author_device_id_bytes             # 32 bytes
+        || nonce                              # 24 bytes
+        || aead_ciphertext_and_tag            # variable
+                                               total: 115 + N bytes
+    """
+    if not (0 <= format_version <= 0xFF):
+        raise ValueError(f"format_version must fit in u8; got {format_version}")
+    if len(nonce) != XCHACHA20_NONCE_BYTES:
+        raise ValueError(f"nonce must be {XCHACHA20_NONCE_BYTES} bytes; got {len(nonce)}")
+    canonical = normalize_vault_id(vault_id)
+    if len(canonical) != 12:
+        raise ValueError(f"vault_id must canonicalize to 12 bytes; got {len(canonical)}")
+    if len(remote_folder_id) != 30:
+        raise ValueError(f"remote_folder_id must be 30 bytes; got {len(remote_folder_id)}")
+    if len(author_device_id) != 32:
+        raise ValueError(f"author_device_id must be 32 hex chars; got {len(author_device_id)}")
+    return (
+        bytes([format_version])
+        + canonical.encode("ascii")
+        + remote_folder_id.encode("ascii")
+        + shard_revision.to_bytes(8, "big")
+        + parent_shard_revision.to_bytes(8, "big")
+        + author_device_id.encode("ascii")
+        + nonce
+        + aead_ciphertext_and_tag
+    )
+
+
 # ---------------------------------------------------------------- Chunk AAD + envelope (formats §6.2, §11)
 
 _CHUNK_AAD_SCHEMA = b"dc-vault-chunk-v1"   # 17 bytes
@@ -893,6 +1065,14 @@ class VaultCrypto(Protocol):
     def build_manifest_aad(
         self, vault_id: str, revision: int, parent_revision: int, author_device_id: str,
     ) -> bytes: ...
+    def build_root_aad(
+        self, vault_id: str, root_revision: int,
+        parent_root_revision: int, author_device_id: str,
+    ) -> bytes: ...
+    def build_shard_aad(
+        self, vault_id: str, remote_folder_id: str, shard_revision: int,
+        parent_shard_revision: int, author_device_id: str,
+    ) -> bytes: ...
     def build_chunk_aad(
         self, vault_id: str, remote_folder_id: str, file_id: str,
         file_version_id: str, chunk_index: int, chunk_plaintext_size: int,
@@ -917,6 +1097,8 @@ class _DefaultVaultCrypto:
     aead_decrypt       = staticmethod(aead_decrypt)
     argon2id_kdf       = staticmethod(argon2id_kdf)
     build_manifest_aad     = staticmethod(build_manifest_aad)
+    build_root_aad         = staticmethod(build_root_aad)
+    build_shard_aad        = staticmethod(build_shard_aad)
     build_chunk_aad        = staticmethod(build_chunk_aad)
     build_header_aad       = staticmethod(build_header_aad)
     build_recovery_aad     = staticmethod(build_recovery_aad)
@@ -958,6 +1140,10 @@ __all__ = [
     "build_manifest_envelope",
     "build_recovery_aad",
     "build_recovery_envelope",
+    "build_root_aad",
+    "build_root_envelope",
+    "build_shard_aad",
+    "build_shard_envelope",
     "derive_device_grant_wrap_key",
     "derive_export_wrap_key",
     "derive_recovery_wrap_key",

@@ -300,6 +300,18 @@ class VaultCryptoProtocolTests(unittest.TestCase):
             ) -> bytes:
                 return b"FAKE_MANIFEST_AAD"
 
+            def build_root_aad(
+                self, vault_id: str, root_revision: int,
+                parent_root_revision: int, author_device_id: str,
+            ) -> bytes:
+                return b"FAKE_ROOT_AAD"
+
+            def build_shard_aad(
+                self, vault_id: str, remote_folder_id: str, shard_revision: int,
+                parent_shard_revision: int, author_device_id: str,
+            ) -> bytes:
+                return b"FAKE_SHARD_AAD"
+
             def build_chunk_aad(
                 self, vault_id: str, remote_folder_id: str, file_id: str,
                 file_version_id: str, chunk_index: int, chunk_plaintext_size: int,
