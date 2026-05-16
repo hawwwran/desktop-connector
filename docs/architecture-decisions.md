@@ -74,6 +74,147 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-17 — Vault manifest is sharded: root + per-folder shards
+
+**Status:** accepted.
+
+**Context.** The original ``vault_v1`` design from T0 shipped one
+AEAD-encrypted manifest per vault — every edit ships the entire
+vault's manifest envelope on every CAS publish, scaling
+per-publish bandwidth with vault size rather than edit size. The
+Phase 2 large-folder-perf work (SO-2 + SO-3, commits 8ffba34 +
+a93ba08 + d49b643) reduced the per-publish *count* by 50× via
+client-side batching, but each batch still ships the full
+envelope, and the steady-state RAM cost of the in-memory
+manifest dict still grows with the union of every folder's
+file count. A multi-folder use-case (≥ 2 folders, ≥ 10k files
+each) would see ~ 9 MB encrypted manifest per publish and ~
+390 MiB RAM peak on a single-binding edit. Manifest sharding —
+splitting the envelope along the natural folder boundary — was
+the natural next step. The scoping doc
+``docs/plans/vault-manifest-sharding.md`` captured the eight-
+phase plan; this entry records the lock.
+
+**What we decided.** The encrypted manifest on the relay is now
+two envelope kinds:
+
+* A small **root** envelope (``dc-vault-root-v1`` schema,
+  ``HKDF(info="dc-vault-v1/root")`` subkey, ``aad_root`` 76
+  bytes) carrying vault-wide metadata + a per-folder pointer
+  list. Each pointer carries the folder's currently-published
+  ``shard_revision`` + ``shard_hash`` so a fresh client cold-
+  starts with one root fetch and learns which shards exist plus
+  what envelope hash to expect for each.
+* One **shard** envelope per remote folder (``dc-vault-shard-v1``
+  schema, ``HKDF(info="dc-vault-v1/shard")`` subkey, ``aad_shard``
+  107 bytes — adds the 30-byte ``remote_folder_id``
+  discriminator) carrying that folder's file entries +
+  per-folder op-log tail + per-folder archived segments.
+
+Each shard has its own CAS chain (``shard_revision`` +
+``parent_shard_revision``) advanced by the per-folder
+``vault_folder_shard_heads`` row on the relay. The root has a
+parallel CAS chain on ``vaults.current_root_revision``. The
+**primary publish path** is the atomic
+``PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root`` —
+both writes commit in one SQLite IMMEDIATE transaction or both
+abort, so a reader never sees a half-published pair. Folder-set
+changes (add / remove / rename) and vault-wide policy edits
+publish the root alone via ``PUT /api/vaults/{id}/root``;
+retention purge passes that touch only one shard publish via
+``PUT /api/vaults/{id}/folders/{folder_id}/shard`` and rely on
+the next root publish to update the pointer.
+
+**Trust anchor.** The root's encrypted plaintext stores
+``shard_hash = sha256(shard_envelope_bytes)`` for every folder.
+On decrypt the reader verifies the fetched shard's envelope
+hash against the trusted root pointer before consuming the
+shard's entries (formats §10.C). A relay-side rollback that
+serves an older shard envelope (still authenticated under the
+vault's AEAD key) fails this compare and surfaces as
+``vault_shard_tampered`` — same shape as the
+``manifest_revision_floor`` rollback detection in §3.7.
+
+**Why not** keep the single-envelope shape with delta
+encoding? Two reasons. (1) Delta encoding requires server-side
+state on the manifest body (a journal of revisions), which is
+exactly the kind of plaintext-aware bookkeeping the
+plaintext-blind relay can't do — the relay can't tell two
+"add file F" mutations apart from the encrypted bytes. (2)
+RAM on the client (one decrypted dict per active sync) scales
+with the union of every folder's entries regardless of wire
+shape. Sharding fixes both because the per-folder envelope is
+the unit of fetch *and* the unit of in-memory load.
+
+**Why not** key per-folder subkeys (one HKDF subkey per
+``remote_folder_id``)? An attacker controlling the relay
+already has every folder's shard ciphertext; the relevant
+defense is the AAD-bound ``remote_folder_id`` substitution
+check, which already fails closed under a single ``k_shard``
+subkey. Per-folder subkeys add no defense + add a
+device-grant-side compartment to track. The scoping doc's
+"key compartment per shard" branch was rejected on that basis.
+
+**Where it lands.**
+
+* Wire spec: ``docs/protocol/vault-v1.md`` §6.4–§6.8,
+  ``docs/protocol/vault-v1-formats.md`` §6.1 / §6.1a / §10.
+* Test vectors: ``tests/protocol/vault-v1/root_v1.json`` +
+  ``shard_v1.json`` (legacy ``manifest_v1.json`` kept as
+  transitional fixture for tests that still exercise the
+  pre-sharding ``Vault.publish_manifest`` path).
+* Server schema: ``server/migrations/005_vault_manifest_shards.sql``
+  (drops the legacy ``vault_manifests`` table, adds
+  ``vault_root_manifests`` + ``vault_folder_shards`` +
+  ``vault_folder_shard_heads``).
+* Server controller: ``VaultController::{getRoot,putRoot,
+  getShard,putShard,putShardWithRoot}``.
+* Server repositories: ``VaultRootManifestsRepository``,
+  ``VaultFolderShardsRepository`` (the latter owns the
+  per-folder CAS head + the atomic shard-with-root
+  SELECT-then-UPDATE under one BEGIN IMMEDIATE).
+* Server capabilities: ``vault_root_cas_v1`` +
+  ``vault_shard_cas_v1`` replace the legacy
+  ``vault_manifest_cas_v1`` bit.
+* Desktop crypto: ``build_root_aad`` / ``build_root_envelope``
+  / ``build_shard_aad`` / ``build_shard_envelope`` in
+  ``desktop/src/vault/crypto.py``.
+* Desktop manifest dict: ``make_root_manifest`` /
+  ``make_folder_shard`` / ``normalize_root_manifest_plaintext``
+  / ``normalize_shard_plaintext`` / ``assemble_unified_manifest``
+  / shard-aware entry helpers (``*_in_shard``) in
+  ``desktop/src/vault/manifest.py``.
+* Desktop wire layer: ``Vault.{fetch_root_manifest,
+  publish_root_manifest, fetch_folder_shard,
+  publish_folder_shard, publish_shard_with_root,
+  fetch_unified_manifest}`` in ``desktop/src/vault/vault.py``.
+* Wire-isolation tests: per-folder PUT counters in
+  ``tests/protocol/test_desktop_vault_shard_wire.py`` +
+  ``test_desktop_vault_binding_shard_isolation.py`` +
+  ``test_desktop_vault_shard_lazy_load.py``.
+* Migration script: ``temp/migrate_vault_to_shards.py`` +
+  dry-run test ``test_temp_migrate_vault_to_shards.py``.
+
+**Compatibility note.** ``vault_v1`` had never shipped (per
+the operating constraints in
+``docs/plans/vault-manifest-sharding.md``), so the wire format
+was altered in place — no compatibility shim, no deprecation
+runway, no coexistence period across devices. The
+developer's dev twin re-seeds its vault via the suite-start
+setup. ``Vault.fetch_manifest`` / ``publish_manifest`` survive
+on the client as Phase D compat shims so the protocol suite
+stays green during a phased call-site migration; Phase H
+removes them once every caller is shard-aware.
+
+**Eight-phase rollout.** Commits ``204b0cd`` (Phase A — wire
+spec + vectors), ``00cb3cc`` (Phase B — server schema +
+endpoints), ``0f87ada`` (Phase C — client manifest model),
+``6940c47`` (Phase D — client wire layer), ``364f92b`` (Phase
+E — sync-engine surface + isolation tests), ``93c2701`` (Phase
+F — lazy shard load acceptance test), ``e8a6b5f`` (Phase G —
+migration script + dry-run), and this commit (Phase H —
+cleanup + ADR).
+
 ### 2026-05-16 — Two-way Phase B batches publishes, aborts on CAS (no replay)
 
 **Status:** accepted.

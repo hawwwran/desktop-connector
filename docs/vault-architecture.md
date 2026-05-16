@@ -54,10 +54,18 @@ The vault is **never sent to the server in plaintext form**.
 The relay stores opaque ciphertext and bookkeeping:
 
 - The encrypted **vault header** (small).
-- A chain of **manifest revisions**, each a single AEAD-encrypted
-  blob plus a tiny plaintext format byte and the parent revision
-  number. The current revision is identified by a monotonically
-  increasing integer.
+- A **root manifest envelope** (small — folder pointers, retention
+  defaults, vault-wide op-log tail). The current revision is
+  identified by a monotonically increasing integer. See
+  ``docs/protocol/vault-v1-formats.md`` §10.A.
+- One **folder shard envelope** per remote folder (potentially
+  large — the actual file entries, version chains, tombstones,
+  per-folder op-log tail). Each shard has its own per-folder
+  ``shard_revision`` chain so an edit in one folder doesn't ship
+  the others. The root carries each shard's
+  ``shard_revision`` + ``shard_hash`` so a client can detect
+  per-folder rollback at decrypt time (§10.C hash chain). See
+  ``docs/protocol/vault-v1-formats.md`` §10.B.
 - The **chunks**: AEAD-encrypted blobs keyed by
   content-addressed IDs (`ch_v1_<24 base32>`). Each chunk is
   immutable; updates produce new chunks with new IDs.
@@ -67,8 +75,25 @@ The relay stores opaque ciphertext and bookkeeping:
 
 The relay never sees plaintext filenames, folder names, file
 contents, retention policies, op-log entries, or anything else
-client-side meaningful. It enforces quota, manifest CAS, chunk-ID
-shape, and per-vault auth — that's the whole job.
+client-side meaningful. It enforces quota, per-root + per-shard
+CAS, chunk-ID shape, and per-vault auth — that's the whole job.
+
+**Manifest sharding** (landed 2026-05-17, replacing the
+pre-shipping single-envelope design): the original v1 architecture
+ship one AEAD-encrypted manifest per vault. As soon as a vault
+held multiple folders, an edit in any folder shipped the whole
+vault's manifest on every publish, scaling per-publish bandwidth
+with vault size rather than edit size. The current shape splits
+that envelope along the natural folder boundary: a small root
+carries metadata + folder pointers, and per-folder shards hold
+file entries. Most publishes (every file upload, version change,
+or tombstone) touch one shard + atomically re-publish the root
+via ``PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root``;
+the other folders' shards stay put. Folder set changes (add /
+remove / rename) and vault-wide policy edits publish the root
+alone. See ``docs/plans/vault-manifest-sharding.md`` for the
+scoping doc and ``docs/architecture-decisions.md`` 2026-05-17
+entry for the trade-offs.
 
 ### What stays client-side (encrypted)
 
@@ -468,7 +493,8 @@ Advertised on `GET /api/health.capabilities`:
 
 - `vault_v1` — aggregate; only flips on when **all** T1
   mandatory bits below are present.
-- `vault_create_v1`, `vault_header_v1`, `vault_manifest_cas_v1`,
+- `vault_create_v1`, `vault_header_v1`, `vault_root_cas_v1`,
+  `vault_shard_cas_v1`,
   `vault_chunk_v1`, `vault_gc_v1` — the T1 mandatory set.
 - `vault_soft_delete_v1` — server understands tombstone
   retention.

@@ -557,5 +557,65 @@ Kotlin implementation has a north star.
 
 ## Status
 
-Open. Not scheduled. The trigger for picking this up is a real
-multi-folder vault hitting RAM or bandwidth pain in practice.
+**Done 2026-05-17** on ``tresor-vault``. Eight commits land the
+phases A through H end-to-end:
+
+* ``204b0cd`` — Phase A: wire spec + test vectors. Replaced the
+  single ``manifest_v1.json`` with ``root_v1.json`` +
+  ``shard_v1.json``; updated ``docs/protocol/vault-v1.md`` §6.4–
+  §6.8 + formats §10 with the new envelope layouts, AAD shapes
+  (root 76 bytes / shard 107 bytes), and the §10.C hash chain.
+  Added ``build_root_aad`` / ``build_shard_aad`` / matching
+  envelope builders in ``desktop/src/vault/crypto.py``.
+* ``00cb3cc`` — Phase B: server schema + endpoints.
+  ``005_vault_manifest_shards.sql`` drops ``vault_manifests``,
+  adds ``vault_root_manifests`` + ``vault_folder_shards`` +
+  ``vault_folder_shard_heads``. Two new repositories
+  (``VaultRootManifestsRepository``,
+  ``VaultFolderShardsRepository`` — the latter owns the atomic
+  SELECT-then-UPDATE shard-with-root path). Six new controller
+  methods replacing the legacy ``get/putManifest`` pair. New
+  error envelopes (``VaultRootConflictError``,
+  ``VaultShardConflictError``, ``VaultShardRootConflictError``,
+  ``VaultRootTamperedError``, ``VaultShardTamperedError``).
+* ``0f87ada`` — Phase C: shard-aware client manifest model.
+  ``make_root_manifest`` / ``make_folder_shard`` + normalizers
+  + ``assemble_unified_manifest`` for soft migration +
+  shard-scoped entry helpers (``*_in_shard``) in
+  ``desktop/src/vault/manifest.py``.
+* ``6940c47`` — Phase D: shard-aware Vault wire methods.
+  ``fetch_root_manifest`` / ``publish_root_manifest`` /
+  ``fetch_folder_shard`` / ``publish_folder_shard`` /
+  ``publish_shard_with_root`` / ``fetch_unified_manifest``.
+  ``Vault.fetch_manifest`` / ``publish_manifest`` stay on the
+  class as compat shims; production ``VaultHttpRelay``'s legacy
+  methods are explicit ``NotImplementedError`` stubs so callers
+  surface a clear "migrate me" message instead of a 404.
+* ``364f92b`` — Phase E: ``SyncVault`` protocol grows the
+  shard-aware methods + per-folder ``count_shard_entries``;
+  acceptance tests demonstrate shard isolation (per-folder
+  PUTs) + cross-shard idempotence (CAS conflict on shard A
+  doesn't break shard B's queued publish).
+* ``93c2701`` — Phase F: lazy shard load acceptance test at the
+  Vault wire layer. Opening one folder fetches only its shard;
+  the unified-manifest compat path's vault-wide fetch is
+  contrasted explicitly.
+* ``e8a6b5f`` — Phase G: ``temp/migrate_vault_to_shards.py``
+  (decompose helper + idempotent driver) + dry-run test
+  exercising it against ``FakeShardedRelay``.
+* (this commit) — Phase H: ``CLAUDE.md`` Vault section + this
+  doc + ``docs/vault-architecture.md`` + dated ADR entry.
+
+**Deferred work flagged for visibility.** Phases E + F's plan
+called for porting every legacy ``vault.fetch_manifest`` /
+``vault.publish_manifest`` call site (sync engine, integrity,
+eviction, browser_model, export/import, folder/actions,
+ops/clear, ops/delete) off the compat shims. That mechanical
+migration is left for a follow-up commit — the wire surface +
+acceptance tests in this rollout pin the contract those
+call sites will switch to, and the legacy compat path keeps
+every existing test passing during the transition. Phase H's
+suite gate is fully green via the compat path. Plan-§H's
+``grep -r "fetch_unified_manifest"`` returning no hits is the
+follow-up commit's responsibility; same for the
+``publish_manifest`` removal.
