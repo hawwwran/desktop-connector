@@ -13,6 +13,14 @@ capturing every emit through Python's logging propagation.
 """
 
 from ..relay_errors import VaultRelayError
+from .batch_session import (
+    BatchedUploadStub,
+    clear_stub,
+    find_matching_stub,
+    make_stub,
+    reap_stubs_for_path,
+    save_stub,
+)
 from .constants import (
     CAS_MAX_RETRIES,
     CHUNK_SIZE,
@@ -33,6 +41,7 @@ from .results import (
     FileSkipped,
     FolderUploadProgress,
     FolderUploadResult,
+    PreparedUpload,
     UploadProgress,
     UploadResult,
 )
@@ -44,15 +53,17 @@ from .session import (
     list_resumable_sessions,
     save_session,
 )
-from .single_file import upload_file
+from .single_file import prepare_upload_for_batch, upload_file
 
 __all__ = [
     "CAS_MAX_RETRIES",
     "CHUNK_SIZE",
     "MAX_FILE_BYTES_DEFAULT",
+    "BatchedUploadStub",
     "FileSkipped",
     "FolderUploadProgress",
     "FolderUploadResult",
+    "PreparedUpload",
     "UploadConflictError",
     "UploadFileTooLargeError",
     "UploadMode",
@@ -64,13 +75,19 @@ __all__ = [
     "UploadVault",
     "VaultRelayError",
     "clear_session",
+    "clear_stub",
     "default_upload_resume_dir",
     "describe_quota_exceeded",
     "detect_path_conflict",
+    "find_matching_stub",
     "list_resumable_sessions",
     "make_conflict_renamed_path",
+    "make_stub",
+    "reap_stubs_for_path",
+    "prepare_upload_for_batch",
     "resume_upload",
     "save_session",
+    "save_stub",
     "upload_file",
     "upload_folder",
 ]

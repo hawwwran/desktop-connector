@@ -44,7 +44,14 @@ from .constants import CAS_MAX_RETRIES, CHUNK_SIZE, MAX_FILE_BYTES_DEFAULT, Uplo
 from .errors import UploadConflictError, UploadFileTooLargeError, UploadSpecialFileSkipped
 from .hashing import _hash_file, _now_rfc3339
 from .protocols import UploadRelay, UploadVault
-from .results import UploadProgress, UploadResult
+from .batch_session import (
+    BatchedUploadStub,
+    find_matching_stub,
+    make_stub,
+    reap_stubs_for_path,
+    save_stub,
+)
+from .results import PreparedUpload, UploadProgress, UploadResult
 from .session import UploadSession, default_upload_resume_dir, clear_session, save_session
 
 log = logging.getLogger(__name__)
@@ -325,6 +332,231 @@ def upload_file(
         logical_size=total_logical_size,
         content_fingerprint=fingerprint,
         skipped_identical=False,
+    )
+
+
+def prepare_upload_for_batch(
+    *,
+    vault: UploadVault,
+    relay: UploadRelay,
+    manifest: dict[str, Any],
+    local_path: Path,
+    remote_folder_id: str,
+    remote_path: str,
+    author_device_id: str,
+    chunk_size: int = CHUNK_SIZE,
+    created_at: str | None = None,
+    progress: Callable[[UploadProgress], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
+    batch_cache_dir: Path | None = None,
+) -> PreparedUpload:
+    """SO-3: encrypt + PUT chunks for ``local_path`` without publishing
+    a manifest revision. Returns the version payload the caller will
+    fold into a batched CAS publish.
+
+    Crash safety: chunk PUTs are idempotent (server dedupes by
+    content-addressed ``chunk_id``); re-running prep after a kill
+    HEAD-and-skips chunks that already landed *provided the same
+    ``version_id`` is reused* — chunk_ids depend on version_id, so a
+    fresh random id between runs would invalidate dedupe. We pin
+    that by persisting a :class:`BatchedUploadStub` (lightweight, no
+    per-chunk state) keyed by ``(vault, remote_path, fingerprint)``;
+    the next prep finds it and reuses the same ``entry_id`` /
+    ``version_id``. Stubs live under ``<batch_cache_dir>/batched/`` so
+    they don't surface in the resume banner (which only scans the
+    parent ``cache_dir``). The cycle clears them after a successful
+    batch publish.
+
+    Skipped-identical short circuit: when the file's keyed fingerprint
+    already matches the latest live version in ``manifest``, returns
+    ``PreparedUpload(skipped_identical=True, ...)`` without touching
+    the relay. The caller stamps the local-entry row and drops the
+    pending-op without growing the batch.
+    """
+    if vault.master_key is None or vault.vault_access_secret is None:
+        raise ValueError("vault is closed")
+
+    local_path = Path(local_path)
+    try:
+        st = local_path.lstat()
+    except OSError as exc:
+        raise FileNotFoundError(f"local file not found: {local_path}") from exc
+    mode_bits = st.st_mode
+    if (
+        _stat.S_ISLNK(mode_bits)
+        or _stat.S_ISFIFO(mode_bits)
+        or _stat.S_ISSOCK(mode_bits)
+        or _stat.S_ISCHR(mode_bits)
+        or _stat.S_ISBLK(mode_bits)
+    ):
+        log.info(
+            "vault.sync.special_file_skipped path=%s reason=non-regular",
+            local_path,
+        )
+        raise UploadSpecialFileSkipped(
+            f"refusing to upload non-regular file: {local_path}"
+        )
+    if not local_path.is_file():
+        raise FileNotFoundError(f"local file not found: {local_path}")
+
+    try:
+        observed_size = int(local_path.stat().st_size)
+    except OSError as exc:
+        raise FileNotFoundError(f"local file not found: {local_path}") from exc
+    if observed_size > MAX_FILE_BYTES_DEFAULT:
+        raise UploadFileTooLargeError(
+            f"{local_path} is {observed_size} bytes, "
+            f"max per-file is {MAX_FILE_BYTES_DEFAULT}"
+        )
+
+    normalized_remote_path = normalize_manifest_path(remote_path)
+    existing_entry = find_file_entry(manifest, remote_folder_id, normalized_remote_path)
+    has_existing = existing_entry is not None and not bool(existing_entry.get("deleted"))
+
+    plaintext_sha256, total_logical_size = _hash_file(local_path)
+    content_fp_key = derive_content_fingerprint_key(vault.master_key)
+    fingerprint = make_content_fingerprint(content_fp_key, plaintext_sha256)
+
+    if has_existing:
+        for version in existing_entry.get("versions", []) or []:
+            if not isinstance(version, dict):
+                continue
+            if str(version.get("content_fingerprint", "")) == fingerprint and \
+               not bool(existing_entry.get("deleted")):
+                _report(progress, "done", 0, 0, 0)
+                return PreparedUpload(
+                    entry_id=str(existing_entry["entry_id"]),
+                    version_id=str(version.get("version_id", "")),
+                    normalized_remote_path=normalized_remote_path,
+                    content_fingerprint=fingerprint,
+                    logical_size=total_logical_size,
+                    chunks_uploaded=0,
+                    chunks_skipped=int(len(version.get("chunks") or [])),
+                    bytes_uploaded=0,
+                    version_payload=None,
+                    skipped_identical=True,
+                )
+
+    # Dedupe pin: if a prior batched-prep for this (vault, path,
+    # fingerprint) tuple persisted a stub, reuse its entry_id +
+    # version_id so the chunk_ids match and HEAD-and-skip works.
+    # Stubs whose fingerprint differs (the file was edited between
+    # the first attempt and the retry) are reaped, since reusing
+    # their version_id would produce chunks that don't match the
+    # current bytes.
+    stub_cache = Path(batch_cache_dir) if batch_cache_dir else default_upload_resume_dir()
+    existing_stub = find_matching_stub(
+        vault_id=vault.vault_id,
+        remote_path=normalized_remote_path,
+        content_fingerprint=fingerprint,
+        cache_dir=stub_cache,
+    )
+    if existing_stub is not None:
+        entry_id = existing_stub.entry_id
+        version_id = existing_stub.version_id
+        stub = existing_stub
+    else:
+        reap_stubs_for_path(
+            vault_id=vault.vault_id,
+            remote_path=normalized_remote_path,
+            cache_dir=stub_cache,
+            keep_fingerprint=fingerprint,
+        )
+        entry_id = (
+            existing_entry["entry_id"] if existing_entry else generate_file_entry_id()
+        )
+        version_id = generate_file_version_id()
+        stub = make_stub(
+            vault_id=vault.vault_id,
+            remote_path=normalized_remote_path,
+            entry_id=entry_id,
+            version_id=version_id,
+            content_fingerprint=fingerprint,
+        )
+        save_stub(stub, stub_cache)
+
+    chunks_plan, _ = _build_chunk_plan(
+        vault=vault,
+        local_path=local_path,
+        remote_folder_id=remote_folder_id,
+        entry_id=entry_id,
+        version_id=version_id,
+        chunk_size=chunk_size,
+    )
+    total_chunks = len(chunks_plan)
+
+    chunk_ids = [chunk["chunk_id"] for chunk in chunks_plan]
+    _report(progress, "checking", 0, total_chunks)
+    heads = (
+        relay.batch_head_chunks(vault.vault_id, vault.vault_access_secret, chunk_ids)
+        if chunk_ids
+        else {}
+    )
+
+    chunks_uploaded = 0
+    chunks_skipped = 0
+    bytes_uploaded = 0
+    completed = 0
+    for index, chunk in enumerate(chunks_plan):
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.sync.upload_cancelled vault=%s remote_path=%s "
+                "chunks_done=%d total=%d (batch-prep)",
+                vault.vault_id, normalized_remote_path, completed, total_chunks,
+            )
+            raise SyncCancelledError(
+                f"upload cancelled at chunk {completed}/{total_chunks} of "
+                f"{normalized_remote_path}"
+            )
+        head = heads.get(chunk["chunk_id"]) if isinstance(heads, dict) else None
+        if isinstance(head, dict) and head.get("present"):
+            chunks_skipped += 1
+        else:
+            relay.put_chunk(
+                vault.vault_id,
+                vault.vault_access_secret,
+                chunk["chunk_id"],
+                chunk["envelope"],
+            )
+            chunks_uploaded += 1
+            bytes_uploaded += chunk["ciphertext_size"]
+        completed += 1
+        _report(progress, "uploading", completed, total_chunks, bytes_uploaded)
+
+    if should_continue is not None and not should_continue():
+        log.info(
+            "vault.sync.upload_cancelled_pre_publish vault=%s remote_path=%s "
+            "(batch-prep)",
+            vault.vault_id, normalized_remote_path,
+        )
+        raise SyncCancelledError(
+            f"upload cancelled before publish for {normalized_remote_path}"
+        )
+
+    timestamp = created_at or _now_rfc3339()
+    version_payload = _make_version_payload(
+        version_id=version_id,
+        chunks_plan=chunks_plan,
+        author_device_id=author_device_id,
+        created_at=timestamp,
+        logical_size=total_logical_size,
+        content_fingerprint=fingerprint,
+    )
+    _report(progress, "ready_to_publish", total_chunks, total_chunks, bytes_uploaded)
+
+    return PreparedUpload(
+        entry_id=entry_id,
+        version_id=version_id,
+        normalized_remote_path=normalized_remote_path,
+        content_fingerprint=fingerprint,
+        logical_size=total_logical_size,
+        chunks_uploaded=chunks_uploaded,
+        chunks_skipped=chunks_skipped,
+        bytes_uploaded=bytes_uploaded,
+        version_payload=version_payload,
+        skipped_identical=False,
+        stub_session_id=stub.session_id,
+        stub_cache_dir=str(stub_cache),
     )
 
 

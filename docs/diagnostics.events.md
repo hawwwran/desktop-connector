@@ -486,6 +486,11 @@ relay log (filenames are local-only).
 | `vault.sync.autosync_list_bindings_failed` | desktop | error | exception traceback | F-LT06 — bindings store query raised; tick skipped, retried on next interval |
 | `vault.sync.autosync_state_subscribe_failed` | desktop | error | exception traceback | F-LT06 — `conn.on_state_change` registration raised; the autosync loop still starts but won't be kicked on reconnect (next interval tick still drains) |
 | `vault.sync.autosync_tick_failed` | desktop | error | exception traceback | F-LT06 — `watcher_runtime.tick_all()` raised; flush attempt still proceeds |
+| `vault.sync.batch_cas_exhausted` | desktop | warning | `batch_size`, `retries` | SO-3 — batched manifest publish exhausted its CAS retry budget; each batched op is recorded as failed and its pending-op row survives for the next cycle |
+| `vault.sync.batch_cas_retry` | desktop | info | `attempt`, `max_retries`, `batch_size` | SO-3 — batched publish hit a CAS conflict; refetched server head and replayed the batch idempotently |
+| `vault.sync.batch_publish_cas_conflict` | desktop | warning | `binding`, `batch_size` | SO-3 — caller-visible end of the batch publish loop after exhausting CAS retries; every batched op rolls back to "failed" |
+| `vault.sync.batch_publish_failed` | desktop | warning | `binding`, `batch_size`, `error` | SO-3 — non-CAS exception during batched publish (network, encrypt, etc.); pending-ops survive for retry |
+| `vault.sync.batch_published` | desktop | info | `binding`, `batch_size`, `new_revision` | SO-3 — batched manifest publish landed; the K batched ops are now finalized at `new_revision` |
 | `vault.sync.binding_disconnect_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — disconnect cancelled an in-flight cycle via the registry |
 | `vault.sync.binding_disconnect_dropping_op` | desktop | info | `binding`, `op_type`, `path`, `attempts` | F-Y30 — per-op audit trail emitted before disconnect drops a pending op |
 | `vault.sync.binding_disconnect_dropping_op_truncated` | desktop | info | `binding`, `logged`, `total` | F-Y30 — per-op audit log capped; summary follows on `binding_disconnected` |
@@ -518,6 +523,7 @@ relay log (filenames are local-only).
 | `vault.sync.ransomware_pause_triggered` | desktop | warning | `binding`, `title`, `body` | F-Y27 — detector tripped; binding paused |
 | `vault.sync.ransomware_threshold_rename_ratio` | desktop | warning | `binding`, `total`, `renames`, `ratio` | T12.3 trip via rename ratio |
 | `vault.sync.ransomware_threshold_total` | desktop | warning | `binding`, `total`, `window_s` | T12.3 trip via total events |
+| `vault.sync.refetch_after_batch_failure_failed` | desktop | warning | `binding` | SO-3 — post-batch-failure manifest refresh raised; cycle ends without a fresh head but the failed pending-ops survive for retry |
 | `vault.sync.refetch_after_failure_failed` | desktop | warning | `binding` | SO-2 — post-op-failure manifest refresh raised; cycle continues with the stale view |
 | `vault.sync.refetch_after_publish_failed` | desktop | warning | `binding` | Manifest re-fetch after our own publish failed; cycle continues |
 | `vault.sync.refetch_for_next_iter_failed` | desktop | warning | `binding` | Two-way next-iter re-fetch failed |
@@ -558,6 +564,7 @@ relay log (filenames are local-only).
 | `vault.sync.upload_path_vanished_promoted_to_delete` | desktop | info | `binding`, `path` | Watcher saw modify; sync saw missing — promoted to delete |
 | `vault.sync.upload_path_vanished_silent` | desktop | info | `binding`, `path` | Upload op for never-synced path dropped |
 | `vault.sync.upload_quota_exceeded` | desktop | warning | `binding`, `path`, `used`, `quota` | F-D03 — sync engine surfaced 507 to caller |
+| `vault.sync.upload_too_large` | desktop | warning | `binding`, `path`, `error` | SO-3 — batched prep rejected a file over the per-file size cap; op marked failed |
 | `vault.sync.watchdog_unavailable` | desktop | warning | `reason` | python3-watchdog not installed; falling back to polling |
 | `vault.sync.watcher_flush_failed` | desktop | error | `binding` | "Sync now" couldn't drain watcher events first |
 | `vault.sync.watcher_runtime_boot_failed` | desktop | error | exception traceback | F-Y13 — watcher boot crashed |

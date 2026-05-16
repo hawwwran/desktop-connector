@@ -80,12 +80,74 @@ from .bindings import (
     VaultLocalEntry,
     VaultPendingOperation,
 )
-from ..manifest import find_file_entry, normalize_manifest_path, tombstone_file_entry
+from ..manifest import (
+    add_or_append_file_version,
+    find_file_entry,
+    normalize_manifest_path,
+    normalize_manifest_plaintext,
+    tombstone_file_entry,
+)
 from ..relay_errors import VaultCASConflictError, VaultQuotaExceededError
-from ..upload import UploadResult, UploadSpecialFileSkipped, upload_file
+from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
+from ..upload import (
+    CAS_MAX_RETRIES,
+    PreparedUpload,
+    UploadFileTooLargeError,
+    UploadResult,
+    UploadSpecialFileSkipped,
+    clear_stub,
+    prepare_upload_for_batch,
+    upload_file,
+)
 
 
 log = logging.getLogger(__name__)
+
+
+# SO-3 — Batched manifest publish.
+#
+# ``run_backup_only_cycle`` collapses up to ``PUBLISH_BATCH_SIZE``
+# per-op manifest publishes into a single CAS publish, dropping the
+# initial-bind manifest round-trips from O(N) to O(N/K). 50 is the
+# plan's tuned default: small enough that a kill-mid-batch only re-
+# uploads ~50 files worth of chunks (and the chunk dedupe makes the
+# re-upload mostly a HEAD-and-skip), large enough that the
+# manifest-ship-per-op cliff in suite 0004 (B7) flattens out.
+#
+# Steady-state single-file edits still publish promptly: each cycle
+# call only drains the pending-ops queue once, and the final partial
+# batch flushes at cycle end. A user dropping one file in waits for
+# one publish, same as today.
+PUBLISH_BATCH_SIZE = 50
+
+
+@dataclass
+class _BatchEntry:
+    """One op's contribution to a SO-3 batched manifest mutation.
+
+    For uploads, ``prepared`` carries the version payload built by
+    ``prepare_upload_for_batch`` (chunks already PUT, version_id
+    fixed). For deletes (and upload-promoted-to-delete on a vanished
+    path), ``deleted_at`` carries the tombstone timestamp.
+
+    ``post_publish_outcome`` is the outcome the cycle records once the
+    batch publishes successfully; ``local_entry_for_upsert`` and
+    ``op_for_dequeue`` capture the pending-ops + local-entries
+    bookkeeping the batch flush owes the store.
+    """
+
+    op: VaultPendingOperation
+    kind: str  # "upload" | "delete"
+    # Upload-specific:
+    prepared: PreparedUpload | None = None
+    absolute_path: Path | None = None
+    # Delete-specific:
+    deleted_at: str | None = None
+    # Whether this entry was a watcher-queued upload that got promoted
+    # to a delete (file vanished before sync). The outcome's op_type
+    # stays "upload" so the ledger view correlates with the watcher
+    # event, but the manifest mutation is a tombstone.
+    promoted_from_upload: bool = False
 
 
 @dataclass
@@ -252,6 +314,7 @@ def run_backup_only_cycle(
     chunk_cache_dir: Path | None = None,
     progress: Callable[[SyncOpOutcome], None] | None = None,
     should_continue: Callable[[], bool] | None = None,
+    batch_size: int = PUBLISH_BATCH_SIZE,
 ) -> SyncCycleResult:
     """Drain ``binding``'s pending ops once. Returns a summary.
 
@@ -259,12 +322,22 @@ def run_backup_only_cycle(
     extra round-trip; otherwise we fetch the head fresh.
 
     F-Y08: ``should_continue`` is checked before each op and passed
-    down into ``upload_file``. When it returns ``False`` mid-cycle
+    down into the chunk-PUT phase. When it returns ``False`` mid-cycle
     the loop exits early; the in-flight op's outcome is recorded
     (status ``"cancelled"`` if the chunk loop bailed, else the op
     was never started) and the result's ``cancelled`` flag is set.
     Remaining queue rows are left untouched and pick up on the next
     cycle.
+
+    SO-3: per-op chunk PUTs are grouped into batches of ``batch_size``
+    (default :data:`PUBLISH_BATCH_SIZE`); each batch closes with one
+    CAS-published manifest revision instead of N. Skipped ops
+    (identical bytes, special files, never-synced vanish) and failed
+    ops (quota, CAS exhaustion, non-CAS errors) do not enter the
+    batch — they flush immediately so the cycle keeps draining. On
+    kill mid-batch the chunks already PUT are idempotent at the
+    relay; the next cycle re-encrypts the same files, HEAD-and-skips
+    those chunks, and rebuilds the batch.
     """
     if binding.state != "bound":
         raise ValueError(
@@ -280,6 +353,8 @@ def run_backup_only_cycle(
             f"binding {binding.binding_id} sync_mode={binding.sync_mode!r} "
             "is not supported by this loop (T10.5 covers backup-only)"
         )
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
 
     head = manifest or vault.fetch_manifest(relay)
     started_at_revision = int(head.get("revision", 0))
@@ -290,17 +365,29 @@ def run_backup_only_cycle(
     cancelled = False
 
     current_manifest: dict[str, Any] = head
+    batch: list[_BatchEntry] = []
+
+    def _emit(outcome: SyncOpOutcome) -> None:
+        outcomes.append(outcome)
+        if progress is not None:
+            try:
+                progress(outcome)
+            except Exception:  # noqa: BLE001
+                log.exception("vault.sync.progress_callback_failed")
+
     for op in pending:
         # F-Y08: bail before starting another op when cancellation
-        # fired between ops. The remaining ops stay queued.
+        # fired between ops. Anything already batched flushes below.
         if should_continue is not None and not should_continue():
             log.info(
                 "vault.sync.cycle_cancelled_between_ops binding=%s remaining=%d",
-                binding.binding_id, len(pending) - len(outcomes),
+                binding.binding_id,
+                len(pending) - len(outcomes) - len(batch),
             )
             cancelled = True
             break
-        outcome, current_manifest = _execute_op(
+
+        immediate_outcome, batch_entry, current_manifest = _prepare_op_for_batch(
             vault=vault,
             relay=relay,
             store=store,
@@ -312,27 +399,85 @@ def run_backup_only_cycle(
             chunk_cache_dir=chunk_cache_dir,
             should_continue=should_continue,
         )
-        outcomes.append(outcome)
-        if progress is not None:
-            try:
-                progress(outcome)
-            except Exception:  # noqa: BLE001
-                log.exception("vault.sync.progress_callback_failed")
-        if outcome.status == "cancelled":
-            # Chunk-level bail surfaced upward; stop the queue drain.
-            cancelled = True
-            break
-        # SO-2: successful publishes thread the new manifest back via
-        # ``_execute_op``'s return — no per-op GET. Only refresh on
-        # failure (typically a CAS conflict whose inner retry budget
-        # was exhausted) so the next op sees the post-conflict head.
-        # F-Y07.
-        if outcome.status == "failed":
+
+        if immediate_outcome is not None:
+            _emit(immediate_outcome)
+            if immediate_outcome.status == "cancelled":
+                cancelled = True
+                break
+            if immediate_outcome.status == "failed":
+                # F-Y07: a non-batched failure (quota, special-file
+                # error, unsupported op type) is rare enough that we
+                # take the GET to refresh head — keeps semantics in
+                # line with the pre-SO-3 single-op path.
+                try:
+                    current_manifest = vault.fetch_manifest(relay)
+                except Exception:  # noqa: BLE001
+                    log.warning(
+                        "vault.sync.refetch_after_failure_failed binding=%s",
+                        binding.binding_id, exc_info=True,
+                    )
+            continue
+
+        if batch_entry is None:
+            # Defensive — prep returned no outcome and no entry. Treat
+            # as a soft-skip so the cycle stays robust.
+            continue
+        batch.append(batch_entry)
+
+        if len(batch) >= batch_size:
+            batch_outcomes, current_manifest, batch_failed = _flush_batch(
+                vault=vault,
+                relay=relay,
+                store=store,
+                binding=binding,
+                local_root=local_root,
+                current_manifest=current_manifest,
+                batch=batch,
+                author_device_id=author_device_id,
+            )
+            for outcome in batch_outcomes:
+                _emit(outcome)
+            batch = []
+            if batch_failed:
+                try:
+                    current_manifest = vault.fetch_manifest(relay)
+                except Exception:  # noqa: BLE001
+                    log.warning(
+                        "vault.sync.refetch_after_batch_failure_failed binding=%s",
+                        binding.binding_id, exc_info=True,
+                    )
+
+    # Cycle-end flush: any partial batch still pending publishes now.
+    # This handles two cases:
+    #   1. Steady-state "one new file" — a single op landed, K-1 didn't
+    #      arrive, so we publish what we have rather than sitting on it.
+    #   2. Cancellation between ops — when ``should_continue`` flipped
+    #      false after some ops had already finished their chunk PUTs,
+    #      we still publish the ready batch so the work isn't wasted
+    #      (F-Y08's "bail within ~1 chunk" is enforced inside
+    #      ``prepare_upload_for_batch``; an op that bailed mid-chunk
+    #      surfaces a "cancelled" outcome and never enters the batch).
+    if batch:
+        batch_outcomes, current_manifest, batch_failed = _flush_batch(
+            vault=vault,
+            relay=relay,
+            store=store,
+            binding=binding,
+            local_root=local_root,
+            current_manifest=current_manifest,
+            batch=batch,
+            author_device_id=author_device_id,
+        )
+        for outcome in batch_outcomes:
+            _emit(outcome)
+        batch = []
+        if batch_failed and not cancelled:
             try:
                 current_manifest = vault.fetch_manifest(relay)
             except Exception:  # noqa: BLE001
                 log.warning(
-                    "vault.sync.refetch_after_failure_failed binding=%s",
+                    "vault.sync.refetch_after_batch_failure_failed binding=%s",
                     binding.binding_id, exc_info=True,
                 )
 
@@ -350,6 +495,561 @@ def run_backup_only_cycle(
         outcomes=outcomes,
         binding=rebound,
         cancelled=cancelled,
+    )
+
+
+def _prepare_op_for_batch(
+    *,
+    vault: SyncVault,
+    relay: Any,
+    store: VaultBindingsStore,
+    binding: VaultBinding,
+    local_root: Path,
+    op: VaultPendingOperation,
+    manifest: dict[str, Any],
+    author_device_id: str,
+    chunk_cache_dir: Path | None,
+    should_continue: Callable[[], bool] | None,
+) -> tuple[SyncOpOutcome | None, _BatchEntry | None, dict[str, Any]]:
+    """SO-3: prepare one op for inclusion in a batched manifest publish.
+
+    Returns ``(immediate_outcome, batch_entry, manifest_after_prep)``.
+
+    Exactly one of ``immediate_outcome`` and ``batch_entry`` is
+    non-None when the op was handled (the caller emits the outcome or
+    appends the entry); both may be ``None`` if the op was a defensive
+    soft-skip. ``manifest_after_prep`` is the input ``manifest``
+    unchanged — prep never publishes, so the cycle's view of the head
+    is stable until the next batch flush.
+
+    The immediate-outcome path covers ops that don't contribute to a
+    batch: identical-bytes skip (no manifest mutation), special-file
+    skip, never-synced vanish, quota / CAS / unexpected errors, and
+    cancellation. Everything else (real uploads, deletes, and
+    upload-promoted-to-delete on a previously-synced path) becomes a
+    ``_BatchEntry`` that ``_flush_batch`` consumes.
+    """
+    if op.op_type == "upload":
+        return _prepare_upload_for_batch(
+            vault=vault,
+            relay=relay,
+            store=store,
+            binding=binding,
+            local_root=local_root,
+            op=op,
+            manifest=manifest,
+            author_device_id=author_device_id,
+            chunk_cache_dir=chunk_cache_dir,
+            should_continue=should_continue,
+        )
+    if op.op_type == "delete":
+        return _prepare_delete_for_batch(
+            store=store, binding=binding, op=op, manifest=manifest,
+        )
+    # T10.5 doesn't carry rename ops in backup-only.
+    store.mark_op_failed(op.op_id, f"unsupported op_type: {op.op_type}")
+    return (
+        SyncOpOutcome(
+            op_id=op.op_id,
+            op_type=op.op_type,
+            relative_path=op.relative_path,
+            status="failed",
+            error=f"unsupported op_type: {op.op_type}",
+        ),
+        None,
+        manifest,
+    )
+
+
+def _prepare_upload_for_batch(
+    *,
+    vault: SyncVault,
+    relay: Any,
+    store: VaultBindingsStore,
+    binding: VaultBinding,
+    local_root: Path,
+    op: VaultPendingOperation,
+    manifest: dict[str, Any],
+    author_device_id: str,
+    chunk_cache_dir: Path | None,
+    should_continue: Callable[[], bool] | None,
+) -> tuple[SyncOpOutcome | None, _BatchEntry | None, dict[str, Any]]:
+    """Prep an upload op for batching: run chunk PUTs, return a batch entry.
+
+    Identical-bytes shortcut: when the file's keyed fingerprint already
+    matches the latest live version in ``manifest``, no chunks are PUT
+    and no batch entry is produced — the cycle records "skipped" and
+    stamps the local-entry row at the manifest's current revision.
+
+    Path-vanished cases:
+
+    - Never previously synced: dequeue silently, immediate "skipped"
+      outcome (§A17 — never publish a tombstone for a never-synced
+      path).
+    - Previously synced: produce a *tombstone* batch entry so the
+      vanish flows through as a delete in the next publish. The
+      outcome's ``op_type`` stays ``"upload"`` so the ledger view
+      still correlates with the watcher's original event.
+    """
+    relative_path = op.relative_path
+    absolute = local_root / relative_path
+    if not _file_present_with_atomic_rename_grace(absolute):
+        if not _previously_synced_via_store(store, binding.binding_id, relative_path):
+            log.info(
+                "vault.sync.upload_path_vanished_silent "
+                "binding=%s path=%s",
+                binding.binding_id, relative_path,
+            )
+            store.delete_pending_op(op.op_id)
+            return (
+                SyncOpOutcome(
+                    op_id=op.op_id, op_type="upload",
+                    relative_path=relative_path, status="skipped",
+                    error="path_vanished_never_synced",
+                ),
+                None,
+                manifest,
+            )
+        log.info(
+            "vault.sync.upload_path_vanished_promoted_to_delete "
+            "binding=%s path=%s",
+            binding.binding_id, relative_path,
+        )
+        normalized = normalize_manifest_path(relative_path)
+        entry = find_file_entry(manifest, binding.remote_folder_id, normalized)
+        if entry is None or bool(entry.get("deleted")):
+            # Already gone remotely too — just reap local state.
+            store.delete_local_entry(binding.binding_id, relative_path)
+            store.delete_pending_op(op.op_id)
+            return (
+                SyncOpOutcome(
+                    op_id=op.op_id, op_type="upload",
+                    relative_path=relative_path, status="skipped",
+                ),
+                None,
+                manifest,
+            )
+        from datetime import datetime, timezone
+        deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return (
+            None,
+            _BatchEntry(
+                op=op, kind="delete",
+                deleted_at=deleted_at,
+                promoted_from_upload=True,
+            ),
+            manifest,
+        )
+
+    try:
+        prepared = prepare_upload_for_batch(
+            vault=vault,
+            relay=relay,
+            manifest=manifest,
+            local_path=absolute,
+            remote_folder_id=binding.remote_folder_id,
+            remote_path=relative_path,
+            author_device_id=author_device_id,
+            should_continue=should_continue,
+            batch_cache_dir=chunk_cache_dir,
+        )
+    except SyncCancelledError as exc:
+        log.info(
+            "vault.sync.upload_cancelled_op binding=%s path=%s",
+            binding.binding_id, relative_path,
+        )
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="cancelled",
+                error=str(exc),
+            ),
+            None,
+            manifest,
+        )
+    except UploadSpecialFileSkipped:
+        store.delete_pending_op(op.op_id)
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="skipped",
+                error="special_file",
+            ),
+            None,
+            manifest,
+        )
+    except UploadFileTooLargeError as exc:
+        store.mark_op_failed(op.op_id, str(exc))
+        log.warning(
+            "vault.sync.upload_too_large binding=%s path=%s error=%s",
+            binding.binding_id, relative_path, exc,
+        )
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="failed",
+                error=str(exc),
+            ),
+            None,
+            manifest,
+        )
+    except VaultQuotaExceededError as exc:
+        log.warning(
+            "vault.sync.upload_quota_exceeded binding=%s path=%s used=%d quota=%d",
+            binding.binding_id, relative_path,
+            getattr(exc, "used_bytes", 0),
+            getattr(exc, "quota_bytes", 0),
+        )
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="failed",
+                error="quota_exceeded",
+            ),
+            None,
+            manifest,
+        )
+    except VaultCASConflictError as exc:
+        # ``prepare_upload_for_batch`` does not publish, so a CAS
+        # conflict here would only fire from a HEAD probe — treat as
+        # transient and let the next cycle re-try.
+        store.mark_op_failed(op.op_id, f"cas_conflict: {exc}")
+        log.warning(
+            "vault.sync.upload_cas_conflict binding=%s path=%s",
+            binding.binding_id, relative_path,
+        )
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="failed",
+                error="cas_conflict",
+            ),
+            None,
+            manifest,
+        )
+    except Exception as exc:  # noqa: BLE001
+        store.mark_op_failed(op.op_id, str(exc))
+        log.warning(
+            "vault.sync.upload_failed binding=%s path=%s error=%s",
+            binding.binding_id, relative_path, exc,
+        )
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="failed",
+                error=str(exc),
+            ),
+            None,
+            manifest,
+        )
+
+    if prepared.skipped_identical:
+        # File's bytes already match the latest live version. Stamp the
+        # local-entry row at the current manifest revision and drop the
+        # pending op — no batch entry needed.
+        try:
+            stat = absolute.stat()
+            size = int(stat.st_size)
+            mtime_ns = int(stat.st_mtime_ns)
+        except OSError:
+            size, mtime_ns = int(prepared.logical_size), 0
+        current_revision = int(manifest.get("revision", 0))
+        store.upsert_local_entry(VaultLocalEntry(
+            binding_id=binding.binding_id,
+            relative_path=relative_path,
+            content_fingerprint=prepared.content_fingerprint,
+            size_bytes=size,
+            mtime_ns=mtime_ns,
+            last_synced_revision=current_revision,
+        ))
+        store.delete_pending_op(op.op_id)
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="upload",
+                relative_path=relative_path, status="skipped",
+                bytes_uploaded=int(prepared.bytes_uploaded),
+                chunks_uploaded=int(prepared.chunks_uploaded),
+            ),
+            None,
+            manifest,
+        )
+
+    return (
+        None,
+        _BatchEntry(
+            op=op, kind="upload",
+            prepared=prepared,
+            absolute_path=absolute,
+        ),
+        manifest,
+    )
+
+
+def _prepare_delete_for_batch(
+    *,
+    store: VaultBindingsStore,
+    binding: VaultBinding,
+    op: VaultPendingOperation,
+    manifest: dict[str, Any],
+) -> tuple[SyncOpOutcome | None, _BatchEntry | None, dict[str, Any]]:
+    """Prep a delete op for batching: build a tombstone entry, or
+    short-circuit when the remote entry is already gone."""
+    relative_path = op.relative_path
+    normalized = normalize_manifest_path(relative_path)
+    entry = find_file_entry(manifest, binding.remote_folder_id, normalized)
+    if entry is None or bool(entry.get("deleted")):
+        store.delete_local_entry(binding.binding_id, relative_path)
+        store.delete_pending_op(op.op_id)
+        return (
+            SyncOpOutcome(
+                op_id=op.op_id, op_type="delete",
+                relative_path=relative_path, status="skipped",
+            ),
+            None,
+            manifest,
+        )
+    from datetime import datetime, timezone
+    deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return (
+        None,
+        _BatchEntry(op=op, kind="delete", deleted_at=deleted_at),
+        manifest,
+    )
+
+
+def _apply_batch_to_manifest(
+    parent_manifest: dict[str, Any],
+    batch: list[_BatchEntry],
+    *,
+    remote_folder_id: str,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Fold every batched mutation onto ``parent_manifest`` and bump revisions.
+
+    Both helpers are idempotent: ``add_or_append_file_version`` is a
+    no-op when the same ``version_id`` is already the latest; the
+    tombstone helper refreshes ``deleted_at`` on an already-deleted
+    entry. So replaying the same batch against a freshly-fetched head
+    on a CAS conflict converges without duplicating work.
+
+    Tombstones for already-gone entries are tolerated — that case
+    arises naturally when a CAS conflict refetch shows the same path
+    was already tombstoned by another writer.
+    """
+    parent_n = normalize_manifest_plaintext(parent_manifest)
+    parent_revision = int(parent_n.get("revision", 0))
+    next_revision = parent_revision + 1
+
+    candidate = parent_n
+    for entry in batch:
+        if entry.kind == "upload":
+            assert entry.prepared is not None
+            candidate = add_or_append_file_version(
+                candidate,
+                remote_folder_id=remote_folder_id,
+                path=entry.prepared.normalized_remote_path,
+                version=entry.prepared.version_payload,
+                entry_id=entry.prepared.entry_id,
+            )
+        elif entry.kind == "delete":
+            normalized = normalize_manifest_path(entry.op.relative_path)
+            try:
+                candidate = tombstone_file_entry(
+                    candidate,
+                    remote_folder_id=remote_folder_id,
+                    path=normalized,
+                    deleted_at=str(entry.deleted_at or created_at),
+                    author_device_id=author_device_id,
+                )
+            except KeyError:
+                # Entry already gone — fine for a batched tombstone
+                # (likely a CAS-conflict replay landing after another
+                # writer tombstoned the same path).
+                pass
+
+    candidate["revision"] = next_revision
+    candidate["parent_revision"] = parent_revision
+    candidate["created_at"] = created_at
+    candidate["author_device_id"] = str(author_device_id)
+    return candidate
+
+
+def _publish_batch_with_cas_retry(
+    *,
+    vault: SyncVault,
+    relay: Any,
+    parent_manifest: dict[str, Any],
+    batch: list[_BatchEntry],
+    remote_folder_id: str,
+    author_device_id: str,
+    max_retries: int = CAS_MAX_RETRIES,
+) -> dict[str, Any]:
+    """Publish the batch with §D4 CAS retry semantics.
+
+    On 409, decrypt the inline server-head envelope, re-apply the
+    batch's mutations on top of the new head, retry. ``last_attempt``
+    is replaced each iteration (rather than being merged forward) so
+    we don't carry stale revision stamps across attempts.
+    """
+    from datetime import datetime, timezone
+
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    candidate = _apply_batch_to_manifest(
+        parent_manifest, batch,
+        remote_folder_id=remote_folder_id,
+        author_device_id=author_device_id,
+        created_at=created_at,
+    )
+    for attempt in range(max_retries):
+        try:
+            return vault.publish_manifest(relay, candidate)
+        except VaultCASConflictError as exc:
+            envelope = exc.current_manifest_ciphertext_bytes()
+            if not envelope:
+                raise
+            server_head = decrypt_manifest_envelope(vault, envelope)
+            log.info(
+                "vault.sync.batch_cas_retry attempt=%d/%d batch_size=%d",
+                attempt + 1, max_retries, len(batch),
+            )
+            candidate = _apply_batch_to_manifest(
+                server_head, batch,
+                remote_folder_id=remote_folder_id,
+                author_device_id=author_device_id,
+                created_at=created_at,
+            )
+    try:
+        return vault.publish_manifest(relay, candidate)
+    except VaultCASConflictError:
+        log.warning(
+            "vault.sync.batch_cas_exhausted batch_size=%d retries=%d",
+            len(batch), max_retries,
+        )
+        raise
+
+
+def _flush_batch(
+    *,
+    vault: SyncVault,
+    relay: Any,
+    store: VaultBindingsStore,
+    binding: VaultBinding,
+    local_root: Path,
+    current_manifest: dict[str, Any],
+    batch: list[_BatchEntry],
+    author_device_id: str,
+) -> tuple[list[SyncOpOutcome], dict[str, Any], bool]:
+    """Publish the accumulated batch and run post-publish bookkeeping.
+
+    Returns ``(outcomes, manifest_after_publish, batch_failed)``. On
+    a successful publish, every batched op is marked "uploaded" or
+    "deleted" and its local-entry / pending-op rows are reconciled.
+    On CAS exhaustion (or any other publish error), every batched op
+    is marked "failed" so the cycle's failed_count reflects reality;
+    pending-op rows survive for the next cycle.
+    """
+    if not batch:
+        return [], current_manifest, False
+
+    try:
+        published = _publish_batch_with_cas_retry(
+            vault=vault,
+            relay=relay,
+            parent_manifest=current_manifest,
+            batch=batch,
+            remote_folder_id=binding.remote_folder_id,
+            author_device_id=author_device_id,
+        )
+    except VaultCASConflictError as exc:
+        log.warning(
+            "vault.sync.batch_publish_cas_conflict binding=%s batch_size=%d",
+            binding.binding_id, len(batch),
+        )
+        outcomes: list[SyncOpOutcome] = []
+        for entry in batch:
+            store.mark_op_failed(entry.op.op_id, f"cas_conflict: {exc}")
+            outcomes.append(_failed_outcome(entry, "cas_conflict"))
+        return outcomes, current_manifest, True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "vault.sync.batch_publish_failed binding=%s batch_size=%d error=%s",
+            binding.binding_id, len(batch), exc,
+        )
+        outcomes = []
+        for entry in batch:
+            store.mark_op_failed(entry.op.op_id, str(exc))
+            outcomes.append(_failed_outcome(entry, str(exc)))
+        return outcomes, current_manifest, True
+
+    new_revision = int(published.get("revision", current_manifest.get("revision", 0)))
+    outcomes = []
+    for entry in batch:
+        if entry.kind == "upload":
+            assert entry.prepared is not None
+            assert entry.absolute_path is not None
+            try:
+                stat = entry.absolute_path.stat()
+                size = int(stat.st_size)
+                mtime_ns = int(stat.st_mtime_ns)
+            except OSError:
+                size, mtime_ns = int(entry.prepared.logical_size), 0
+            store.upsert_local_entry(VaultLocalEntry(
+                binding_id=binding.binding_id,
+                relative_path=entry.op.relative_path,
+                content_fingerprint=entry.prepared.content_fingerprint,
+                size_bytes=size,
+                mtime_ns=mtime_ns,
+                last_synced_revision=new_revision,
+            ))
+            store.delete_pending_op(entry.op.op_id)
+            # SO-3 dedupe stub no longer needed — the publish landed,
+            # the chunk_ids are permanent in the manifest, and we
+            # don't want the next cycle's prep to short-circuit on it
+            # if the file is later edited and re-queued.
+            if (
+                entry.prepared.stub_session_id is not None
+                and entry.prepared.stub_cache_dir is not None
+            ):
+                clear_stub(
+                    entry.prepared.stub_session_id,
+                    Path(entry.prepared.stub_cache_dir),
+                )
+            outcomes.append(SyncOpOutcome(
+                op_id=entry.op.op_id,
+                op_type="upload",
+                relative_path=entry.op.relative_path,
+                status="uploaded",
+                bytes_uploaded=int(entry.prepared.bytes_uploaded),
+                chunks_uploaded=int(entry.prepared.chunks_uploaded),
+            ))
+        else:  # delete (or upload-promoted-to-delete)
+            store.delete_local_entry(binding.binding_id, entry.op.relative_path)
+            store.delete_pending_op(entry.op.op_id)
+            outcomes.append(SyncOpOutcome(
+                op_id=entry.op.op_id,
+                op_type=entry.op.op_type,  # preserves "upload" for promoted entries
+                relative_path=entry.op.relative_path,
+                status="deleted",
+            ))
+
+    log.info(
+        "vault.sync.batch_published binding=%s batch_size=%d new_revision=%d",
+        binding.binding_id, len(batch), new_revision,
+    )
+    return outcomes, published, False
+
+
+def _failed_outcome(entry: _BatchEntry, error: str) -> SyncOpOutcome:
+    """Build the SyncOpOutcome row for a batched op that didn't publish."""
+    op_type = "upload" if entry.kind == "upload" else entry.op.op_type
+    status_label = "failed"
+    return SyncOpOutcome(
+        op_id=entry.op.op_id,
+        op_type=op_type,
+        relative_path=entry.op.relative_path,
+        status=status_label,
+        error=error,
     )
 
 
@@ -375,6 +1075,12 @@ def _execute_op(
     before publish, cancelled). Callers that need a fresh view after a
     CAS-conflict failure must re-fetch explicitly — this helper does
     not, so success paths skip the redundant per-op GET.
+
+    SO-3 retained this single-op path for ``twoway.py`` — the two-way
+    conflict-rename detector in Phase A inspects the manifest per file
+    and is left on the single-publish shape for now. Backup-only uses
+    the batched primitives ``_prepare_op_for_batch`` / ``_flush_batch``
+    via :func:`run_backup_only_cycle`.
     """
     relative_path = op.relative_path
     if op.op_type == "upload":

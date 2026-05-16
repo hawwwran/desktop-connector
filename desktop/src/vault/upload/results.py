@@ -70,3 +70,44 @@ class UploadResult:
     logical_size: int
     content_fingerprint: str
     skipped_identical: bool = False
+
+
+@dataclass(frozen=True)
+class PreparedUpload:
+    """SO-3: per-file output of the chunk-PUT phase, ready to be folded
+    into a batched manifest publish.
+
+    ``prepare_upload_for_batch`` encrypts + PUTs the file's chunks but
+    *does not* publish a manifest revision. The caller adds
+    ``version_payload`` to a per-binding batch and runs one CAS publish
+    for the whole batch (the SO-3 amortization). Re-running prep after a
+    kill is safe — a persisted :class:`BatchedUploadStub` keyed by
+    ``(vault, path, fingerprint)`` pins the same ``version_id`` across
+    runs so the chunk_ids match and the relay HEAD-and-skips chunks
+    that already landed. ``stub_session_id`` is the stub's identifier
+    so the cycle's flush can clear it after a successful publish.
+
+    ``skipped_identical`` short-circuits the caller: the file's bytes
+    already match the latest live version on the remote, so nothing
+    needs to enter the batch. The caller still owes a local-entry
+    upsert + pending-op delete to record the "already in sync" state.
+    """
+
+    entry_id: str
+    version_id: str
+    normalized_remote_path: str
+    content_fingerprint: str
+    logical_size: int
+    chunks_uploaded: int
+    chunks_skipped: int
+    bytes_uploaded: int
+    # Populated when ``skipped_identical`` is False — the per-file
+    # manifest version payload the caller threads into the batch.
+    version_payload: dict[str, Any] | None = None
+    skipped_identical: bool = False
+    # The dedupe-stub id the cycle clears after a successful publish.
+    # None for skipped_identical (no stub was written).
+    stub_session_id: str | None = None
+    # The directory holding the batched-stub subdirectory so the flush
+    # can locate the stub without re-deriving the default path.
+    stub_cache_dir: str | None = None
