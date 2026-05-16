@@ -672,6 +672,94 @@ file; if they become work, they get their own numbered items.
 
 ---
 
+## 13. Large folder bind — works, but 10k = 2 hours wall-clock (was B7)
+
+**Symptom**: B7 in the backlog ("Attach a folder with 10k+ small
+files; verify baseline scan completes, sync up doesn't OOM, manifest
+publishes successfully. Watch for `vault/binding/scan.py` /
+`vault/binding/watcher.py` performance cliffs"). Driven 2026-05-16
+on suite 0004; full result writeup at
+`temp/automation-tests-results/0004/B7-large-folder/result.md`.
+
+**Cause / Verification**: step-ladder bind of 100 / 1k / 10k random
+256-byte files, each in a nested subdirectory tree, against a clean
+vault on a single-threaded php -S relay.
+
+| Folder | scan wall | sync wall | rate (start → end) | RSS peak |
+|---|---|---|---|---|
+| 100 files | 0.16 s | ~3 s | ~30 ops/s | 57 MiB |
+| 1 000 files | 1.46 s | 70.4 s | 26.7 → 14.2 ops/s | 67.3 MiB |
+| 10 000 files | 14.5 s | **7908 s (2 h 11 min)** | 8.5 → 1.3 ops/s | 210 MiB |
+
+- **Scan is fine** — linear in N with no per-file IPC.
+- **Sync drain is the cliff.** Rate decays roughly as `k / sqrt(N)`
+  (8.5 ops/s → 1.3 ops/s over 10 000 ops). Manifest grows linearly,
+  each `upload_file` call ships the full encrypted manifest down + up.
+- **Memory is fine** — peak 210 MiB at 10k entries, scaling ~13 KiB
+  per cached entry. A 100k-file binding would extrapolate to ~2 GiB
+  RSS which is concerning, but 10k is the spec.
+- **Correctness holds** — all 10 000 ops `status=uploaded`, manifest
+  CAS-published from revision 1104 → 11 104 with no conflicts during
+  the serial single-client run. No OOM, no failed ops, no broken
+  versions.
+
+**Three improvement targets** (none block B7 functional PASS):
+
+1. **Redundant manifest GET per op.** `run_backup_only_cycle`
+   (sync.py:328-336) does `vault.fetch_manifest(relay)` after every
+   successful op for the next op's view — even though
+   `publish_manifest` already returned the updated manifest dict and
+   the loop has it in `current_manifest`. Per-op cost is 2 manifest
+   round-trips where 1 would do. **Expected ~2× speedup** by trusting
+   the publish_manifest return value (re-fetch only when a CAS
+   conflict signals divergence).
+2. **No batched-publish path.** Every file is its own manifest
+   revision. Total bytes shipped scales as `O(N²)`. A future
+   "accumulate K ops, publish one combined manifest revision" API
+   would collapse 10k revisions into 100 (K=100), dramatically
+   shortening initial-bind time.
+3. **Initial-bind UX has no rich progress.** A user dropping a
+   Documents folder into a binding will wait ~2 h with only an
+   "X/Y synced" counter — no ETA, no warning. Worth either a
+   one-time toast ("Large folder; this may take a while — N files
+   queued") at bind time, or a richer progress widget that
+   surfaces the rate trajectory.
+
+**SO-1 (B7) — Stray dev twins survive `kill $stored_pid`**: while
+setting the test up, four orphan headless `src.main` processes
+accumulated. Each `kill $TWIN` from a setup retry was killing the
+**bash shell wrapper PID** (`echo $!` after backgrounding a
+`python3 -m src.main …` captures the wrapper, not the python
+child), so the python twin survived each kill. Discovered when a
+microsync showed **86 s per file** instead of 22 ms — PHP server
+log was full of `/api/transfers/notify` 25-second long-polls from
+four parallel pollers, starving every other request. `pkill -9 -f
+"src.main.*desktop-connector-dev"` cleaned them up; rate
+immediately returned to ~22 ms/file. **Reinforces B8 SO-1** —
+both are between-runs hygiene gaps in
+`docs/testing/vault-tests.md`'s suite-start.
+
+**SO-4 (B7) — Watcher path not exercised**: this test drove the
+`scan_for_local_changes` + Sync-now path, not the inotify-driven
+`vault_filesystem_watcher`. Both feed into the same pending-ops
+queue, but the watcher enqueues incrementally instead of in burst.
+A future B7-followup should drop 10k files into a binding **with
+the dev twin running** to verify the watcher doesn't lose events
+under burst load.
+
+**Acceptance**: see assertions in
+`temp/automation-tests-results/0004/B7-large-folder/result.md`.
+All five assertions pass; three improvements (SO-2/3/4 above)
+plus SO-1 (harness hygiene) recorded as follow-up nudges.
+
+**Status (2026-05-16): done** on `tresor-vault`. B7 backlog item
+struck. The two ~2× perf wins (skip redundant manifest GET; batched
+publish) are real and would dramatically improve initial-bind UX
+for large user folders. If they become work, they get their own
+numbered items.
+
+---
+
 ## Backlog — un-driven flows
 
 Candidate live-test sessions that aren't yet in the chained
@@ -685,18 +773,15 @@ Ordered by priority (2026-05-16). Tier 1 = exercises core daily flows
 that block real use if broken. Tier 2 = silent-data-loss risk if a
 correctness path misbehaves. Tier 3 = ops/support/edge-case flows that
 matter but aren't day-one blockers. Identifiers descend down the list:
-**B7 is highest priority, B1 is lowest** (B8 closed 2026-05-16 — see
-§12 above). When a flow lands, write it up as a numbered item above;
-its B# stays attached for cross-doc references.
+**B6 is highest priority, B1 is lowest** (B8 closed 2026-05-16 — see
+§12; B7 closed 2026-05-16 — see §13). When a flow lands, write it up
+as a numbered item above; its B# stays attached for cross-doc
+references.
 
 **Tier 1 — core daily flows**
 
 - ~~**B8 — Resume upload after kill.**~~ Closed 2026-05-16 — see §12.
-- **B7 — Large folder bind.** Attach a folder with 10k+ small files;
-  verify baseline scan completes, sync up doesn't OOM, manifest
-  publishes successfully. Watch for `vault/binding/scan.py` /
-  `vault/binding/watcher.py` performance cliffs. Gates whether real
-  user folders (Documents, photo libraries) are usable at all.
+- ~~**B7 — Large folder bind.**~~ Closed 2026-05-16 — see §13.
 
 **Tier 2 — silent data-loss risk**
 
