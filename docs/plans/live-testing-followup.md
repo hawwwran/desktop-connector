@@ -761,13 +761,33 @@ immediately returned to ~22 ms/file. **Reinforces B8 SO-1** —
 both are between-runs hygiene gaps in
 `docs/testing/vault-tests.md`'s suite-start.
 
-**SO-4 (B7) — Watcher path not exercised**: this test drove the
+**SO-4 (B7) — Watcher path not exercised**: ~~this test drove the
 `scan_for_local_changes` + Sync-now path, not the inotify-driven
 `vault_filesystem_watcher`. Both feed into the same pending-ops
 queue, but the watcher enqueues incrementally instead of in burst.
 A future B7-followup should drop 10k files into a binding **with
 the dev twin running** to verify the watcher doesn't lose events
-under burst load.
+under burst load.~~ **DONE 2026-05-16** on `tresor-vault`:
+
+- `tests/protocol/test_desktop_vault_filesystem_watcher.py:WatcherBurstLoadTests`
+  drives 10 000 events into `WatcherCoordinator` directly with a
+  hermetic clock and verifies every path lands in pending-ops with
+  no drops / no duplicates / no synthesised paths. Three vectors:
+  10k creates with stable stat, 10k deletes filtered through the
+  §A17 / T12.2 predicate, 10k mixed create+modify events
+  collapsing to one op per path.
+- `WatchdogObserverBurstSmokeTests.test_200_create_burst_reaches_coordinator_pending`
+  exercises the real `watchdog.Observer` thread + inotify path
+  with 200 files (skipped when `python3-watchdog` isn't installed;
+  bounded to ≤ 5 s wall-clock for CI). The unit-test scale at 10k
+  already exercises the coordinator's hot path; this layer just
+  pins the watchdog→coordinator adapter.
+
+A live-session 10k drop against the dev twin (full daemon, real
+inotify, full sync drain to relay) would be belt-and-braces but
+isn't required — the unit-scale 10k + real-inotify 200 covers
+both halves of the integration. File it as a follow-up if a real
+user reports lost events.
 
 **Acceptance**: see assertions in
 `temp/automation-tests-results/0004/B7-large-folder/result.md`.

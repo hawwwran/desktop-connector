@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
+import time
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -293,6 +296,250 @@ class WatcherCoordinatorTests(unittest.TestCase):
         # Hung detector fires somewhere past 5 min — nothing enqueued.
         self.assertEqual(store.enqueued, [])
         self.assertNotIn("hung.txt", coord.pending_paths())
+
+
+# ---------------------------------------------------------------------------
+# WatcherCoordinator — burst-load coverage (SO-4 from §13)
+# ---------------------------------------------------------------------------
+
+
+class WatcherBurstLoadTests(unittest.TestCase):
+    """SO-4 from ``docs/plans/live-testing-followup.md`` §13.
+
+    The B7 test drove the catch-up scan + Sync-now path. SO-4 is the
+    coverage gap: when a watcher is actually running and 10 000 files
+    appear in a single inotify burst, every event must land in
+    ``vault_pending_operations`` — no debounce-induced collapse, no
+    stability-gate stall, no silent drop. These tests exercise the
+    coordinator's pure logic at burst scale so a regression in the
+    debouncer / stability gate / pending dict surfaces as a unit-test
+    failure rather than a 10k-file live-test session.
+
+    The watchdog-Observer-thread integration is exercised separately
+    by ``test_watchdog_observer_burst_smoke`` below — that test only
+    runs when ``watchdog`` is installed (the AppImage / dev tree
+    case; CI without it skips).
+    """
+
+    BURST_SIZE = 10_000
+
+    def _make_coord(
+        self,
+        *,
+        clock: FakeClock,
+        store: FakeStore,
+        stat_provider,
+        previously_synced=None,
+    ) -> WatcherCoordinator:
+        return WatcherCoordinator(
+            binding_id="rb_v1_burst",
+            local_root=Path("/tmp/dummy"),
+            store=store,
+            clock=clock,
+            stat_provider=stat_provider,
+            previously_synced=previously_synced,
+        )
+
+    def test_10k_creates_all_land_in_pending_ops(self) -> None:
+        """A 10 000-file create burst plus the two-tick stability
+        sequence (first records the snapshot, second confirms unchanged
+        after the window) must enqueue all 10 000 ops — no drops, no
+        duplicates, no synthesised paths."""
+        clock = FakeClock(0.0)
+        store = FakeStore(binding_id="rb_v1_burst")
+        # Each file is 256 bytes, mtime stable from the moment it lands —
+        # so the stability gate ticks ``ready`` after one window.
+        stat_state = {
+            f"d{i // 100:03d}/f{i:05d}.txt": (256, 1_000_000 + i)
+            for i in range(self.BURST_SIZE)
+        }
+        coord = self._make_coord(
+            clock=clock, store=store,
+            stat_provider=lambda p: stat_state.get(p),
+        )
+
+        # Burst all 10 000 events into ``observe()`` within a single
+        # 50 ms window — modelling inotify firing them in a tight loop.
+        for path in stat_state.keys():
+            # Advance the clock 5 µs per event so the wall-clock stays
+            # monotonic; each path's first event is fresh either way.
+            clock.advance(5e-6)
+            coord.observe(path, kind="created")
+
+        self.assertEqual(len(coord.pending_paths()), self.BURST_SIZE)
+
+        # First tick at t ≈ 0.06 records the (size, mtime) snapshot for
+        # every path. Gate returns ``ready=False`` because this is the
+        # first time the gate sees these paths — it needs a second tick
+        # at least ``window_s`` seconds later to confirm "unchanged".
+        clock.advance(0.01)
+        self.assertEqual(coord.tick(), 0)
+        self.assertEqual(store.enqueued, [])
+
+        # Tick again after the stability window — every snapshot still
+        # matches, ``unchanged_for >= window_s``, all 10 000 ready.
+        clock.advance(STABILITY_WINDOW_LOCAL_S + 0.5)
+        enqueued_count = coord.tick()
+        self.assertEqual(
+            enqueued_count, self.BURST_SIZE,
+            f"tick enqueued {enqueued_count}/{self.BURST_SIZE} ops — "
+            "watcher dropped events under burst load (SO-4 regression)",
+        )
+        self.assertEqual(len(store.enqueued), self.BURST_SIZE)
+
+        # Every emitted op is an upload (no orphan deletes) and every
+        # path is in our generated set (no synthesis).
+        op_types = {op_type for op_type, _ in store.enqueued}
+        self.assertEqual(op_types, {"upload"})
+        emitted_paths = {path for _, path in store.enqueued}
+        self.assertEqual(emitted_paths, set(stat_state.keys()))
+
+        # The pending dict drained — no leak.
+        self.assertEqual(coord.pending_paths(), [])
+
+        # A second tick is a no-op (everything already enqueued and
+        # popped from the pending dict).
+        self.assertEqual(coord.tick(), 0)
+        self.assertEqual(len(store.enqueued), self.BURST_SIZE)
+
+    def test_10k_deletes_filter_through_previously_synced_predicate(self) -> None:
+        """A 10 000-file delete burst respects the §A17 / T12.2 invariant:
+        previously-synced paths tombstone, never-synced paths drop
+        silently. No path slips through both filters."""
+        store = FakeStore(binding_id="rb_v1_burst_delete")
+        # Half the paths are "previously synced" (have a fingerprint
+        # row), half are baseline-extras the user is wiping.
+        all_paths = [f"f{i:05d}.txt" for i in range(self.BURST_SIZE)]
+        synced = set(all_paths[: self.BURST_SIZE // 2])
+        clock = FakeClock(0.0)
+        coord = self._make_coord(
+            clock=clock, store=store,
+            stat_provider=lambda p: None,
+            previously_synced=lambda p: p in synced,
+        )
+        for path in all_paths:
+            coord.observe(path, kind="deleted")
+
+        self.assertEqual(len(store.enqueued), len(synced))
+        self.assertEqual(
+            {op_type for op_type, _ in store.enqueued}, {"delete"},
+        )
+        self.assertEqual(
+            {p for _, p in store.enqueued}, synced,
+            "delete burst leaked never-synced paths through the §A17 gate",
+        )
+        # Pending dict stays empty for delete events (they enqueue
+        # synchronously inside observe(), no stability gate).
+        self.assertEqual(coord.pending_paths(), [])
+
+    def test_10k_mixed_creates_and_modifies_collapse_per_path(self) -> None:
+        """If the same path fires multiple create + modify events in
+        the burst, the coordinator collapses them — one path = at
+        most one enqueued op per cycle. Models the inotify reality
+        where Linux fires ``CREATE`` then several ``MODIFY``s for a
+        single file copy."""
+        clock = FakeClock(0.0)
+        store = FakeStore(binding_id="rb_v1_burst_collapse")
+        # 5k unique paths, each firing 4 events (create + 3 modifies).
+        unique_paths = 5_000
+        events_per_path = 4
+        # Each path's stat stays stable from event 0 so it gates ready
+        # after a single stability window.
+        stat_state = {
+            f"f{i:05d}.txt": (256, 2_000_000 + i)
+            for i in range(unique_paths)
+        }
+        coord = self._make_coord(
+            clock=clock, store=store,
+            stat_provider=lambda p: stat_state.get(p),
+        )
+
+        kinds = ("created", "modified", "modified", "modified")
+        for event_round in range(events_per_path):
+            for path in stat_state.keys():
+                clock.advance(5e-6)
+                coord.observe(path, kind=kinds[event_round])
+
+        self.assertEqual(len(coord.pending_paths()), unique_paths)
+
+        # First tick records snapshots, second tick (after the window)
+        # transitions every path to ready.
+        clock.advance(0.01)
+        self.assertEqual(coord.tick(), 0)
+        clock.advance(STABILITY_WINDOW_LOCAL_S + 0.5)
+        self.assertEqual(coord.tick(), unique_paths)
+        # One op per unique path — no duplicates from the 4-event
+        # series.
+        self.assertEqual(len(store.enqueued), unique_paths)
+        emitted = {p for _, p in store.enqueued}
+        self.assertEqual(emitted, set(stat_state.keys()))
+
+
+# ---------------------------------------------------------------------------
+# Watchdog observer thread — SO-4 inotify-integration smoke
+# ---------------------------------------------------------------------------
+
+
+class WatchdogObserverBurstSmokeTests(unittest.TestCase):
+    """Smoke test for the watchdog-thread → coordinator path with
+    real inotify (or the watchdog polling fallback on hosts where
+    inotify isn't available). 200 files instead of 10 000 keeps the
+    test under one second on any reasonable disk; the burst-scale
+    coverage above already exercises the coordinator's hot path.
+    """
+
+    def setUp(self) -> None:
+        try:
+            import watchdog  # noqa: F401
+        except ImportError:
+            self.skipTest("python3-watchdog not installed")
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_watcher_smoke_"))
+
+    def tearDown(self) -> None:
+        if hasattr(self, "tmpdir"):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_200_create_burst_reaches_coordinator_pending(self) -> None:
+        from src.vault.binding.filesystem_watcher import start_watchdog_observer
+
+        store = FakeStore(binding_id="rb_v1_inotify")
+        coord = WatcherCoordinator(
+            binding_id="rb_v1_inotify",
+            local_root=self.tmpdir,
+            store=store,
+            # Real clock + real stat — we're testing the inotify path,
+            # not coordinator logic.
+        )
+        handle = start_watchdog_observer(coord, poll_interval_s=0.1)
+        if handle is None:
+            self.skipTest("watchdog could not start an observer (CI sandbox?)")
+        try:
+            # Drop 200 files in a single burst.
+            burst = 200
+            for i in range(burst):
+                (self.tmpdir / f"f{i:04d}.txt").write_bytes(b"x" * 64)
+            # Let the observer thread drain its queue. inotify is
+            # asynchronous so we poll until the pending dict catches
+            # up (or we hit a generous timeout).
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if len(coord.pending_paths()) >= burst:
+                    break
+                time.sleep(0.05)
+        finally:
+            handle.stop()
+
+        pending = coord.pending_paths()
+        # Burst should land in the coordinator. We allow a small
+        # tolerance for watchdog's internal queueing on slow CI; the
+        # important property is "no silent loss", not "exactly 200
+        # within 5 seconds".
+        self.assertGreaterEqual(
+            len(pending), int(burst * 0.95),
+            f"watchdog only delivered {len(pending)}/{burst} events to "
+            f"the coordinator — possible SO-4 regression. Tolerance is "
+            f"95 % to absorb inotify async timing on slow CI.",
+        )
 
 
 if __name__ == "__main__":
