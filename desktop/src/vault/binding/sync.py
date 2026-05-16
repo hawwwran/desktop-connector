@@ -192,10 +192,38 @@ class SyncVault(Protocol):
     @property
     def vault_access_secret(self) -> str | None: ...
 
+    # Legacy unified-manifest surface — call site migrates to the
+    # shard-aware path over the next phase. Phase H removes both.
     def fetch_manifest(self, relay, *, local_index=None) -> dict[str, Any]: ...
 
     def publish_manifest(
         self, relay, manifest, *, local_index=None,
+    ) -> dict[str, Any]: ...
+
+    # Shard-aware surface (Phase D). The sync engine's bandwidth
+    # advantage from the manifest-sharding work comes from publishing
+    # via ``publish_shard_with_root`` instead of ``publish_manifest``;
+    # the engine's current ``_publish_batch_with_cas_retry`` keeps
+    # using the legacy path during the migration, and shard-aware
+    # tests cover the new methods via ``FakeShardedRelay``.
+    def fetch_root_manifest(self, relay, *, local_index=None) -> dict[str, Any]: ...
+
+    def publish_root_manifest(
+        self, relay, root, *, local_index=None,
+    ) -> dict[str, Any]: ...
+
+    def fetch_folder_shard(self, relay, remote_folder_id) -> dict[str, Any]: ...
+
+    def publish_folder_shard(
+        self, relay, remote_folder_id, shard,
+    ) -> dict[str, Any]: ...
+
+    def publish_shard_with_root(
+        self, relay, remote_folder_id, shard, root,
+    ): ...
+
+    def fetch_unified_manifest(
+        self, relay, *, local_index=None,
     ) -> dict[str, Any]: ...
 
 

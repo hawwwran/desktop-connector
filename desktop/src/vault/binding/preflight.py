@@ -57,9 +57,14 @@ WARNING_THRESHOLD_S = 120.0   # 2 min — below this we don't pop the dialog.
 def count_manifest_entries(manifest: dict[str, Any]) -> int:
     """Count every (file, version) pair in the manifest.
 
-    The bind drain's per-op cost grows with **total** manifest size,
-    not just the entries in the folder being bound. So the estimator
-    sums versions across all remote folders.
+    The bind drain's per-op cost grows with **the relevant shard's**
+    size, not the whole vault's. After Phase D the binding's manifest
+    snapshot is the legacy unified shape (root + every shard merged)
+    — but the cost-driver is the binding's *own* folder. The estimator
+    therefore prefers the per-folder ``entries`` count when the caller
+    supplies one (via ``count_shard_entries``); this function keeps
+    the legacy vault-wide sum for the pre-Phase-D code path until
+    every caller is shard-aware (Phase F).
     """
     total = 0
     for folder in manifest.get("remote_folders", []) or []:
@@ -70,6 +75,24 @@ def count_manifest_entries(manifest: dict[str, Any]) -> int:
                 continue
             versions = entry.get("versions", []) or []
             total += sum(1 for v in versions if isinstance(v, dict))
+    return total
+
+
+def count_shard_entries(shard: dict[str, Any]) -> int:
+    """Per-shard variant of ``count_manifest_entries``.
+
+    The bind drain's per-op cost after Phase D's sharding now grows
+    with the **per-folder shard** size, not the vault-wide manifest.
+    Use this for binding-specific preflight estimates so a vault with
+    multiple folders doesn't inflate the projected drain duration of
+    a single folder's first bind.
+    """
+    total = 0
+    for entry in shard.get("entries", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        versions = entry.get("versions", []) or []
+        total += sum(1 for v in versions if isinstance(v, dict))
     return total
 
 
