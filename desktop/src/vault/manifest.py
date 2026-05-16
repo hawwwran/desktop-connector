@@ -923,3 +923,665 @@ def _normalize_string_list(value: Any, field_name: str) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{field_name} must be a list")
     return [unicodedata.normalize("NFC", str(item)) for item in value]
+
+
+# ====================================================================
+#  Sharded manifest model (Phase C of the manifest-sharding rollout)
+# ====================================================================
+#
+# The wire spec moves from one envelope per vault to a small **root**
+# envelope (vault metadata + folder pointers) plus one **shard**
+# envelope per remote folder. The helpers below are the in-memory dict
+# shape that mirrors the new envelopes.
+#
+# During Phase C the *legacy* helpers above (``make_manifest``,
+# ``add_or_append_file_version``, ``tombstone_file_entry`` …) stay
+# functional; phases D + E migrate their callers to the new
+# shard-aware surface. Phase H drops the legacy helpers.
+#
+# Spec: docs/protocol/vault-v1.md §6.4–§6.8,
+#       docs/protocol/vault-v1-formats.md §10.A / §10.B.
+
+ROOT_SCHEMA  = "dc-vault-root-v1"
+SHARD_SCHEMA = "dc-vault-shard-v1"
+
+
+def make_root_manifest(
+    *,
+    vault_id: str,
+    root_revision: int,
+    parent_root_revision: int,
+    created_at: str,
+    author_device_id: str,
+    retention_policy: dict[str, int] | None = None,
+    remote_folders: list[dict[str, Any]] | None = None,
+    operation_log_tail: list[dict[str, Any]] | None = None,
+    archived_op_segments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a normalized v1 root manifest plaintext object.
+
+    The root carries vault-wide metadata only: folder pointers with
+    their per-shard hash chain anchors, retention defaults, and the
+    vault-scoped op log. File entries live in per-folder shards
+    (``make_folder_shard``).
+    """
+    root = {
+        "schema": ROOT_SCHEMA,
+        "vault_id": normalize_vault_id(vault_id),
+        "root_revision": int(root_revision),
+        "parent_root_revision": int(parent_root_revision),
+        "created_at": str(created_at),
+        "author_device_id": str(author_device_id),
+        "manifest_format_version": MANIFEST_FORMAT_VERSION,
+        "retention_policy": copy.deepcopy(retention_policy or DEFAULT_RETENTION_POLICY),
+        "remote_folders": list(remote_folders or []),
+        "operation_log_tail": list(operation_log_tail or []),
+        "archived_op_segments": list(archived_op_segments or []),
+    }
+    return normalize_root_manifest_plaintext(root)
+
+
+def make_root_folder_pointer(
+    *,
+    remote_folder_id: str,
+    display_name_enc: str,
+    created_at: str,
+    created_by_device_id: str,
+    shard_revision: int = 0,
+    shard_hash: str = "",
+    retention_policy: dict[str, int] | None = None,
+    ignore_patterns: list[str] | None = None,
+    state: str = "active",
+) -> dict[str, Any]:
+    """Build a root-manifest folder pointer (no ``entries`` field).
+
+    The shard_revision / shard_hash pair anchors the §10.C hash chain:
+    after every per-folder publish the pointer's hash MUST equal
+    ``sha256(shard_envelope_bytes)`` for the referenced shard. The
+    defaults (``0`` / ``""``) are valid only on a brand-new folder
+    pointer that has not yet had a shard published — ``make_folder_shard``
+    + ``publish_shard_with_root`` (Phase D) fill them in atomically.
+    """
+    pointer: dict[str, Any] = {
+        "remote_folder_id": remote_folder_id,
+        "display_name_enc": unicodedata.normalize("NFC", display_name_enc),
+        "created_at": created_at,
+        "created_by_device_id": created_by_device_id,
+        "state": state,
+        "retention_policy": copy.deepcopy(retention_policy or DEFAULT_RETENTION_POLICY),
+        "ignore_patterns": list(ignore_patterns or []),
+        "shard_revision": int(shard_revision),
+        "shard_hash": str(shard_hash),
+    }
+    _validate_root_folder_pointer(pointer)
+    return pointer
+
+
+def make_folder_shard(
+    *,
+    vault_id: str,
+    remote_folder_id: str,
+    shard_revision: int,
+    parent_shard_revision: int,
+    created_at: str,
+    author_device_id: str,
+    entries: list[dict[str, Any]] | None = None,
+    operation_log_tail: list[dict[str, Any]] | None = None,
+    archived_op_segments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a normalized v1 folder shard plaintext object."""
+    if not _REMOTE_FOLDER_ID_RE.match(remote_folder_id):
+        raise ValueError("remote_folder_id must match ^rf_v1_[a-z2-7]{24}$")
+    shard = {
+        "schema": SHARD_SCHEMA,
+        "vault_id": normalize_vault_id(vault_id),
+        "remote_folder_id": remote_folder_id,
+        "shard_revision": int(shard_revision),
+        "parent_shard_revision": int(parent_shard_revision),
+        "created_at": str(created_at),
+        "author_device_id": str(author_device_id),
+        "manifest_format_version": MANIFEST_FORMAT_VERSION,
+        "entries": list(entries or []),
+        "operation_log_tail": list(operation_log_tail or []),
+        "archived_op_segments": list(archived_op_segments or []),
+    }
+    return normalize_shard_plaintext(shard)
+
+
+def normalize_root_manifest_plaintext(root: dict[str, Any]) -> dict[str, Any]:
+    """Return a v1-compatible root manifest copy.
+
+    Same defaults-shape pattern as ``normalize_manifest_plaintext`` but
+    drops the per-folder ``entries`` field (which now lives in shards)
+    and demands the ``shard_revision`` + ``shard_hash`` pair on every
+    folder pointer. Defaults to ``0`` / ``""`` so a freshly-built root
+    listing a newly-added folder normalizes cleanly before the first
+    shard publish.
+    """
+    if not isinstance(root, dict):
+        raise ValueError("root manifest plaintext must be an object")
+
+    out = copy.deepcopy(root)
+    out.setdefault("schema", ROOT_SCHEMA)
+    out.setdefault("manifest_format_version", MANIFEST_FORMAT_VERSION)
+    out.setdefault("operation_log_tail", [])
+    out.setdefault("archived_op_segments", [])
+    out.setdefault("retention_policy", copy.deepcopy(DEFAULT_RETENTION_POLICY))
+
+    folders = out.get("remote_folders", [])
+    if folders is None:
+        folders = []
+    if not isinstance(folders, list):
+        raise ValueError("remote_folders must be a list")
+
+    created_at = str(out.get("created_at", ""))
+    author_device_id = str(out.get("author_device_id", ""))
+    out["remote_folders"] = [
+        _normalize_root_folder_pointer(
+            folder,
+            default_created_at=created_at,
+            default_created_by_device_id=author_device_id,
+        )
+        for folder in folders
+    ]
+    out["retention_policy"] = _normalize_retention_policy(out["retention_policy"])
+    return out
+
+
+def normalize_shard_plaintext(shard: dict[str, Any]) -> dict[str, Any]:
+    """Return a v1-compatible shard copy.
+
+    ``entries`` may be missing on a brand-new shard — normalized to
+    ``[]``. Entry-shape semantics are byte-identical to the legacy
+    single-manifest ``remote_folders[*].entries`` shape (file_id, path,
+    versions[], chunks[], deletion flags, etc.) so the helpers stay
+    portable.
+    """
+    if not isinstance(shard, dict):
+        raise ValueError("shard plaintext must be an object")
+
+    out = copy.deepcopy(shard)
+    out.setdefault("schema", SHARD_SCHEMA)
+    out.setdefault("manifest_format_version", MANIFEST_FORMAT_VERSION)
+    out.setdefault("operation_log_tail", [])
+    out.setdefault("archived_op_segments", [])
+    out.setdefault("entries", [])
+    entries = out["entries"]
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        raise ValueError("shard entries must be a list")
+    out["entries"] = list(entries)
+    return out
+
+
+def canonical_root_json(root: dict[str, Any]) -> bytes:
+    """Canonical JSON bytes for root AEAD plaintext."""
+    normalized = normalize_root_manifest_plaintext(root)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def canonical_shard_json(shard: dict[str, Any]) -> bytes:
+    """Canonical JSON bytes for shard AEAD plaintext."""
+    normalized = normalize_shard_plaintext(shard)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def bump_root_revision(
+    candidate: dict[str, Any],
+    *,
+    from_parent: dict[str, Any],
+) -> dict[str, Any]:
+    """``bump_revision`` analogue for the root chain (§A8 invariant)."""
+    parent_revision = int(from_parent.get("root_revision", 0))
+    if parent_revision < 0:
+        raise ManifestRevisionInvariantError(
+            f"parent root_revision must be non-negative; got {parent_revision}",
+        )
+    candidate["root_revision"] = parent_revision + 1
+    candidate["parent_root_revision"] = parent_revision
+    return candidate
+
+
+def bump_shard_revision(
+    candidate: dict[str, Any],
+    *,
+    from_parent: dict[str, Any],
+) -> dict[str, Any]:
+    """``bump_revision`` analogue for a shard chain (§A8 invariant)."""
+    parent_revision = int(from_parent.get("shard_revision", 0))
+    if parent_revision < 0:
+        raise ManifestRevisionInvariantError(
+            f"parent shard_revision must be non-negative; got {parent_revision}",
+        )
+    candidate["shard_revision"] = parent_revision + 1
+    candidate["parent_shard_revision"] = parent_revision
+    return candidate
+
+
+def assert_publishable_root_revision(root: dict[str, Any]) -> None:
+    """Same §A8 single-bump invariant, on the root chain."""
+    try:
+        revision = int(root.get("root_revision", -1))
+        parent_revision = int(root.get("parent_root_revision", -1))
+    except (TypeError, ValueError) as exc:
+        raise ManifestRevisionInvariantError(
+            f"root revision pair must be integers; got "
+            f"root_revision={root.get('root_revision')!r} "
+            f"parent_root_revision={root.get('parent_root_revision')!r}",
+        ) from exc
+    if revision < 1:
+        raise ManifestRevisionInvariantError(
+            f"root_revision must be >= 1; got {revision}",
+        )
+    if parent_revision < 0:
+        raise ManifestRevisionInvariantError(
+            f"parent_root_revision must be non-negative; got {parent_revision}",
+        )
+    if revision != parent_revision + 1:
+        raise ManifestRevisionInvariantError(
+            f"root_revision must be parent_root_revision + 1; "
+            f"got root_revision={revision} parent_root_revision={parent_revision}",
+        )
+
+
+def assert_publishable_shard_revision(shard: dict[str, Any]) -> None:
+    """Same §A8 single-bump invariant, on a shard chain."""
+    try:
+        revision = int(shard.get("shard_revision", -1))
+        parent_revision = int(shard.get("parent_shard_revision", -1))
+    except (TypeError, ValueError) as exc:
+        raise ManifestRevisionInvariantError(
+            f"shard revision pair must be integers; got "
+            f"shard_revision={shard.get('shard_revision')!r} "
+            f"parent_shard_revision={shard.get('parent_shard_revision')!r}",
+        ) from exc
+    if revision < 1:
+        raise ManifestRevisionInvariantError(
+            f"shard_revision must be >= 1; got {revision}",
+        )
+    if parent_revision < 0:
+        raise ManifestRevisionInvariantError(
+            f"parent_shard_revision must be non-negative; got {parent_revision}",
+        )
+    if revision != parent_revision + 1:
+        raise ManifestRevisionInvariantError(
+            f"shard_revision must be parent_shard_revision + 1; "
+            f"got shard_revision={revision} parent_shard_revision={parent_revision}",
+        )
+
+
+def assemble_unified_manifest(
+    root: dict[str, Any],
+    shards_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Compose a legacy-shaped vault-wide manifest from a root + shard map.
+
+    Soft migration surface for callers that haven't been ported to the
+    sharded model yet (Phase D + E migrate them one by one; Phase H
+    removes this helper). The returned dict matches the byte shape the
+    pre-sharding ``Vault.fetch_manifest`` produced: one
+    ``remote_folders[]`` array, each entry carrying its own
+    ``entries[]`` array merged from the matching shard.
+
+    Folders whose shard is missing from ``shards_by_id`` render as
+    pointers with ``entries: []`` — useful when only one binding's
+    shard has been fetched and the caller wants the full vault view
+    without the round-trip to fetch every other shard.
+    """
+    root_n = normalize_root_manifest_plaintext(root)
+    unified = {
+        "schema": MANIFEST_SCHEMA,
+        "vault_id": root_n["vault_id"],
+        "revision": int(root_n["root_revision"]),
+        "parent_revision": int(root_n["parent_root_revision"]),
+        "created_at": root_n["created_at"],
+        "author_device_id": root_n["author_device_id"],
+        "manifest_format_version": int(root_n["manifest_format_version"]),
+        "remote_folders": [],
+        "operation_log_tail": list(root_n["operation_log_tail"]),
+        "archived_op_segments": list(root_n["archived_op_segments"]),
+    }
+    for pointer in root_n["remote_folders"]:
+        rf_id = str(pointer["remote_folder_id"])
+        folder_entry = {
+            "remote_folder_id": rf_id,
+            "display_name_enc": pointer["display_name_enc"],
+            "created_at": pointer["created_at"],
+            "created_by_device_id": pointer["created_by_device_id"],
+            "state": pointer["state"],
+            "retention_policy": copy.deepcopy(pointer["retention_policy"]),
+            "ignore_patterns": list(pointer["ignore_patterns"]),
+            "entries": [],
+        }
+        shard = shards_by_id.get(rf_id)
+        if shard is not None:
+            shard_n = normalize_shard_plaintext(shard)
+            folder_entry["entries"] = copy.deepcopy(shard_n["entries"])
+        unified["remote_folders"].append(folder_entry)
+    return normalize_manifest_plaintext(unified)
+
+
+# --------------------------------------------------------------------
+#  Shard-scoped entry helpers (mirrors the legacy folder-walking helpers
+#  but operates on a single shard dict, no folder loop).
+# --------------------------------------------------------------------
+
+
+def find_file_entry_in_shard(
+    shard: dict[str, Any],
+    path: str,
+) -> dict[str, Any] | None:
+    """Return the file entry at ``path`` inside ``shard``, or None."""
+    normalized_path = normalize_manifest_path(path)
+    for entry in shard.get("entries", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
+            return entry
+    return None
+
+
+def add_or_append_file_version_in_shard(
+    shard: dict[str, Any],
+    *,
+    path: str,
+    version: dict[str, Any],
+    entry_id: str | None = None,
+) -> dict[str, Any]:
+    """Shard-scoped variant of ``add_or_append_file_version``.
+
+    Same idempotent-publish semantics (F-D05) as the legacy helper —
+    re-publishing the same ``version_id`` is a no-op that returns the
+    shard unchanged. Caller owns ``shard_revision`` + ``parent_shard_revision``
+    bookkeeping (use ``bump_shard_revision`` before publishing).
+    """
+    if not _FILE_VERSION_ID_RE.match(str(version.get("version_id", ""))):
+        raise ValueError("version.version_id must match ^fv_v1_[a-z2-7]{24}$")
+
+    out = normalize_shard_plaintext(shard)
+    normalized_path = normalize_manifest_path(path)
+
+    target = None
+    for entry in out["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
+            target = entry
+            break
+
+    new_version = copy.deepcopy(version)
+    if target is None:
+        new_entry_id = entry_id or generate_file_entry_id()
+        if not _FILE_ENTRY_ID_RE.match(new_entry_id):
+            raise ValueError("entry_id must match ^fe_v1_[a-z2-7]{24}$")
+        target = {
+            "entry_id": new_entry_id,
+            "type": "file",
+            "path": normalized_path,
+            "deleted": False,
+            "latest_version_id": new_version["version_id"],
+            "versions": [new_version],
+        }
+        out["entries"].append(target)
+    else:
+        target["versions"] = [
+            v for v in target.get("versions", []) if isinstance(v, dict)
+        ]
+        version_id_str = str(new_version.get("version_id", ""))
+        existing_ids = [str(v.get("version_id", "")) for v in target["versions"]]
+        if version_id_str and version_id_str in existing_ids:
+            target["latest_version_id"] = version_id_str
+            target["deleted"] = False
+            target.pop("deleted_at", None)
+            target.pop("recoverable_until", None)
+            return out
+        target["versions"].append(new_version)
+        target["latest_version_id"] = new_version["version_id"]
+        target["deleted"] = False
+        target.pop("deleted_at", None)
+        target.pop("recoverable_until", None)
+    return out
+
+
+def tombstone_file_entry_in_shard(
+    shard: dict[str, Any],
+    *,
+    path: str,
+    deleted_at: str,
+    author_device_id: str,
+    folder_retention_policy: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Mark a file as soft-deleted in the shard.
+
+    ``folder_retention_policy`` is supplied by the caller (it lives in
+    the root pointer, not the shard plaintext) so the helper can
+    compute the display-only ``recoverable_until``. Passing ``None``
+    falls back to the default retention policy.
+    """
+    out = normalize_shard_plaintext(shard)
+    normalized_path = normalize_manifest_path(path)
+    target = None
+    for entry in out["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
+            target = entry
+            break
+    if target is None:
+        raise KeyError(f"file not found: {path}")
+
+    target["deleted"] = True
+    target["deleted_at"] = str(deleted_at)
+    target["deleted_by_device_id"] = str(author_device_id)
+    policy = folder_retention_policy or DEFAULT_RETENTION_POLICY
+    try:
+        keep_days = int(policy.get("keep_deleted_days", DEFAULT_RETENTION_POLICY["keep_deleted_days"]))
+    except (TypeError, ValueError):
+        keep_days = int(DEFAULT_RETENTION_POLICY["keep_deleted_days"])
+    horizon = compute_recoverable_until(str(deleted_at), keep_days)
+    if horizon:
+        target["recoverable_until"] = horizon
+    return out
+
+
+def restore_file_entry_in_shard(
+    shard: dict[str, Any],
+    *,
+    path: str,
+    new_version: dict[str, Any],
+    author_device_id: str,
+) -> dict[str, Any]:
+    """Restore a tombstoned file *or* promote a previous version (T7.4)."""
+    if not _FILE_VERSION_ID_RE.match(str(new_version.get("version_id", ""))):
+        raise ValueError("new_version.version_id must match ^fv_v1_[a-z2-7]{24}$")
+
+    out = normalize_shard_plaintext(shard)
+    normalized_path = normalize_manifest_path(path)
+    target = None
+    for entry in out["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
+            target = entry
+            break
+    if target is None:
+        raise KeyError(f"file not found: {path}")
+
+    versions = [v for v in target.get("versions", []) if isinstance(v, dict)]
+    versions.append(copy.deepcopy(new_version))
+    target["versions"] = versions
+    target["latest_version_id"] = str(new_version["version_id"])
+    target["deleted"] = False
+    target.pop("deleted_at", None)
+    target.pop("deleted_by_device_id", None)
+    target.pop("recoverable_until", None)
+    target["restored_by_device_id"] = str(author_device_id)
+    return out
+
+
+def tombstone_files_under_in_shard(
+    shard: dict[str, Any],
+    *,
+    path_prefix: str,
+    deleted_at: str,
+    author_device_id: str,
+    folder_retention_policy: dict[str, int] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Bulk soft-delete in the shard: tombstone every file at-or-under ``path_prefix``."""
+    out = normalize_shard_plaintext(shard)
+    prefix_normalized = (
+        normalize_manifest_path(path_prefix) if path_prefix else ""
+    )
+    policy = folder_retention_policy or DEFAULT_RETENTION_POLICY
+    try:
+        keep_days = int(policy.get("keep_deleted_days", DEFAULT_RETENTION_POLICY["keep_deleted_days"]))
+    except (TypeError, ValueError):
+        keep_days = int(DEFAULT_RETENTION_POLICY["keep_deleted_days"])
+
+    tombstoned: list[str] = []
+    for entry in out["entries"]:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("type", "file")) != "file":
+            continue
+        if bool(entry.get("deleted")):
+            continue
+        path = unicodedata.normalize("NFC", str(entry.get("path", "")))
+        if prefix_normalized:
+            if not (path == prefix_normalized or path.startswith(prefix_normalized + "/")):
+                continue
+        entry["deleted"] = True
+        entry["deleted_at"] = str(deleted_at)
+        entry["deleted_by_device_id"] = str(author_device_id)
+        horizon = compute_recoverable_until(str(deleted_at), keep_days)
+        if horizon:
+            entry["recoverable_until"] = horizon
+        tombstoned.append(path)
+    return out, tombstoned
+
+
+def merge_shard_with_remote_head(
+    *,
+    parent: dict[str, Any],
+    local_attempt: dict[str, Any],
+    server_head: dict[str, Any],
+    author_device_id: str,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """§D4 CAS merge, shard-scoped variant.
+
+    ``parent`` / ``local_attempt`` / ``server_head`` are all shard dicts
+    for the same ``(vault_id, remote_folder_id)``. Output's
+    ``shard_revision`` is ``server_head.shard_revision + 1`` so the
+    caller can immediately CAS-publish without further bookkeeping.
+    """
+    parent_n = normalize_shard_plaintext(parent)
+    local_n  = normalize_shard_plaintext(local_attempt)
+    server_n = normalize_shard_plaintext(server_head)
+
+    server_revision = int(server_n.get("shard_revision", 0))
+    out = copy.deepcopy(server_n)
+    out["shard_revision"] = server_revision + 1
+    out["parent_shard_revision"] = server_revision
+    out["created_at"] = str(now or _now_rfc3339_default())
+    out["author_device_id"] = str(author_device_id)
+
+    # Reuse the same merge_folder_entries shape the legacy code uses by
+    # synthesizing fake folder-wrappers around the entry lists.
+    fake_parent_folder = {
+        "remote_folder_id": parent_n.get("remote_folder_id", ""),
+        "entries": parent_n.get("entries", []),
+    }
+    fake_local_folder = {
+        "remote_folder_id": local_n.get("remote_folder_id", ""),
+        "entries": local_n.get("entries", []),
+    }
+    fake_out_folder = {
+        "remote_folder_id": out.get("remote_folder_id", ""),
+        "entries": out.get("entries", []),
+    }
+    _merge_folder_entries(
+        local_folder=fake_local_folder,
+        parent_folder=fake_parent_folder,
+        out_folder=fake_out_folder,
+    )
+    out["entries"] = fake_out_folder["entries"]
+    return out
+
+
+def _validate_root_folder_pointer(pointer: dict[str, Any]) -> None:
+    required = (
+        "remote_folder_id",
+        "display_name_enc",
+        "created_at",
+        "created_by_device_id",
+        "retention_policy",
+        "ignore_patterns",
+        "state",
+        "shard_revision",
+        "shard_hash",
+    )
+    for key in required:
+        if key not in pointer:
+            raise ValueError(f"root folder pointer missing required field: {key}")
+    if not _REMOTE_FOLDER_ID_RE.match(str(pointer["remote_folder_id"])):
+        raise ValueError("remote_folder_id must match ^rf_v1_[a-z2-7]{24}$")
+    if not _DEVICE_ID_RE.match(str(pointer["created_by_device_id"])):
+        raise ValueError("created_by_device_id must be 32 lowercase hex chars")
+    if int(pointer["shard_revision"]) < 0:
+        raise ValueError("shard_revision must be non-negative")
+
+
+def _normalize_root_folder_pointer(
+    pointer: dict[str, Any],
+    *,
+    default_created_at: str | None = None,
+    default_created_by_device_id: str | None = None,
+) -> dict[str, Any]:
+    """Normalize a root-manifest folder pointer (no ``entries``)."""
+    if not isinstance(pointer, dict):
+        raise ValueError("root folder pointer must be an object")
+
+    out = copy.deepcopy(pointer)
+    if "display_name_enc" not in out and "name" in out:
+        out["display_name_enc"] = str(out["name"])
+    out.pop("name", None)
+
+    if "retention_policy" not in out and "retention" in out:
+        out["retention_policy"] = out["retention"]
+    out.pop("retention", None)
+
+    if "created_at" not in out and default_created_at is not None:
+        out["created_at"] = default_created_at
+    if "created_by_device_id" not in out and default_created_by_device_id is not None:
+        out["created_by_device_id"] = default_created_by_device_id
+
+    out.setdefault("retention_policy", copy.deepcopy(DEFAULT_RETENTION_POLICY))
+    out.setdefault("ignore_patterns", [])
+    out.setdefault("state", "active")
+    out.setdefault("shard_revision", 0)
+    out.setdefault("shard_hash", "")
+
+    # Drop legacy `entries` if a caller hands in a folder dict from the
+    # pre-sharding shape; it has no meaning on the root.
+    out.pop("entries", None)
+
+    _validate_root_folder_pointer(out)
+    out["display_name_enc"] = unicodedata.normalize("NFC", str(out["display_name_enc"]))
+    out["created_at"] = str(out["created_at"])
+    out["created_by_device_id"] = str(out["created_by_device_id"])
+    out["retention_policy"] = _normalize_retention_policy(out["retention_policy"])
+    out["ignore_patterns"] = _normalize_string_list(out["ignore_patterns"], "ignore_patterns")
+    out["state"] = str(out["state"])
+    out["shard_revision"] = int(out["shard_revision"])
+    out["shard_hash"] = str(out["shard_hash"])
+    return out
