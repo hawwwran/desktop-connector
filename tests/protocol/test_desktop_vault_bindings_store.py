@@ -402,6 +402,157 @@ class VaultBindingsSchemaTests(unittest.TestCase):
             )
 
 
+class CountPendingOpsForVaultTests(unittest.TestCase):
+    """``count_pending_ops_for_vault`` feeds the Vault Browser's ambient
+    "Vault sync K/N" indicator. Phase 1.5 of
+    ``docs/plans/vault-large-folder-perf.md``.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_bindings_count_test_"))
+        self.index = VaultLocalIndex(self.tmpdir)
+        self.store = VaultBindingsStore(self.index.db_path)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _seed_binding(self, vault_id: str, remote_folder_id: str) -> str:
+        record = self.store.create_binding(
+            vault_id=vault_id,
+            remote_folder_id=remote_folder_id,
+            local_path=f"/tmp/{remote_folder_id}",
+            state="bound",
+        )
+        return record.binding_id
+
+    def test_empty_vault_returns_zero(self) -> None:
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("ABCD2345WXYZ"), 0,
+        )
+
+    def test_unknown_vault_returns_zero(self) -> None:
+        # Set up some other vault's queue; assert the count is correctly
+        # scoped to the requested vault.
+        bid = self._seed_binding("AAAA2345WXYZ", "rf_v1_a" * 5)
+        self.store.coalesce_op(
+            binding_id=bid, op_type="upload",
+            relative_path="x.txt", now=1,
+        )
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("OTHERVAULTID"), 0,
+        )
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("AAAA2345WXYZ"), 1,
+        )
+
+    def test_counts_across_multiple_bindings(self) -> None:
+        bid_a = self._seed_binding("VAULTONEZZZZ", "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa")
+        bid_b = self._seed_binding("VAULTONEZZZZ", "rf_v1_bbbbbbbbbbbbbbbbbbbbbbbb")
+        for path in ("a1.txt", "a2.txt", "a3.txt"):
+            self.store.coalesce_op(
+                binding_id=bid_a, op_type="upload",
+                relative_path=path, now=1,
+            )
+        self.store.coalesce_op(
+            binding_id=bid_b, op_type="upload",
+            relative_path="b1.txt", now=1,
+        )
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("VAULTONEZZZZ"), 4,
+        )
+
+    def test_does_not_leak_across_vaults(self) -> None:
+        bid_a = self._seed_binding("VAULTONEZZZZ", "rf_v1_a" * 5)
+        bid_b = self._seed_binding("VAULTTWOZZZZ", "rf_v1_b" * 5)
+        self.store.coalesce_op(
+            binding_id=bid_a, op_type="upload",
+            relative_path="left.txt", now=1,
+        )
+        self.store.coalesce_op(
+            binding_id=bid_b, op_type="upload",
+            relative_path="right.txt", now=1,
+        )
+        self.store.coalesce_op(
+            binding_id=bid_b, op_type="upload",
+            relative_path="right2.txt", now=1,
+        )
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("VAULTONEZZZZ"), 1,
+        )
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("VAULTTWOZZZZ"), 2,
+        )
+
+    def test_drained_queue_drops_to_zero(self) -> None:
+        bid = self._seed_binding("VAULTONEZZZZ", "rf_v1_a" * 5)
+        op = self.store.coalesce_op(
+            binding_id=bid, op_type="upload",
+            relative_path="only.txt", now=1,
+        )
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("VAULTONEZZZZ"), 1,
+        )
+        self.store.delete_pending_op(op.op_id)
+        self.assertEqual(
+            self.store.count_pending_ops_for_vault("VAULTONEZZZZ"), 0,
+        )
+
+
+class SyncStatusBannerSourceTests(unittest.TestCase):
+    """Source-pin: the ambient Vault-sync banner is wired into the
+    browser process. We can't drive GLib timeouts in a headless test,
+    but the wiring shape can be pinned so a refactor doesn't silently
+    strip the banner from the layout or the polling timer from
+    activation.
+    """
+
+    def test_sync_status_banner_module_exists_with_poller(self) -> None:
+        from _paths import REPO_ROOT
+        source = Path(
+            REPO_ROOT, "desktop/src/windows_vault_browser/sync_status_banner.py"
+        ).read_text(encoding="utf-8")
+        for needle in (
+            "class SyncStatusBannerMixin",
+            "POLL_INTERVAL_MS",
+            "_start_sync_status_polling",
+            "_refresh_sync_status_banner",
+            "count_pending_ops_for_vault",
+            "Vault sync",
+            "_sync_status_session_max",
+        ):
+            with self.subTest(text=needle):
+                self.assertIn(needle, source)
+
+    def test_layout_appends_banner_above_resume_banner(self) -> None:
+        from _paths import REPO_ROOT
+        source = Path(
+            REPO_ROOT, "desktop/src/windows_vault_browser/layout.py"
+        ).read_text(encoding="utf-8")
+        # The sync-status banner must be appended BEFORE the resume
+        # banner so it sits on top visually (the resume banner is the
+        # interrupted-upload prompt and stays above the body).
+        sync_idx = source.find("sync_status_banner_box")
+        resume_idx = source.find("resume_banner_box")
+        self.assertGreater(sync_idx, 0)
+        self.assertGreater(resume_idx, 0)
+        self.assertLess(sync_idx, resume_idx)
+
+    def test_app_imports_mixin_and_starts_polling(self) -> None:
+        from _paths import REPO_ROOT
+        source = Path(
+            REPO_ROOT, "desktop/src/windows_vault_browser/app.py"
+        ).read_text(encoding="utf-8")
+        for needle in (
+            "from .sync_status_banner import SyncStatusBannerMixin",
+            "SyncStatusBannerMixin,",
+            "self._start_sync_status_polling()",
+            "self.sync_status_banner_box: Gtk.Box | None = None",
+            "self.sync_status_banner_label: Gtk.Label | None = None",
+        ):
+            with self.subTest(text=needle):
+                self.assertIn(needle, source)
+
+
 class GenerateBindingIdTests(unittest.TestCase):
     def test_format_matches_id_space_convention(self) -> None:
         bid = generate_binding_id()

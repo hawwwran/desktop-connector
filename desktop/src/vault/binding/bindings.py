@@ -411,6 +411,28 @@ class VaultBindingsStore:
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_pending_op(r) for r in rows]
 
+    def count_pending_ops_for_vault(self, vault_id: str) -> int:
+        """Count pending ops across **all bindings** of one vault.
+
+        Feeds the Vault Browser's ambient "Vault sync K/N" indicator
+        (`vault-large-folder-perf.md` Phase 1.5). The browser shows
+        files for one vault at a time; the count is joined against
+        `vault_bindings` so a sync running on a different vault's
+        binding (multi-vault future) doesn't leak into the visible
+        counter.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM vault_pending_operations p
+                JOIN vault_bindings b ON p.binding_id = b.binding_id
+                WHERE b.vault_id = ?
+                """,
+                (vault_id,),
+            ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
     # F-Y09: cap on retries before an op is treated as permanent
     # failure. Caller decides what to do beyond the cap (drop the op,
     # surface in UI, etc.). 10 keeps transient flakes safe and

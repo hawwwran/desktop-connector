@@ -252,6 +252,27 @@ class LayoutMixin:
 
     def _build_breadcrumb_and_status(self) -> None:
         assert self.outer is not None
+
+        # Ambient "Vault sync K/N" banner above the resume banner.
+        # Driven by SyncStatusBannerMixin's GLib poll; hidden when the
+        # pending-ops queue is empty. Spec:
+        # docs/plans/vault-large-folder-perf.md Phase 1.5.
+        self.sync_status_banner_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+        self.sync_status_banner_box.add_css_class("card")
+        self.sync_status_banner_box.set_visible(False)
+        self.sync_status_banner_label = Gtk.Label(
+            xalign=0, hexpand=True, wrap=False,
+            margin_top=10,
+            margin_bottom=10,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.sync_status_banner_box.append(self.sync_status_banner_label)
+        self.outer.append(self.sync_status_banner_box)
+
         # Resume "banner" — a custom horizontal box that pairs the
         # message with both Resume and Cancel actions. Adw.Banner is
         # single-action by design, so we roll our own to surface the

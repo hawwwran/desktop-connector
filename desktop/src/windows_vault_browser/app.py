@@ -48,6 +48,7 @@ from .panes import PanesMixin
 from .quota import QuotaMixin
 from .resume_banner import ResumeBannerMixin
 from .state import BrowserState
+from .sync_status_banner import SyncStatusBannerMixin
 from .uploads import UploadsMixin
 
 log = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class VaultBrowser(
     DeleteRestoreMixin,
     QuotaMixin,
     ResumeBannerMixin,
+    SyncStatusBannerMixin,
 ):
     """Owns the entire browser window: state, widgets, and async hooks.
 
@@ -160,6 +162,13 @@ class VaultBrowser(
         self.resume_banner_label: Gtk.Label | None = None
         self.resume_resume_btn: Gtk.Button | None = None
         self.resume_cancel_btn: Gtk.Button | None = None
+        # Ambient "Vault sync K/N" banner driven by SyncStatusBannerMixin.
+        # Slots stay None until layout builds them; polling source is
+        # armed once during activation.
+        self.sync_status_banner_box: Gtk.Box | None = None
+        self.sync_status_banner_label: Gtk.Label | None = None
+        self._sync_status_poll_source = None
+        self._sync_status_session_max: int = 0
         self.quota_banner: Adw.Banner | None = None
         self.breadcrumb: Gtk.Label | None = None
         self.status_label: Gtk.Label | None = None
@@ -253,6 +262,9 @@ class VaultBrowser(
         # Kick the initial manifest fetch on entry so the user sees the
         # tree populate without a manual click.
         self._refresh_manifest_async()
+        # Arm the ambient "Vault sync K/N" poller. Idempotent + cheap
+        # (sub-ms SQLite COUNT every POLL_INTERVAL_MS).
+        self._start_sync_status_polling()
 
     def _wire_responsive_sidebar(self) -> None:
         """Wave 2.5: bind split-view ⟷ toggle button + window breakpoint.
