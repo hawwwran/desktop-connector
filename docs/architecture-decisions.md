@@ -74,6 +74,68 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-16 — Two-way Phase B batches publishes, aborts on CAS (no replay)
+
+**Status:** accepted.
+
+**Context.** The original Phase 2 SO-3 design (commit `a93ba08`)
+batched only ``run_backup_only_cycle``; the perf plan said two-way
+"probably stays single-publish for now" because of the §D4
+keep-both conflict-rename detection in Phase A. After SO-2 + SO-3
+shipped for backup-only, two-way bindings became disproportionately
+slow: a 10 000-file two-way initial bind still did 10 000 per-op
+publishes (~2 h on suite-0004 hardware) while the equivalent
+backup-only bind was 20 minutes. Auditing the actual Phase A logic
+showed the conflict detector runs *before* Phase B's drain on each
+iteration — the per-op publish wasn't load-bearing for safety,
+just the assumed simpler shape.
+
+**Decision.** ``run_two_way_cycle`` Phase B now uses the same
+batched primitives backup-only does (``_prepare_op_for_batch`` +
+``_flush_batch``), with one critical policy change: batch publishes
+in two-way pass ``max_retries=0``. On a CAS conflict the batch
+aborts without replay; ``head`` is refetched; Phase B breaks early
+and the outer iteration loop re-runs Phase A on the fresh head —
+which is where §D4 keep-both / §A20 conflict-rename detection fires
+for any concurrent writer's changes. The
+``MAX_TWO_WAY_ITERATIONS = 4`` cap bounds pathological multi-device
+contention.
+
+The F-Y26 convergence check was extended so a CAS-failed batch
+counts as "progress" even when ``new_revision == revision_at_start``
+and no individual op succeeded — otherwise a spurious-conflict
+iteration would exit the loop before a retry. Real-world conflicts
+advance the revision so this exception rarely fires; it's a
+robustness against test-injection and stale-CAS-probe noise.
+
+**Rejected alternatives.**
+- *Same blind CAS-replay as backup-only.* Would skip the §D4
+  conflict-rename detection: if another writer added a new version
+  at path X while our batch had an upload for path X, the replay
+  would demote their version silently. Backup-only's
+  last-writer-wins is by design; two-way's keep-both isn't
+  optional.
+- *Per-op publish for paths Phase A flagged + batched publish for
+  rest.* Complex bookkeeping for a benefit that mostly matters in
+  the multi-device case (which is when conflicts happen anyway).
+  Single policy keeps the code small.
+- *Keep two-way single-publish per the plan's deferred stance.*
+  The plan was correct that conflict-rename detection was the
+  hard part, but the existing Phase A solves it on each iteration
+  — Phase B doesn't need to. Two-way users (likely the majority
+  of paid users syncing across devices) get the same 4–6× speedup
+  as backup-only.
+
+**Anchor.** ``desktop/src/vault/binding/twoway.py``: imports the
+SO-3 primitives (``_prepare_op_for_batch``, ``_flush_batch``,
+``_BatchEntry``, ``PUBLISH_BATCH_SIZE``) from ``sync.py``; Phase B
+drain rewritten around them with the ``max_retries=0`` policy;
+``batch_failed_in_iteration`` added to the F-Y26 convergence check.
+Tests: ``TwoWayBatchedPhaseBTests`` in
+``tests/protocol/test_desktop_vault_binding_twoway.py`` (4 vectors:
+clean batch / smaller batch_size split / one-conflict-retry-iter /
+persistent-conflict-MAX_ITER-cap).
+
 ### 2026-05-16 — Vault binding cycle batches manifest publishes at K=50
 
 **Status:** accepted.

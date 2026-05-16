@@ -377,11 +377,21 @@ and a 14-day TTL sweep catches orphans the per-path reaper misses.
   architectural change. Worth its own design doc once the SO-2/SO-3
   baseline is shipped — that'll tell us whether the cliff is
   *truly* gone or just pushed to ~100k files.
-- **Two-way conflict path batching**: deferred. The conflict-detect
+- ~~**Two-way conflict path batching**: deferred. The conflict-detect
   loop in `twoway.py` is the harder amortization; the backup-only
-  path covers the initial-bind hot case.
-- **Watcher / inotify burst-load coverage**: separate test (SO-4
-  from §13). Not a performance fix; a coverage gap.
+  path covers the initial-bind hot case.~~ **Landed 2026-05-16** —
+  the conflict-rename detection lives in `_apply_remote_to_local`
+  (Phase A) and runs once per outer iteration before Phase B's
+  drain, so Phase B can batch safely. Two-way batches with
+  ``max_retries=0``: on CAS conflict the batch aborts and the
+  outer loop re-runs Phase A on the fresh head (which fires §D4
+  keep-both for any concurrent writer's changes). See
+  `docs/architecture-decisions.md` 2026-05-16 entry "Two-way
+  Phase B batches publishes, aborts on CAS (no replay)".
+- ~~**Watcher / inotify burst-load coverage**: separate test (SO-4
+  from §13). Not a performance fix; a coverage gap.~~ **Landed
+  2026-05-16** — `WatcherBurstLoadTests` + `WatchdogObserverBurstSmokeTests`
+  in `tests/protocol/test_desktop_vault_filesystem_watcher.py`.
 
 ---
 

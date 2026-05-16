@@ -786,6 +786,238 @@ class TwoWayFetchManifestPerOpTests(unittest.TestCase):
         )
 
 
+class TwoWayBatchedPhaseBTests(unittest.TestCase):
+    """SO-3 extension to two-way: Phase B drains pending ops in
+    batches of K=50, not one publish per op. CAS conflicts abort the
+    batch and the outer iteration loop's Phase A re-runs on the fresh
+    head (which fires §D4 conflict-rename detection for any
+    concurrent writer's changes) rather than blind-replaying.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_twoway_batched_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.config_dir = self.tmpdir / "config"
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+        self.index = VaultLocalIndex(self.config_dir)
+        self.store = VaultBindingsStore(self.index.db_path)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _empty_remote(self) -> "_TwoWayBatchProbeRelay":
+        manifest = make_manifest(
+            vault_id=VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-16T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-16T12:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        relay = _TwoWayBatchProbeRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
+        vault = _vault()
+        try:
+            vault.publish_manifest(relay, manifest)
+        finally:
+            vault.close()
+        relay.put_manifest_attempt_count = 0
+        relay.published_manifests = []
+        return relay
+
+    def _make_two_way_binding(self, *, last_revision: int):
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id,
+            state="bound",
+            sync_mode="two-way",
+            last_synced_revision=last_revision,
+        )
+        return self.store.get_binding(binding.binding_id)
+
+    def test_phase_b_5_ops_publish_in_one_batch(self) -> None:
+        """5 uploads in a two-way cycle should produce one CAS publish
+        (the K=50 default), not 5 single publishes."""
+        relay = self._empty_remote()
+        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+
+        for i in range(5):
+            path = f"tw{i}.txt"
+            (self.local_root / path).write_bytes(f"data-{i}".encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        vault = _vault()
+        try:
+            result = run_two_way_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.succeeded_count, 5)
+        self.assertEqual(result.failed_count, 0)
+        self.assertEqual(
+            relay.put_manifest_attempt_count, 1,
+            "two-way Phase B did per-op publishes instead of batching; "
+            f"saw {relay.put_manifest_attempt_count} publish attempts "
+            "for 5 ops — SO-3 two-way regression",
+        )
+
+    def test_phase_b_smaller_batch_size_splits_into_multiple_publishes(self) -> None:
+        """7 ops with batch_size=3 → exactly 3 publishes (3 + 3 + 1
+        cycle-end flush of the partial batch)."""
+        relay = self._empty_remote()
+        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+
+        for i in range(7):
+            path = f"sm{i}.txt"
+            (self.local_root / path).write_bytes(f"d-{i}".encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        vault = _vault()
+        try:
+            result = run_two_way_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+                batch_size=3,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.succeeded_count, 7)
+        self.assertEqual(relay.put_manifest_attempt_count, 3)
+
+    def test_cas_conflict_aborts_batch_next_iteration_completes(self) -> None:
+        """A CAS conflict on the two-way batch publish aborts (no
+        retry-within-batch like backup-only would do). The outer
+        iteration loop re-runs Phase A on the fresh head and Phase B
+        re-tries the pending ops. With one injected conflict, the
+        second iteration succeeds.
+        """
+        relay = self._empty_remote()
+        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+
+        for i in range(3):
+            path = f"cf{i}.txt"
+            (self.local_root / path).write_bytes(f"c-{i}".encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        # Inject one CAS conflict — first batch flush aborts, second
+        # iteration's batch publishes successfully.
+        relay.cas_conflicts_to_inject = 1
+
+        vault = _vault()
+        try:
+            result = run_two_way_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+            )
+        finally:
+            vault.close()
+
+        # Eventually all 3 ops uploaded — first iter's batch flushed
+        # 3 "failed" outcomes, second iter's batch flushed 3
+        # "uploaded" outcomes. Net succeeded_count = 3.
+        uploaded = [o for o in result.outcomes if o.status == "uploaded"]
+        failed = [o for o in result.outcomes if o.status == "failed"]
+        self.assertEqual(len(uploaded), 3)
+        # The 3 failed outcomes from the aborted first batch survive
+        # in the outcomes list (they were emitted before the retry).
+        self.assertEqual(len(failed), 3)
+        # The pending-op rows are gone (the second iter's success
+        # deleted them).
+        self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
+        # Two publish attempts: 1 conflict + 1 success.
+        self.assertEqual(relay.put_manifest_attempt_count, 2)
+        # Conflict budget exhausted.
+        self.assertEqual(relay.cas_conflicts_to_inject, 0)
+        # ``relay.published_manifests`` only counts successful CAS,
+        # so 1 entry (the retry).
+        self.assertEqual(len(relay.published_manifests), 1)
+
+    def test_cas_conflict_persists_across_max_iterations_leaves_failed(self) -> None:
+        """If the relay keeps conflicting every batch publish, the
+        outer loop hits MAX_TWO_WAY_ITERATIONS and exits with the
+        pending-ops still queued. Defends against an unbounded
+        retry loop on a pathologically busy multi-device vault.
+        """
+        from src.vault.binding.twoway import MAX_TWO_WAY_ITERATIONS
+
+        relay = self._empty_remote()
+        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+
+        for i in range(3):
+            path = f"perm{i}.txt"
+            (self.local_root / path).write_bytes(f"p-{i}".encode())
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        # Conflict every iteration — outer loop should bail at the
+        # MAX_TWO_WAY_ITERATIONS cap.
+        relay.cas_conflicts_to_inject = 99
+
+        vault = _vault()
+        try:
+            result = run_two_way_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=THIS_DEVICE,
+                device_name=DEVICE_NAME,
+            )
+        finally:
+            vault.close()
+
+        # No ops succeeded — every batch CAS-conflicted.
+        uploaded = [o for o in result.outcomes if o.status == "uploaded"]
+        self.assertEqual(len(uploaded), 0)
+        # Pending ops survive for the next sync cycle.
+        self.assertEqual(len(self.store.list_pending_ops(binding.binding_id)), 3)
+        # We attempted exactly MAX_TWO_WAY_ITERATIONS publishes
+        # (one per iteration's batch flush).
+        self.assertEqual(
+            relay.put_manifest_attempt_count, MAX_TWO_WAY_ITERATIONS,
+            f"expected {MAX_TWO_WAY_ITERATIONS} publish attempts (one "
+            "per iteration), saw "
+            f"{relay.put_manifest_attempt_count} — outer-loop cap "
+            "is not gating the retries",
+        )
+
+
 class _CountingTwoWayRelay(FakeUploadRelay):
     """``FakeUploadRelay`` that counts ``get_manifest`` for SO-2 pinning."""
 
@@ -796,6 +1028,56 @@ class _CountingTwoWayRelay(FakeUploadRelay):
     def get_manifest(self, vault_id, vault_access_secret):
         self.get_manifest_count += 1
         return super().get_manifest(vault_id, vault_access_secret)
+
+
+class _TwoWayBatchProbeRelay(FakeUploadRelay):
+    """Relay that counts ``put_manifest`` attempts and can inject CAS
+    conflicts on demand, scoped to the two-way batched-publish tests.
+    Same shape as ``BatchProbeRelay`` in the batched-publish test
+    file; duplicated here rather than imported across test modules.
+    """
+
+    def __init__(self, *, manifest: dict) -> None:
+        super().__init__(manifest=manifest)
+        self.put_manifest_attempt_count = 0
+        self.cas_conflicts_to_inject = 0
+
+    def put_manifest(
+        self,
+        vault_id,
+        vault_access_secret,
+        *,
+        expected_current_revision,
+        new_revision,
+        parent_revision,
+        manifest_hash,
+        manifest_ciphertext,
+    ):
+        import base64
+
+        self.put_manifest_attempt_count += 1
+        if self.cas_conflicts_to_inject > 0:
+            self.cas_conflicts_to_inject -= 1
+            from src.vault.relay_errors import VaultCASConflictError
+            raise VaultCASConflictError({
+                "code": "vault_manifest_conflict",
+                "message": "injected CAS conflict (two-way SO-3 test)",
+                "details": {
+                    "current_revision": self.current_revision,
+                    "current_manifest_hash": self.current_hash,
+                    "current_manifest_ciphertext":
+                        base64.b64encode(self.current_envelope).decode("ascii"),
+                    "current_manifest_size": len(self.current_envelope),
+                },
+            })
+        return super().put_manifest(
+            vault_id, vault_access_secret,
+            expected_current_revision=expected_current_revision,
+            new_revision=new_revision,
+            parent_revision=parent_revision,
+            manifest_hash=manifest_hash,
+            manifest_ciphertext=manifest_ciphertext,
+        )
 
 
 if __name__ == "__main__":

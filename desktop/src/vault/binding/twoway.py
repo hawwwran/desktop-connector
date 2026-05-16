@@ -42,10 +42,13 @@ from typing import Any, Callable, Protocol
 from ..atomic import fsync_dir
 from .lifecycle import SyncCancelledError
 from .sync import (
+    PUBLISH_BATCH_SIZE,
     SyncCycleResult,
     SyncOpOutcome,
     SyncVault,
-    _execute_op,
+    _BatchEntry,
+    _flush_batch,
+    _prepare_op_for_batch,
 )
 from .bindings import (
     VaultBinding, VaultBindingsStore, VaultLocalEntry,
@@ -73,6 +76,7 @@ def run_two_way_cycle(
     chunk_cache_dir: Path | None = None,
     progress: Callable[[SyncOpOutcome], None] | None = None,
     should_continue: Callable[[], bool] | None = None,
+    batch_size: int = PUBLISH_BATCH_SIZE,
 ) -> SyncCycleResult:
     """Run one two-way sync cycle for ``binding``.
 
@@ -84,6 +88,16 @@ def run_two_way_cycle(
     B, between every Phase B op (and inside ``upload_file`` between
     chunks), and between full iterations. The result's ``cancelled``
     flag is set when a Pause / Disconnect lands mid-cycle.
+
+    SO-3 extension: Phase B drains pending ops in batches of
+    ``batch_size`` (default :data:`PUBLISH_BATCH_SIZE`) using the
+    same primitives as :func:`run_backup_only_cycle`. The key
+    difference from backup-only: batches use ``max_retries=0`` — on
+    CAS conflict we abort the batch and break Phase B early so the
+    outer iteration loop re-runs Phase A on the fresh head. Phase A
+    is where the §D4 keep-both conflict-rename detection lives;
+    blind CAS-replay (the backup-only behavior) would skip that
+    detection and silently overwrite a concurrent writer's version.
     """
     if binding.state != "bound":
         raise ValueError(
@@ -141,18 +155,31 @@ def run_two_way_cycle(
             cancelled = True
             break
 
-        # Phase B: drain pending uploads/deletes.
+        # Phase B: drain pending uploads/deletes in batches.
         pending = store.list_pending_ops(binding.binding_id)
         b_outcomes_before = len(outcomes)
+        batch: list[_BatchEntry] = []
+        batch_failed_in_iteration = False
+
+        def _emit_twoway(outcome: SyncOpOutcome) -> None:
+            outcomes.append(outcome)
+            if progress is not None:
+                try:
+                    progress(outcome)
+                except Exception:  # noqa: BLE001
+                    log.exception("vault.sync.progress_callback_failed")
+
         for op in pending:
             if should_continue is not None and not should_continue():
                 log.info(
                     "vault.sync.twoway_cancelled_between_ops binding=%s remaining=%d",
-                    binding.binding_id, len(pending) - (len(outcomes) - b_outcomes_before),
+                    binding.binding_id,
+                    len(pending) - (len(outcomes) - b_outcomes_before) - len(batch),
                 )
                 cancelled = True
                 break
-            outcome, head = _execute_op(
+
+            immediate_outcome, batch_entry = _prepare_op_for_batch(
                 vault=vault,
                 relay=relay,
                 store=store,
@@ -164,35 +191,102 @@ def run_two_way_cycle(
                 chunk_cache_dir=cache_dir,
                 should_continue=should_continue,
             )
-            outcomes.append(outcome)
-            if progress is not None:
-                try:
-                    progress(outcome)
-                except Exception:  # noqa: BLE001
-                    log.exception("vault.sync.progress_callback_failed")
-            if outcome.status == "cancelled":
-                cancelled = True
-                break
-            # SO-2: successful publishes thread the new manifest back via
-            # the tuple return. Only re-fetch on failure (typically a
-            # CAS conflict whose inner retry budget was exhausted) so the
-            # next op in this iteration sees the post-conflict revision.
-            # F-Y07.
-            if outcome.status == "failed":
+
+            if immediate_outcome is not None:
+                _emit_twoway(immediate_outcome)
+                if immediate_outcome.status == "cancelled":
+                    cancelled = True
+                    break
+                if immediate_outcome.status == "failed":
+                    # F-Y07: non-batched failure (quota, special-file
+                    # error, unsupported op type). Refresh head so the
+                    # rest of the iteration sees the latest.
+                    try:
+                        head = vault.fetch_manifest(relay)
+                    except Exception:  # noqa: BLE001
+                        log.warning(
+                            "vault.sync.refetch_after_failure_failed binding=%s",
+                            binding.binding_id, exc_info=True,
+                        )
+                continue
+
+            if batch_entry is None:
+                continue
+            batch.append(batch_entry)
+
+            if len(batch) >= batch_size:
+                # SO-3 two-way variant: ``max_retries=0`` so a CAS
+                # conflict aborts the batch rather than blind-replays.
+                # The outer iteration loop re-runs Phase A on the
+                # refreshed head, which applies the concurrent
+                # writer's changes (and produces §D4 conflict
+                # renames where local state would be overwritten).
+                batch_outcomes, head, batch_failed = _flush_batch(
+                    vault=vault,
+                    relay=relay,
+                    store=store,
+                    binding=binding,
+                    local_root=local_root,
+                    current_manifest=head,
+                    batch=batch,
+                    author_device_id=author_device_id,
+                    max_retries=0,
+                )
+                for outcome in batch_outcomes:
+                    _emit_twoway(outcome)
+                batch = []
+                if batch_failed:
+                    batch_failed_in_iteration = True
+                    try:
+                        head = vault.fetch_manifest(relay)
+                    except Exception:  # noqa: BLE001
+                        log.warning(
+                            "vault.sync.refetch_after_batch_failure_failed binding=%s",
+                            binding.binding_id, exc_info=True,
+                        )
+                    # Stop draining; next iteration's Phase A will
+                    # apply the concurrent writer's changes before
+                    # we retry the surviving pending-op rows.
+                    break
+
+        # Cycle-end flush of the partial batch (if any). Same
+        # ``max_retries=0`` policy — single attempt; on CAS conflict
+        # drop the batch and let the next iteration re-run Phase A.
+        if batch:
+            batch_outcomes, head, batch_failed = _flush_batch(
+                vault=vault,
+                relay=relay,
+                store=store,
+                binding=binding,
+                local_root=local_root,
+                current_manifest=head,
+                batch=batch,
+                author_device_id=author_device_id,
+                max_retries=0,
+            )
+            for outcome in batch_outcomes:
+                _emit_twoway(outcome)
+            batch = []
+            if batch_failed:
+                batch_failed_in_iteration = True
                 try:
                     head = vault.fetch_manifest(relay)
                 except Exception:  # noqa: BLE001
                     log.warning(
-                        "vault.sync.refetch_after_failure_failed binding=%s",
+                        "vault.sync.refetch_after_batch_failure_failed binding=%s",
                         binding.binding_id, exc_info=True,
                     )
+
         if cancelled:
             break
 
         # Convergence check: no progress made in this iteration. F-Y26.
-        # "Progress" means either the revision advanced OR at least one
-        # op was processed successfully. A loop where every op fails
-        # would never converge under the old (queue-empty) rule.
+        # "Progress" means either the revision advanced, at least one
+        # op was processed successfully, OR the iteration's batch CAS-
+        # failed (signal to re-run Phase A on the refreshed head; the
+        # `MAX_TWO_WAY_ITERATIONS` cap bounds spurious-conflict loops).
+        # A loop where every op fails AND nothing else changed breaks
+        # out — pending ops survive in the queue for the next cycle.
         new_revision = int(head.get("revision", revision_at_start))
         any_progress = any(
             o.status in ("uploaded", "deleted", "skipped")
@@ -201,6 +295,7 @@ def run_two_way_cycle(
         if (
             new_revision == revision_at_start
             and not any_progress
+            and not batch_failed_in_iteration
         ):
             break
         last_revision = new_revision
