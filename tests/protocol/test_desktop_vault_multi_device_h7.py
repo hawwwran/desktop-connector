@@ -299,11 +299,11 @@ class MultiDeviceH7Tests(unittest.TestCase):
         seed_local.write_bytes(b"shared")
         bootstrap = _make_vault()
         try:
-            # Step 3: ``upload_file`` is still legacy. Align the legacy
-            # mirror to current sharded state so its CAS publish hits a
-            # consistent parent_revision. Removed when upload_file is
-            # ported in step 4.
-            mirror_legacy_from_sharded(bootstrap, self.relay)
+            # ``upload_file`` is sharded (step 4) — no legacy mirror
+            # needed before it. ``seed_sharded_state_from_manifest``
+            # after the upload keeps the relay's sharded surface
+            # coherent with the result manifest for downstream
+            # legacy-side reads.
             res = upload_file(
                 vault=bootstrap, relay=self.relay, manifest=self._decrypt_head(),
                 local_path=seed_local, remote_folder_id=DOCS_ID,

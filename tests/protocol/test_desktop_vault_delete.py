@@ -244,31 +244,32 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
             try:
                 vault.publish_manifest(relay, manifest)
                 seed_sharded_state_from_manifest(vault, relay, manifest)
+                # Reset publish counters so the test counts only the
+                # upload + delete (not the seed's bootstrap publishes).
+                relay.published_shards = []
+                relay.published_roots = []
                 uploaded = upload_file(
                     vault=vault, relay=relay, manifest=manifest, local_path=local,
                     remote_folder_id=DOCS_ID, remote_path="doomed.txt",
                     author_device_id=AUTHOR,
                 )
-                mirror_legacy_from_sharded(vault, relay)
                 published = delete_file(
                     vault=vault, relay=relay, manifest=uploaded.manifest,
                     remote_folder_id=DOCS_ID, remote_path="doomed.txt",
                     author_device_id=AUTHOR,
                     deleted_at="2026-05-04T18:00:00.000Z",
                 )
-                # Step 5: delete is sharded; mirror to legacy so the
-                # ``current_revision`` count reflects the delete as one
-                # legacy revision (matches the bootstrap + upload + delete
-                # = 3 expectation). Removed in step 7 alongside the legacy
-                # mirror itself.
-                mirror_legacy_from_sharded(vault, relay)
             finally:
                 vault.close()
         joined = "\n".join(cm.output)
         self.assertIn("vault.delete.completed", joined)
         self.assertIn("path=doomed.txt", joined)
 
-        self.assertEqual(relay.current_revision, 3)  # bootstrap upload + delete
+        # Sharded counts: one shard publish for the upload, one for the
+        # delete. The legacy ``relay.current_revision`` assertion was
+        # only correct via interleaved ``mirror_legacy_from_sharded``
+        # calls; counting shards directly is the durable shape.
+        self.assertEqual(len(relay.published_shards), 2)
         entry = find_file_entry(published, DOCS_ID, "doomed.txt")
         self.assertTrue(entry["deleted"])
         # Chunks remain on the relay — soft delete only touches the manifest.
