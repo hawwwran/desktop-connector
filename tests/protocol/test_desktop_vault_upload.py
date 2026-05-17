@@ -1381,6 +1381,205 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         self.assertIn("shared/taken (imported).bin", entry_paths)
 
 
+    def test_three_device_merge_retry_merge_cycle_terminates(self) -> None:
+        """Review §7.C3 — true §D4 merge-retry-merge.
+
+        The pre-existing two-device tests drain A then B sequentially:
+        A wins first publish, B sees one conflict and retries once.
+        That exercises *one* merge round. The merge-retry-merge cycle
+        — both devices receive 409 with inline current ciphertext, both
+        run auto-merge against the same parent, both retry, only one
+        wins second round, loser merges *again* — was unexercised.
+
+        Scenario:
+          1. Seed publishes "report.txt" → rev 1.
+          2. A publishes a new version → rev 2.
+          3. B starts publishing against the pre-A parent (still rev 1).
+          4. B's CAS publish 409s (current is rev 2). The relay's
+             on-conflict hook fires and runs C's publish → rev 3.
+          5. B's auto-merge fetches rev 3, retries — 409 again
+             (current is rev 3 not the rev 2 we merged against, since
+             we set up the hook to advance head BEFORE B's pull).
+             Auto-merge runs a second time against rev 3, retries.
+          6. B wins at rev 4. Assert: B terminated, head revision == 4,
+             every device's version_id present in entry.versions[].
+        """
+        device_seed = "0" * 32
+        device_a = "a" * 32
+        device_b = "b" * 32
+        device_c = "c" * 32
+
+        seed_local = self.tmpdir / "seed.txt"
+        seed_local.write_bytes(b"seed payload v1")
+        local_a = self.tmpdir / "a.txt"
+        local_a.write_bytes(b"alpha payload")
+        local_b = self.tmpdir / "b.txt"
+        local_b.write_bytes(b"beta payload - distinct bytes")
+        local_c = self.tmpdir / "c.txt"
+        local_c.write_bytes(b"charlie payload - other distinct bytes")
+
+        manifest = _empty_manifest()
+        relay = ConflictInjectingRelay()
+        seed_vault = _vault()
+        try:
+            seed_sharded_state_from_manifest(seed_vault, relay, manifest)
+            relay.published_shards = []
+            relay.published_roots = []
+            seed_res = upload_file(
+                vault=seed_vault, relay=relay, manifest=manifest,
+                local_path=seed_local, remote_folder_id=DOCS_ID,
+                remote_path="report.txt", author_device_id=device_seed,
+                created_at="2026-05-04T09:00:00.000Z",
+            )
+        finally:
+            seed_vault.close()
+        shared_parent = seed_res.manifest
+
+        # Capture B's pre-A view BEFORE A publishes — without this,
+        # B's own fetch_folder_state would see A's post-publish head
+        # and the conflict path never fires.
+        from src.vault.upload.folder_state import fetch_folder_state
+        vault_b = _vault()
+        pre_a_state_b = fetch_folder_state(vault_b, relay, DOCS_ID, device_b)
+
+        # A's publish — advances head to rev 2.
+        vault_a = _vault()
+        try:
+            res_a = upload_file(
+                vault=vault_a, relay=relay, manifest=shared_parent,
+                local_path=local_a, remote_folder_id=DOCS_ID,
+                remote_path="report.txt", author_device_id=device_a,
+                created_at="2026-05-04T10:00:00.000Z",
+            )
+        finally:
+            vault_a.close()
+
+        # Queue two mutations so B sees 2 sequential conflicts (i.e.
+        # merge-RETRY-merge, not just merge-retry-win):
+        #
+        #   1. on_conflict: C publishes when B's 1st CAS 409s. Head
+        #      advances to rev 3 before the exception returns to B.
+        #   2. on_post_fetch: D publishes AFTER B fetches the new
+        #      state (rev 3) but BEFORE B's 2nd CAS attempt. Head
+        #      advances to rev 4. B's merge was against rev 3, so the
+        #      2nd attempt 409s and B must merge a second time
+        #      against rev 4 before its 3rd attempt finally wins.
+        device_d = "d" * 32
+        local_d = self.tmpdir / "d.txt"
+        local_d.write_bytes(b"delta payload - last-mover bytes")
+
+        def publish_c_on_first_conflict() -> None:
+            vc = _vault()
+            try:
+                upload_file(
+                    vault=vc, relay=relay,
+                    manifest=_fetch_current_head(vc, relay),
+                    local_path=local_c, remote_folder_id=DOCS_ID,
+                    remote_path="report.txt", author_device_id=device_c,
+                    created_at="2026-05-04T10:30:00.000Z",
+                )
+            finally:
+                vc.close()
+
+        def publish_d_on_post_fetch() -> None:
+            vd = _vault()
+            try:
+                upload_file(
+                    vault=vd, relay=relay,
+                    manifest=_fetch_current_head(vd, relay),
+                    local_path=local_d, remote_folder_id=DOCS_ID,
+                    remote_path="report.txt", author_device_id=device_d,
+                    created_at="2026-05-04T10:45:00.000Z",
+                )
+            finally:
+                vd.close()
+
+        # NB: upload_file's CAS retry uses the inline current ciphertext
+        # from the 409 (see single_file.py:719 — exc.current_shard_ciphertext_bytes)
+        # — it does NOT re-call get_shard. So we queue BOTH mutations
+        # as on_conflict and rely on the staleness of the inline
+        # payload to make B see 2 sequential 409s: each conflict's
+        # inline-payload reflects the pre-mutation state, and B's
+        # next attempt against that older revision then collides with
+        # the mutation's freshly-advanced head.
+        relay.queue_on_conflict_mutation(publish_c_on_first_conflict)
+        relay.queue_on_conflict_mutation(publish_d_on_post_fetch)
+
+        try:
+            res_b = upload_file(
+                vault=vault_b, relay=relay,
+                manifest=shared_parent,
+                local_path=local_b, remote_folder_id=DOCS_ID,
+                remote_path="report.txt", author_device_id=device_b,
+                created_at="2026-05-04T11:00:00.000Z",
+                # Pre-A state snapshot guarantees B's 1st publish 409s
+                # against A's freshly-published head.
+                parent_state=pre_a_state_b,
+            )
+        finally:
+            vault_b.close()
+
+        # Review §7.C3 invariants:
+        # (a) B terminated — both res_b and a valid version_id exist
+        #     (would have been an exception or None if the merge loop
+        #     diverged).
+        self.assertTrue(res_b.version_id)
+
+        # (b) Same final root_revision for any observer — i.e. the
+        #     head moved forward monotonically; B observed at least
+        #     two distinct conflicts before winning.
+        head_rev_b_observed = int(res_b.manifest["revision"])
+        head_rev_relay = relay.root_revision
+        self.assertEqual(
+            head_rev_b_observed, head_rev_relay,
+            f"B's res manifest disagrees with relay head: "
+            f"{head_rev_b_observed} vs {head_rev_relay}",
+        )
+        # The hook fired (C published mid-retry). With this, B had to
+        # run the merge-retry cycle at least twice, so the relay's
+        # shard_with_root_puts count must exceed the successful-publish
+        # count by at least 2 (B's two failed attempts before the win).
+        self.assertGreaterEqual(
+            relay.shard_with_root_puts - len(relay.published_shards), 2,
+            "expected ≥2 failed CAS attempts (B's first against A, "
+            "B's second against C); got "
+            f"{relay.shard_with_root_puts - len(relay.published_shards)}",
+        )
+
+        # (c) No entries lost — every publisher's version_id present
+        # in the final entry. Five publishers (seed, A, C, D, B).
+        entry = find_file_entry(res_b.manifest, DOCS_ID, "report.txt")
+        self.assertIsNotNone(entry)
+        version_ids = {v["version_id"] for v in entry["versions"]}
+        self.assertIn(seed_res.version_id, version_ids,
+                      "seed version dropped during merge")
+        self.assertIn(res_a.version_id, version_ids,
+                      "A's version dropped during merge")
+        self.assertIn(res_b.version_id, version_ids,
+                      "B's own version dropped during merge")
+        self.assertEqual(
+            len(version_ids), 5,
+            f"expected 5 versions in entry (seed, A, C, D, B), "
+            f"got {len(version_ids)}",
+        )
+
+
+def _fetch_current_head(vault, relay) -> dict:
+    """Tiny helper for the §7.C3 test — pull and assemble the current
+    sharded head into a unified-manifest dict the upload helpers can
+    consume as ``manifest=``."""
+    from src.vault.manifest import assemble_unified_manifest
+    root = vault.fetch_root_manifest(relay)
+    shards = {}
+    for folder in root.get("remote_folders", []):
+        rfid = folder.get("remote_folder_id")
+        try:
+            shards[rfid] = vault.fetch_folder_shard(relay, rfid)
+        except Exception:  # noqa: BLE001
+            continue
+    return assemble_unified_manifest(root, shards)
+
+
 class SimulatedCrashError(RuntimeError):
     """Raised by ``CrashingRelay`` to model a process death mid-upload."""
 
@@ -1769,6 +1968,83 @@ class CrashingRelay(FakeUploadRelay):
         if self.fail_after_n_puts is not None and len(self.put_calls) >= self.fail_after_n_puts:
             self.fail_after_n_puts = None  # only crash once
             raise SimulatedCrashError("simulated kill mid-upload")
+        return result
+
+
+class ConflictInjectingRelay(FakeUploadRelay):
+    """Variant for the §7.C3 §D4 merge-retry-merge test.
+
+    Two hook queues:
+      - ``_on_conflict_mutations`` fires once per CAS-conflict raised
+        by ``put_shard_with_root``. Used to make the caller see N
+        sequential 409s by advancing the head once per failure.
+      - ``_on_post_fetch_mutations`` fires once after every
+        ``get_shard`` call that follows a conflict. Used to advance
+        the head AGAIN between the caller's fetch and its retry,
+        which is what forces the §D4 *merge-retry-merge* cycle
+        (rather than the easier "fetch picks up the new state and
+        the retry wins").
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._on_conflict_mutations: list = []
+        self._on_post_fetch_mutations: list = []
+        self._in_conflict_recovery = False
+        self._suppress_hooks = False
+
+    def queue_on_conflict_mutation(self, callback) -> None:
+        """Register ``callback`` to fire once when the next CAS
+        conflict would have been raised."""
+        self._on_conflict_mutations.append(callback)
+
+    def queue_on_post_fetch_mutation(self, callback) -> None:
+        """Register ``callback`` to fire once after the caller fetches
+        a shard following a CAS conflict (i.e. during the auto-merge
+        re-fetch step). Used to advance the head AGAIN so the
+        caller's next publish also 409s."""
+        self._on_post_fetch_mutations.append(callback)
+
+    def _run_mutation(self, cb) -> None:
+        """Run a queued mutation with re-entrant hook firing
+        suppressed. Otherwise the mutation's own upload_file flow
+        (which itself calls get_shard + put_shard_with_root) would
+        consume hooks meant for the outer caller."""
+        prev = self._suppress_hooks
+        self._suppress_hooks = True
+        try:
+            cb()
+        finally:
+            self._suppress_hooks = prev
+
+    def put_shard_with_root(self, vault_id, vault_access_secret,
+                            remote_folder_id, *, shard, root):
+        try:
+            res = super().put_shard_with_root(
+                vault_id, vault_access_secret, remote_folder_id,
+                shard=shard, root=root,
+            )
+            if not self._suppress_hooks:
+                self._in_conflict_recovery = False
+            return res
+        except VaultCASConflictError:
+            if not self._suppress_hooks and self._on_conflict_mutations:
+                cb = self._on_conflict_mutations.pop(0)
+                self._run_mutation(cb)
+            if not self._suppress_hooks:
+                self._in_conflict_recovery = True
+            raise
+
+    def get_shard(self, vault_id, vault_access_secret, remote_folder_id):
+        result = super().get_shard(vault_id, vault_access_secret, remote_folder_id)
+        if (
+            not self._suppress_hooks
+            and self._in_conflict_recovery
+            and self._on_post_fetch_mutations
+        ):
+            cb = self._on_post_fetch_mutations.pop(0)
+            self._in_conflict_recovery = False
+            self._run_mutation(cb)
         return result
 
 
