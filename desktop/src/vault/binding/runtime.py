@@ -198,9 +198,61 @@ class VaultHttpRelay:
             body = resp.json()
             data = body["data"]
             data["encrypted_header"] = base64.b64decode(data["encrypted_header"])
-            return data
         except Exception as exc:
             raise RuntimeError("Relay returned an invalid vault header response.") from exc
+        # Review §5.C3: when the source relay returns ``migrated_to``
+        # (the §H2 commit set it), persist the propagation decision so
+        # the next vault subprocess / next adapter construction picks
+        # up the new server_url. The current adapter keeps reading
+        # from the source relay (which stays read-only) for the rest
+        # of its lifetime — tolerable, since reads still succeed and
+        # the next process restart picks up the new active URL.
+        self._maybe_propagate_relay_migration(data)
+        return data
+
+    def _maybe_propagate_relay_migration(self, header_data: dict) -> None:
+        """Persist the §H2 migration propagation decision to Config when
+        the source relay's GET /header has flipped ``migrated_to`` set
+        (review §5.C3)."""
+        try:
+            from ..migration.propagation import propagate_relay_migration
+        except ImportError:  # defensive — propagation module is in-tree
+            return
+        try:
+            current_url = self._config.server_url
+        except Exception:  # noqa: BLE001
+            return
+        decision = propagate_relay_migration(
+            header_data=header_data,
+            current_relay_url=current_url,
+        )
+        if not decision.should_switch or not decision.new_relay_url:
+            return
+        try:
+            self._config.server_url = decision.new_relay_url
+            self._config.vault_previous_relay_url = decision.previous_relay_url
+            self._config.vault_previous_relay_expires_at = (
+                decision.previous_relay_expires_at
+            )
+            self._config.save()
+        except Exception:  # noqa: BLE001
+            # A config-write failure must not prevent the caller from
+            # consuming the header response; the propagation will retry
+            # on the next GET /header.
+            import logging
+            logging.getLogger(__name__).exception(
+                "vault.sync.migration_propagation_persist_failed "
+                "new=%s previous=%s",
+                decision.new_relay_url, decision.previous_relay_url,
+            )
+            return
+        import logging
+        logging.getLogger(__name__).warning(
+            "vault.sync.migration_propagation_applied new=%s previous=%s expires=%s",
+            decision.new_relay_url,
+            decision.previous_relay_url,
+            decision.previous_relay_expires_at,
+        )
 
     def get_root(self, vault_id, vault_access_secret):
         resp = self._conn.request(

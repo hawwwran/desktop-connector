@@ -529,6 +529,8 @@ relay log (filenames are local-only).
 | `vault.sync.flush_skipped_paused` | desktop | info | `binding` | F-Y01 — sync now no-op for paused binding |
 | `vault.sync.ignore_pattern_unsupported_shape` | desktop | warning | `pattern`, `reason`, `hint` | F-D14 — caller-supplied ignore pattern uses `**` or starts with `/`; the v1 fnmatch matcher silently never matches those shapes (emitted once per process per pattern) |
 | `vault.sync.local_delete_unsynced_silent` | desktop | info | `binding`, `path` | T12.2 watcher gate dropped a delete on a never-synced path |
+| `vault.sync.migration_propagation_applied` | desktop | warning | `new`, `previous`, `expires` | Review §5.C3 — source relay's GET /header carried `migrated_to`; config switched to the target URL, previous URL retained for the §H2 7-day switch-back grace |
+| `vault.sync.migration_propagation_persist_failed` | desktop | error | `new`, `previous`, exception traceback | Review §5.C3 — config write failed while applying a migration propagation; the next GET /header retries |
 | `vault.sync.previously_synced_check_failed` | desktop | warning | `binding`, `path` | The T12.2 predicate raised; treating as not-synced |
 | `vault.sync.progress_callback_failed` | desktop | error | exception traceback | UI progress callback raised; cycle continues |
 | `vault.sync.queue_cross_type_superseded` | desktop | info | `binding`, `path`, `superseded`, `by`, `rows` | F-Y11 — last-intent-wins: coalesce_op dropped a stale upload/delete because the inverse op was just enqueued for the same path |
