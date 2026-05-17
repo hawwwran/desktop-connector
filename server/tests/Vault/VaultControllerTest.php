@@ -829,6 +829,132 @@ final class VaultControllerTest extends TestCase
         );
     }
 
+    // ===================================================================
+    //  Review §7.C2 — controller-level format-version gate
+    // ===================================================================
+
+    /**
+     * Helper: flip the format-version byte at offset 0 to ``$badVersion``
+     * so the resulting envelope passes the deterministic-prefix parser
+     * but fails the ``guardFormatVersion`` check.
+     */
+    private function tamperFormatVersion(string $envelope, int $badVersion): string
+    {
+        $buf = $envelope;
+        $buf[0] = chr($badVersion);
+        return $buf;
+    }
+
+    public function test_putHeader_422_on_unsupported_format_version(): void
+    {
+        $badHeader = $this->tamperFormatVersion(
+            $this->headerEnvelope(2), 0x02,
+        );
+        $body = [
+            'expected_header_revision' => 1,
+            'new_header_revision'      => 2,
+            'encrypted_header'         => base64_encode($badHeader),
+            'header_hash'              => str_repeat('a', 64),
+        ];
+        try {
+            VaultController::putHeader(
+                $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+            );
+            self::fail('expected VaultFormatVersionUnsupportedError');
+        } catch (VaultFormatVersionUnsupportedError $e) {
+            self::assertSame(422, $e->status);
+            self::assertSame('vault_format_version_unsupported', $e->errorCode);
+        }
+    }
+
+    public function test_putRoot_422_on_unsupported_format_version(): void
+    {
+        $badRoot = $this->tamperFormatVersion(
+            $this->rootEnvelope(2, 1), 0x02,
+        );
+        $body = [
+            'expected_current_root_revision' => 1,
+            'new_root_revision'              => 2,
+            'parent_root_revision'           => 1,
+            'root_hash'                      => str_repeat('1', 64),
+            'root_ciphertext'                => base64_encode($badRoot),
+        ];
+        try {
+            VaultController::putRoot(
+                $this->db, $this->jctx('PUT', ['vault_id' => self::VAULT_ID], $body)
+            );
+            self::fail('expected VaultFormatVersionUnsupportedError');
+        } catch (VaultFormatVersionUnsupportedError $e) {
+            self::assertSame(422, $e->status);
+            self::assertSame('vault_format_version_unsupported', $e->errorCode);
+        }
+    }
+
+    public function test_putShard_422_on_unsupported_format_version(): void
+    {
+        $badShard = $this->tamperFormatVersion(
+            $this->shardEnvelope(self::FOLDER_A, 2, 1), 0x02,
+        );
+        $body = [
+            'expected_current_shard_revision' => 1,
+            'new_shard_revision'              => 2,
+            'parent_shard_revision'           => 1,
+            'shard_hash'                      => str_repeat('2', 64),
+            'shard_ciphertext'                => base64_encode($badShard),
+        ];
+        try {
+            VaultController::putShard(
+                $this->db,
+                $this->jctx('PUT', [
+                    'vault_id'  => self::VAULT_ID,
+                    'folder_id' => self::FOLDER_A,
+                ], $body)
+            );
+            self::fail('expected VaultFormatVersionUnsupportedError');
+        } catch (VaultFormatVersionUnsupportedError $e) {
+            self::assertSame(422, $e->status);
+            self::assertSame('vault_format_version_unsupported', $e->errorCode);
+        }
+    }
+
+    public function test_putShardWithRoot_422_on_unsupported_root_format_version(): void
+    {
+        $badRoot = $this->tamperFormatVersion(
+            $this->rootEnvelope(2, 1), 0x02,
+        );
+        $body = [
+            'shard' => [
+                'expected_current_shard_revision' => 1,
+                'new_shard_revision'              => 2,
+                'parent_shard_revision'           => 1,
+                'shard_hash'                      => str_repeat('3', 64),
+                'shard_ciphertext'                => base64_encode(
+                    $this->shardEnvelope(self::FOLDER_A, 2, 1),
+                ),
+            ],
+            'root' => [
+                'expected_current_root_revision' => 1,
+                'new_root_revision'              => 2,
+                'parent_root_revision'           => 1,
+                'root_hash'                      => str_repeat('4', 64),
+                'root_ciphertext'                => base64_encode($badRoot),
+            ],
+        ];
+        try {
+            VaultController::putShardWithRoot(
+                $this->db,
+                $this->jctx('PUT', [
+                    'vault_id'  => self::VAULT_ID,
+                    'folder_id' => self::FOLDER_A,
+                ], $body)
+            );
+            self::fail('expected VaultFormatVersionUnsupportedError');
+        } catch (VaultFormatVersionUnsupportedError $e) {
+            self::assertSame(422, $e->status);
+            self::assertSame('vault_format_version_unsupported', $e->errorCode);
+        }
+    }
+
     /**
      * Regression for review §1.C1: putChunk against an existing row in
      * ``purged`` state must re-charge quota and revive the row, then

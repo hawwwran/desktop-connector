@@ -153,6 +153,197 @@ final class VaultCryptoVectorsTest extends TestCase
         self::assertSame($plaintext, VaultCrypto::aeadDecrypt($ct, $subkey, $nonce, $aad));
     }
 
+    // ---------------------------------------------------------------- root envelope
+
+    /**
+     * Review §7.C1: cross-runtime parity for ``root_v1.json``. Mirrors
+     * the Python ``_run_root_case`` byte-for-byte so a regression in
+     * either runtime's root-envelope builder or AAD constructor breaks
+     * the build (was Python-only pre-fix).
+     *
+     * Root envelope plaintext header: 1+12+8+8+32+24 = 85 bytes (the
+     * 32-byte author_device_id is hex-encoded so its raw form is 16
+     * bytes, but the spec records the hex bytes in the envelope —
+     * vault-v1-formats §10.1).
+     */
+    public static function rootCases(): array { return self::loadCases('root_v1.json'); }
+
+    #[DataProvider("rootCases")]
+    public function test_root_case(string $name, array $case): void
+    {
+        $inputs = $case['inputs'];
+        $expected = $case['expected'];
+
+        $masterKey = hex2bin($inputs['vault_master_key']);
+        $nonce = hex2bin($inputs['nonce']);
+        $plaintext = base64_decode($inputs['root_plaintext'], true);
+        $rootRevision = (int)$inputs['root_revision'];
+        $parentRevision = (int)$inputs['parent_root_revision'];
+
+        $aad = VaultCrypto::buildRootAad(
+            $inputs['vault_id'],
+            $rootRevision,
+            $parentRevision,
+            $inputs['author_device_id']
+        );
+        $subkey = VaultCrypto::deriveSubkey('dc-vault-v1/root', $masterKey);
+        $ct = VaultCrypto::aeadEncrypt($plaintext, $subkey, $nonce, $aad);
+        $envelope = VaultCrypto::buildRootEnvelope(
+            $inputs['vault_id'],
+            $rootRevision,
+            $parentRevision,
+            $inputs['author_device_id'],
+            $nonce,
+            $ct
+        );
+
+        if (isset($expected['expected_error'])) {
+            $tamper = $case['tamper'] ?? [];
+            $decryptAad = $aad;
+            $decryptEnvelope = $envelope;
+            $decryptCt = $ct;
+            if (isset($tamper['envelope_byte_xor'])) {
+                $spec = $tamper['envelope_byte_xor'];
+                $buf = $envelope;
+                $buf[$spec['offset']] = chr(
+                    ord($buf[$spec['offset']]) ^ hexdec($spec['xor'])
+                );
+                $decryptEnvelope = $buf;
+                // Root envelope plaintext header is 85 bytes
+                // (1+12+8+8+32+24); ciphertext starts at offset 85.
+                $decryptCt = substr($buf, 85);
+            }
+            if (isset($tamper['aad_override'])) {
+                $decryptAad = hex2bin($tamper['aad_override']);
+            }
+            if ($expected['expected_error'] === 'vault_format_version_unsupported') {
+                $this->expectException(VaultFormatVersionUnsupportedError::class);
+                VaultCrypto::assertSupportedFormatVersion($decryptEnvelope, 'root');
+                return;
+            }
+            $this->expectException(SodiumException::class);
+            VaultCrypto::aeadDecrypt($decryptCt, $subkey, $nonce, $decryptAad);
+            return;
+        }
+
+        if (isset($expected['aad'])) {
+            self::assertSame($expected['aad'], bin2hex($aad), "{$name}: AAD mismatch");
+        }
+        if (isset($expected['subkey'])) {
+            self::assertSame($expected['subkey'], bin2hex($subkey), "{$name}: subkey mismatch");
+        }
+        if (isset($expected['aead_ciphertext_and_tag'])) {
+            self::assertSame(
+                $expected['aead_ciphertext_and_tag'], bin2hex($ct),
+                "{$name}: ciphertext mismatch",
+            );
+        }
+        if (isset($expected['envelope_bytes'])) {
+            self::assertSame(
+                $expected['envelope_bytes'], bin2hex($envelope),
+                "{$name}: envelope mismatch",
+            );
+        }
+        self::assertSame(
+            $plaintext, VaultCrypto::aeadDecrypt($ct, $subkey, $nonce, $aad),
+            "{$name}: round-trip plaintext mismatch",
+        );
+    }
+
+    // ---------------------------------------------------------------- shard envelope
+
+    /**
+     * Review §7.C1: cross-runtime parity for ``shard_v1.json``. Same
+     * pattern as root but the envelope plaintext header is 115 bytes
+     * (the extra 30 bytes are the remote_folder_id) so the ciphertext
+     * offset is 115.
+     */
+    public static function shardCases(): array { return self::loadCases('shard_v1.json'); }
+
+    #[DataProvider("shardCases")]
+    public function test_shard_case(string $name, array $case): void
+    {
+        $inputs = $case['inputs'];
+        $expected = $case['expected'];
+
+        $masterKey = hex2bin($inputs['vault_master_key']);
+        $nonce = hex2bin($inputs['nonce']);
+        $plaintext = base64_decode($inputs['shard_plaintext'], true);
+        $shardRevision = (int)$inputs['shard_revision'];
+        $parentShardRevision = (int)$inputs['parent_shard_revision'];
+
+        $aad = VaultCrypto::buildShardAad(
+            $inputs['vault_id'],
+            $inputs['remote_folder_id'],
+            $shardRevision,
+            $parentShardRevision,
+            $inputs['author_device_id']
+        );
+        $subkey = VaultCrypto::deriveSubkey('dc-vault-v1/shard', $masterKey);
+        $ct = VaultCrypto::aeadEncrypt($plaintext, $subkey, $nonce, $aad);
+        $envelope = VaultCrypto::buildShardEnvelope(
+            $inputs['vault_id'],
+            $inputs['remote_folder_id'],
+            $shardRevision,
+            $parentShardRevision,
+            $inputs['author_device_id'],
+            $nonce,
+            $ct
+        );
+
+        if (isset($expected['expected_error'])) {
+            $tamper = $case['tamper'] ?? [];
+            $decryptAad = $aad;
+            $decryptEnvelope = $envelope;
+            $decryptCt = $ct;
+            if (isset($tamper['envelope_byte_xor'])) {
+                $spec = $tamper['envelope_byte_xor'];
+                $buf = $envelope;
+                $buf[$spec['offset']] = chr(
+                    ord($buf[$spec['offset']]) ^ hexdec($spec['xor'])
+                );
+                $decryptEnvelope = $buf;
+                // Shard envelope plaintext header is 115 bytes
+                // (1+12+30+8+8+32+24); ciphertext starts at offset 115.
+                $decryptCt = substr($buf, 115);
+            }
+            if (isset($tamper['aad_override'])) {
+                $decryptAad = hex2bin($tamper['aad_override']);
+            }
+            if ($expected['expected_error'] === 'vault_format_version_unsupported') {
+                $this->expectException(VaultFormatVersionUnsupportedError::class);
+                VaultCrypto::assertSupportedFormatVersion($decryptEnvelope, 'shard');
+                return;
+            }
+            $this->expectException(SodiumException::class);
+            VaultCrypto::aeadDecrypt($decryptCt, $subkey, $nonce, $decryptAad);
+            return;
+        }
+
+        if (isset($expected['aad'])) {
+            self::assertSame($expected['aad'], bin2hex($aad), "{$name}: AAD mismatch");
+        }
+        if (isset($expected['subkey'])) {
+            self::assertSame($expected['subkey'], bin2hex($subkey), "{$name}: subkey mismatch");
+        }
+        if (isset($expected['aead_ciphertext_and_tag'])) {
+            self::assertSame(
+                $expected['aead_ciphertext_and_tag'], bin2hex($ct),
+                "{$name}: ciphertext mismatch",
+            );
+        }
+        if (isset($expected['envelope_bytes'])) {
+            self::assertSame(
+                $expected['envelope_bytes'], bin2hex($envelope),
+                "{$name}: envelope mismatch",
+            );
+        }
+        self::assertSame(
+            $plaintext, VaultCrypto::aeadDecrypt($ct, $subkey, $nonce, $aad),
+            "{$name}: round-trip plaintext mismatch",
+        );
+    }
+
     // ---------------------------------------------------------------- recovery envelope
 
     public static function recoveryCases(): array { return self::loadCases('recovery_envelope_v1.json'); }
