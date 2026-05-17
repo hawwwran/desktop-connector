@@ -942,7 +942,17 @@ class VaultController
 
         $chunksRepo = new VaultChunksRepository($db);
         $row = $chunksRepo->get($vaultId, $chunkId);
-        if ($row === null) {
+        // Review §1.H2: state-gate the response. headChunk and
+        // batchHead both filter via ``isUserVisibleChunkState``;
+        // pre-fix getChunk skipped that filter, so during the GC
+        // window (state ∈ {gc_pending, purged} but the unlink hasn't
+        // landed yet) HEAD 404'd while GET 200'd for the same id.
+        // That race lets a chunk that the relay has just torn down
+        // still serve content for a fraction of a second.
+        if (
+            $row === null
+            || !self::isUserVisibleChunkState((string)$row['state'])
+        ) {
             throw new VaultChunkMissingError($chunkId);
         }
 

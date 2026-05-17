@@ -1093,6 +1093,30 @@ final class VaultControllerTest extends TestCase
         ]));
     }
 
+    /**
+     * Review §1.H2: a chunk in state `purged` (or `gc_pending`) must
+     * 404 on GET even if the on-disk file is briefly still present
+     * — otherwise the GC window races against the client and the
+     * relay serves content for a chunk it has already torn down.
+     * headChunk already filters; this aligns getChunk.
+     */
+    public function test_getChunk_404_when_chunk_in_purged_state(): void
+    {
+        $chunkId = 'ch_v1_state2gateedabcdefghijkl';
+        $this->uploadChunk($chunkId, b'still here');
+        // Flip the row to purged without unlinking — emulates the
+        // post-state-flip, pre-unlink window the §1.C2 reaper now
+        // covers. Pre-§1.H2 the GET still returned 200 here.
+        $repo = new VaultChunksRepository($this->db);
+        $repo->setState(self::VAULT_ID, $chunkId, VaultChunksRepository::STATE_PURGED);
+
+        $this->expectException(VaultChunkMissingError::class);
+        VaultController::getChunk($this->db, $this->ctx('GET', [
+            'vault_id' => self::VAULT_ID,
+            'chunk_id' => $chunkId,
+        ]));
+    }
+
     // ===================================================================
     //  6.10 HEAD /api/vaults/{id}/chunks/{chunk_id}
     // ===================================================================
