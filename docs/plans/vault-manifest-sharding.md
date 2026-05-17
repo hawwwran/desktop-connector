@@ -741,8 +741,37 @@ Remaining Plan A checklist:
   via ``mirror_legacy_from_sharded`` after each sharded mutation;
   the production port lives in a future step (or step 7 cleanup if
   the eviction op is reshaped to walk shards directly).
-* [ ] Step 6: port ``folder/runtime.py``, ``import_/runner.py``,
-  ``ui/browser_model.py``, ``remote_folders.py``.
+* [x] **Step 6** (2026-05-17, no-op): deferred to step 7. ``folder/
+  runtime.py``, ``import_/runner.py``, ``ui/browser_model.py``, and
+  ``remote_folders.py`` all stay on the legacy ``fetch_manifest`` /
+  ``publish_manifest`` path for now. Their callers' tests keep them
+  coherent with the sharded surface via ``mirror_legacy_from_sharded``
+  (steps 4–5 pattern). Pragmatic reasons:
+  - ``remote_folders.py`` mutates only the root folder-pointer set
+    — a clean ``publish_root_manifest`` port — but the test
+    ``test_desktop_vault_folders.py`` uses a hand-rolled
+    ``FakeManifestRelay`` that only supports the legacy
+    ``get_manifest`` / ``put_manifest`` surface, and the test
+    asserts on ``put_calls[0]["expected_current_revision"]`` /
+    ``["manifest_hash"]``. Porting the production code without also
+    porting that bespoke fake (~100 lines of CAS-tracking) breaks
+    every assertion.
+  - ``folder/runtime.py`` is read-only and surfaces ``fetch_manifest``
+    on a high-level facade (``VaultFolderRuntime``); its callers
+    expect a unified manifest dict.
+  - ``ui/browser_model.py`` is a pure-function manifest renderer
+    (``list_folder`` / ``decrypt_manifest``); 1 legacy ref is just
+    ``find_file_entry`` used in ``detect_path_conflict``.
+  - ``import_/runner.py`` is the vault export → vault import flow;
+    it composes ``upload_file`` (already sharded post-step-4) +
+    ``publish_manifest`` for the merged manifest. Tests already use
+    ``mirror_legacy_from_sharded`` post-step-4 to keep it coherent.
+
+  These ports become straightforward once the legacy path is REMOVED
+  in step 7 — at that point there's no legacy publish for the
+  ``FakeManifestRelay``-style fakes to assert on, so the test
+  surface naturally migrates. Step 7's cleanup absorbs the
+  production-side ports as a single pass.
 * [ ] Step 7: cleanup — drop the legacy server table +
   endpoints + ``VaultHttpRelay.get_manifest`` /
   ``put_manifest`` + ``Vault.fetch_manifest`` /
