@@ -45,6 +45,13 @@ ONBOARD_WINDOW = (
     / "windows_vault"
     / "onboard_window.py"
 )
+BROWSER_DELETE = (
+    Path(REPO_ROOT)
+    / "desktop"
+    / "src"
+    / "windows_vault_browser"
+    / "delete_restore.py"
+)
 
 
 class UiOffloadSmokeTests(unittest.TestCase):
@@ -92,6 +99,36 @@ class UiOffloadSmokeTests(unittest.TestCase):
             f"verify_recovery_kit must not be invoked inline; saw: {inline_calls}",
         )
 
+    def test_browser_delete_folder_routes_through_fresh_unlock_and_typed_confirm(self) -> None:
+        """§6.C4: Vault Browser per-row "Delete folder contents" must
+        run through ``require_fresh_unlock_or_prompt`` AND open an
+        AlertDialog with a typed-confirm Entry. Pre-fix the hamburger
+        skipped both — quiet bypass of the Danger tab's gates."""
+        source = BROWSER_DELETE.read_text()
+        handler_body = _slice_function(source, "def _confirm_delete_folder(")
+        self.assertIn(
+            "require_fresh_unlock_or_prompt", handler_body,
+            "_confirm_delete_folder must gate on fresh-unlock",
+        )
+        # Confirm-text helper invoked in the confirm-dialog branch.
+        confirm_body = _slice_function(
+            source, "def _open_delete_folder_confirm_dialog(",
+        )
+        self.assertIn(
+            "confirm_folder_clear_text_matches", confirm_body,
+            "the post-fresh-unlock dialog must use the typed-confirm helper",
+        )
+        self.assertIn(
+            "Gtk.Entry", confirm_body,
+            "the confirm dialog must include a Gtk.Entry for typed-confirm",
+        )
+        # The "delete" response must start disabled until the user
+        # types the folder name correctly.
+        self.assertIn(
+            'set_response_enabled("delete", False)', confirm_body,
+            "the Delete response must start disabled (typed-confirm gate)",
+        )
+
     def test_onboard_retry_publish_uses_worker_thread(self) -> None:
         """§6.C3: the "Retry publish" handler must run the relay POST
         inside a worker so a flaky relay doesn't freeze the wizard."""
@@ -116,17 +153,35 @@ class UiOffloadSmokeTests(unittest.TestCase):
 
 
 def _slice_function(source: str, header: str) -> str:
-    """Return the body of a function whose def-line starts with ``header``."""
+    """Return the body of a function whose def-line starts with ``header``.
+
+    Supports multi-line def headers (parameters wrapped across lines):
+    skip ahead until we find the colon-terminator that introduces the
+    function body, then slice from there.
+    """
     idx = source.find(header)
     if idx == -1:
         raise AssertionError(f"function not found: {header}")
-    # Capture the leading whitespace of the def line as the base indent.
     line_start = source.rfind("\n", 0, idx) + 1
     base_indent = idx - line_start
-    # Walk forward until we find a non-blank line at indent <= base_indent.
-    body_start = source.index("\n", idx) + 1
-    cursor = body_start
+    # Find the colon that closes the def signature. For multi-line
+    # headers Python requires the close-paren+":"+newline pattern at
+    # the same outer indent as the def keyword; walk forward
+    # paren-balanced and stop at the first ":" at depth 0.
+    depth = 0
+    cursor = idx + len(header) - 1   # position of the opening paren
+    while cursor < len(source):
+        ch = source[cursor]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            break
+        cursor += 1
+    body_start = source.index("\n", cursor) + 1
     body_lines: list[str] = []
+    cursor = body_start
     while cursor < len(source):
         eol = source.find("\n", cursor)
         if eol == -1:
