@@ -822,7 +822,17 @@ class VaultController
         $db->execute('BEGIN IMMEDIATE');
         $result = null;
         try {
-            if ($chunksRepo->head($vaultId, $chunkId) === null) {
+            // Review §1.C1: a purged row had its bytes freed at gc/execute
+            // time, so a re-upload must re-reserve quota even though the row
+            // metadata still exists. Active/retained/gc_pending rows keep
+            // their bytes accounted; only a missing row OR a purged row
+            // counts as fresh allocation here.
+            $existing = $chunksRepo->head($vaultId, $chunkId);
+            $needsReserve = (
+                $existing === null
+                || (string)$existing['state'] === VaultChunksRepository::STATE_PURGED
+            );
+            if ($needsReserve) {
                 if (!$vaultsRepo->reserveCiphertextBytes($vaultId, $size, $now)) {
                     $db->execute('ROLLBACK');
                     $vault = $vaultsRepo->getById($vaultId);

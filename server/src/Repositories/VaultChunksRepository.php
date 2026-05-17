@@ -118,8 +118,36 @@ class VaultChunksRepository
                     "chunk_id {$chunkId} already stored with a different hash"
                 );
             }
-            // Byte-identical re-upload. Bump last_referenced_at so the
-            // GC sweep doesn't evict it as cold.
+            $existingState = (string)$existing['state'];
+            // F-S01 fix (review §1.C1): purged rows have lost their on-disk
+            // blob (gcExecute unlinked it); gc_pending rows are scheduled to
+            // lose it. Reviving means flipping back to active and signalling
+            // the controller to perform the disk write so the manifest
+            // reference doesn't dangle. Returning 'already_exists' here
+            // would 200 the caller with no blob on disk → silent corruption.
+            if (
+                $existingState === self::STATE_PURGED
+                || $existingState === self::STATE_GC_PENDING
+            ) {
+                $this->db->execute(
+                    'UPDATE vault_chunks
+                     SET state = :state,
+                         storage_path = :path,
+                         last_referenced_at = :now
+                     WHERE vault_id = :vid AND chunk_id = :cid',
+                    [
+                        ':state' => self::STATE_ACTIVE,
+                        ':path'  => $storagePath,
+                        ':now'   => $now,
+                        ':vid'   => $vaultId,
+                        ':cid'   => $chunkId,
+                    ]
+                );
+                return 'created';
+            }
+            // Byte-identical re-upload of an active/retained row. Blob
+            // is still on disk; bump last_referenced_at so the GC sweep
+            // doesn't evict it as cold.
             $this->db->execute(
                 'UPDATE vault_chunks
                  SET last_referenced_at = :now

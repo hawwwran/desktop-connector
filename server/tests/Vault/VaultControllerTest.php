@@ -829,6 +829,74 @@ final class VaultControllerTest extends TestCase
         );
     }
 
+    /**
+     * Regression for review §1.C1. Sequence:
+     *   1. PUT chunk → 201, blob on disk, bytes counted.
+     *   2. gc/plan + gc/execute → row 'purged', blob unlinked, bytes freed.
+     *   3. PUT chunk again with identical bytes.
+     * Pre-fix: head() returned the purged row, controller skipped reserve,
+     * put() returned 'already_exists', controller 200'd with no disk write.
+     * Post-fix: row flips back to 'active', controller re-reserves bytes
+     * and writes the blob, status is 201, and a follow-up GET succeeds.
+     */
+    public function test_putChunk_after_gc_purge_revives_blob(): void
+    {
+        $chunkId = 'ch_v1_repurge234abcdefghijklmn';
+        $bytes = 're-upload-after-purge-bytes';
+
+        $this->uploadChunk($chunkId, $bytes);
+        self::assertFileExists(VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId));
+
+        $planRes = $this->invoke(fn() => VaultController::gcPlan(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                'root_revision'       => 1,
+                'encrypted_gc_auth'   => 'x',
+                'candidate_chunk_ids' => [$chunkId],
+            ])
+        ));
+        $planId = $planRes['json']['data']['plan_id'];
+        $this->invoke(fn() => VaultController::gcExecute(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], ['plan_id' => $planId])
+        ));
+
+        self::assertFileDoesNotExist(VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId));
+        $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
+        self::assertSame(0, (int)$vault['used_ciphertext_bytes']);
+        self::assertSame(0, (int)$vault['chunk_count']);
+        $purged = (new VaultChunksRepository($this->db))->get(self::VAULT_ID, $chunkId);
+        self::assertNotNull($purged);
+        self::assertSame(VaultChunksRepository::STATE_PURGED, $purged['state']);
+
+        // Re-upload the same chunk: must restore disk + counters.
+        $res = $this->invoke(fn() => VaultController::putChunk(
+            $this->db,
+            $this->ctx('PUT', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId], $bytes)
+        ));
+        self::assertSame(201, $res['status'], 'purged-row re-upload must be treated as fresh insert');
+        self::assertTrue($res['json']['data']['stored']);
+
+        $absPath = VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId);
+        self::assertFileExists($absPath);
+        self::assertSame($bytes, file_get_contents($absPath));
+
+        $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
+        self::assertSame(strlen($bytes), (int)$vault['used_ciphertext_bytes']);
+        self::assertSame(1, (int)$vault['chunk_count']);
+
+        $revived = (new VaultChunksRepository($this->db))->get(self::VAULT_ID, $chunkId);
+        self::assertSame(VaultChunksRepository::STATE_ACTIVE, $revived['state']);
+
+        // GET must serve the byte-identical blob (was 404 pre-fix).
+        $getRes = $this->invoke(fn() => VaultController::getChunk(
+            $this->db,
+            $this->ctx('GET', ['vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId])
+        ));
+        self::assertSame(200, $getRes['status']);
+        self::assertSame($bytes, $getRes['raw']);
+    }
+
     // ===================================================================
     //  6.9 GET /api/vaults/{id}/chunks/{chunk_id}
     // ===================================================================
