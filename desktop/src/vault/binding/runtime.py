@@ -489,15 +489,29 @@ class VaultHttpRelay:
         except Exception as exc:
             raise RuntimeError("Relay returned an invalid migration-commit response.") from exc
 
-    def gc_plan(self, vault_id, vault_access_secret, *, root_revision, candidate_chunk_ids):
+    def gc_plan(
+        self,
+        vault_id,
+        vault_access_secret,
+        *,
+        root_revision,
+        candidate_chunk_ids,
+        purpose="sync",
+    ):
+        # Review §3.C1: ``purpose='forced_eviction'`` flags an eviction
+        # stage 2/3 plan (unexpired tombstones or historical versions),
+        # which the relay then gates behind role=admin on /gc/execute.
+        body = {
+            "root_revision": int(root_revision),
+            "candidate_chunk_ids": list(candidate_chunk_ids),
+        }
+        if purpose != "sync":
+            body["purpose"] = str(purpose)
         resp = self._conn.request(
             "POST",
             f"/api/vaults/{vault_id}/gc/plan",
             headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
-            json={
-                "root_revision": int(root_revision),
-                "candidate_chunk_ids": list(candidate_chunk_ids),
-            },
+            json=body,
         )
         if resp is None:
             raise RuntimeError("Could not reach the relay while planning vault GC.")

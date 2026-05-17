@@ -24,9 +24,10 @@ class VaultGcJobsRepository
     public const STATE_EXPIRED   = 'expired';
     public const STATE_FAILED    = 'failed';
 
-    public const KIND_SYNC_PLAN       = 'sync_plan';
-    public const KIND_EXPIRY_PLAN     = 'expiry_plan';
-    public const KIND_SCHEDULED_PURGE = 'scheduled_purge';
+    public const KIND_SYNC_PLAN        = 'sync_plan';
+    public const KIND_EXPIRY_PLAN      = 'expiry_plan';
+    public const KIND_FORCED_EVICTION  = 'forced_eviction';
+    public const KIND_SCHEDULED_PURGE  = 'scheduled_purge';
 
     public function __construct(private Database $db) {}
 

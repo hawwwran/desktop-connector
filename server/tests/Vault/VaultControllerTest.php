@@ -1130,6 +1130,95 @@ final class VaultControllerTest extends TestCase
         );
     }
 
+    /**
+     * Review §3.C1: gcPlan with purpose='forced_eviction' must require
+     * role=admin (the call is a hard-purge plan for eviction stages
+     * 2/3). A sync-only device is forbidden from creating such a
+     * plan — the corresponding eviction stages stay sync-driven only
+     * for the safe stage-1 expired-tombstone case.
+     */
+    public function test_gcPlan_forced_eviction_forbidden_for_sync(): void
+    {
+        $this->demoteCaller('sync');
+        try {
+            VaultController::gcPlan(
+                $this->db,
+                $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                    'root_revision'       => 1,
+                    'encrypted_gc_auth'   => 'x',
+                    'candidate_chunk_ids' => [],
+                    'purpose'             => 'forced_eviction',
+                ])
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertSame('admin', $e->details['required_role']);
+        }
+    }
+
+    /**
+     * Review §3.C1: a sync-only device that somehow got hold of an
+     * admin-issued forced_eviction plan id still fails at gc/execute.
+     * Defense-in-depth: gcExecute looks up the job kind and enforces
+     * admin on KIND_FORCED_EVICTION independently of the planner's
+     * role check.
+     */
+    public function test_gcExecute_forced_eviction_forbidden_for_sync(): void
+    {
+        // Plan as admin (default seeded role), then demote and try to execute.
+        $planRes = $this->invoke(fn() => VaultController::gcPlan(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                'root_revision'       => 1,
+                'encrypted_gc_auth'   => 'x',
+                'candidate_chunk_ids' => [],
+                'purpose'             => 'forced_eviction',
+            ])
+        ));
+        $planId = $planRes['json']['data']['plan_id'];
+        $this->demoteCaller('sync');
+        try {
+            VaultController::gcExecute(
+                $this->db,
+                $this->jctx('POST', ['vault_id' => self::VAULT_ID], ['plan_id' => $planId])
+            );
+            self::fail('expected VaultPurgeNotAllowedError');
+        } catch (VaultPurgeNotAllowedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertStringContainsString('admin', $e->getMessage());
+        }
+    }
+
+    /**
+     * Review §3.C1: admin device with purpose='forced_eviction'
+     * succeeds end-to-end. Confirms the admin-gated path still works.
+     */
+    public function test_gcExecute_forced_eviction_admin_succeeds(): void
+    {
+        $cid = 'ch_v1_forcedevict234abcdefghij';
+        $bytes = 'evict-me';
+        $this->uploadChunk($cid, $bytes);
+
+        $planRes = $this->invoke(fn() => VaultController::gcPlan(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                'root_revision'       => 1,
+                'encrypted_gc_auth'   => 'x',
+                'candidate_chunk_ids' => [$cid],
+                'purpose'             => 'forced_eviction',
+            ])
+        ));
+        $planId = $planRes['json']['data']['plan_id'];
+
+        $res = $this->invoke(fn() => VaultController::gcExecute(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], ['plan_id' => $planId])
+        ));
+        self::assertSame(200, $res['status']);
+        self::assertSame(1, $res['json']['data']['deleted_count']);
+    }
+
     // ===================================================================
     //  6.14 POST /api/vaults/{id}/gc/cancel
     // ===================================================================

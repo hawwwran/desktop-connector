@@ -1434,7 +1434,15 @@ class FakeUploadRelay:
         return self.chunks[chunk_id]
 
     # --- gc relay (T7.5) -----------------------------------------------
-    def gc_plan(self, vault_id, vault_access_secret, *, manifest_revision, candidate_chunk_ids):
+    def gc_plan(
+        self,
+        vault_id,
+        vault_access_secret,
+        *,
+        manifest_revision,
+        candidate_chunk_ids,
+        purpose="sync",
+    ):
         plan_id = f"pl_{len(getattr(self, 'gc_plans', {}))}"
         if not hasattr(self, "gc_plans"):
             self.gc_plans = {}
@@ -1447,6 +1455,7 @@ class FakeUploadRelay:
         self.gc_plans[plan_id] = {
             "manifest_revision": manifest_revision,
             "safe_to_delete": safe,
+            "purpose": purpose,
         }
         return {
             "plan_id": plan_id,

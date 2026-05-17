@@ -132,8 +132,10 @@ class ServerVaultMigrationTests(unittest.TestCase):
         self.assertTrue(body["data"]["token"].startswith("mig_v1_"))
         first_token = body["data"]["token"]
 
-        # /start the second time with the same target is idempotent — no
-        # token re-emission, 200 OK, target unchanged.
+        # Review §1.C3: /start retry by the same initiating_device with
+        # the same target now rotates the stored hash and emits a fresh
+        # token (so a dropped 201 from the original /start is
+        # recoverable). 200 OK, started_at preserved, new token in body.
         status, body = self._vault_request(
             "POST", f"/api/vaults/{VAULT_ID_BARE}/migration/start",
             device_id=device_id, device_token=device_token,
@@ -141,8 +143,9 @@ class ServerVaultMigrationTests(unittest.TestCase):
             body={"target_relay_url": target},
         )
         self.assertEqual(status, 200, body)
-        self.assertFalse(body["data"]["token_returned"])
-        self.assertIsNone(body["data"]["token"])
+        self.assertTrue(body["data"]["token_returned"])
+        self.assertTrue(body["data"]["token"].startswith("mig_v1_"))
+        self.assertNotEqual(body["data"]["token"], first_token)
 
         # /start with a *different* target while one is in flight 409s.
         status, body = self._vault_request(

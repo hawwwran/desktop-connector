@@ -93,6 +93,7 @@ class EvictionRelay(Protocol):
         *,
         manifest_revision: int,
         candidate_chunk_ids: list[str],
+        purpose: str = "sync",
     ) -> dict[str, Any]: ...
 
     def gc_execute(
@@ -211,7 +212,10 @@ def eviction_pass(
 
     _check_cancel("stage_2")
 
-    # Stage 2 — unexpired tombstones, oldest deleted_at first.
+    # Stage 2 — unexpired tombstones, oldest deleted_at first. Review
+    # §3.C1: this is a hard-purge — flag the plan kind so the relay
+    # requires role=admin on gc/execute (a compromised sync-only
+    # device cannot wipe data inside the 30-day grace window).
     stage_2, current_manifest = _run_stage(
         vault=vault,
         relay=relay,
@@ -220,6 +224,7 @@ def eviction_pass(
         candidates_fn=_unexpired_tombstone_candidates,
         event="vault.eviction.tombstone_purged_early",
         local_index=local_index,
+        purpose="forced_eviction",
     )
     if stage_2 is not None:
         stages.append(stage_2)
@@ -238,6 +243,7 @@ def eviction_pass(
     _check_cancel("stage_3")
 
     # Stage 3 — oldest historical version of multi-version live files.
+    # Review §3.C1: this is also a hard-purge; admin-gated on the relay.
     stage_3, current_manifest = _run_stage(
         vault=vault,
         relay=relay,
@@ -246,6 +252,7 @@ def eviction_pass(
         candidates_fn=_oldest_version_candidates,
         event="vault.eviction.version_purged",
         local_index=local_index,
+        purpose="forced_eviction",
     )
     if stage_3 is not None:
         stages.append(stage_3)
@@ -299,8 +306,14 @@ def _run_stage(
     candidates_fn: CandidatesFn,
     event: str,
     local_index: Any,
+    purpose: str = "sync",
 ) -> tuple[EvictionStageResult | None, dict[str, Any]]:
-    """Execute one eviction stage; return result + (possibly) updated manifest."""
+    """Execute one eviction stage; return result + (possibly) updated manifest.
+
+    ``purpose='forced_eviction'`` flags stages 2/3 as hard-purges so the
+    relay can gate them behind role=admin (review §3.C1); stage 1
+    expired-tombstone housekeeping keeps the default sync role.
+    """
     batch = candidates_fn(manifest)
     if batch is None or not batch.chunk_ids:
         return None, manifest
@@ -314,6 +327,7 @@ def _run_stage(
         vault.vault_access_secret,
         manifest_revision=revision,
         candidate_chunk_ids=list(batch.chunk_ids),
+        purpose=purpose,
     )
     safe_to_delete = list(plan.get("safe_to_delete") or [])
     # Phase H step 7d crash-recovery: ``already_deleted_chunk_ids`` is the

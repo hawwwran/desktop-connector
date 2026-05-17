@@ -1068,12 +1068,33 @@ class VaultController
     {
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
-        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'sync');
+        $callerDevice = (string)($ctx->deviceId ?? "");
+        VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'sync');
         self::guardReadOnly($vault);
 
         $body = $ctx->jsonBody();
         $rootRevision = Validators::requireInt($body, 'root_revision');
         $candidateIds = $body['candidate_chunk_ids'] ?? null;
+
+        // Review §3.C1: eviction stages 2/3 are hard-purges (unexpired
+        // tombstones, oldest historical versions) — they must be gated
+        // behind admin role, not the default sync role. Clients flag
+        // such plans via ``purpose='forced_eviction'``; gcExecute then
+        // enforces admin on the resulting job. ``purpose='sync'`` (the
+        // default) keeps the historical sync_plan behaviour for the
+        // safe stage-1 expired-tombstone path.
+        $purpose = isset($body['purpose']) && is_string($body['purpose'])
+            ? $body['purpose']
+            : 'sync';
+        if (!in_array($purpose, ['sync', 'forced_eviction'], true)) {
+            throw new VaultInvalidRequestError(
+                "purpose must be 'sync' or 'forced_eviction'",
+                'purpose'
+            );
+        }
+        if ($purpose === 'forced_eviction') {
+            VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
+        }
         if (!is_array($candidateIds)) {
             throw new VaultInvalidRequestError('candidate_chunk_ids must be array', 'candidate_chunk_ids');
         }
@@ -1127,10 +1148,13 @@ class VaultController
         $deviceId  = (string)($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
 
         $jobsRepo = new VaultGcJobsRepository($db);
+        $jobKind = $purpose === 'forced_eviction'
+            ? VaultGcJobsRepository::KIND_FORCED_EVICTION
+            : VaultGcJobsRepository::KIND_SYNC_PLAN;
         $jobsRepo->create(
             $jobId,
             $vaultId,
-            VaultGcJobsRepository::KIND_SYNC_PLAN,
+            $jobKind,
             $safe,
             null,
             $expiresAt,
@@ -1205,7 +1229,12 @@ class VaultController
 
         // §6.13: sync GC requires role=sync; scheduled_purge requires
         // role=admin AND a valid purge_secret (vault_purge_not_allowed
-        // covers both the role gap and a wrong-secret).
+        // covers both the role gap and a wrong-secret). Review §3.C1:
+        // forced_eviction (eviction stages 2/3) is a hard-purge — it
+        // requires role=admin too, but does NOT yet enforce
+        // purge_secret (the desktop's 507-quota flow has no passphrase
+        // prompt yet; that's tracked as the spec-conformance follow-up
+        // in docs/plans/review-doubts.md §3.C1).
         $callerDevice = (string)($ctx->deviceId ?? "");
         if ($job['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE) {
             try {
@@ -1224,6 +1253,14 @@ class VaultController
                 hash('sha256', $purgeSecret, true)
             )) {
                 throw new VaultPurgeNotAllowedError('purge_secret does not match');
+            }
+        } elseif ($job['kind'] === VaultGcJobsRepository::KIND_FORCED_EVICTION) {
+            try {
+                VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
+            } catch (VaultAccessDeniedError $e) {
+                throw new VaultPurgeNotAllowedError(
+                    'forced eviction requires role=admin'
+                );
             }
         } else {
             VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'sync');
@@ -1350,12 +1387,17 @@ class VaultController
                 // toggle-OFF retries (§A17) don't error.
                 continue;
             }
-            if ($row['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE) {
+            if (
+                $row['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE
+                || $row['kind'] === VaultGcJobsRepository::KIND_FORCED_EVICTION
+            ) {
                 try {
                     VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
                 } catch (VaultAccessDeniedError $e) {
+                    $label = $row['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE
+                        ? 'scheduled_purge' : 'forced_eviction';
                     throw new VaultPurgeNotAllowedError(
-                        'cancelling a scheduled_purge requires role=admin'
+                        "cancelling a {$label} requires role=admin"
                     );
                 }
             } else {

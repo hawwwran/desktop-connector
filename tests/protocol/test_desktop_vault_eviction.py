@@ -312,6 +312,58 @@ class VaultEvictionPassTests(unittest.TestCase):
         # Manifest no longer references the stranded entry.
         self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "stranded.txt"))
 
+    def test_stage_purposes_match_destructiveness(self) -> None:
+        """Review §3.C1: stage 1 sends purpose='sync'; stages 2/3 send
+        purpose='forced_eviction' so the relay can gate them at admin
+        role. Asserting on the recorded purposes ensures a refactor
+        can't silently relabel a hard-purge as housekeeping.
+        """
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay()
+        vault = _vault()
+        try:
+            seed_sharded_state_from_manifest(vault, relay, manifest)
+            for path, deleted_at in [
+                ("expired.txt", "2026-04-01T10:00:00.000Z"),
+                ("fresh.txt", "2026-05-03T10:00:00.000Z"),
+            ]:
+                local = self.tmpdir / path
+                local.write_bytes(f"content for {path}".encode("utf-8"))
+                head = _decrypt_current_manifest(vault, relay) if relay.root_envelope else manifest
+                uploaded = upload_file(
+                    vault=vault, relay=relay, manifest=head, local_path=local,
+                    remote_folder_id=DOCS_ID, remote_path=path,
+                    author_device_id=AUTHOR,
+                )
+                delete_file(
+                    vault=vault, relay=relay, manifest=uploaded.manifest,
+                    remote_folder_id=DOCS_ID, remote_path=path,
+                    author_device_id=AUTHOR, deleted_at=deleted_at,
+                )
+
+            current = _decrypt_current_manifest(vault, relay)
+            target = sum(len(v) for v in relay.chunks.values()) + 1
+            eviction_pass(
+                vault=vault, relay=relay, manifest=current,
+                author_device_id=AUTHOR,
+                target_bytes_to_free=target,
+                now_iso="2026-05-04T12:00:00.000Z",
+            )
+        finally:
+            vault.close()
+
+        purposes = [plan["purpose"] for plan in relay.gc_plans.values()]
+        # Stage 1 (expired tombstone) — sync.
+        self.assertIn("sync", purposes)
+        # Stage 2 (unexpired tombstone, hard-purge) — forced_eviction.
+        self.assertIn("forced_eviction", purposes)
+        # Every plan in stages that the relay would gate on admin must
+        # carry the destructive label.
+        sync_plans = [p for p in purposes if p == "sync"]
+        forced_plans = [p for p in purposes if p == "forced_eviction"]
+        self.assertGreaterEqual(len(sync_plans), 1)
+        self.assertGreaterEqual(len(forced_plans), 1)
+
 
 def _vault() -> Vault:
     return Vault(
