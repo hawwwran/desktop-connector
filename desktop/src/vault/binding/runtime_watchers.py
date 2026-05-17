@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..atomic import sweep_orphan_temp_files
-from .lifecycle import pause_binding
+from .lifecycle import BindingCancellationRegistry, pause_binding
 from .bindings import VaultBindingsStore
 from .filesystem_watcher import (
     WatcherCoordinator,
@@ -56,6 +56,13 @@ class VaultWatcherRuntime:
 
     vault_id: str
     store: VaultBindingsStore
+    # Review §3.C2: shared with the caller's sync cycle driver
+    # (typically the tray's autosync loop). When the ransomware
+    # detector trips, ``_on_tripped`` routes the pause through
+    # ``pause_binding(..., cancellation=registry)`` so an in-flight
+    # cycle observes the bail signal at its next checkpoint instead
+    # of bleeding tombstones to completion.
+    cancellation_registry: BindingCancellationRegistry | None = None
     bindings: dict[str, _BindingRuntime] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _ransomware_callback: Callable[[str], None] | None = None
@@ -173,7 +180,18 @@ class VaultWatcherRuntime:
                 return
             runtime.paused_for_ransomware = True
         try:
-            pause_binding(self.store, binding_id)
+            # Review §3.C2: thread the cancellation registry into
+            # pause_binding so an in-flight backup-only / two-way cycle
+            # observes the bail signal before its next chunk/op checkpoint
+            # and stops bleeding deletes/tombstones. pause_binding itself
+            # calls registry.cancel(binding_id) prior to the DB state flip,
+            # so the cycle's should_continue sees the trip the moment the
+            # current chunk finishes.
+            pause_binding(
+                self.store,
+                binding_id,
+                cancellation=self.cancellation_registry,
+            )
         except Exception:  # noqa: BLE001
             log.exception(
                 "vault.sync.ransomware_pause_failed binding=%s", binding_id,

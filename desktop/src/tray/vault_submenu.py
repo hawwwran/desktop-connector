@@ -165,6 +165,7 @@ class VaultSubmenuMixin:
             try:
                 from ..vault.binding.runtime_watchers import VaultWatcherRuntime
                 from ..vault.binding.bindings import VaultBindingsStore
+                from ..vault.binding.lifecycle import BindingCancellationRegistry
                 from ..vault.state.local_index import VaultLocalIndex
                 from ..vault.folder.runtime import VaultRuntime
                 vault_id = str(
@@ -175,9 +176,16 @@ class VaultSubmenuMixin:
                 if self._vault_watcher_runtime is None:
                     local_index = VaultLocalIndex(self.config.config_dir)
                     store = VaultBindingsStore(local_index.db_path)
+                    # Review §3.C2: share one registry between the watcher
+                    # runtime (whose ransomware-trip handler calls
+                    # pause_binding) and the autosync flush below — so a
+                    # detector trip bails the in-flight cycle instead of
+                    # letting it keep draining tombstones to completion.
+                    self._vault_cancellation_registry = BindingCancellationRegistry()
                     self._vault_watcher_runtime = VaultWatcherRuntime(
                         vault_id=vault_id,
                         store=store,
+                        cancellation_registry=self._vault_cancellation_registry,
                     )
                     # F-LT06: hold the GTK-free VaultRuntime alongside
                     # the watcher runtime so the autosync loop can call
@@ -311,22 +319,42 @@ class VaultSubmenuMixin:
                 str(self.config.device_name or "").strip() or "this device"
             )
 
+            cancellation_registry = getattr(
+                self, "_vault_cancellation_registry", None,
+            )
             for binding in active_bindings:
                 if self._should_quit.is_set():
                     return
+                # Review §3.C2: register this cycle on the shared
+                # cancellation registry so the watcher runtime's
+                # ransomware-trip handler (pause_binding via
+                # registry.cancel) can interrupt it. The should_continue
+                # closure consults both the global quit event AND this
+                # per-binding event.
+                cancel_event = (
+                    cancellation_registry.register(binding.binding_id)
+                    if cancellation_registry is not None
+                    else None
+                )
                 result = None
                 try:
                     result = autosync_runtime.flush_and_sync_binding(
                         binding_id=binding.binding_id,
                         author_device_id=author_device_id,
                         device_name=device_name,
-                        should_continue=lambda: not self._should_quit.is_set(),
+                        should_continue=lambda ev=cancel_event: (
+                            not self._should_quit.is_set()
+                            and (ev is None or not ev.is_set())
+                        ),
                     )
                 except Exception:  # noqa: BLE001
                     log.exception(
                         "vault.sync.autosync_flush_failed binding=%s",
                         binding.binding_id,
                     )
+                finally:
+                    if cancellation_registry is not None:
+                        cancellation_registry.clear(binding.binding_id)
                 if result is None:
                     continue
                 outcomes = getattr(result, "outcomes", []) or []
