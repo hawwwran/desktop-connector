@@ -122,11 +122,21 @@ class VaultRuntime:
                 self._lock.release()
 
     def fetch_manifest(self) -> dict:
-        """Read the current manifest. Used by usage-refresh and the
-        Connect-folder dialog precondition."""
+        """Read the current unified manifest. Used by usage-refresh and
+        the Connect-folder dialog precondition.
+
+        Phase H step 7b: backed by ``vault.fetch_unified_manifest``
+        (root + per-folder shards, assembled into the legacy unified
+        shape) so callers' walks over ``remote_folders`` /
+        ``entries`` keep working. The ``fetch_unified_manifest``
+        wrapper itself disappears in step 7f along with the legacy
+        shape — at that point the runtime exposes ``fetch_root`` +
+        ``fetch_folder_shard`` directly and callers walk shards
+        lazily.
+        """
         relay = self._relay_factory(self._config)
         with self._open_serialized() as vault:
-            return vault.fetch_manifest(relay, local_index=self._local_index)
+            return vault.fetch_unified_manifest(relay, local_index=self._local_index)
 
     def add_remote_folder(
         self,
@@ -228,7 +238,7 @@ class VaultRuntime:
         """
         relay = self._relay_factory(self._config)
         with self._open_serialized() as vault:
-            manifest = vault.fetch_manifest(
+            manifest = vault.fetch_unified_manifest(
                 relay, local_index=self._local_index,
             )
             store = VaultBindingsStore(self._local_index.db_path)

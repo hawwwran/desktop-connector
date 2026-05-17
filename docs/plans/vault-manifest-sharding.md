@@ -814,15 +814,17 @@ Remaining Plan A checklist:
     The unrelated ``manifest-v1-legacy-no-remote-folders`` test
     vector is no longer referenced from this file.
 
-  * **7b — Production: ``folder/runtime.py``, ``ui/browser_model.py``.**
-    Both are read-mostly. ``folder/runtime.py`` is a
-    ``VaultFolderRuntime`` facade exposing ``fetch_manifest()``;
-    flip it to fetch root + on-demand shards. ``ui/browser_model.py``
-    has one legacy ref (``find_file_entry``) inside
-    ``detect_path_conflict``; either inline a shard-scoped variant
-    or have the caller pass a shard slice. ``decrypt_manifest``
-    helper stays — it's the envelope decoder used by both
-    pre-port and post-port code.
+  * [x] **7b** (2026-05-17) — Production: ``folder/runtime.py``,
+    ``ui/browser_model.py``. ``VaultRuntime.fetch_manifest`` and
+    ``run_initial_baseline`` now go through
+    ``vault.fetch_unified_manifest`` (root + per-folder shards,
+    assembled). ``vault.fetch_unified_manifest`` itself disappears
+    in step 7f. ``ui/browser_model.py`` needed no port — it's
+    just helpers (``decrypt_manifest`` envelope decoder,
+    ``list_folder`` renderer, ``detect_path_conflict``); no
+    publish/fetch calls. The ``FakeVault`` in
+    ``test_desktop_vault_folder_runtime.py`` was renamed to
+    ``fetch_unified_manifest`` to match.
 
   * **7c — Production: ``import_/runner.py``.** The vault export →
     vault import flow. Reads source vault state, writes to target

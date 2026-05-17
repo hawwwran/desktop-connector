@@ -52,7 +52,7 @@ class FakeVault:
         self.add_result: dict = {"after_add": True}
         self.rename_result: dict = {"after_rename": True}
 
-    def fetch_manifest(self, relay, *, local_index):
+    def fetch_unified_manifest(self, relay, *, local_index):
         self.calls.append(
             ("fetch_manifest", {"relay": relay, "local_index": local_index}),
         )
