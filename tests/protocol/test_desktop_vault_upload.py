@@ -1300,6 +1300,166 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         finally:
             vault.close()
 
+    def test_two_device_concurrent_folder_upload_tie_break_by_device_hash(self) -> None:
+        """§D4 tie-break must run on the folder-batch CAS-retry path.
+
+        Two devices upload folders containing the same path under the
+        same entry_id; concurrent publishes race; the loser merges via
+        the new ``_merge_additions_into_shard_with_bump`` helper which
+        re-resolves ``latest_version_id`` via
+        ``(modified_at, sha256(author_device_id))`` per §D4.
+        """
+        device_seed = "0" * 32
+        device_a = "00" * 16
+        device_b = "ff" * 16
+        same_ts = "2026-05-04T12:00:00.000Z"
+
+        # Seed: one file already at "shared/tied.txt" so both devices
+        # see the same parent entry_id E0 when they walk their folder.
+        seed_dir = self.tmpdir / "seed_folder"
+        (seed_dir / "shared").mkdir(parents=True)
+        (seed_dir / "shared" / "tied.txt").write_bytes(b"seed for tied path")
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        seed_vault = _vault()
+        try:
+            relay.current_revision = int(manifest.get("parent_revision", 0))
+            seed_vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(seed_vault, relay, manifest)
+            relay.published_manifests = []
+            relay.published_shards = []
+            relay.published_roots = []
+            shared_parent = upload_folder(
+                vault=seed_vault,
+                relay=relay,
+                manifest=manifest,
+                local_root=seed_dir,
+                remote_folder_id=DOCS_ID,
+                remote_sub_path="",
+                author_device_id=device_seed,
+                created_at="2026-05-04T11:00:00.000Z",
+            ).manifest
+        finally:
+            seed_vault.close()
+
+        # Each device has its own folder with same path, different content.
+        dir_a = self.tmpdir / "from_a"
+        (dir_a / "shared").mkdir(parents=True)
+        (dir_a / "shared" / "tied.txt").write_bytes(
+            b"alpha unique payload alpha alpha"
+        )
+        dir_b = self.tmpdir / "from_b"
+        (dir_b / "shared").mkdir(parents=True)
+        (dir_b / "shared" / "tied.txt").write_bytes(
+            b"beta unique payload beta beta beta"
+        )
+
+        from src.vault.upload.folder_state import fetch_folder_state
+        vault_a = _vault()
+        vault_b = _vault()
+        try:
+            # Snapshot B's pre-A view; pass via parent_state so B's
+            # publish 409s and runs the §D4 merge tie-break.
+            pre_a_state_b = fetch_folder_state(vault_b, relay, DOCS_ID, device_b)
+            res_a = upload_folder(
+                vault=vault_a, relay=relay, manifest=shared_parent,
+                local_root=dir_a,
+                remote_folder_id=DOCS_ID, remote_sub_path="",
+                author_device_id=device_a, created_at=same_ts,
+            )
+            res_b = upload_folder(
+                vault=vault_b, relay=relay, manifest=shared_parent,
+                local_root=dir_b,
+                remote_folder_id=DOCS_ID, remote_sub_path="",
+                author_device_id=device_b, created_at=same_ts,
+                parent_state=pre_a_state_b,
+            )
+        finally:
+            vault_a.close()
+            vault_b.close()
+
+        # Both devices used the same entry_id E0 (from the seed). The
+        # winner's version_id should land as latest after B's merge.
+        winner = max(
+            (device_a, device_b),
+            key=lambda d: hashlib.sha256(d.encode("utf-8")).digest(),
+        )
+        # Find A's and B's version_ids from their per-file upload results.
+        # Each folder upload returns one UploadResult per file uploaded.
+        a_version_id = next(
+            r.version_id for r in res_a.uploaded
+            if r.path == "shared/tied.txt"
+        )
+        b_version_id = next(
+            r.version_id for r in res_b.uploaded
+            if r.path == "shared/tied.txt"
+        )
+        expected = a_version_id if winner == device_a else b_version_id
+        entry = find_file_entry(res_b.manifest, DOCS_ID, "shared/tied.txt")
+        self.assertEqual(entry["latest_version_id"], expected)
+
+    def test_concurrent_new_file_at_same_path_renames_imported_folder_batch(self) -> None:
+        """§D4 row 1 on folder-batch CAS-retry path: two devices create
+        different files at the same path; the late publisher's entry is
+        renamed via ``_imported_rename`` per the merge helper."""
+        dir_a = self.tmpdir / "from_a"
+        (dir_a / "shared").mkdir(parents=True)
+        (dir_a / "shared" / "taken.bin").write_bytes(b"alpha alpha alpha alpha alpha")
+        dir_b = self.tmpdir / "from_b"
+        (dir_b / "shared").mkdir(parents=True)
+        (dir_b / "shared" / "taken.bin").write_bytes(b"beta beta beta beta beta beta beta")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        vault_a = _vault()
+        vault_b = _vault()
+        try:
+            relay.current_revision = int(manifest.get("parent_revision", 0))
+            vault_a.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault_a, relay, manifest)
+            relay.published_manifests = []
+            relay.published_shards = []
+            relay.published_roots = []
+            from src.vault.upload.folder_state import fetch_folder_state
+            # Snapshot B's pre-A view so its upload generates a fresh
+            # entry_id; B's CAS-retry merge then runs row-1 rename.
+            pre_a_state_b = fetch_folder_state(vault_b, relay, DOCS_ID, "b" * 32)
+            upload_folder(
+                vault=vault_a, relay=relay, manifest=manifest,
+                local_root=dir_a,
+                remote_folder_id=DOCS_ID, remote_sub_path="",
+                author_device_id="a" * 32,
+            )
+            upload_folder(
+                vault=vault_b, relay=relay, manifest=manifest,
+                local_root=dir_b,
+                remote_folder_id=DOCS_ID, remote_sub_path="",
+                author_device_id="b" * 32,
+                parent_state=pre_a_state_b,
+            )
+        finally:
+            vault_a.close()
+            vault_b.close()
+
+        # Decode the post-publish sharded state and verify both entries
+        # coexist: original "shared/taken.bin" + rename-imported variant.
+        from src.vault.manifest import assemble_unified_manifest
+        observer = _vault()
+        try:
+            root = observer.fetch_root_manifest(relay)
+            shard = observer.fetch_folder_shard(relay, DOCS_ID)
+            head = assemble_unified_manifest(root, {DOCS_ID: shard})
+        finally:
+            observer.close()
+        entry_paths = {
+            e["path"]
+            for f in head["remote_folders"]
+            if f["remote_folder_id"] == DOCS_ID
+            for e in f["entries"]
+        }
+        self.assertIn("shared/taken.bin", entry_paths)
+        self.assertIn("shared/taken (imported).bin", entry_paths)
+
 
 class SimulatedCrashError(RuntimeError):
     """Raised by ``CrashingRelay`` to model a process death mid-upload."""

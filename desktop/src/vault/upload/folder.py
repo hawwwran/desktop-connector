@@ -24,6 +24,7 @@ from ..manifest import (
     find_file_entry_in_shard,
     generate_file_entry_id,
     generate_file_version_id,
+    merge_local_version_into_shard,
     normalize_manifest_path,
     normalize_root_manifest_plaintext,
     normalize_shard_plaintext,
@@ -79,6 +80,7 @@ def upload_folder(
     progress: Callable[[FolderUploadProgress], None] | None = None,
     local_index: Any = None,
     should_continue: Callable[[], bool] | None = None,
+    parent_state: FolderState | None = None,
 ) -> FolderUploadResult:
     """Recursively upload every accepted file under ``local_root``.
 
@@ -108,8 +110,12 @@ def upload_folder(
 
     # Phase H step 4: fetch the binding's sharded state fresh; the
     # ``manifest`` kwarg is accepted for caller compatibility and
-    # ignored.
-    state = fetch_folder_state(vault, relay, remote_folder_id, author_device_id)
+    # ignored. ``parent_state`` lets §D4 acceptance tests inject a
+    # stale view so the CAS-retry merge path runs deterministically —
+    # production callers don't pass it.
+    state = parent_state if parent_state is not None else fetch_folder_state(
+        vault, relay, remote_folder_id, author_device_id,
+    )
     pointer = find_root_folder_pointer(state.root, remote_folder_id)
     if pointer is None:
         raise ValueError(f"remote folder not found: {remote_folder_id}")
@@ -440,19 +446,36 @@ def _publish_batch_with_cas_retry(
     """Apply N version additions to ``parent_state.shard`` and CAS-publish
     via ``publish_shard_with_root``.
 
-    Same retry shape as ``_publish_with_cas_retry`` but every retry
-    re-applies *all* additions on top of the freshly-decrypted server
-    shard head.
+    First attempt uses blind path-append (``_apply_additions_to_shard``)
+    — matches the pre-Phase-H semantic where a non-conflicting publish
+    is a fresh upload, no tie-break needed. On the first 409 we flip
+    ``use_merge = True`` and rebuild every retry candidate via
+    ``_merge_additions_into_shard_with_bump`` so concurrent same-path
+    uploads from different devices land with the §D4-correct
+    ``entry_id`` (collision-rename) and ``latest_version_id``
+    (tie-break by ``(modified_at, sha256(author_device_id))``).
     """
     timestamp = _now_rfc3339()
+    initial_parent = parent_state
     current_state = parent_state
+    use_merge = False
     for attempt in range(max_retries):
-        candidate_shard = _apply_additions_to_shard(
-            current_state.shard, additions,
-            remote_folder_id=remote_folder_id,
-            author_device_id=author_device_id,
-            created_at=timestamp,
-        )
+        if use_merge:
+            candidate_shard = _merge_additions_into_shard_with_bump(
+                server_shard=current_state.shard,
+                parent_shard=initial_parent.shard,
+                additions=additions,
+                remote_folder_id=remote_folder_id,
+                author_device_id=author_device_id,
+                created_at=timestamp,
+            )
+        else:
+            candidate_shard = _apply_additions_to_shard(
+                current_state.shard, additions,
+                remote_folder_id=remote_folder_id,
+                author_device_id=author_device_id,
+                created_at=timestamp,
+            )
         candidate_root = _bumped_root_for_shard_publish(
             current_state.root,
             author_device_id=author_device_id,
@@ -492,6 +515,7 @@ def _publish_batch_with_cas_retry(
                 bool(shard_envelope), bool(root_envelope),
             )
             current_state = FolderState(root=new_root, shard=new_shard)
+            use_merge = True
     raise AssertionError("unreachable: loop exits via return or raise")
 
 
@@ -524,6 +548,47 @@ def _apply_additions_to_shard(
     candidate["author_device_id"] = str(author_device_id)
     candidate["remote_folder_id"] = remote_folder_id
     return candidate
+
+
+def _merge_additions_into_shard_with_bump(
+    *,
+    server_shard: dict[str, Any],
+    parent_shard: dict[str, Any],
+    additions: list[_VersionAddition],
+    remote_folder_id: str,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """CAS-retry candidate for the folder-batch path: rebuild N version
+    additions on top of ``server_shard`` with §D4 tie-break +
+    collision-rename per addition.
+
+    Iterates ``merge_local_version_into_shard`` once per addition. Each
+    call sees the entries accumulated by previous iterations, so a
+    same-path collision among in-batch additions correctly chains
+    renames. ``parent_shard`` is the pre-attempt local snapshot used by
+    the merge for version-id deduplication.
+
+    Bumps the shard revision pair once at the end so the result is
+    directly publishable via ``publish_shard_with_root``.
+    """
+    server_n = normalize_shard_plaintext(server_shard)
+    parent_revision = int(server_n.get("shard_revision", 0))
+    merged = server_n
+    for addition in additions:
+        merged = merge_local_version_into_shard(
+            merged,
+            parent_shard=parent_shard,
+            entry_id=addition.entry_id,
+            path=addition.path,
+            version=addition.version,
+        )
+    merged["shard_revision"] = parent_revision + 1
+    merged["parent_shard_revision"] = parent_revision
+    merged["created_at"] = created_at
+    merged["author_device_id"] = str(author_device_id)
+    merged["remote_folder_id"] = remote_folder_id
+    return merged
 
 
 def _report_folder(
