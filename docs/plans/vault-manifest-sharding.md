@@ -780,3 +780,120 @@ Remaining Plan A checklist:
   ``temp/migrate_vault_to_shards.py`` + ``manifest_v1.json``
   fixture. Flip ``Vault.create_new`` back to writing a root
   envelope.
+
+  ### Step 7 sub-tasks (~5 commits worth)
+
+  Step 7 is genuinely large — its surface analysis on 2026-05-17
+  found 8 production files still on the legacy API, 9 test files
+  using the transitional ``mirror_legacy_from_sharded`` bridge,
+  one bespoke test fake (``FakeManifestRelay`` in
+  ``test_desktop_vault_folders.py``) tied to the legacy CAS shape,
+  and the server-side migration / table / endpoints. Each is
+  pulled in below as a separate commit so progress lands
+  incrementally instead of in one untested mega-diff.
+
+  * **7a — Production: ``remote_folders.py`` + ``FakeManifestRelay``.**
+    Smallest piece. ``add_remote_folder`` / ``rename_remote_folder``
+    / ``update_remote_folder_settings`` all mutate the root
+    folder-pointer set — a clean ``publish_root_manifest`` port.
+    Blocked on porting ``FakeManifestRelay`` to also expose
+    ``get_root`` / ``put_root`` so the legacy CAS-tracking
+    assertions in ``test_desktop_vault_folders.py``
+    (``put_calls[0]["expected_current_revision"]`` etc.) can be
+    flipped to root-revision counters. The relay can be built
+    around ``publish_root_manifest``'s wire shape; the manifest
+    vector fixture stays for now.
+
+  * **7b — Production: ``folder/runtime.py``, ``ui/browser_model.py``.**
+    Both are read-mostly. ``folder/runtime.py`` is a
+    ``VaultFolderRuntime`` facade exposing ``fetch_manifest()``;
+    flip it to fetch root + on-demand shards. ``ui/browser_model.py``
+    has one legacy ref (``find_file_entry``) inside
+    ``detect_path_conflict``; either inline a shard-scoped variant
+    or have the caller pass a shard slice. ``decrypt_manifest``
+    helper stays — it's the envelope decoder used by both
+    pre-port and post-port code.
+
+  * **7c — Production: ``import_/runner.py``.** The vault export →
+    vault import flow. Reads source vault state, writes to target
+    vault. Currently composes ``upload_file`` (already sharded
+    post-step 4) with ``publish_manifest`` for the merged
+    manifest. Port the publish to ``publish_root_manifest`` for
+    the folder-set merge + ``publish_shard_with_root`` for any
+    per-folder entry merges.
+
+  * **7d — Production: ``ops/eviction.py``.** The tricky one.
+    Stage 1 (expired tombstones) can span multiple folders; that
+    no longer fits ``publish_shard_with_root``'s one-folder scope
+    cleanly. Two design options:
+    (1) Per-affected-folder publishes — loses the atomic-stage
+        semantics but is the only fit for the current wire
+        surface; stages become "publish N shards in sequence";
+        partial failures leave a coherent vault (each shard
+        publish is its own CAS).
+    (2) A new ``publish_multi_shard_with_root`` endpoint — cleaner
+        but adds server-side scope.
+    Option 1 is the pragmatic call. Stage 2 + 3 are already
+    single-folder; just port them via the same pattern as ops/
+    delete.py.
+
+  * **7e — Production: ``ops/integrity.py``.** Read-only.
+    ``run_quick_check`` and ``run_full_check`` use
+    ``vault.fetch_manifest`` to grab the head + walk chunk refs;
+    port to ``fetch_root_manifest`` + iterate all
+    ``fetch_folder_shard`` calls + assemble. ``run_full_check``'s
+    historical-revision walk (``relay.list_manifest_revisions``)
+    needs a sharded equivalent ``list_root_revisions`` +
+    ``list_shard_revisions`` — possibly new server endpoints, or
+    a flag to skip historical scope until the server side lands.
+
+  * **7f — Vault class + tests + server: nuke the legacy surface.**
+    Once 7a–7e land:
+    - Drop ``Vault.fetch_manifest`` / ``publish_manifest`` /
+      ``decrypt_manifest`` shims (the latter is the
+      envelope-only helper still used by tests — keep that one,
+      since it's the public envelope decoder).
+    - Drop the legacy fields from ``UploadVault`` / ``DeleteVault``
+      / ``IntegrityVault`` Protocols — narrow them.
+    - Drop ``assemble_unified_manifest`` (no more synthesis
+      needed once UploadResult / FolderUploadResult expose
+      ``.root`` + ``.shard`` directly — that field rename is
+      part of this commit). Drop ``fetch_unified_manifest`` from
+      ``Vault``.
+    - Drop legacy ``make_manifest`` /
+      ``add_remote_folder`` (manifest helper) /
+      ``rename_remote_folder`` / ``tombstone_file_entry`` /
+      ``add_or_append_file_version`` /
+      ``merge_with_remote_head`` from
+      ``desktop/src/vault/manifest.py`` — the sharded ``_in_shard``
+      variants stay.
+    - Drop the test-side ``seed_sharded_state_from_manifest`` +
+      ``mirror_legacy_from_sharded`` helpers in
+      ``test_desktop_vault_upload.py`` — they're only needed
+      while the legacy mirror exists. Tests that called them
+      either drop those calls (sharded-only) or migrate to a
+      pure sharded ``seed_sharded_state(vault, relay, *,
+      remote_folders=[...])`` that doesn't take a unified
+      manifest.
+    - Drop ``relay.put_manifest`` / ``get_manifest`` from
+      ``FakeUploadRelay`` (and the dup in
+      ``test_desktop_vault_folders.py``).
+    - Server: drop ``vault_manifests`` table + the
+      ``GET/PUT /api/vaults/{id}/manifest`` endpoints +
+      ``Vault.create_new``'s legacy manifest write — flip back
+      to root + empty-folders genesis-root.
+    - Drop ``temp/migrate_vault_to_shards.py`` +
+      ``tests/protocol/test_temp_migrate_vault_to_shards.py`` +
+      ``tests/protocol/vault-v1/manifest_v1.json`` once nothing
+      references them.
+
+  ### Out-of-scope until next phase
+
+  The legacy ``vault-v1`` cross-runtime test vectors live at
+  ``tests/protocol/vault-v1/*.json``. ``manifest_v1.json``
+  encodes the single-manifest envelope shape — the
+  ``test_vault_v1_vectors.py`` runner walks all of them. Step 7f
+  removes the legacy fixture + its runner case but leaves
+  ``root_v1.json`` and ``shard_v1.json`` (the sharded
+  successors, landed in Phase A). Other runtimes will adopt the
+  same vectors when they port.
