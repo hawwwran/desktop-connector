@@ -48,7 +48,9 @@ from .sync import (
     SyncOpOutcome,
     SyncVault,
     _BatchEntry,
+    _BindingFolderState,
     _fetch_folder_state,
+    _find_root_folder_pointer,
     _flush_batch,
     _prepare_op_for_batch,
 )
@@ -96,7 +98,7 @@ def run_two_way_cycle(
     same primitives as :func:`run_backup_only_cycle`. The key
     difference from backup-only: batches use ``max_retries=0`` — on
     CAS conflict we abort the batch and break Phase B early so the
-    outer iteration loop re-runs Phase A on the fresh head. Phase A
+    outer iteration loop re-runs Phase A on the refreshed state. Phase A
     is where the §D4 keep-both conflict-rename detection lives;
     blind CAS-replay (the backup-only behavior) would skip that
     detection and silently overwrite a concurrent writer's version.
@@ -116,13 +118,13 @@ def run_two_way_cycle(
     local_root = Path(binding.local_path)
     local_root.mkdir(parents=True, exist_ok=True)
 
-    head = vault.fetch_manifest(relay)
-    # Phase H step 2: the batched-publish helpers (``_prepare_op_for_batch``
-    # / ``_flush_batch``) consume a sharded ``_BindingFolderState``. Phase
-    # A's apply-remote-to-local helper still walks the unified ``head`` —
-    # twoway's full sharded port lands in step 3.
+    # Phase H step 3: twoway reads sharded state end-to-end. The legacy
+    # unified ``head`` variable is gone — both Phase A and Phase B
+    # consume ``state``. ``manifest`` kwarg stays on the public signature
+    # for caller compatibility but is ignored (mirrors step 2's
+    # ``run_backup_only_cycle``).
     state = _fetch_folder_state(vault, relay, binding, author_device_id)
-    started_revision = int(head.get("revision", 0))
+    started_revision = int(state.root.get("root_revision", 0))
     outcomes: list[SyncOpOutcome] = []
     cancelled = False
 
@@ -135,14 +137,14 @@ def run_two_way_cycle(
             )
             cancelled = True
             break
-        revision_at_start = int(head.get("revision", 0))
+        revision_at_start = int(state.root.get("root_revision", 0))
         # Phase A: apply remote → local.
         remote_outcomes = _apply_remote_to_local(
             vault=vault,
             relay=relay,
             store=store,
             binding=binding,
-            manifest=head,
+            state=state,
             local_root=local_root,
             cache_dir=cache_dir,
             device_name=device_name,
@@ -206,10 +208,9 @@ def run_two_way_cycle(
                     break
                 if immediate_outcome.status == "failed":
                     # F-Y07: non-batched failure (quota, special-file
-                    # error, unsupported op type). Refresh both views
-                    # so the rest of the iteration sees the latest.
+                    # error, unsupported op type). Refresh state so
+                    # the rest of the iteration sees the latest.
                     try:
-                        head = vault.fetch_manifest(relay)
                         state = _fetch_folder_state(
                             vault, relay, binding, author_device_id,
                         )
@@ -248,7 +249,6 @@ def run_two_way_cycle(
                 if batch_failed:
                     batch_failed_in_iteration = True
                     try:
-                        head = vault.fetch_manifest(relay)
                         state = _fetch_folder_state(
                             vault, relay, binding, author_device_id,
                         )
@@ -261,17 +261,6 @@ def run_two_way_cycle(
                     # apply the concurrent writer's changes before
                     # we retry the surviving pending-op rows.
                     break
-                # Phase H step 2: post-flush, the legacy ``head`` mirror
-                # is stale (publish went via shard-with-root). Synthesize
-                # a fresh head from the post-publish sharded state so
-                # the next iteration's Phase A sees what we just wrote
-                # (e.g. an entry we re-uploaded on top of a tombstone is
-                # no longer a tombstone, so Phase A doesn't re-trash the
-                # local file). Step 3 ports Phase A to sharded; the
-                # synthesis goes away then.
-                head = assemble_unified_manifest(
-                    state.root, {binding.remote_folder_id: state.shard},
-                )
 
         # Cycle-end flush of the partial batch (if any). Same
         # ``max_retries=0`` policy — single attempt; on CAS conflict
@@ -294,7 +283,6 @@ def run_two_way_cycle(
             if batch_failed:
                 batch_failed_in_iteration = True
                 try:
-                    head = vault.fetch_manifest(relay)
                     state = _fetch_folder_state(
                         vault, relay, binding, author_device_id,
                     )
@@ -303,13 +291,6 @@ def run_two_way_cycle(
                         "vault.sync.refetch_after_batch_failure_failed binding=%s",
                         binding.binding_id, exc_info=True,
                     )
-            else:
-                # Phase H step 2: keep ``head`` aligned with the sharded
-                # state we just published; see longer comment on the
-                # in-loop flush above. Removed in step 3.
-                head = assemble_unified_manifest(
-                    state.root, {binding.remote_folder_id: state.shard},
-                )
 
         if cancelled:
             break
@@ -321,7 +302,7 @@ def run_two_way_cycle(
         # `MAX_TWO_WAY_ITERATIONS` cap bounds spurious-conflict loops).
         # A loop where every op fails AND nothing else changed breaks
         # out — pending ops survive in the queue for the next cycle.
-        new_revision = int(head.get("revision", revision_at_start))
+        new_revision = int(state.root.get("root_revision", revision_at_start))
         any_progress = any(
             o.status in ("uploaded", "deleted", "skipped")
             for o in outcomes[-len(pending) :]
@@ -334,21 +315,16 @@ def run_two_way_cycle(
             break
         last_revision = new_revision
         # Re-fetch for next iteration so we observe any remote work
-        # that landed while we were uploading. Phase H step 2: pull
-        # both legacy (for Phase A) and sharded (for Phase B) views;
-        # step 3 collapses them.
+        # that landed while we were uploading.
         try:
             state = _fetch_folder_state(vault, relay, binding, author_device_id)
-            head = assemble_unified_manifest(
-                state.root, {binding.remote_folder_id: state.shard},
-            )
         except Exception:  # noqa: BLE001
             log.warning(
                 "vault.sync.refetch_for_next_iter_failed binding=%s",
                 binding.binding_id, exc_info=True,
             )
 
-    ended_revision = int(head.get("revision", started_revision))
+    ended_revision = int(state.root.get("root_revision", started_revision))
     store.update_binding_state(
         binding.binding_id,
         last_synced_revision=ended_revision,
@@ -375,18 +351,18 @@ def _apply_remote_to_local(
     relay: Any,
     store: VaultBindingsStore,
     binding: VaultBinding,
-    manifest: dict[str, Any],
+    state: _BindingFolderState,
     local_root: Path,
     cache_dir: Path,
     device_name: str,
     progress: Callable[[SyncOpOutcome], None] | None,
     should_continue: Callable[[], bool] | None = None,
 ) -> list[SyncOpOutcome]:
-    folder = _find_folder(manifest, binding.remote_folder_id)
-    if folder is None:
+    pointer = _find_root_folder_pointer(state.root, binding.remote_folder_id)
+    if pointer is None:
         return []
 
-    folder_display_name = str(folder.get("display_name_enc", ""))
+    folder_display_name = str(pointer.get("display_name_enc", ""))
     if not folder_display_name:
         log.warning(
             "vault.sync.twoway_folder_no_display_name binding=%s folder=%s",
@@ -394,7 +370,7 @@ def _apply_remote_to_local(
         )
         return []
 
-    revision = int(manifest.get("revision", 0))
+    revision = int(state.root.get("root_revision", 0))
     fingerprint_key = _content_fingerprint_key(vault)
     outcomes: list[SyncOpOutcome] = []
     # F-Y20: paths visited by the per-entry loop. After the loop ends
@@ -404,7 +380,7 @@ def _apply_remote_to_local(
     # accumulate forever.
     visited: set[str] = set()
 
-    for entry in folder.get("entries", []) or []:
+    for entry in state.shard.get("entries", []) or []:
         # F-Y08: bail between remote entries so a Pause / Disconnect
         # lands within one entry's worth of work even on a folder with
         # hundreds of files. We append a sentinel "cancelled" outcome
@@ -477,7 +453,7 @@ def _apply_remote_to_local(
 
         outcome = _apply_remote_upsert(
             vault=vault, relay=relay, store=store,
-            binding=binding, manifest=manifest,
+            binding=binding, state=state,
             relative=relative, target=target,
             local_entry=local_entry,
             folder_display_name=folder_display_name,
@@ -651,7 +627,7 @@ def _apply_remote_upsert(
     relay: Any,
     store: VaultBindingsStore,
     binding: VaultBinding,
-    manifest: dict[str, Any],
+    state: _BindingFolderState,
     relative: str,
     target: Path,
     local_entry: VaultLocalEntry | None,
@@ -745,11 +721,17 @@ def _apply_remote_upsert(
             )
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    # Phase H step 3: ``download_latest_file`` still consumes the legacy
+    # unified manifest shape (step 6 ports it). Synthesize a 1-folder
+    # unified view from the post-publish sharded state for the download.
+    download_manifest = assemble_unified_manifest(
+        state.root, {binding.remote_folder_id: state.shard},
+    )
     try:
         download_latest_file(
             vault=vault,
             relay=relay,
-            manifest=manifest,
+            manifest=download_manifest,
             path=display_path,
             destination=target,
             existing_policy="overwrite",
@@ -780,18 +762,6 @@ def _apply_remote_upsert(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _find_folder(
-    manifest: dict[str, Any], remote_folder_id: str,
-) -> dict[str, Any] | None:
-    for folder in manifest.get("remote_folders", []) or []:
-        if (
-            isinstance(folder, dict)
-            and folder.get("remote_folder_id") == remote_folder_id
-        ):
-            return folder
-    return None
 
 
 def _latest_version(entry: dict[str, Any]) -> dict[str, Any] | None:

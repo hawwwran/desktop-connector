@@ -1538,15 +1538,14 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
 
 
 def mirror_legacy_from_sharded(vault, relay) -> None:
-    """Inverse of :func:`seed_sharded_state_from_manifest`: rebuild the
-    unified manifest from the current root + shards on the relay and
+    """Rebuild the unified manifest from the current root + shards and
     publish it via legacy ``put_manifest`` so legacy ``fetch_manifest``
-    sees the latest sharded mutations.
+    reflects the latest sharded mutations.
 
-    Used by multi-device tests where a sharded publish on device A
-    must propagate to device B's two-way Phase A (which still reads
-    the legacy unified manifest). Goes away when twoway's Phase A is
-    ported to sharded in step 3.
+    Phase H step 3 retains this helper purely for tests that mix
+    sharded cycles with legacy ``upload_file`` setup calls — the
+    legacy publish path still needs a current legacy mirror. Step 4
+    ports ``upload_file`` to sharded and this helper goes away.
     """
     from src.vault.manifest import assemble_unified_manifest
 

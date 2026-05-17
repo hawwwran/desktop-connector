@@ -146,19 +146,12 @@ class Device:
         binding = self.get_binding()
         vault = _make_vault()
         try:
-            result = run_two_way_cycle(
+            return run_two_way_cycle(
                 vault=vault, relay=relay, store=self.store,
                 binding=binding,
                 author_device_id=self.device_id,
                 device_name=self.name,
             )
-            # Step 2: cycles publish via sharded ``put_shard_with_root``
-            # but the multi-device test asserts on the legacy
-            # ``current_envelope`` via legacy ``fetch_manifest``. Mirror
-            # back here so the next device's Phase A sees this device's
-            # mutations. Removed once twoway Phase A is sharded (step 3).
-            mirror_legacy_from_sharded(vault, relay)
-            return result
         finally:
             vault.close()
 
@@ -166,13 +159,11 @@ class Device:
         binding = self.get_binding()
         vault = _make_vault()
         try:
-            result = run_backup_only_cycle(
+            return run_backup_only_cycle(
                 vault=vault, relay=relay, store=self.store,
                 binding=binding,
                 author_device_id=self.device_id,
             )
-            mirror_legacy_from_sharded(vault, relay)
-            return result
         finally:
             vault.close()
 
@@ -247,9 +238,19 @@ class MultiDeviceH7Tests(unittest.TestCase):
         )
 
     def _decrypt_head(self) -> dict:
+        # Phase H step 3: cycles read + write sharded state end-to-end.
+        # Synthesize a unified-shape manifest from the current sharded
+        # state for assertions + legacy ``upload_file`` calls. Removed
+        # when ``upload_file`` is ported in step 4.
+        from src.vault.manifest import assemble_unified_manifest
         observer = _make_vault()
         try:
-            return decrypt_manifest(observer, self.relay.current_envelope)
+            root = observer.decrypt_root_envelope(self.relay.root_envelope)
+            shards = {
+                fid: observer.decrypt_shard_envelope(s["envelope"], fid)
+                for fid, s in self.relay.shards.items()
+            }
+            return assemble_unified_manifest(root, shards)
         finally:
             observer.close()
 
@@ -298,6 +299,11 @@ class MultiDeviceH7Tests(unittest.TestCase):
         seed_local.write_bytes(b"shared")
         bootstrap = _make_vault()
         try:
+            # Step 3: ``upload_file`` is still legacy. Align the legacy
+            # mirror to current sharded state so its CAS publish hits a
+            # consistent parent_revision. Removed when upload_file is
+            # ported in step 4.
+            mirror_legacy_from_sharded(bootstrap, self.relay)
             res = upload_file(
                 vault=bootstrap, relay=self.relay, manifest=self._decrypt_head(),
                 local_path=seed_local, remote_folder_id=DOCS_ID,

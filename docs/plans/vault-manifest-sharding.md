@@ -667,12 +667,24 @@ Remaining Plan A checklist:
   ``mirror_legacy_from_sharded`` helper that re-publishes the
   unified mirror after each cycle so device-B's two-way Phase A
   sees device-A's sharded writes.
-* [ ] Step 3: port ``binding/twoway.py``'s Phase A
-  (``_apply_remote_to_local`` + tombstone / upsert helpers) to
-  read from a sharded state. Drops the
-  ``assemble_unified_manifest`` synthesis added in step 2,
-  ``mirror_legacy_from_sharded`` test helper, and Phase A's
-  legacy ``head`` variable.
+* [x] **Step 3** (2026-05-17): ported ``binding/twoway.py``'s
+  Phase A (``_apply_remote_to_local`` + ``_apply_remote_upsert``)
+  to take a ``_BindingFolderState`` instead of the unified
+  manifest. ``run_two_way_cycle``'s legacy ``head`` variable is
+  gone — both phases consume ``state``. Step 2's post-flush
+  ``assemble_unified_manifest`` head-synthesis is removed; the
+  end-of-iter ``head = vault.fetch_manifest(relay)`` is replaced
+  by ``state = _fetch_folder_state(...)``. Dead ``_find_folder``
+  helper deleted. The legacy ``download_latest_file`` call inside
+  ``_apply_remote_upsert`` still wants a unified manifest, so we
+  synthesize one inline from ``(state.root, {folder: state.shard})``
+  — this last legacy wart goes when step 6 ports the download
+  path. ``mirror_legacy_from_sharded`` test helper survives for
+  the single h7 spot where mid-test ``upload_file`` still uses
+  the legacy publish path (removed in step 4 when ``upload_file``
+  is ported). h7's ``_decrypt_head`` now synthesizes the unified
+  view from sharded relay state so assertions read the
+  authoritative source.
 * [ ] Step 4: port ``upload/single_file.py``'s ``upload_file`` +
   ``_publish_with_cas_retry``, ``upload/folder.py``,
   ``upload/resume.py``. Rename ``UploadResult.manifest`` →
