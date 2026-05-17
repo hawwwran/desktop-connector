@@ -39,6 +39,8 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
+    mirror_legacy_from_sharded,
+    seed_sharded_state_from_manifest,
 )
 
 
@@ -309,6 +311,14 @@ def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, 
     relay = FakeUploadRelay(manifest=manifest)
     vault = _vault()
     try:
+        # FakeUploadRelay.__init__ already seeds the legacy
+        # current_revision from ``manifest``; the Phase-H-ported
+        # upload_file publishes via the sharded surface only, so we
+        # bootstrap the sharded state and then mirror it back to the
+        # legacy envelope (the export bundle pipeline still reads
+        # ``relay.current_envelope``).
+        seed_sharded_state_from_manifest(vault, relay, manifest)
+        mirror_legacy_from_sharded(vault, relay)
         current_manifest = manifest
         for relative, content in files.items():
             local = tmpdir / relative.replace("/", "_")
@@ -319,6 +329,8 @@ def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, 
                 remote_path=relative, author_device_id=AUTHOR,
             )
             current_manifest = res.manifest
+            seed_sharded_state_from_manifest(vault, relay, current_manifest)
+            mirror_legacy_from_sharded(vault, relay)
     finally:
         vault.close()
     from src.vault.ui.browser_model import decrypt_manifest as _decrypt

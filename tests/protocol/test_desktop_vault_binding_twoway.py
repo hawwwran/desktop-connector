@@ -157,6 +157,11 @@ class TwoWayCycleTests(unittest.TestCase):
         next_manifest["author_device_id"] = AUTHOR
         vault = _vault()
         try:
+            # Phase H step 4: upload_file no longer mirrors to legacy,
+            # so the legacy current_revision has drifted from the
+            # caller-supplied manifest revision. Reset before the CAS
+            # publish so the chain stays coherent for the next call.
+            relay.current_revision = int(next_manifest["parent_revision"])
             vault.publish_manifest(relay, next_manifest)
             seed_sharded_state_from_manifest(vault, relay, next_manifest)
         finally:

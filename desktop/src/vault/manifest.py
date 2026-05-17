@@ -1348,6 +1348,101 @@ def add_or_append_file_version_in_shard(
     return out
 
 
+def merge_local_version_into_shard(
+    server_shard: dict[str, Any],
+    *,
+    parent_shard: dict[str, Any] | None,
+    entry_id: str,
+    path: str,
+    version: dict[str, Any],
+) -> dict[str, Any]:
+    """§D4 CAS merge for the sharded path: rebuild a local upload's
+    single-version contribution on top of ``server_shard``.
+
+    Mirrors :func:`_merge_folder_entries` but scoped to one shard +
+    one local version. Two distinct cases:
+
+    * **No entry with this ``entry_id`` on the server**: it's a "new
+      file at path P" from local. If the server already has a live
+      entry at the same ``path``, the local entry is renamed via
+      ``_imported_rename`` per §D4 row 1.
+    * **Entry exists on the server**: it's a "new version" from
+      local. Append the new version if not already present; re-resolve
+      ``latest_version_id`` via the §D4 tie-break
+      ``(modified_at, sha256(author_device_id))``.
+
+    Returns the merged shard. ``shard_revision`` / ``parent_shard_revision``
+    bookkeeping stays with the caller.
+    """
+    if not _FILE_VERSION_ID_RE.match(str(version.get("version_id", ""))):
+        raise ValueError("version.version_id must match ^fv_v1_[a-z2-7]{24}$")
+    if not _FILE_ENTRY_ID_RE.match(entry_id):
+        raise ValueError("entry_id must match ^fe_v1_[a-z2-7]{24}$")
+
+    out = normalize_shard_plaintext(server_shard)
+    normalized_path = normalize_manifest_path(path)
+    parent_version_ids: set[str] = set()
+    if parent_shard is not None:
+        parent_n = normalize_shard_plaintext(parent_shard)
+        for parent_entry in parent_n.get("entries", []) or []:
+            if not isinstance(parent_entry, dict):
+                continue
+            if str(parent_entry.get("entry_id", "")) != entry_id:
+                continue
+            for v in parent_entry.get("versions", []) or []:
+                if isinstance(v, dict):
+                    parent_version_ids.add(str(v.get("version_id", "")))
+
+    new_version = copy.deepcopy(version)
+    target = None
+    for entry in out["entries"]:
+        if isinstance(entry, dict) and str(entry.get("entry_id", "")) == entry_id:
+            target = entry
+            break
+
+    if target is None:
+        # "New file at path P" from local. Rename on path collision
+        # with a live server-side entry.
+        existing_paths = {
+            unicodedata.normalize("NFC", str(e.get("path", "")))
+            for e in out["entries"]
+            if isinstance(e, dict) and not bool(e.get("deleted"))
+        }
+        landed_path = normalized_path
+        if landed_path in existing_paths:
+            landed_path = _imported_rename(landed_path, existing_paths)
+        out["entries"].append({
+            "entry_id": entry_id,
+            "type": "file",
+            "path": landed_path,
+            "deleted": False,
+            "latest_version_id": new_version["version_id"],
+            "versions": [new_version],
+        })
+        return out
+
+    # Existing entry on server: append local's new version if not already
+    # present, then tie-break latest_version_id per §D4.
+    target["versions"] = [
+        v for v in target.get("versions", []) if isinstance(v, dict)
+    ]
+    server_version_ids = {
+        str(v.get("version_id", "")) for v in target["versions"]
+    }
+    if str(new_version.get("version_id", "")) not in server_version_ids:
+        target["versions"].append(new_version)
+    # Re-resolve latest_version_id only when the entry is still live —
+    # F-D07 says tombstoned entries keep their pre-tombstone latest.
+    if not bool(target.get("deleted")):
+        target["latest_version_id"] = _resolve_latest_version_id(
+            [v for v in target["versions"] if isinstance(v, dict)]
+        )
+        target["deleted"] = False
+        target.pop("deleted_at", None)
+        target.pop("recoverable_until", None)
+    return out
+
+
 def tombstone_file_entry_in_shard(
     shard: dict[str, Any],
     *,

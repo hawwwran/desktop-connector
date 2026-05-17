@@ -31,7 +31,11 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     MASTER_KEY,
     VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    mirror_legacy_from_sharded,
+    seed_sharded_state_from_manifest,
+)
 
 
 class VaultEvictionPassTests(unittest.TestCase):
@@ -54,13 +58,17 @@ class VaultEvictionPassTests(unittest.TestCase):
 
         manifest = _empty_manifest()
         relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="old.txt",
                 author_device_id=AUTHOR,
             )
+            mirror_legacy_from_sharded(vault, relay)
             after_delete = delete_file(
                 vault=vault, relay=relay, manifest=uploaded.manifest,
                 remote_folder_id=DOCS_ID, remote_path="old.txt",
@@ -94,13 +102,17 @@ class VaultEvictionPassTests(unittest.TestCase):
 
         manifest = _empty_manifest()
         relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="fresh.txt",
                 author_device_id=AUTHOR,
             )
+            mirror_legacy_from_sharded(vault, relay)
             after_delete = delete_file(
                 vault=vault, relay=relay, manifest=uploaded.manifest,
                 remote_folder_id=DOCS_ID, remote_path="fresh.txt",
@@ -127,8 +139,11 @@ class VaultEvictionPassTests(unittest.TestCase):
         # Two tombstones: one expired (for stage 1), one fresh (forces stage 2).
         manifest = _empty_manifest()
         relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
             for path, deleted_at in [
                 ("expired.txt", "2026-04-01T10:00:00.000Z"),
                 ("fresh.txt", "2026-05-03T10:00:00.000Z"),
@@ -136,11 +151,13 @@ class VaultEvictionPassTests(unittest.TestCase):
                 local = self.tmpdir / path
                 local.write_bytes(f"content for {path}".encode("utf-8"))
                 head = _decrypt_current_manifest(vault, relay) if relay.current_envelope else manifest
+                seed_sharded_state_from_manifest(vault, relay, head)
                 uploaded = upload_file(
                     vault=vault, relay=relay, manifest=head, local_path=local,
                     remote_folder_id=DOCS_ID, remote_path=path,
                     author_device_id=AUTHOR,
                 )
+                mirror_legacy_from_sharded(vault, relay)
                 delete_file(
                     vault=vault, relay=relay, manifest=uploaded.manifest,
                     remote_folder_id=DOCS_ID, remote_path=path,
@@ -173,21 +190,26 @@ class VaultEvictionPassTests(unittest.TestCase):
 
         manifest = _empty_manifest()
         relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
             v1 = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="doc.txt",
                 author_device_id=AUTHOR,
                 created_at="2026-04-01T10:00:00.000Z",
             )
+            mirror_legacy_from_sharded(vault, relay)
             local.write_bytes(b"v2 content - distinct bytes here")
-            upload_file(
+            v2 = upload_file(
                 vault=vault, relay=relay, manifest=v1.manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="doc.txt",
                 author_device_id=AUTHOR,
                 created_at="2026-05-01T10:00:00.000Z",
             )
+            mirror_legacy_from_sharded(vault, relay)
 
             current = _decrypt_current_manifest(vault, relay)
             target = sum(len(v) for v in relay.chunks.values())  # demand all bytes
@@ -218,13 +240,17 @@ class VaultEvictionPassTests(unittest.TestCase):
 
         manifest = _empty_manifest()
         relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="untouchable.txt",
                 author_device_id=AUTHOR,
             )
+            mirror_legacy_from_sharded(vault, relay)
             result = eviction_pass(
                 vault=vault, relay=relay, manifest=uploaded.manifest,
                 author_device_id=AUTHOR,

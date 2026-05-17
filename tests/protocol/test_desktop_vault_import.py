@@ -401,7 +401,11 @@ class VaultImportRunnerTests(unittest.TestCase):
             MASTER_KEY,
             VAULT_ID as MASTER_VAULT_ID,
         )
-        from tests.protocol.test_desktop_vault_upload import FakeUploadRelay
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay,
+            mirror_legacy_from_sharded,
+            seed_sharded_state_from_manifest,
+        )
 
         # Use the master-key-bound test vault id so encrypt/decrypt match.
         VAULT_ACCESS_SECRET = "vault-secret"
@@ -434,6 +438,11 @@ class VaultImportRunnerTests(unittest.TestCase):
         relay_a = FakeUploadRelay(manifest=empty)
         vault = make_vault()
         try:
+            # Bootstrap Phase H sharded state + legacy mirror so
+            # upload_file (sharded-only publish) leaves a coherent
+            # legacy envelope behind for the export step.
+            seed_sharded_state_from_manifest(vault, relay_a, empty)
+            mirror_legacy_from_sharded(vault, relay_a)
             local_a = self.tmpdir / "exported.txt"
             local_a.write_bytes(b"exported content for the import flow")
             uploaded = upload_file(
@@ -441,6 +450,8 @@ class VaultImportRunnerTests(unittest.TestCase):
                 local_path=local_a, remote_folder_id=MASTER_DOCS_ID,
                 remote_path="exported.txt", author_device_id=MASTER_AUTHOR,
             )
+            seed_sharded_state_from_manifest(vault, relay_a, uploaded.manifest)
+            mirror_legacy_from_sharded(vault, relay_a)
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay_a,
@@ -459,6 +470,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         active_active = empty
         vault = make_vault()
         try:
+            # Bootstrap sharded state only. run_import publishes via the
+            # legacy CAS path against relay_b's existing current_revision
+            # (initialized by FakeUploadRelay.__init__ from ``empty``), so
+            # we deliberately skip mirror_legacy_from_sharded — calling it
+            # would add a second entry to published_manifests and break
+            # the "manifest published exactly once" assertion below.
+            seed_sharded_state_from_manifest(vault, relay_b, empty)
             result = run_import(
                 vault=vault, relay=relay_b,
                 bundle_path=bundle_path,
@@ -495,7 +513,11 @@ class VaultImportRunnerTests(unittest.TestCase):
             MASTER_KEY,
             VAULT_ID as MASTER_VAULT_ID,
         )
-        from tests.protocol.test_desktop_vault_upload import FakeUploadRelay
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay,
+            mirror_legacy_from_sharded,
+            seed_sharded_state_from_manifest,
+        )
 
         VAULT_ACCESS_SECRET = "vault-secret"
         empty = make_manifest(
@@ -521,6 +543,8 @@ class VaultImportRunnerTests(unittest.TestCase):
             manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
         )
         try:
+            seed_sharded_state_from_manifest(vault, relay, empty)
+            mirror_legacy_from_sharded(vault, relay)
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay,

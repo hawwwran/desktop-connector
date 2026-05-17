@@ -33,7 +33,11 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     MASTER_KEY,
     VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    mirror_legacy_from_sharded,
+    seed_sharded_state_from_manifest,
+)
 
 
 VAULT_ACCESS_SECRET = "vault-secret"
@@ -591,6 +595,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(target_relay, target_manifest)
+            seed_sharded_state_from_manifest(vault, target_relay, target_manifest)
         finally:
             vault.close()
 
@@ -721,15 +726,26 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         )
         vault = _vault()
         try:
+            # ``create_vault`` above already initialized
+            # ``relay.current_envelope`` + ``current_revision``, so we
+            # only need to bootstrap the Phase H sharded state (root +
+            # shards) before invoking ``upload_file``. ``upload_file``
+            # now publishes via the sharded surface only, so we mirror
+            # back into the legacy envelope after each call — the
+            # migration runner still reads ``get_manifest`` (legacy).
+            seed_sharded_state_from_manifest(vault, relay, manifest)
+            mirror_legacy_from_sharded(vault, relay)
             for path, content in files.items():
                 local = self.tmpdir / path.replace("/", "_")
                 local.write_bytes(content)
-                upload_file(
+                res = upload_file(
                     vault=vault, relay=relay,
                     manifest=_decrypt_current_manifest(vault, relay) or manifest,
                     local_path=local, remote_folder_id=DOCS_ID,
                     remote_path=path, author_device_id=AUTHOR,
                 )
+                seed_sharded_state_from_manifest(vault, relay, res.manifest)
+                mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
         return relay, relay.current_envelope

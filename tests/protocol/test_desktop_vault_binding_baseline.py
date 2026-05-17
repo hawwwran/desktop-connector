@@ -35,7 +35,11 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     MASTER_KEY,
     VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    mirror_legacy_from_sharded,
+    seed_sharded_state_from_manifest,
+)
 
 
 VAULT_ACCESS_SECRET = "vault-secret"
@@ -76,8 +80,11 @@ class VaultBaselineTests(unittest.TestCase):
             ],
         )
         relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
             current = manifest
             for path, content in files.items():
                 local = self.tmpdir / "src_" / path.replace("/", "_")
@@ -89,6 +96,7 @@ class VaultBaselineTests(unittest.TestCase):
                     remote_path=path, author_device_id=AUTHOR,
                 )
                 current = res.manifest
+                seed_sharded_state_from_manifest(vault, relay, current)
             if with_tombstone is not None:
                 current = tombstone_file_entry(
                     current,
@@ -99,7 +107,10 @@ class VaultBaselineTests(unittest.TestCase):
                 )
                 current["revision"] = int(current["revision"]) + 1
                 current["parent_revision"] = current["revision"] - 1
+                relay.current_revision = int(current["parent_revision"])
                 vault.publish_manifest(relay, current)
+                seed_sharded_state_from_manifest(vault, relay, current)
+            mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
         from src.vault.ui.browser_model import decrypt_manifest as _decrypt

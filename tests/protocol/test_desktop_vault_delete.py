@@ -42,6 +42,8 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
+    mirror_legacy_from_sharded,
+    seed_sharded_state_from_manifest,
 )
 
 
@@ -233,17 +235,21 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         local.write_bytes(b"payload that will be soft-deleted")
         manifest = _empty_manifest()
         relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
         vault = _vault()
         # F-510: capture vault.delete.completed so the Activity tab has
         # a real emit site to anchor on.
         import logging as _logging
         with self.assertLogs("src.vault.ops.delete", level="INFO") as cm:
             try:
+                vault.publish_manifest(relay, manifest)
+                seed_sharded_state_from_manifest(vault, relay, manifest)
                 uploaded = upload_file(
                     vault=vault, relay=relay, manifest=manifest, local_path=local,
                     remote_folder_id=DOCS_ID, remote_path="doomed.txt",
                     author_device_id=AUTHOR,
                 )
+                mirror_legacy_from_sharded(vault, relay)
                 published = delete_file(
                     vault=vault, relay=relay, manifest=uploaded.manifest,
                     remote_folder_id=DOCS_ID, remote_path="doomed.txt",
@@ -270,18 +276,23 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         self.assertEqual(files[0]["status"], "Deleted")
 
     def test_delete_folder_contents_bulk_tombstones(self) -> None:
-        relay = FakeUploadRelay(manifest=_empty_manifest())
+        empty = _empty_manifest()
+        relay = FakeUploadRelay(manifest=empty)
+        relay.current_revision = int(empty.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, empty)
+            seed_sharded_state_from_manifest(vault, relay, empty)
             for sub in ("Invoices/2026/a.pdf", "Invoices/2026/b.pdf", "Photos/p.jpg"):
                 local = self.tmpdir / sub.replace("/", "_")
                 local.write_bytes(f"content for {sub}".encode("utf-8"))
-                upload_file(
+                res = upload_file(
                     vault=vault, relay=relay,
                     manifest=_decrypt_current_manifest(vault, relay),
                     local_path=local, remote_folder_id=DOCS_ID,
                     remote_path=sub, author_device_id=AUTHOR,
                 )
+                mirror_legacy_from_sharded(vault, relay)
             head = _decrypt_current_manifest(vault, relay)
             published, tombstoned = delete_folder_contents(
                 vault=vault, relay=relay, manifest=head,
@@ -306,15 +317,20 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
     def test_restore_version_promotes_chosen_version_without_uploading(self) -> None:
         local = self.tmpdir / "report.txt"
         local.write_bytes(b"version 1 content")
-        relay = FakeUploadRelay(manifest=_empty_manifest())
+        empty = _empty_manifest()
+        relay = FakeUploadRelay(manifest=empty)
+        relay.current_revision = int(empty.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, empty)
+            seed_sharded_state_from_manifest(vault, relay, empty)
             v1 = upload_file(
                 vault=vault, relay=relay, manifest=_empty_manifest(),
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path="report.txt", author_device_id=AUTHOR,
                 created_at="2026-05-01T10:00:00.000Z",
             )
+            mirror_legacy_from_sharded(vault, relay)
             local.write_bytes(b"version 2 content - different bytes")
             v2 = upload_file(
                 vault=vault, relay=relay, manifest=v1.manifest,
@@ -322,6 +338,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
                 remote_path="report.txt", author_device_id=AUTHOR,
                 created_at="2026-05-02T10:00:00.000Z",
             )
+            mirror_legacy_from_sharded(vault, relay)
             puts_before = list(relay.put_calls)
             restored = restore_version_to_current(
                 vault=vault, relay=relay, manifest=v2.manifest,
@@ -358,14 +375,19 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
     def test_restore_tombstoned_file_clears_deleted(self) -> None:
         local = self.tmpdir / "ghost.txt"
         local.write_bytes(b"will be tombstoned then restored")
-        relay = FakeUploadRelay(manifest=_empty_manifest())
+        empty = _empty_manifest()
+        relay = FakeUploadRelay(manifest=empty)
+        relay.current_revision = int(empty.get("parent_revision", 0))
         vault = _vault()
         try:
+            vault.publish_manifest(relay, empty)
+            seed_sharded_state_from_manifest(vault, relay, empty)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=_empty_manifest(),
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path="ghost.txt", author_device_id=AUTHOR,
             )
+            mirror_legacy_from_sharded(vault, relay)
             after_delete = delete_file(
                 vault=vault, relay=relay, manifest=uploaded.manifest,
                 remote_folder_id=DOCS_ID, remote_path="ghost.txt",

@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..binding.lifecycle import SyncCancelledError
-from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..crypto import (
     aead_encrypt,
     build_chunk_aad,
@@ -31,17 +30,23 @@ from ..crypto import (
     make_content_fingerprint,
 )
 from ..manifest import (
-    add_or_append_file_version,
-    find_file_entry,
+    add_or_append_file_version_in_shard,
+    assemble_unified_manifest,
     find_file_entry_in_shard,
     generate_file_entry_id,
     generate_file_version_id,
-    merge_with_remote_head,
+    merge_local_version_into_shard,
     normalize_manifest_path,
-    normalize_manifest_plaintext,
+    normalize_root_manifest_plaintext,
+    normalize_shard_plaintext,
 )
 from ..relay_errors import VaultCASConflictError
 from .constants import CAS_MAX_RETRIES, CHUNK_SIZE, MAX_FILE_BYTES_DEFAULT, UploadMode
+from .folder_state import (
+    FolderState,
+    fetch_folder_state,
+    find_root_folder_pointer,
+)
 from .errors import UploadConflictError, UploadFileTooLargeError, UploadSpecialFileSkipped
 from .hashing import _hash_file, _now_rfc3339
 from .protocols import UploadRelay, UploadVault
@@ -129,6 +134,7 @@ def upload_file(
     local_index: Any = None,
     resume_cache_dir: Path | None = None,
     should_continue: Callable[[], bool] | None = None,
+    parent_state: FolderState | None = None,
 ) -> UploadResult:
     """Encrypt + upload ``local_path`` and CAS-publish a new manifest revision.
 
@@ -151,8 +157,20 @@ def upload_file(
     local_path = Path(local_path)
     _validate_local_for_upload(local_path)
 
+    # Phase H step 4: read the binding's folder shard + vault root
+    # fresh; the ``manifest`` kwarg is accepted for caller compatibility
+    # and ignored. The shard is the authoritative source for the
+    # existing-entry / fingerprint short-circuit; the root pointer
+    # carries the folder retention policy used by tombstone publishes.
+    # ``parent_state`` lets §D4 acceptance tests inject a stale view so
+    # the CAS-retry merge path runs deterministically — production
+    # callers don't pass it.
+    state = parent_state if parent_state is not None else fetch_folder_state(
+        vault, relay, remote_folder_id, author_device_id,
+    )
+
     normalized_remote_path = normalize_manifest_path(remote_path)
-    existing_entry = find_file_entry(manifest, remote_folder_id, normalized_remote_path)
+    existing_entry = find_file_entry_in_shard(state.shard, normalized_remote_path)
     has_existing = existing_entry is not None and not bool(existing_entry.get("deleted"))
 
     if mode == "new_file_only" and has_existing:
@@ -181,7 +199,9 @@ def upload_file(
                not bool(existing_entry.get("deleted")):
                 _report(progress, "done", 0, 0, 0)
                 return UploadResult(
-                    manifest=normalize_manifest_plaintext(manifest),
+                    manifest=assemble_unified_manifest(
+                        state.root, {remote_folder_id: state.shard},
+                    ),
                     entry_id=str(existing_entry["entry_id"]),
                     version_id=str(version.get("version_id", "")),
                     path=normalized_remote_path,
@@ -309,16 +329,15 @@ def upload_file(
     session.phase = "ready_to_publish"
     save_session(session, cache_dir)
 
-    published = _publish_with_cas_retry(
+    published_state = _publish_with_cas_retry(
         vault=vault,
         relay=relay,
-        parent_manifest=manifest,
+        parent_state=state,
         remote_folder_id=remote_folder_id,
         normalized_remote_path=normalized_remote_path,
         version_payload=version_payload,
         entry_id=entry_id,
         author_device_id=author_device_id,
-        local_index=local_index,
     )
     # F-D05: mark the session as published BEFORE the filesystem-side
     # cleanup. If clear_session fails (rare disk error), the
@@ -333,12 +352,14 @@ def upload_file(
     log.info(
         "vault.upload.completed vault=%s revision=%d path=%s",
         vault.vault_id,
-        int(published.get("revision", 0)) if isinstance(published, dict) else 0,
+        int(published_state.root.get("root_revision", 0)),
         normalized_remote_path,
     )
 
     return UploadResult(
-        manifest=published,
+        manifest=assemble_unified_manifest(
+            published_state.root, {remote_folder_id: published_state.shard},
+        ),
         entry_id=entry_id,
         version_id=version_id,
         path=normalized_remote_path,
@@ -635,63 +656,119 @@ def _publish_with_cas_retry(
     *,
     vault: UploadVault,
     relay: UploadRelay,
-    parent_manifest: dict[str, Any],
+    parent_state: FolderState,
     remote_folder_id: str,
     normalized_remote_path: str,
     version_payload: dict[str, Any],
     entry_id: str,
     author_device_id: str,
-    local_index: Any,
     max_retries: int = CAS_MAX_RETRIES,
-) -> dict[str, Any]:
-    """CAS-publish a single-version upload, retrying via §D4 on 409.
+) -> FolderState:
+    """CAS-publish a single-version upload via ``publish_shard_with_root``.
 
-    Each retry decrypts the server head from the 409 details (no follow-up
-    GET — server inlines the manifest per §A1), runs ``merge_with_remote
-    _head`` to rebuild the local change on top of the new revision, and
-    publishes again. Cap is ``max_retries`` to avoid livelocking against
-    a busy multi-device vault.
+    On 409, the server inlines the conflicting shard and/or root
+    envelope(s) (§A1); we decrypt whichever side(s) we got back,
+    rebuild the candidate on top of the new head(s), bump a fresh
+    root revision, and retry. ``max_retries`` caps the loop to avoid
+    livelocking against a busy multi-device vault.
+
+    Returns the published ``(root, shard)`` state.
     """
-    parent_n = normalize_manifest_plaintext(parent_manifest)
-    parent_revision = int(parent_n.get("revision", 0))
-
-    candidate = dict(parent_n)
-    candidate["revision"] = parent_revision + 1
-    candidate["parent_revision"] = parent_revision
-    candidate["created_at"] = str(version_payload.get("created_at"))
-    candidate["author_device_id"] = str(author_device_id)
-    candidate = add_or_append_file_version(
-        candidate,
-        remote_folder_id=remote_folder_id,
-        path=normalized_remote_path,
-        version=version_payload,
-        entry_id=entry_id,
-    )
-
-    rebased_parent = parent_n
-    last_attempt = candidate
-    for _ in range(max_retries):
-        try:
-            return vault.publish_manifest(relay, last_attempt, local_index=local_index)
-        except VaultCASConflictError as exc:
-            envelope = exc.current_manifest_ciphertext_bytes()
-            if not envelope:
-                raise
-            server_head = decrypt_manifest_envelope(vault, envelope)
-            last_attempt = merge_with_remote_head(
-                parent=rebased_parent,
-                local_attempt=last_attempt,
-                server_head=server_head,
+    created_at = str(version_payload.get("created_at")) or _now_rfc3339()
+    initial_parent = parent_state
+    current_state = parent_state
+    # Initial attempt: blind append (``latest_version_id = new_version``)
+    # — matches the pre-Phase-H semantic where a non-conflicting publish
+    # was a fresh upload, no tie-break needed. CAS retries (``use_merge
+    # = True``) fold the local version onto the server head via §D4
+    # merge so concurrent uploads from different devices land with the
+    # right ``latest_version_id`` (tie-break) and/or path (rename).
+    use_merge = False
+    for attempt in range(max_retries):
+        if use_merge:
+            candidate_shard = _merge_local_version_into_shard_with_bump(
+                server_shard=current_state.shard,
+                parent_shard=initial_parent.shard,
+                remote_folder_id=remote_folder_id,
+                path=normalized_remote_path,
+                version=version_payload,
+                entry_id=entry_id,
                 author_device_id=author_device_id,
+                created_at=created_at,
             )
-            rebased_parent = server_head
-    # One more try after the final merge — no exception means success;
-    # any 409 here propagates as the caller's terminal CAS error.
-    # F-D25: tag exhaustion separately from a first-attempt 409 so the
-    # activity log distinguishes "live CAS race the user retried" from
-    # "we ran out of retry budget against a busy multi-device vault".
+        else:
+            candidate_shard = _apply_version_to_shard(
+                current_state.shard,
+                remote_folder_id=remote_folder_id,
+                path=normalized_remote_path,
+                version=version_payload,
+                entry_id=entry_id,
+                author_device_id=author_device_id,
+                created_at=created_at,
+            )
+        candidate_root = _bumped_root_for_shard_publish(
+            current_state.root,
+            author_device_id=author_device_id,
+            created_at=created_at,
+        )
+        try:
+            shard_out, root_out = vault.publish_shard_with_root(
+                relay, remote_folder_id, candidate_shard, candidate_root,
+            )
+            return FolderState(root=root_out, shard=shard_out)
+        except VaultCASConflictError as exc:
+            shard_envelope = exc.current_shard_ciphertext_bytes()
+            root_envelope = exc.current_root_ciphertext_bytes()
+            if not shard_envelope and not root_envelope:
+                raise
+            new_shard = (
+                vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
+                if shard_envelope else current_state.shard
+            )
+            new_root = (
+                vault.decrypt_root_envelope(root_envelope)
+                if root_envelope else current_state.root
+            )
+            log.info(
+                "vault.upload.cas_retry attempt=%d/%d path=%s "
+                "shard_conflict=%s root_conflict=%s",
+                attempt + 1, max_retries, normalized_remote_path,
+                bool(shard_envelope), bool(root_envelope),
+            )
+            current_state = FolderState(root=new_root, shard=new_shard)
+            use_merge = True
+    # F-D25: one final attempt; exhaustion-tag if it still 409s.
+    if use_merge:
+        candidate_shard = _merge_local_version_into_shard_with_bump(
+            server_shard=current_state.shard,
+            parent_shard=initial_parent.shard,
+            remote_folder_id=remote_folder_id,
+            path=normalized_remote_path,
+            version=version_payload,
+            entry_id=entry_id,
+            author_device_id=author_device_id,
+            created_at=created_at,
+        )
+    else:
+        candidate_shard = _apply_version_to_shard(
+            current_state.shard,
+            remote_folder_id=remote_folder_id,
+            path=normalized_remote_path,
+            version=version_payload,
+            entry_id=entry_id,
+            author_device_id=author_device_id,
+            created_at=created_at,
+        )
+    candidate_root = _bumped_root_for_shard_publish(
+        current_state.root,
+        author_device_id=author_device_id,
+        created_at=created_at,
+    )
     try:
-        return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+        shard_out, root_out = vault.publish_shard_with_root(
+            relay, remote_folder_id, candidate_shard, candidate_root,
+        )
+        return FolderState(root=root_out, shard=shard_out)
     except VaultCASConflictError:
         log.warning(
             "vault.upload.cas_exhausted vault=%s path=%s retries=%d",
@@ -700,6 +777,90 @@ def _publish_with_cas_retry(
             max_retries,
         )
         raise
+
+
+def _apply_version_to_shard(
+    parent_shard: dict[str, Any],
+    *,
+    remote_folder_id: str,
+    path: str,
+    version: dict[str, Any],
+    entry_id: str,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Fold a single new version onto ``parent_shard`` and bump revisions.
+
+    Idempotent: re-applying the same version_id is a no-op. The
+    canonical ``remote_folder_id`` discriminator is pinned so a
+    synthetic genesis-shard parent becomes publishable on first
+    publish.
+    """
+    parent_n = normalize_shard_plaintext(parent_shard)
+    parent_revision = int(parent_n.get("shard_revision", 0))
+    candidate = add_or_append_file_version_in_shard(
+        parent_n, path=path, version=version, entry_id=entry_id,
+    )
+    candidate["shard_revision"] = parent_revision + 1
+    candidate["parent_shard_revision"] = parent_revision
+    candidate["created_at"] = created_at
+    candidate["author_device_id"] = str(author_device_id)
+    candidate["remote_folder_id"] = remote_folder_id
+    return candidate
+
+
+def _merge_local_version_into_shard_with_bump(
+    *,
+    server_shard: dict[str, Any],
+    parent_shard: dict[str, Any],
+    remote_folder_id: str,
+    path: str,
+    version: dict[str, Any],
+    entry_id: str,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """CAS-retry candidate: merge the local version onto the server head
+    shard with §D4 tie-break, then bump the shard revision pair so the
+    result is publishable.
+    """
+    server_n = normalize_shard_plaintext(server_shard)
+    parent_revision = int(server_n.get("shard_revision", 0))
+    merged = merge_local_version_into_shard(
+        server_n,
+        parent_shard=parent_shard,
+        entry_id=entry_id,
+        path=path,
+        version=version,
+    )
+    merged["shard_revision"] = parent_revision + 1
+    merged["parent_shard_revision"] = parent_revision
+    merged["created_at"] = created_at
+    merged["author_device_id"] = str(author_device_id)
+    merged["remote_folder_id"] = remote_folder_id
+    return merged
+
+
+def _bumped_root_for_shard_publish(
+    parent_root: dict[str, Any],
+    *,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Build a fresh root revision for ``publish_shard_with_root``.
+
+    ``publish_shard_with_root`` patches the matching folder pointer's
+    ``shard_hash`` + ``shard_revision`` internally before sealing —
+    this helper only owns the vault-wide revision bump.
+    """
+    parent_n = normalize_root_manifest_plaintext(parent_root)
+    parent_revision = int(parent_n.get("root_revision", 0))
+    candidate = dict(parent_n)
+    candidate["root_revision"] = parent_revision + 1
+    candidate["parent_root_revision"] = parent_revision
+    candidate["created_at"] = created_at
+    candidate["author_device_id"] = str(author_device_id)
+    return candidate
 
 
 def _report(

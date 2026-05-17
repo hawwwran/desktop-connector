@@ -14,27 +14,36 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from ..binding.lifecycle import SyncCancelledError
-from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..crypto import (
     derive_content_fingerprint_key,
     make_content_fingerprint,
 )
 from ..manifest import (
-    add_or_append_file_version,
-    find_file_entry,
+    add_or_append_file_version_in_shard,
+    assemble_unified_manifest,
+    find_file_entry_in_shard,
     generate_file_entry_id,
     generate_file_version_id,
-    merge_with_remote_head,
     normalize_manifest_path,
-    normalize_manifest_plaintext,
+    normalize_root_manifest_plaintext,
+    normalize_shard_plaintext,
 )
 from ..relay_errors import VaultCASConflictError
 from .constants import CAS_MAX_RETRIES, CHUNK_SIZE, MAX_FILE_BYTES_DEFAULT
+from .folder_state import (
+    FolderState,
+    fetch_folder_state,
+    find_root_folder_pointer,
+)
 from .hashing import _hash_file, _now_rfc3339
 from .ignore_patterns import _matches_ignore
 from .protocols import UploadRelay, UploadVault
 from .results import FileSkipped, FolderUploadProgress, FolderUploadResult, UploadResult
-from .single_file import _build_chunk_plan, _make_version_payload
+from .single_file import (
+    _build_chunk_plan,
+    _bumped_root_for_shard_publish,
+    _make_version_payload,
+)
 
 log = logging.getLogger(__name__)
 
@@ -97,11 +106,14 @@ def upload_folder(
     if not local_root.is_dir():
         raise NotADirectoryError(f"local folder not found: {local_root}")
 
-    parent_n = normalize_manifest_plaintext(manifest)
-    folder_entry = _find_remote_folder(parent_n, remote_folder_id)
-    if folder_entry is None:
+    # Phase H step 4: fetch the binding's sharded state fresh; the
+    # ``manifest`` kwarg is accepted for caller compatibility and
+    # ignored.
+    state = fetch_folder_state(vault, relay, remote_folder_id, author_device_id)
+    pointer = find_root_folder_pointer(state.root, remote_folder_id)
+    if pointer is None:
         raise ValueError(f"remote folder not found: {remote_folder_id}")
-    ignore_patterns = list(folder_entry.get("ignore_patterns", []) or [])
+    ignore_patterns = list(pointer.get("ignore_patterns", []) or [])
     ignore_patterns.extend(extra_ignore_patterns or [])
 
     base_remote_path = normalize_manifest_path(remote_sub_path) if remote_sub_path else ""
@@ -160,7 +172,7 @@ def upload_folder(
         result = _upload_one_into_batch(
             vault=vault,
             relay=relay,
-            parent_manifest=parent_n,
+            parent_state=state,
             local_path=plan.local_path,
             remote_folder_id=remote_folder_id,
             remote_path=remote_path,
@@ -182,11 +194,13 @@ def upload_folder(
         )
 
     # 3. CAS-publish all version additions atomically. Identical-content
-    # short-circuits leave nothing to publish — the manifest is unchanged.
+    # short-circuits leave nothing to publish — the shard is unchanged.
     if not any(addition for addition in additions):
         _report_folder(progress, "done", files_total, files_total, bytes_total, bytes_completed, "")
         return FolderUploadResult(
-            manifest=parent_n,
+            manifest=assemble_unified_manifest(
+                state.root, {remote_folder_id: state.shard},
+            ),
             uploaded=upload_results,
             skipped=skipped,
         )
@@ -201,21 +215,24 @@ def upload_folder(
         )
 
     _report_folder(progress, "publishing", files_total, files_total, bytes_total, bytes_completed, "")
-    published = _publish_batch_with_cas_retry(
+    published_state = _publish_batch_with_cas_retry(
         vault=vault,
         relay=relay,
-        parent_manifest=parent_n,
+        parent_state=state,
+        remote_folder_id=remote_folder_id,
         additions=additions,
         author_device_id=author_device_id,
-        local_index=local_index,
     )
     _report_folder(progress, "done", files_total, files_total, bytes_total, bytes_completed, "")
 
     # Re-stamp uploaded entries with the published manifest so the caller
     # sees consistent state in `result.uploaded[i].manifest`.
+    published_manifest = assemble_unified_manifest(
+        published_state.root, {remote_folder_id: published_state.shard},
+    )
     upload_results = [
         UploadResult(
-            manifest=published,
+            manifest=published_manifest,
             entry_id=r.entry_id,
             version_id=r.version_id,
             path=r.path,
@@ -230,17 +247,10 @@ def upload_folder(
         for r in upload_results
     ]
     return FolderUploadResult(
-        manifest=published,
+        manifest=published_manifest,
         uploaded=upload_results,
         skipped=skipped,
     )
-
-
-def _find_remote_folder(manifest: dict[str, Any], remote_folder_id: str) -> dict[str, Any] | None:
-    for folder in manifest.get("remote_folders", []) or []:
-        if isinstance(folder, dict) and folder.get("remote_folder_id") == remote_folder_id:
-            return folder
-    return None
 
 
 def _walk_for_upload(
@@ -311,7 +321,7 @@ def _upload_one_into_batch(
     *,
     vault: UploadVault,
     relay: UploadRelay,
-    parent_manifest: dict[str, Any],
+    parent_state: FolderState,
     local_path: Path,
     remote_folder_id: str,
     remote_path: str,
@@ -321,9 +331,9 @@ def _upload_one_into_batch(
     additions: list[_VersionAddition],
 ) -> "UploadResult":
     """Per-file half of ``upload_folder``: chunk + PUT + collect the version
-    payload into ``additions`` for the batched manifest publish."""
+    payload into ``additions`` for the batched shard publish."""
     normalized_remote_path = normalize_manifest_path(remote_path)
-    existing_entry = find_file_entry(parent_manifest, remote_folder_id, normalized_remote_path)
+    existing_entry = find_file_entry_in_shard(parent_state.shard, normalized_remote_path)
     has_existing = existing_entry is not None and not bool(existing_entry.get("deleted"))
 
     plaintext_sha256, total_logical_size = _hash_file(local_path)
@@ -336,7 +346,9 @@ def _upload_one_into_batch(
                 continue
             if str(version.get("content_fingerprint", "")) == fingerprint:
                 return UploadResult(
-                    manifest=parent_manifest,
+                    manifest=assemble_unified_manifest(
+                        parent_state.root, {remote_folder_id: parent_state.shard},
+                    ),
                     entry_id=str(existing_entry["entry_id"]),
                     version_id=str(version.get("version_id", "")),
                     path=normalized_remote_path,
@@ -399,7 +411,9 @@ def _upload_one_into_batch(
     ))
 
     return UploadResult(
-        manifest=parent_manifest,  # patched after the batch publish
+        manifest=assemble_unified_manifest(
+            parent_state.root, {remote_folder_id: parent_state.shard},
+        ),  # patched after the batch publish
         entry_id=entry_id,
         version_id=version_id,
         path=normalized_remote_path,
@@ -417,58 +431,77 @@ def _publish_batch_with_cas_retry(
     *,
     vault: UploadVault,
     relay: UploadRelay,
-    parent_manifest: dict[str, Any],
+    parent_state: FolderState,
+    remote_folder_id: str,
     additions: list[_VersionAddition],
     author_device_id: str,
-    local_index: Any,
     max_retries: int = CAS_MAX_RETRIES,
-) -> dict[str, Any]:
-    """Apply N version additions to ``parent_manifest`` and CAS-publish.
+) -> FolderState:
+    """Apply N version additions to ``parent_state.shard`` and CAS-publish
+    via ``publish_shard_with_root``.
 
     Same retry shape as ``_publish_with_cas_retry`` but every retry
-    re-applies *all* additions on top of the freshly-fetched server
-    head (via §D4 merge).
+    re-applies *all* additions on top of the freshly-decrypted server
+    shard head.
     """
-    parent_n = normalize_manifest_plaintext(parent_manifest)
-    parent_revision = int(parent_n.get("revision", 0))
     timestamp = _now_rfc3339()
-
-    candidate = dict(parent_n)
-    candidate["revision"] = parent_revision + 1
-    candidate["parent_revision"] = parent_revision
-    candidate["created_at"] = timestamp
-    candidate["author_device_id"] = str(author_device_id)
-    for addition in additions:
-        candidate = add_or_append_file_version(
-            candidate,
-            remote_folder_id=addition.remote_folder_id,
-            path=addition.path,
-            version=addition.version,
-            entry_id=addition.entry_id,
+    current_state = parent_state
+    for attempt in range(max_retries):
+        candidate_shard = _apply_additions_to_shard(
+            current_state.shard, additions,
+            remote_folder_id=remote_folder_id,
+            author_device_id=author_device_id,
+            created_at=timestamp,
         )
-
-    rebased_parent = parent_n
-    last_attempt = candidate
-    for _ in range(max_retries):
+        candidate_root = _bumped_root_for_shard_publish(
+            current_state.root,
+            author_device_id=author_device_id,
+            created_at=timestamp,
+        )
         try:
-            return vault.publish_manifest(relay, last_attempt, local_index=local_index)
-        except VaultCASConflictError as exc:
-            envelope = exc.current_manifest_ciphertext_bytes()
-            if not envelope:
-                raise
-            server_head = decrypt_manifest_envelope(vault, envelope)
-            last_attempt = merge_with_remote_head(
-                parent=rebased_parent,
-                local_attempt=last_attempt,
-                server_head=server_head,
-                author_device_id=author_device_id,
+            shard_out, root_out = vault.publish_shard_with_root(
+                relay, remote_folder_id, candidate_shard, candidate_root,
             )
-            rebased_parent = server_head
+            return FolderState(root=root_out, shard=shard_out)
+        except VaultCASConflictError as exc:
+            shard_envelope = exc.current_shard_ciphertext_bytes()
+            root_envelope = exc.current_root_ciphertext_bytes()
+            if not shard_envelope and not root_envelope:
+                raise
+            new_shard = (
+                vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
+                if shard_envelope else current_state.shard
+            )
+            new_root = (
+                vault.decrypt_root_envelope(root_envelope)
+                if root_envelope else current_state.root
+            )
+            log.info(
+                "vault.folder_upload.cas_retry attempt=%d/%d additions=%d "
+                "shard_conflict=%s root_conflict=%s",
+                attempt + 1, max_retries, len(additions),
+                bool(shard_envelope), bool(root_envelope),
+            )
+            current_state = FolderState(root=new_root, shard=new_shard)
     # F-D25: same exhaustion log as the single-version helper, scoped
     # to the batch path so a folder-upload's terminal CAS failure shows
     # up with its own event tag.
+    candidate_shard = _apply_additions_to_shard(
+        current_state.shard, additions,
+        remote_folder_id=remote_folder_id,
+        author_device_id=author_device_id,
+        created_at=timestamp,
+    )
+    candidate_root = _bumped_root_for_shard_publish(
+        current_state.root,
+        author_device_id=author_device_id,
+        created_at=timestamp,
+    )
     try:
-        return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+        shard_out, root_out = vault.publish_shard_with_root(
+            relay, remote_folder_id, candidate_shard, candidate_root,
+        )
+        return FolderState(root=root_out, shard=shard_out)
     except VaultCASConflictError:
         log.warning(
             "vault.upload.batch_cas_exhausted vault=%s additions=%d retries=%d",
@@ -477,6 +510,37 @@ def _publish_batch_with_cas_retry(
             max_retries,
         )
         raise
+
+
+def _apply_additions_to_shard(
+    parent_shard: dict[str, Any],
+    additions: list[_VersionAddition],
+    *,
+    remote_folder_id: str,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Fold N version additions onto ``parent_shard`` and bump revisions.
+
+    Idempotent under CAS replay: ``add_or_append_file_version_in_shard``
+    is a no-op when the same ``version_id`` already exists on the entry.
+    """
+    parent_n = normalize_shard_plaintext(parent_shard)
+    parent_revision = int(parent_n.get("shard_revision", 0))
+    candidate = parent_n
+    for addition in additions:
+        candidate = add_or_append_file_version_in_shard(
+            candidate,
+            path=addition.path,
+            version=addition.version,
+            entry_id=addition.entry_id,
+        )
+    candidate["shard_revision"] = parent_revision + 1
+    candidate["parent_shard_revision"] = parent_revision
+    candidate["created_at"] = created_at
+    candidate["author_device_id"] = str(author_device_id)
+    candidate["remote_folder_id"] = remote_folder_id
+    return candidate
 
 
 def _report_folder(

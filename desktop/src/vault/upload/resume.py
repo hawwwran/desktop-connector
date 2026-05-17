@@ -23,6 +23,8 @@ from ..crypto import (
     make_chunk_id,
     make_chunk_nonce,
 )
+from ..manifest import assemble_unified_manifest
+from .folder_state import fetch_folder_state
 from .protocols import UploadRelay, UploadVault
 from .results import UploadProgress, UploadResult
 from .session import UploadSession, default_upload_resume_dir, clear_session, save_session
@@ -198,22 +200,30 @@ def resume_upload(
     session.phase = "ready_to_publish"
     save_session(session, cache_dir)
 
-    published = _publish_with_cas_retry(
+    # Phase H step 4: fetch the binding's sharded state fresh; the
+    # ``manifest`` kwarg is accepted for caller compatibility and
+    # ignored.
+    parent_state = fetch_folder_state(
+        vault, relay, session.remote_folder_id, session.author_device_id,
+    )
+    published_state = _publish_with_cas_retry(
         vault=vault,
         relay=relay,
-        parent_manifest=manifest,
+        parent_state=parent_state,
         remote_folder_id=session.remote_folder_id,
         normalized_remote_path=session.remote_path,
         version_payload=version_payload,
         entry_id=session.entry_id,
         author_device_id=session.author_device_id,
-        local_index=local_index,
     )
     clear_session(session.session_id, cache_dir)
     _report(progress, "done", len(chunk_ids), len(chunk_ids), bytes_uploaded)
 
     return UploadResult(
-        manifest=published,
+        manifest=assemble_unified_manifest(
+            published_state.root,
+            {session.remote_folder_id: published_state.shard},
+        ),
         entry_id=session.entry_id,
         version_id=session.version_id,
         path=session.remote_path,

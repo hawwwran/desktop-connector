@@ -685,10 +685,43 @@ Remaining Plan A checklist:
   is ported). h7's ``_decrypt_head`` now synthesizes the unified
   view from sharded relay state so assertions read the
   authoritative source.
-* [ ] Step 4: port ``upload/single_file.py``'s ``upload_file`` +
-  ``_publish_with_cas_retry``, ``upload/folder.py``,
-  ``upload/resume.py``. Rename ``UploadResult.manifest`` →
-  ``.root`` + ``.shard``. Narrow the ``UploadVault`` Protocol.
+* [x] **Step 4** (2026-05-17): ported ``upload/single_file.py``'s
+  ``upload_file`` + ``_publish_with_cas_retry``, ``upload/folder.py``,
+  and ``upload/resume.py`` to publish via ``publish_shard_with_root``.
+  New shared module ``upload/folder_state.py`` (``FolderState``,
+  ``fetch_folder_state``, ``find_root_folder_pointer``) avoids the
+  circular import between ``binding/sync.py`` and the upload module.
+  ``UploadVault`` Protocol gains the sharded methods
+  (``fetch_root_manifest`` / ``fetch_folder_shard`` /
+  ``publish_shard_with_root`` / ``decrypt_root_envelope`` /
+  ``decrypt_shard_envelope``); the legacy ``fetch_manifest`` /
+  ``publish_manifest`` pair stays for callers that haven't ported
+  yet (Protocol narrowed in step 7). ``UploadResult.manifest`` stays
+  populated — synthesized from the post-publish ``(root, shard)``
+  via ``assemble_unified_manifest`` — for ~30 caller sites that
+  still read it. The rename to ``.root`` + ``.shard`` lands in
+  step 7's cleanup. New ``manifest.merge_local_version_into_shard``
+  helper holds the §D4 tie-break / collision-rename logic that
+  ``merge_with_remote_head`` provides for the legacy path; the
+  upload's CAS-retry loop uses it on conflict, the initial attempt
+  uses ``add_or_append_file_version_in_shard`` (blind append —
+  matches pre-Phase-H semantics). New ``vault.folder_upload.cas_retry``
+  + ``vault.upload.cas_retry`` events catalogued.
+
+  Test surface: every ``FakeUploadRelay(manifest=...)`` site across
+  ~10 test files now seeds both surfaces (legacy via
+  ``vault.publish_manifest`` + ``relay.current_revision`` reset,
+  sharded via ``seed_sharded_state_from_manifest``).
+  ``mirror_legacy_from_sharded`` is the recipe for tests where a
+  not-yet-ported path (baseline / delete / eviction / export /
+  migration_runner) reads the legacy mirror after a sharded upload;
+  it advances ``relay.current_revision`` by exactly one per call so
+  legacy-revision-count assertions stay readable. Two §D4 acceptance
+  tests (``test_concurrent_new_file_at_same_path_renames_imported``,
+  ``test_two_device_concurrent_upload_tie_break_by_device_hash``)
+  use the new ``parent_state`` kwarg on ``upload_file`` to inject
+  a stale pre-A snapshot so device B's publish actually hits CAS
+  and runs the merge path — production callers never set it.
 * [ ] Step 5: port ``ops/integrity.py``, ``ops/eviction.py``,
   ``ops/delete.py``.
 * [ ] Step 6: port ``folder/runtime.py``, ``import_/runner.py``,

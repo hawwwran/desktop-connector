@@ -434,6 +434,7 @@ relay log (filenames are local-only).
 | `vault.folder.cleared` | desktop | info | `remote_folder_id`, `tombstoned`, `author` | T14.1 bulk-soft-delete published |
 | `vault.folder_upload.cancelled` | desktop | info | `vault`, `files_done`, `total` | F-U03 — folder upload cancelled between files |
 | `vault.folder_upload.cancelled_pre_publish` | desktop | info | `vault`, `files_done` | F-U03 — folder upload cancelled before the batch CAS publish |
+| `vault.folder_upload.cas_retry` | desktop | info | `attempt`, `additions`, `shard_conflict`, `root_conflict` | Phase H — folder-upload shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
 | `vault.fresh_unlock.prompt.envelope_meta_missing` | desktop | warning | `operation` | F-LT11 — fresh-unlock mini-prompt opened on a device whose `recovery_envelope_meta` is absent from config; prompt explains the user must finish onboarding before retrying |
 | `vault.fresh_unlock.verified` | desktop | info | `operation` | F-LT11 — user re-typed the recovery passphrase and Argon2id verified it; stamp set for §3.9/§3.11 destructive-op gate |
 | `vault.fresh_unlock.verify_failed` | desktop | info | `operation`, `reason` | F-LT11 — passphrase or kit mismatch on the mini-prompt; gate stays closed, user can retry |
@@ -586,6 +587,7 @@ relay log (filenames are local-only).
 | `vault.tray.sync_now.stub` | desktop | info | — | F-T18 — tray Sync now click; user-routed stub fires a notification pointing at Vault Settings → Folders → per-binding Sync now. The tray-side handler that would sync directly is intentionally deferred — see `vault_runtime_watchers` for the in-process equivalent |
 | `vault.upload.batch_cas_exhausted` | desktop | warning | `vault`, `additions`, `retries` | F-D25 — folder-upload batch retry budget exhausted; raised the CAS error to caller |
 | `vault.upload.cas_exhausted` | desktop | warning | `vault`, `path`, `retries` | F-D25 — single-version upload retry budget exhausted; raised the CAS error to caller |
+| `vault.upload.cas_retry` | desktop | info | `attempt`, `path`, `shard_conflict`, `root_conflict` | Phase H — single-version upload shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
 | `vault.upload.completed` | desktop | info | `vault`, `revision`, `path` | A single-file upload completed (post-publish) |
 | `vault.usage.malformed_chunk_size_skipped` | desktop | warning | `chunk_id` (truncated) | F-515 — a manifest chunk had no usable `ciphertext_size`; usage rendered as 0 B for it |
 | `vault.vault.cleared` | desktop | info | `total_tombstoned`, `author` | T14.2 whole-vault bulk-soft-delete published |

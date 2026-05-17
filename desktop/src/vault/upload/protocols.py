@@ -17,9 +17,31 @@ class UploadVault(Protocol):
     @property
     def vault_access_secret(self) -> str | None: ...
 
+    # Legacy unified manifest path — retained until step 7 cleanup; the
+    # post-Phase-H upload paths read the sharded methods below.
     def fetch_manifest(self, relay, *, local_index=None) -> dict: ...
 
     def publish_manifest(self, relay, manifest, *, local_index=None) -> dict: ...
+
+    # Phase H sharded path: the upload module reads root + folder shard
+    # and publishes via the atomic shard-with-root endpoint.
+    def fetch_root_manifest(self, relay, *, local_index=None) -> dict: ...
+
+    def fetch_folder_shard(
+        self, relay, remote_folder_id: str, *,
+        expected_shard_hash: str | None = None,
+    ) -> dict: ...
+
+    def publish_shard_with_root(
+        self, relay, remote_folder_id: str,
+        shard: dict, root: dict,
+    ) -> tuple[dict, dict]: ...
+
+    def decrypt_root_envelope(self, envelope_bytes: bytes) -> dict: ...
+
+    def decrypt_shard_envelope(
+        self, envelope_bytes: bytes, remote_folder_id: str,
+    ) -> dict: ...
 
 
 class UploadRelay(Protocol):
