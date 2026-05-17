@@ -52,7 +52,10 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     MASTER_KEY,
     VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    seed_sharded_state_from_manifest,
+)
 
 
 VAULT_ACCESS_SECRET = "vault-secret"
@@ -133,6 +136,7 @@ class UploadFileCancellationTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         return relay, manifest
@@ -233,6 +237,7 @@ class BackupOnlyCycleCancellationTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         return relay, manifest
@@ -374,6 +379,7 @@ class TwoWayCycleCancellationTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         return relay, manifest

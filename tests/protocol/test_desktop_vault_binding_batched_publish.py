@@ -57,7 +57,10 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     MASTER_KEY,
     VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    seed_sharded_state_from_manifest,
+)
 
 
 VAULT_ACCESS_SECRET = "vault-secret"
@@ -105,11 +108,15 @@ class _BatchTestBase(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         # Discard the setup publish so the per-test counters start clean.
         relay.put_manifest_attempt_count = 0
         relay.published_manifests = []
+        relay.published_shards = []
+        relay.published_roots = []
+        relay.shard_with_root_puts = 0
         return relay, manifest
 
     def _seed_remote_file(
@@ -126,6 +133,7 @@ class _BatchTestBase(unittest.TestCase):
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path=path, author_device_id=AUTHOR,
             )
+            seed_sharded_state_from_manifest(vault, relay, res.manifest)
         finally:
             vault.close()
         return res.manifest
@@ -181,21 +189,18 @@ class CleanBatchTests(_BatchTestBase):
             "expected exactly one CAS publish for a 5-op batch; "
             f"saw {relay.put_manifest_attempt_count}",
         )
-        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(len(relay.published_shards), 1)
 
         # All five paths landed remotely under one new revision.
-        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        folder = next(
-            f for f in current["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-        )
         remote_paths = sorted(
-            str(e.get("path", "")) for e in folder["entries"] or []
+            str(e.get("path", "")) for e in shard["entries"] or []
             if isinstance(e, dict) and not bool(e.get("deleted"))
         )
         self.assertEqual(remote_paths, paths)
@@ -234,7 +239,7 @@ class CleanBatchTests(_BatchTestBase):
         self.assertEqual(result.succeeded_count, 7)
         # 3 + 3 + 1 (cycle-end flush of the partial batch)
         self.assertEqual(relay.put_manifest_attempt_count, 3)
-        self.assertEqual(len(relay.published_manifests), 3)
+        self.assertEqual(len(relay.published_shards), 3)
 
 
 class CASConflictMidBatchTests(_BatchTestBase):
@@ -276,22 +281,19 @@ class CASConflictMidBatchTests(_BatchTestBase):
 
         # 2 attempts: 1 conflict + 1 success. 1 publish recorded.
         self.assertEqual(relay.put_manifest_attempt_count, 2)
-        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(len(relay.published_shards), 1)
         self.assertEqual(relay.cas_conflicts_to_inject, 0)
 
         # All three paths landed at the post-retry revision.
-        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        folder = next(
-            f for f in current["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-        )
         remote_paths = sorted(
-            str(e.get("path", "")) for e in folder["entries"] or []
+            str(e.get("path", "")) for e in shard["entries"] or []
             if isinstance(e, dict) and not bool(e.get("deleted"))
         )
         self.assertEqual(remote_paths, paths)
@@ -313,6 +315,9 @@ class MixedUploadAndDeleteTests(_BatchTestBase):
         )
         relay.put_manifest_attempt_count = 0
         relay.published_manifests = []
+        relay.published_shards = []
+        relay.published_roots = []
+        relay.shard_with_root_puts = 0
 
         binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
         # Pretend baseline stamped local-entries for both seeded files.
@@ -355,28 +360,25 @@ class MixedUploadAndDeleteTests(_BatchTestBase):
         statuses = sorted(o.status for o in result.outcomes)
         self.assertEqual(statuses, ["deleted", "uploaded", "uploaded"])
         self.assertEqual(relay.put_manifest_attempt_count, 1)
-        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(len(relay.published_shards), 1)
 
-        # Verify the post-publish manifest carries:
+        # Verify the post-publish shard carries:
         #   - keep.txt: alive
         #   - goner.txt: tombstoned
         #   - new0.txt, new1.txt: alive
-        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        folder = next(
-            f for f in current["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-        )
         alive = {
-            str(e["path"]) for e in folder["entries"] or []
+            str(e["path"]) for e in shard["entries"] or []
             if isinstance(e, dict) and not bool(e.get("deleted"))
         }
         tombstoned = {
-            str(e["path"]) for e in folder["entries"] or []
+            str(e["path"]) for e in shard["entries"] or []
             if isinstance(e, dict) and bool(e.get("deleted"))
         }
         self.assertEqual(alive, {"keep.txt", "new0.txt", "new1.txt"})
@@ -409,10 +411,10 @@ class KillMidBatchResumeTests(_BatchTestBase):
             )
 
         # First cycle: relay accepts chunk PUTs but explodes on publish.
-        original_put_manifest = relay.put_manifest
+        original_put = relay.put_shard_with_root
         def _kill_on_publish(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
             raise RuntimeError("simulated kill mid-publish")
-        relay.put_manifest = _kill_on_publish  # type: ignore[assignment]
+        relay.put_shard_with_root = _kill_on_publish  # type: ignore[assignment]
 
         vault = _vault()
         try:
@@ -440,7 +442,7 @@ class KillMidBatchResumeTests(_BatchTestBase):
             self.assertEqual(op.attempts, 1)
 
         # Restore the healthy publish path.
-        relay.put_manifest = original_put_manifest  # type: ignore[assignment]
+        relay.put_shard_with_root = original_put  # type: ignore[assignment]
         puts_before_run2 = list(relay.put_calls)
 
         # Second cycle: should HEAD-and-skip the existing chunks and
@@ -473,7 +475,7 @@ class KillMidBatchResumeTests(_BatchTestBase):
         # Chunk set on the relay is unchanged.
         self.assertEqual(set(relay.chunks), chunks_after_kill)
         # One publish covered the three resumed ops.
-        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(len(relay.published_shards), 1)
 
 
 class CycleEndCancelFlushTests(_BatchTestBase):
@@ -594,6 +596,9 @@ class SkippedIdenticalInsideBatchTests(_BatchTestBase):
         )
         relay.put_manifest_attempt_count = 0
         relay.published_manifests = []
+        relay.published_shards = []
+        relay.published_roots = []
+        relay.shard_with_root_puts = 0
 
         binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
         # Stage a local file with identical content + queue an upload
@@ -658,10 +663,10 @@ class StubReuseDirectTests(_BatchTestBase):
             relative_path="stable.txt",
         )
 
-        original_put_manifest = relay.put_manifest
+        original_put = relay.put_shard_with_root
         def _kill(*a, **kw):  # noqa: ANN001, ANN002, ANN003
             raise RuntimeError("simulated kill")
-        relay.put_manifest = _kill  # type: ignore[assignment]
+        relay.put_shard_with_root = _kill  # type: ignore[assignment]
 
         vault = _vault()
         try:
@@ -688,7 +693,7 @@ class StubReuseDirectTests(_BatchTestBase):
 
         # Restore the relay; re-run prep against the same file. The
         # stub mechanism must hand back the same ids.
-        relay.put_manifest = original_put_manifest  # type: ignore[assignment]
+        relay.put_shard_with_root = original_put  # type: ignore[assignment]
         binding = self.store.get_binding(binding.binding_id)
         vault = _vault()
         try:
@@ -704,19 +709,16 @@ class StubReuseDirectTests(_BatchTestBase):
         # The successful publish should have cleared the stub.
         self.assertEqual(list(stub_dir.glob("*.json")), [])
 
-        # The published manifest's stable.txt version_id should be
-        # the same one the prior cycle's stub recorded.
-        from src.vault.ui.browser_model import decrypt_manifest
+        # The published shard's stable.txt version_id should be the
+        # same one the prior cycle's stub recorded.
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        folder = next(
-            f for f in current["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-        )
-        target = next(e for e in folder["entries"] if e["path"] == "stable.txt")
+        target = next(e for e in shard["entries"] if e["path"] == "stable.txt")
         published_version_id = target["versions"][-1]["version_id"]
         self.assertEqual(
             published_version_id, first_version_id,
@@ -740,15 +742,16 @@ def _vault() -> Vault:
 
 
 class BatchProbeRelay(FakeUploadRelay):
-    """Relay that counts put_manifest attempts and can inject CAS
-    conflicts on demand.
+    """Relay that counts publish attempts and can inject CAS conflicts
+    on demand.
 
     Used by the SO-3 tests to confirm the batch shape:
-    ``put_manifest_attempt_count`` counts every attempt (success or
-    409). ``cas_conflicts_to_inject`` flips a one-shot 409 on the next
-    attempt — the inline envelope mirrors what the real server returns
-    per §A1 so the §D4 rebase loop in ``_publish_batch_with_cas_retry``
-    has real ciphertext to decrypt.
+    ``put_manifest_attempt_count`` counts every publish attempt
+    (legacy ``put_manifest`` or sharded ``put_shard_with_root``;
+    success or 409). ``cas_conflicts_to_inject`` flips a one-shot 409
+    on the next attempt — the inline envelope mirrors what the real
+    server returns per §A1 so the §D4 rebase loop in
+    ``_publish_batch_with_cas_retry`` has real ciphertext to decrypt.
     """
 
     def __init__(self, *, manifest: dict) -> None:
@@ -788,6 +791,32 @@ class BatchProbeRelay(FakeUploadRelay):
             parent_revision=parent_revision,
             manifest_hash=manifest_hash,
             manifest_ciphertext=manifest_ciphertext,
+        )
+
+    def put_shard_with_root(
+        self, vault_id, vault_access_secret, remote_folder_id, *,
+        shard, root,
+    ):
+        self.put_manifest_attempt_count += 1
+        if self.cas_conflicts_to_inject > 0:
+            self.cas_conflicts_to_inject -= 1
+            current = self.shards.get(remote_folder_id, {})
+            current_envelope = current.get("envelope", b"")
+            raise VaultCASConflictError({
+                "code": "vault_shard_conflict",
+                "message": "injected shard CAS conflict (SO-3 test)",
+                "details": {
+                    "remote_folder_id": remote_folder_id,
+                    "current_shard_revision": int(current.get("revision", 0)),
+                    "current_shard_hash": str(current.get("hash", "")),
+                    "current_shard_ciphertext":
+                        base64.b64encode(current_envelope).decode("ascii"),
+                    "current_shard_size": len(current_envelope),
+                },
+            })
+        return super().put_shard_with_root(
+            vault_id, vault_access_secret, remote_folder_id,
+            shard=shard, root=root,
         )
 
 

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from ..atomic import fsync_dir
+from ..manifest import assemble_unified_manifest
 from .lifecycle import SyncCancelledError
 from .sync import (
     PUBLISH_BATCH_SIZE,
@@ -47,6 +48,7 @@ from .sync import (
     SyncOpOutcome,
     SyncVault,
     _BatchEntry,
+    _fetch_folder_state,
     _flush_batch,
     _prepare_op_for_batch,
 )
@@ -115,6 +117,11 @@ def run_two_way_cycle(
     local_root.mkdir(parents=True, exist_ok=True)
 
     head = vault.fetch_manifest(relay)
+    # Phase H step 2: the batched-publish helpers (``_prepare_op_for_batch``
+    # / ``_flush_batch``) consume a sharded ``_BindingFolderState``. Phase
+    # A's apply-remote-to-local helper still walks the unified ``head`` —
+    # twoway's full sharded port lands in step 3.
+    state = _fetch_folder_state(vault, relay, binding, author_device_id)
     started_revision = int(head.get("revision", 0))
     outcomes: list[SyncOpOutcome] = []
     cancelled = False
@@ -186,7 +193,7 @@ def run_two_way_cycle(
                 binding=binding,
                 local_root=local_root,
                 op=op,
-                manifest=head,
+                state=state,
                 author_device_id=author_device_id,
                 chunk_cache_dir=cache_dir,
                 should_continue=should_continue,
@@ -199,10 +206,13 @@ def run_two_way_cycle(
                     break
                 if immediate_outcome.status == "failed":
                     # F-Y07: non-batched failure (quota, special-file
-                    # error, unsupported op type). Refresh head so the
-                    # rest of the iteration sees the latest.
+                    # error, unsupported op type). Refresh both views
+                    # so the rest of the iteration sees the latest.
                     try:
                         head = vault.fetch_manifest(relay)
+                        state = _fetch_folder_state(
+                            vault, relay, binding, author_device_id,
+                        )
                     except Exception:  # noqa: BLE001
                         log.warning(
                             "vault.sync.refetch_after_failure_failed binding=%s",
@@ -221,13 +231,13 @@ def run_two_way_cycle(
                 # refreshed head, which applies the concurrent
                 # writer's changes (and produces §D4 conflict
                 # renames where local state would be overwritten).
-                batch_outcomes, head, batch_failed = _flush_batch(
+                batch_outcomes, state, batch_failed = _flush_batch(
                     vault=vault,
                     relay=relay,
                     store=store,
                     binding=binding,
                     local_root=local_root,
-                    current_manifest=head,
+                    state=state,
                     batch=batch,
                     author_device_id=author_device_id,
                     max_retries=0,
@@ -239,6 +249,9 @@ def run_two_way_cycle(
                     batch_failed_in_iteration = True
                     try:
                         head = vault.fetch_manifest(relay)
+                        state = _fetch_folder_state(
+                            vault, relay, binding, author_device_id,
+                        )
                     except Exception:  # noqa: BLE001
                         log.warning(
                             "vault.sync.refetch_after_batch_failure_failed binding=%s",
@@ -248,18 +261,29 @@ def run_two_way_cycle(
                     # apply the concurrent writer's changes before
                     # we retry the surviving pending-op rows.
                     break
+                # Phase H step 2: post-flush, the legacy ``head`` mirror
+                # is stale (publish went via shard-with-root). Synthesize
+                # a fresh head from the post-publish sharded state so
+                # the next iteration's Phase A sees what we just wrote
+                # (e.g. an entry we re-uploaded on top of a tombstone is
+                # no longer a tombstone, so Phase A doesn't re-trash the
+                # local file). Step 3 ports Phase A to sharded; the
+                # synthesis goes away then.
+                head = assemble_unified_manifest(
+                    state.root, {binding.remote_folder_id: state.shard},
+                )
 
         # Cycle-end flush of the partial batch (if any). Same
         # ``max_retries=0`` policy — single attempt; on CAS conflict
         # drop the batch and let the next iteration re-run Phase A.
         if batch:
-            batch_outcomes, head, batch_failed = _flush_batch(
+            batch_outcomes, state, batch_failed = _flush_batch(
                 vault=vault,
                 relay=relay,
                 store=store,
                 binding=binding,
                 local_root=local_root,
-                current_manifest=head,
+                state=state,
                 batch=batch,
                 author_device_id=author_device_id,
                 max_retries=0,
@@ -271,11 +295,21 @@ def run_two_way_cycle(
                 batch_failed_in_iteration = True
                 try:
                     head = vault.fetch_manifest(relay)
+                    state = _fetch_folder_state(
+                        vault, relay, binding, author_device_id,
+                    )
                 except Exception:  # noqa: BLE001
                     log.warning(
                         "vault.sync.refetch_after_batch_failure_failed binding=%s",
                         binding.binding_id, exc_info=True,
                     )
+            else:
+                # Phase H step 2: keep ``head`` aligned with the sharded
+                # state we just published; see longer comment on the
+                # in-loop flush above. Removed in step 3.
+                head = assemble_unified_manifest(
+                    state.root, {binding.remote_folder_id: state.shard},
+                )
 
         if cancelled:
             break
@@ -300,9 +334,14 @@ def run_two_way_cycle(
             break
         last_revision = new_revision
         # Re-fetch for next iteration so we observe any remote work
-        # that landed while we were uploading.
+        # that landed while we were uploading. Phase H step 2: pull
+        # both legacy (for Phase A) and sharded (for Phase B) views;
+        # step 3 collapses them.
         try:
-            head = vault.fetch_manifest(relay)
+            state = _fetch_folder_state(vault, relay, binding, author_device_id)
+            head = assemble_unified_manifest(
+                state.root, {binding.remote_folder_id: state.shard},
+            )
         except Exception:  # noqa: BLE001
             log.warning(
                 "vault.sync.refetch_for_next_iter_failed binding=%s",

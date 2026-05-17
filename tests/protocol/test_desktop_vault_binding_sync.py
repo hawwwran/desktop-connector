@@ -37,7 +37,10 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     MASTER_KEY,
     VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    seed_sharded_state_from_manifest,
+)
 
 
 VAULT_ACCESS_SECRET = "vault-secret"
@@ -91,6 +94,7 @@ class BackupOnlySyncTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         return relay, manifest
@@ -113,6 +117,7 @@ class BackupOnlySyncTests(unittest.TestCase):
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path=path, author_device_id=AUTHOR,
             )
+            seed_sharded_state_from_manifest(vault, relay, res.manifest)
         finally:
             vault.close()
         return res.manifest
@@ -200,10 +205,12 @@ class BackupOnlySyncTests(unittest.TestCase):
         # Backup-only must NOT materialize the remote-only file.
         self.assertFalse((self.local_root / "remote-only.txt").exists())
         self.assertEqual(result.outcomes, [])
-        # Revision is at least the remote head's revision (advanced or matched).
+        # Revision matches the server's current root revision (advanced by
+        # the sharded seed publishes; the cycle records root_revision as
+        # the binding's last_synced_revision).
         rebound = self.store.get_binding(binding.binding_id)
         self.assertEqual(
-            rebound.last_synced_revision, int(manifest["revision"]),
+            rebound.last_synced_revision, int(relay.root_revision),
         )
 
     # ------------------------------------------------------------------
@@ -246,18 +253,15 @@ class BackupOnlySyncTests(unittest.TestCase):
         self.assertIsNone(self.store.get_local_entry(binding.binding_id, "goner.txt"))
         self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
 
-        # Remote manifest now has the entry tombstoned.
-        from src.vault.ui.browser_model import decrypt_manifest
+        # Remote shard now has the entry tombstoned.
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        folder = next(
-            f for f in current["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-        )
-        target = next(e for e in folder["entries"] if e["path"] == "goner.txt")
+        target = next(e for e in shard["entries"] if e["path"] == "goner.txt")
         self.assertTrue(bool(target["deleted"]))
 
     # ------------------------------------------------------------------
@@ -476,6 +480,7 @@ class FetchManifestPerOpTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         # Discard any get_manifest calls from setup so the assertions
@@ -536,7 +541,12 @@ class FetchManifestPerOpTests(unittest.TestCase):
             "docs/plans/vault-large-folder-perf.md SO-2.",
         )
 
-    def test_backup_only_cycle_skips_initial_fetch_when_manifest_passed(self) -> None:
+    def test_backup_only_cycle_does_one_root_fetch_per_cycle(self) -> None:
+        # Phase H step 2: the ``manifest=`` kwarg is preserved for caller
+        # compatibility but the sharded cycle ignores it and fetches the
+        # root + shard pair fresh. The SO-2 invariant the test pins is
+        # "exactly one state fetch per cycle, not per op" — i.e. count
+        # equals 1 regardless of how many ops the cycle drains.
         relay = self._empty_remote()
         binding = self._make_bound_binding(last_revision=int(relay.current_revision))
 
@@ -549,8 +559,6 @@ class FetchManifestPerOpTests(unittest.TestCase):
                 relative_path=path,
             )
 
-        # Caller supplies the manifest dict, so the cycle never has to
-        # call fetch_manifest at all on the success path.
         vault = _vault()
         try:
             head = vault.fetch_manifest(relay)
@@ -565,9 +573,10 @@ class FetchManifestPerOpTests(unittest.TestCase):
             vault.close()
 
         self.assertEqual(
-            relay.get_manifest_count, 0,
-            "with a passed-in manifest the cycle must not call "
-            f"fetch_manifest for any of the N ops; saw {relay.get_manifest_count}",
+            relay.get_manifest_count, 1,
+            "expected exactly one cycle-driven state fetch (root) "
+            "regardless of op count; per-op refetch regressed — saw "
+            f"{relay.get_manifest_count}",
         )
 
     def test_backup_only_cycle_refetches_after_failed_op(self) -> None:
@@ -684,6 +693,7 @@ class FlushAndSyncTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
 
@@ -751,6 +761,7 @@ class FlushAndSyncTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         binding = self.store.create_binding(
@@ -799,6 +810,7 @@ class FlushAndSyncTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         binding = self.store.create_binding(
@@ -842,10 +854,14 @@ def _vault() -> Vault:
 
 
 class CountingRelay(FakeUploadRelay):
-    """FakeUploadRelay variant that exposes a counter on ``get_manifest``.
+    """FakeUploadRelay variant that exposes a counter on every
+    cycle-driven state fetch.
 
     Used by :class:`FetchManifestPerOpTests` to pin SO-2 — every extra
-    GET on the success path is a regression and shows up here.
+    GET on the success path is a regression and shows up here. After
+    Phase H step 2 the cycle reads root + shard rather than the unified
+    manifest, so this counter bumps on either ``get_manifest`` (legacy
+    fallback) or ``get_root`` (sharded path).
     """
 
     def __init__(self, *, manifest: dict) -> None:
@@ -855,6 +871,10 @@ class CountingRelay(FakeUploadRelay):
     def get_manifest(self, vault_id, vault_access_secret):
         self.get_manifest_count += 1
         return super().get_manifest(vault_id, vault_access_secret)
+
+    def get_root(self, vault_id, vault_access_secret):
+        self.get_manifest_count += 1
+        return super().get_root(vault_id, vault_access_secret)
 
 
 if __name__ == "__main__":

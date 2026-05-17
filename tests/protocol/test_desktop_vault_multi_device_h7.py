@@ -64,7 +64,11 @@ from src.vault.upload import upload_file  # noqa: E402
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR, DOCS_ID, MASTER_KEY, VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    mirror_legacy_from_sharded,
+    seed_sharded_state_from_manifest,
+)
 
 
 VAULT_ACCESS_SECRET = "vault-secret"
@@ -142,12 +146,19 @@ class Device:
         binding = self.get_binding()
         vault = _make_vault()
         try:
-            return run_two_way_cycle(
+            result = run_two_way_cycle(
                 vault=vault, relay=relay, store=self.store,
                 binding=binding,
                 author_device_id=self.device_id,
                 device_name=self.name,
             )
+            # Step 2: cycles publish via sharded ``put_shard_with_root``
+            # but the multi-device test asserts on the legacy
+            # ``current_envelope`` via legacy ``fetch_manifest``. Mirror
+            # back here so the next device's Phase A sees this device's
+            # mutations. Removed once twoway Phase A is sharded (step 3).
+            mirror_legacy_from_sharded(vault, relay)
+            return result
         finally:
             vault.close()
 
@@ -155,11 +166,13 @@ class Device:
         binding = self.get_binding()
         vault = _make_vault()
         try:
-            return run_backup_only_cycle(
+            result = run_backup_only_cycle(
                 vault=vault, relay=relay, store=self.store,
                 binding=binding,
                 author_device_id=self.device_id,
             )
+            mirror_legacy_from_sharded(vault, relay)
+            return result
         finally:
             vault.close()
 
@@ -197,6 +210,7 @@ class MultiDeviceH7Tests(unittest.TestCase):
         bootstrap = _make_vault()
         try:
             bootstrap.publish_manifest(self.relay, manifest)
+            seed_sharded_state_from_manifest(bootstrap, self.relay, manifest)
         finally:
             bootstrap.close()
         self.start_revision = int(manifest["revision"])
@@ -289,6 +303,7 @@ class MultiDeviceH7Tests(unittest.TestCase):
                 local_path=seed_local, remote_folder_id=DOCS_ID,
                 remote_path="shared.txt", author_device_id=AUTHOR,
             )
+            seed_sharded_state_from_manifest(bootstrap, self.relay, res.manifest)
             seeded_revision = int(res.manifest["revision"])
         finally:
             bootstrap.close()

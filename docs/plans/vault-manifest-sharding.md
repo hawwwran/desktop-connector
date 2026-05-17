@@ -644,15 +644,35 @@ time. Each commit leaves the suite green (Python 1564 + PHP
 
 Remaining Plan A checklist:
 
-* [ ] **Step 1 (this commit):** port ``prepare_upload_for_batch``
+* [x] **Step 1** (2026-05-17): ported ``prepare_upload_for_batch``
   in ``desktop/src/vault/upload/single_file.py`` to take a
   per-folder ``shard`` instead of the unified manifest. Sole
-  caller ``binding/sync.py:_prepare_upload_for_batch`` adapts
-  with a 4-line shard-synthesis shim that disappears in step 2.
-* [ ] Step 2: port ``binding/sync.py`` (resume from
-  ``git stash@{0}``, simpler now without the
-  ``assemble_unified_manifest`` glue).
-* [ ] Step 3: port ``binding/twoway.py``.
+  caller ``binding/sync.py:_prepare_upload_for_batch`` adapted
+  with a 4-line shard-synthesis shim that disappeared in step 2.
+* [x] **Step 2** (2026-05-17): ported ``binding/sync.py``'s
+  ``run_backup_only_cycle`` to fetch root + folder shard via
+  ``_fetch_folder_state`` (§10.C hash chain check + genesis
+  shard synthesis), publish via ``publish_shard_with_root``,
+  and handle shard/root-conflict envelopes in CAS retry.
+  ``binding/twoway.py``'s Phase B drain rides the same shared
+  helpers; Phase A still walks a unified-manifest ``head``
+  synthesized in-memory from the post-publish sharded state so
+  step 3 can port it cleanly. Step 1's ``_shard_view`` shim is
+  gone — sync now hands ``state.shard`` to
+  ``prepare_upload_for_batch`` directly. Test surface migrated
+  to sharded counters (``published_shards``,
+  ``shard_with_root_puts``); ``BatchProbeRelay`` +
+  ``_TwoWayBatchProbeRelay`` learned to inject shard-CAS
+  conflicts. Multi-device tests gain a transitional
+  ``mirror_legacy_from_sharded`` helper that re-publishes the
+  unified mirror after each cycle so device-B's two-way Phase A
+  sees device-A's sharded writes.
+* [ ] Step 3: port ``binding/twoway.py``'s Phase A
+  (``_apply_remote_to_local`` + tombstone / upsert helpers) to
+  read from a sharded state. Drops the
+  ``assemble_unified_manifest`` synthesis added in step 2,
+  ``mirror_legacy_from_sharded`` test helper, and Phase A's
+  legacy ``head`` variable.
 * [ ] Step 4: port ``upload/single_file.py``'s ``upload_file`` +
   ``_publish_with_cas_retry``, ``upload/folder.py``,
   ``upload/resume.py``. Rename ``UploadResult.manifest`` →

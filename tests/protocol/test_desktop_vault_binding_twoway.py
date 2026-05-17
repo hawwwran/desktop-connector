@@ -31,7 +31,10 @@ from src.vault.upload import upload_file  # noqa: E402
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR, DOCS_ID, MASTER_KEY, VAULT_ID,
 )
-from tests.protocol.test_desktop_vault_upload import FakeUploadRelay  # noqa: E402
+from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
+    FakeUploadRelay,
+    seed_sharded_state_from_manifest,
+)
 
 
 VAULT_ACCESS_SECRET = "vault-secret"
@@ -104,6 +107,7 @@ class TwoWayCycleTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         return relay, manifest
@@ -126,6 +130,7 @@ class TwoWayCycleTests(unittest.TestCase):
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path=path, author_device_id=AUTHOR,
             )
+            seed_sharded_state_from_manifest(vault, relay, res.manifest)
         finally:
             vault.close()
         return res.manifest
@@ -153,6 +158,7 @@ class TwoWayCycleTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, next_manifest)
+            seed_sharded_state_from_manifest(vault, relay, next_manifest)
         finally:
             vault.close()
         return next_manifest
@@ -313,18 +319,15 @@ class TwoWayCycleTests(unittest.TestCase):
         self.assertEqual(result.failed_count, 0)
 
         # And the cycle pushed the conflict copy back to remote so other
-        # devices can see it. Decrypt and look for it.
-        from src.vault.ui.browser_model import decrypt_manifest
+        # devices can see it. Decrypt the sharded view and look for it.
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        folder = next(
-            f for f in current["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-        )
-        remote_paths = [e["path"] for e in folder["entries"]]
+        remote_paths = [e["path"] for e in shard["entries"]]
         self.assertIn(conflict_names[0], remote_paths,
                       f"conflict copy not present in remote: {remote_paths}")
 
@@ -428,18 +431,15 @@ class TwoWayCycleTests(unittest.TestCase):
         # And the modification flowed back to remote — the cycle should
         # have re-uploaded the file as a fresh version on top of the
         # tombstone.
-        from src.vault.ui.browser_model import decrypt_manifest
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        folder = next(
-            f for f in current["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-        )
         entry = next(
-            e for e in folder["entries"] if e["path"] == "ledger.txt"
+            e for e in shard["entries"] if e["path"] == "ledger.txt"
         )
         # The post-cycle entry has at least 2 versions and is no longer
         # tombstoned — the local re-upload won.
@@ -479,14 +479,15 @@ class TwoWayCycleTests(unittest.TestCase):
         self.assertEqual(upload_outcomes[0].status, "uploaded")
         self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
 
-        from src.vault.manifest import find_file_entry
-        from src.vault.ui.browser_model import decrypt_manifest
+        from src.vault.manifest import find_file_entry_in_shard
         observer = _vault()
         try:
-            current = decrypt_manifest(observer, relay.current_envelope)
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             observer.close()
-        self.assertIsNotNone(find_file_entry(current, DOCS_ID, "fresh.txt"))
+        self.assertIsNotNone(find_file_entry_in_shard(shard, "fresh.txt"))
 
     # ------------------------------------------------------------------
     # F-Y20 — ghost local-entries reaping
@@ -722,6 +723,7 @@ class TwoWayFetchManifestPerOpTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         # Discard setup-time get_manifest calls so the assertions count
@@ -832,10 +834,14 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         vault = _vault()
         try:
             vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         relay.put_manifest_attempt_count = 0
         relay.published_manifests = []
+        relay.published_shards = []
+        relay.published_roots = []
+        relay.shard_with_root_puts = 0
         return relay
 
     def _make_two_way_binding(self, *, last_revision: int):
@@ -964,9 +970,9 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         self.assertEqual(relay.put_manifest_attempt_count, 2)
         # Conflict budget exhausted.
         self.assertEqual(relay.cas_conflicts_to_inject, 0)
-        # ``relay.published_manifests`` only counts successful CAS,
+        # ``relay.published_shards`` only counts successful CAS,
         # so 1 entry (the retry).
-        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(len(relay.published_shards), 1)
 
     def test_cas_conflict_persists_across_max_iterations_leaves_failed(self) -> None:
         """If the relay keeps conflicting every batch publish, the
@@ -1077,6 +1083,35 @@ class _TwoWayBatchProbeRelay(FakeUploadRelay):
             parent_revision=parent_revision,
             manifest_hash=manifest_hash,
             manifest_ciphertext=manifest_ciphertext,
+        )
+
+    def put_shard_with_root(
+        self, vault_id, vault_access_secret, remote_folder_id, *,
+        shard, root,
+    ):
+        import base64
+
+        self.put_manifest_attempt_count += 1
+        if self.cas_conflicts_to_inject > 0:
+            self.cas_conflicts_to_inject -= 1
+            from src.vault.relay_errors import VaultCASConflictError
+            current = self.shards.get(remote_folder_id, {})
+            current_envelope = current.get("envelope", b"")
+            raise VaultCASConflictError({
+                "code": "vault_shard_conflict",
+                "message": "injected shard CAS conflict (two-way SO-3 test)",
+                "details": {
+                    "remote_folder_id": remote_folder_id,
+                    "current_shard_revision": int(current.get("revision", 0)),
+                    "current_shard_hash": str(current.get("hash", "")),
+                    "current_shard_ciphertext":
+                        base64.b64encode(current_envelope).decode("ascii"),
+                    "current_shard_size": len(current_envelope),
+                },
+            })
+        return super().put_shard_with_root(
+            vault_id, vault_access_secret, remote_folder_id,
+            shard=shard, root=root,
         )
 
 

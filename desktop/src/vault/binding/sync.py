@@ -82,13 +82,18 @@ from .bindings import (
 )
 from ..manifest import (
     add_or_append_file_version,
+    add_or_append_file_version_in_shard,
     find_file_entry,
+    find_file_entry_in_shard,
+    make_folder_shard,
     normalize_manifest_path,
     normalize_manifest_plaintext,
+    normalize_root_manifest_plaintext,
+    normalize_shard_plaintext,
     tombstone_file_entry,
+    tombstone_file_entry_in_shard,
 )
 from ..relay_errors import VaultCASConflictError, VaultQuotaExceededError
-from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..upload import (
     CAS_MAX_RETRIES,
     PreparedUpload,
@@ -331,6 +336,20 @@ def format_sync_outcome_toast(result: "SyncCycleResult") -> str:
     return f"Sync now: {summary}."
 
 
+@dataclass
+class _BindingFolderState:
+    """The shard-aware state one sync cycle works against.
+
+    ``root`` is the vault-wide root manifest plaintext (folder pointers
+    + retention defaults). ``shard`` is this binding's folder's shard
+    plaintext (file entries + per-folder op log). The cycle mutates
+    only ``shard``'s entries; the root advances purely by the
+    revision-bump baked into the atomic shard-with-root publish.
+    """
+    root: dict[str, Any]
+    shard: dict[str, Any]
+
+
 def run_backup_only_cycle(
     *,
     vault: SyncVault,
@@ -346,9 +365,6 @@ def run_backup_only_cycle(
 ) -> SyncCycleResult:
     """Drain ``binding``'s pending ops once. Returns a summary.
 
-    The caller may pass an already-fetched ``manifest`` to avoid an
-    extra round-trip; otherwise we fetch the head fresh.
-
     F-Y08: ``should_continue`` is checked before each op and passed
     down into the chunk-PUT phase. When it returns ``False`` mid-cycle
     the loop exits early; the in-flight op's outcome is recorded
@@ -359,13 +375,20 @@ def run_backup_only_cycle(
 
     SO-3: per-op chunk PUTs are grouped into batches of ``batch_size``
     (default :data:`PUBLISH_BATCH_SIZE`); each batch closes with one
-    CAS-published manifest revision instead of N. Skipped ops
+    CAS-published shard-with-root revision instead of N. Skipped ops
     (identical bytes, special files, never-synced vanish) and failed
     ops (quota, CAS exhaustion, non-CAS errors) do not enter the
     batch — they flush immediately so the cycle keeps draining. On
     kill mid-batch the chunks already PUT are idempotent at the
     relay; the next cycle re-encrypts the same files, HEAD-and-skips
     those chunks, and rebuilds the batch.
+
+    Phase H sharded path: the cycle works against this binding's
+    folder shard plus the vault root. A publish bumps the shard's
+    chain + the root's chain atomically via the §6.8
+    ``PUT /folders/{id}/shard-with-root`` endpoint. Other folders'
+    shards are never fetched — that's the whole point of the
+    sharding work.
     """
     if binding.state != "bound":
         raise ValueError(
@@ -384,15 +407,19 @@ def run_backup_only_cycle(
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
 
-    head = manifest or vault.fetch_manifest(relay)
-    started_at_revision = int(head.get("revision", 0))
+    # ``manifest`` kwarg is the pre-Phase-H caller-supplied unified
+    # manifest. Two-way's run_two_way_cycle still passes it (also
+    # legacy-shaped); we ignore it and fetch the sharded view fresh.
+    # Phase H of the two-way port flips that caller to pass an explicit
+    # state instead.
+    state = _fetch_folder_state(vault, relay, binding, author_device_id)
+    started_at_revision = int(state.root.get("root_revision", 0))
 
     local_root = Path(binding.local_path)
     pending = store.list_pending_ops(binding.binding_id)
     outcomes: list[SyncOpOutcome] = []
     cancelled = False
 
-    current_manifest: dict[str, Any] = head
     batch: list[_BatchEntry] = []
 
     def _emit(outcome: SyncOpOutcome) -> None:
@@ -402,6 +429,16 @@ def run_backup_only_cycle(
                 progress(outcome)
             except Exception:  # noqa: BLE001
                 log.exception("vault.sync.progress_callback_failed")
+
+    def _refetch_state() -> None:
+        nonlocal state
+        try:
+            state = _fetch_folder_state(vault, relay, binding, author_device_id)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "vault.sync.refetch_state_failed binding=%s",
+                binding.binding_id, exc_info=True,
+            )
 
     for op in pending:
         # F-Y08: bail before starting another op when cancellation
@@ -422,7 +459,7 @@ def run_backup_only_cycle(
             binding=binding,
             local_root=local_root,
             op=op,
-            manifest=current_manifest,
+            state=state,
             author_device_id=author_device_id,
             chunk_cache_dir=chunk_cache_dir,
             should_continue=should_continue,
@@ -438,13 +475,7 @@ def run_backup_only_cycle(
                 # error, unsupported op type) is rare enough that we
                 # take the GET to refresh head — keeps semantics in
                 # line with the pre-SO-3 single-op path.
-                try:
-                    current_manifest = vault.fetch_manifest(relay)
-                except Exception:  # noqa: BLE001
-                    log.warning(
-                        "vault.sync.refetch_after_failure_failed binding=%s",
-                        binding.binding_id, exc_info=True,
-                    )
+                _refetch_state()
             continue
 
         if batch_entry is None:
@@ -454,13 +485,13 @@ def run_backup_only_cycle(
         batch.append(batch_entry)
 
         if len(batch) >= batch_size:
-            batch_outcomes, current_manifest, batch_failed = _flush_batch(
+            batch_outcomes, state, batch_failed = _flush_batch(
                 vault=vault,
                 relay=relay,
                 store=store,
                 binding=binding,
                 local_root=local_root,
-                current_manifest=current_manifest,
+                state=state,
                 batch=batch,
                 author_device_id=author_device_id,
             )
@@ -468,13 +499,7 @@ def run_backup_only_cycle(
                 _emit(outcome)
             batch = []
             if batch_failed:
-                try:
-                    current_manifest = vault.fetch_manifest(relay)
-                except Exception:  # noqa: BLE001
-                    log.warning(
-                        "vault.sync.refetch_after_batch_failure_failed binding=%s",
-                        binding.binding_id, exc_info=True,
-                    )
+                _refetch_state()
 
     # Cycle-end flush: any partial batch still pending publishes now.
     #
@@ -485,7 +510,7 @@ def run_backup_only_cycle(
     # Cancelled cycle: F-Y08 says "bail within ~1 chunk", and a busy
     # multi-device vault could otherwise burn many seconds in the §D4
     # retry loop after the user clicked Pause. Compromise: attempt a
-    # single publish (one round-trip, bounded by manifest size) but
+    # single publish (one round-trip, bounded by shard size) but
     # skip the retry budget. If it conflicts, we drop the batch
     # rather than burning 5+ extra round-trips. Chunks are already
     # PUT (idempotent), pending-ops survive on drop, and the next
@@ -497,13 +522,13 @@ def run_backup_only_cycle(
             should_continue is None or not should_continue()
         )
         flush_max_retries = 0 if cancelled_still_active else CAS_MAX_RETRIES
-        batch_outcomes, current_manifest, batch_failed = _flush_batch(
+        batch_outcomes, state, batch_failed = _flush_batch(
             vault=vault,
             relay=relay,
             store=store,
             binding=binding,
             local_root=local_root,
-            current_manifest=current_manifest,
+            state=state,
             batch=batch,
             author_device_id=author_device_id,
             max_retries=flush_max_retries,
@@ -518,15 +543,9 @@ def run_backup_only_cycle(
             _emit(outcome)
         batch = []
         if batch_failed and not cancelled:
-            try:
-                current_manifest = vault.fetch_manifest(relay)
-            except Exception:  # noqa: BLE001
-                log.warning(
-                    "vault.sync.refetch_after_batch_failure_failed binding=%s",
-                    binding.binding_id, exc_info=True,
-                )
+            _refetch_state()
 
-    ended_at_revision = int(current_manifest.get("revision", started_at_revision))
+    ended_at_revision = int(state.root.get("root_revision", started_at_revision))
     store.update_binding_state(
         binding.binding_id,
         last_synced_revision=ended_at_revision,
@@ -543,6 +562,59 @@ def run_backup_only_cycle(
     )
 
 
+def _fetch_folder_state(
+    vault: SyncVault,
+    relay: Any,
+    binding: VaultBinding,
+    author_device_id: str,
+) -> _BindingFolderState:
+    """Fetch the root + this binding's folder shard for a sync cycle.
+
+    Runs the §10.C hash-chain check on the shard against the root
+    pointer's ``shard_hash`` (passed via ``expected_shard_hash``).
+    For a freshly-added folder (pointer exists in root but the
+    binding hasn't published its first shard yet, so
+    ``shard_hash == ""``), synthesizes an empty shard at revision 0;
+    the cycle's first batch publish bumps to revision 1.
+    """
+    root = vault.fetch_root_manifest(relay)
+    pointer = _find_root_folder_pointer(root, binding.remote_folder_id)
+    if pointer is None:
+        raise ValueError(
+            f"binding {binding.binding_id}: remote folder "
+            f"{binding.remote_folder_id} has no pointer in the vault root "
+            "(publish the folder pointer before binding)",
+        )
+    expected_hash = str(pointer.get("shard_hash", ""))
+    if expected_hash == "":
+        # Genesis: pointer exists but no shard ever published. The
+        # synthetic empty shard's revision pair (0, 0) lets the cycle's
+        # first publish bump cleanly to (1, 0).
+        shard = make_folder_shard(
+            vault_id=str(root.get("vault_id", "")),
+            remote_folder_id=binding.remote_folder_id,
+            shard_revision=0,
+            parent_shard_revision=0,
+            created_at=str(pointer.get("created_at", "")),
+            author_device_id=str(pointer.get("created_by_device_id", author_device_id)),
+        )
+    else:
+        shard = vault.fetch_folder_shard(
+            relay, binding.remote_folder_id,
+            expected_shard_hash=expected_hash,
+        )
+    return _BindingFolderState(root=root, shard=shard)
+
+
+def _find_root_folder_pointer(
+    root: dict[str, Any], remote_folder_id: str,
+) -> dict[str, Any] | None:
+    for pointer in root.get("remote_folders", []) or []:
+        if isinstance(pointer, dict) and pointer.get("remote_folder_id") == remote_folder_id:
+            return pointer
+    return None
+
+
 def _prepare_op_for_batch(
     *,
     vault: SyncVault,
@@ -551,22 +623,21 @@ def _prepare_op_for_batch(
     binding: VaultBinding,
     local_root: Path,
     op: VaultPendingOperation,
-    manifest: dict[str, Any],
+    state: _BindingFolderState,
     author_device_id: str,
     chunk_cache_dir: Path | None,
     should_continue: Callable[[], bool] | None,
 ) -> tuple[SyncOpOutcome | None, _BatchEntry | None]:
-    """SO-3: prepare one op for inclusion in a batched manifest publish.
+    """SO-3: prepare one op for inclusion in a batched publish.
 
     Returns ``(immediate_outcome, batch_entry)``. Exactly one is
     non-None when the op was handled (the caller emits the outcome or
     appends the entry); both may be ``None`` if the op was a defensive
-    soft-skip. Prep never publishes, so the cycle's view of the head
-    is stable until the next batch flush — that's why the manifest
-    isn't threaded back.
+    soft-skip. Prep never publishes, so the cycle's view of the
+    folder shard is stable until the next batch flush.
 
     The immediate-outcome path covers ops that don't contribute to a
-    batch: identical-bytes skip (no manifest mutation), special-file
+    batch: identical-bytes skip (no shard mutation), special-file
     skip, never-synced vanish, quota / CAS / unexpected errors, and
     cancellation. Everything else (real uploads, deletes, and
     upload-promoted-to-delete on a previously-synced path) becomes a
@@ -580,14 +651,14 @@ def _prepare_op_for_batch(
             binding=binding,
             local_root=local_root,
             op=op,
-            manifest=manifest,
+            state=state,
             author_device_id=author_device_id,
             chunk_cache_dir=chunk_cache_dir,
             should_continue=should_continue,
         )
     if op.op_type == "delete":
         return _prepare_delete_for_batch(
-            store=store, binding=binding, op=op, manifest=manifest,
+            store=store, binding=binding, op=op, state=state,
         )
     # T10.5 doesn't carry rename ops in backup-only.
     store.mark_op_failed(op.op_id, f"unsupported op_type: {op.op_type}")
@@ -611,7 +682,7 @@ def _prepare_upload_for_batch(
     binding: VaultBinding,
     local_root: Path,
     op: VaultPendingOperation,
-    manifest: dict[str, Any],
+    state: _BindingFolderState,
     author_device_id: str,
     chunk_cache_dir: Path | None,
     should_continue: Callable[[], bool] | None,
@@ -619,9 +690,9 @@ def _prepare_upload_for_batch(
     """Prep an upload op for batching: run chunk PUTs, return a batch entry.
 
     Identical-bytes shortcut: when the file's keyed fingerprint already
-    matches the latest live version in ``manifest``, no chunks are PUT
+    matches the latest live version in ``state.shard``, no chunks are PUT
     and no batch entry is produced — the cycle records "skipped" and
-    stamps the local-entry row at the manifest's current revision.
+    stamps the local-entry row at the root's current revision.
 
     Path-vanished cases:
 
@@ -657,7 +728,7 @@ def _prepare_upload_for_batch(
             binding.binding_id, relative_path,
         )
         normalized = normalize_manifest_path(relative_path)
-        entry = find_file_entry(manifest, binding.remote_folder_id, normalized)
+        entry = find_file_entry_in_shard(state.shard, normalized)
         if entry is None or bool(entry.get("deleted")):
             # Already gone remotely too — just reap local state.
             store.delete_local_entry(binding.binding_id, relative_path)
@@ -680,23 +751,11 @@ def _prepare_upload_for_batch(
             ),
         )
 
-    # Phase H step 1: prepare_upload_for_batch now takes a shard
-    # (per-folder file entries) instead of the unified manifest.
-    # Synthesize one from the unified manifest the legacy fetch
-    # returned. When sync.py's full port lands (next commit), the
-    # cycle will fetch the shard directly and skip this synthesis.
-    _folder_entries: list[Any] = []
-    for _folder in manifest.get("remote_folders", []) or []:
-        if isinstance(_folder, dict) and _folder.get("remote_folder_id") == binding.remote_folder_id:
-            _folder_entries = list(_folder.get("entries", []) or [])
-            break
-    _shard_view = {"entries": _folder_entries}
-
     try:
         prepared = prepare_upload_for_batch(
             vault=vault,
             relay=relay,
-            shard=_shard_view,
+            shard=state.shard,
             local_path=absolute,
             remote_folder_id=binding.remote_folder_id,
             remote_path=relative_path,
@@ -790,7 +849,7 @@ def _prepare_upload_for_batch(
 
     if prepared.skipped_identical:
         # File's bytes already match the latest live version. Stamp the
-        # local-entry row at the current manifest revision and drop the
+        # local-entry row at the current root revision and drop the
         # pending op — no batch entry needed.
         try:
             stat = absolute.stat()
@@ -798,7 +857,7 @@ def _prepare_upload_for_batch(
             mtime_ns = int(stat.st_mtime_ns)
         except OSError:
             size, mtime_ns = int(prepared.logical_size), 0
-        current_revision = int(manifest.get("revision", 0))
+        current_revision = int(state.root.get("root_revision", 0))
         store.upsert_local_entry(VaultLocalEntry(
             binding_id=binding.binding_id,
             relative_path=relative_path,
@@ -833,13 +892,13 @@ def _prepare_delete_for_batch(
     store: VaultBindingsStore,
     binding: VaultBinding,
     op: VaultPendingOperation,
-    manifest: dict[str, Any],
+    state: _BindingFolderState,
 ) -> tuple[SyncOpOutcome | None, _BatchEntry | None]:
     """Prep a delete op for batching: build a tombstone entry, or
     short-circuit when the remote entry is already gone."""
     relative_path = op.relative_path
     normalized = normalize_manifest_path(relative_path)
-    entry = find_file_entry(manifest, binding.remote_folder_id, normalized)
+    entry = find_file_entry_in_shard(state.shard, normalized)
     if entry is None or bool(entry.get("deleted")):
         store.delete_local_entry(binding.binding_id, relative_path)
         store.delete_pending_op(op.op_id)
@@ -858,18 +917,19 @@ def _prepare_delete_for_batch(
     )
 
 
-def _apply_batch_to_manifest(
-    parent_manifest: dict[str, Any],
+def _apply_batch_to_shard(
+    parent_shard: dict[str, Any],
     batch: list[_BatchEntry],
     *,
     remote_folder_id: str,
+    folder_retention_policy: dict[str, int] | None,
     author_device_id: str,
     created_at: str,
 ) -> dict[str, Any]:
-    """Fold every batched mutation onto ``parent_manifest`` and bump revisions.
+    """Fold every batched mutation onto ``parent_shard`` and bump revisions.
 
-    Both helpers are idempotent: ``add_or_append_file_version`` is a
-    no-op when the same ``version_id`` is already the latest; the
+    Both helpers are idempotent: ``add_or_append_file_version_in_shard``
+    is a no-op when the same ``version_id`` is already the latest; the
     tombstone helper refreshes ``deleted_at`` on an already-deleted
     entry. So replaying the same batch against a freshly-fetched head
     on a CAS conflict converges without duplicating work.
@@ -877,18 +937,21 @@ def _apply_batch_to_manifest(
     Tombstones for already-gone entries are tolerated — that case
     arises naturally when a CAS conflict refetch shows the same path
     was already tombstoned by another writer.
+
+    ``folder_retention_policy`` comes from the root pointer (per
+    ``make_root_folder_pointer``); the shard doesn't carry it itself,
+    so the caller passes it in for the tombstone helper.
     """
-    parent_n = normalize_manifest_plaintext(parent_manifest)
-    parent_revision = int(parent_n.get("revision", 0))
+    parent_n = normalize_shard_plaintext(parent_shard)
+    parent_revision = int(parent_n.get("shard_revision", 0))
     next_revision = parent_revision + 1
 
     candidate = parent_n
     for entry in batch:
         if entry.kind == "upload":
             assert entry.prepared is not None
-            candidate = add_or_append_file_version(
+            candidate = add_or_append_file_version_in_shard(
                 candidate,
-                remote_folder_id=remote_folder_id,
                 path=entry.prepared.normalized_remote_path,
                 version=entry.prepared.version_payload,
                 entry_id=entry.prepared.entry_id,
@@ -896,12 +959,12 @@ def _apply_batch_to_manifest(
         elif entry.kind == "delete":
             normalized = normalize_manifest_path(entry.op.relative_path)
             try:
-                candidate = tombstone_file_entry(
+                candidate = tombstone_file_entry_in_shard(
                     candidate,
-                    remote_folder_id=remote_folder_id,
                     path=normalized,
                     deleted_at=str(entry.deleted_at or created_at),
                     author_device_id=author_device_id,
+                    folder_retention_policy=folder_retention_policy,
                 )
             except KeyError:
                 # Entry already gone — fine for a batched tombstone
@@ -909,8 +972,35 @@ def _apply_batch_to_manifest(
                 # writer tombstoned the same path).
                 pass
 
-    candidate["revision"] = next_revision
-    candidate["parent_revision"] = parent_revision
+    candidate["shard_revision"] = next_revision
+    candidate["parent_shard_revision"] = parent_revision
+    candidate["created_at"] = created_at
+    candidate["author_device_id"] = str(author_device_id)
+    # Pin canonical discriminators so a synthetic genesis-shard parent
+    # (no schema/vault_id set yet) becomes publishable after the first
+    # batch mutation.
+    candidate["remote_folder_id"] = remote_folder_id
+    return candidate
+
+
+def _bumped_root_for_shard_publish(
+    parent_root: dict[str, Any],
+    *,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Make a new root revision that just bumps the chain.
+
+    ``publish_shard_with_root`` will patch the matching folder pointer's
+    ``shard_hash`` + ``shard_revision`` internally before sealing —
+    this helper only owns the vault-wide revision bump + author /
+    created_at refresh.
+    """
+    parent_n = normalize_root_manifest_plaintext(parent_root)
+    parent_revision = int(parent_n.get("root_revision", 0))
+    candidate = dict(parent_n)
+    candidate["root_revision"] = parent_revision + 1
+    candidate["parent_root_revision"] = parent_revision
     candidate["created_at"] = created_at
     candidate["author_device_id"] = str(author_device_id)
     return candidate
@@ -920,60 +1010,103 @@ def _publish_batch_with_cas_retry(
     *,
     vault: SyncVault,
     relay: Any,
-    parent_manifest: dict[str, Any],
+    parent_state: _BindingFolderState,
     batch: list[_BatchEntry],
     remote_folder_id: str,
     author_device_id: str,
     max_retries: int = CAS_MAX_RETRIES,
-) -> dict[str, Any]:
-    """Publish the batch with §D4 CAS retry semantics.
+) -> _BindingFolderState:
+    """Publish the batch via ``publish_shard_with_root`` with §D4 CAS retry.
 
-    On 409, decrypt the inline server-head envelope, re-apply the
-    batch's mutations on top of the new head, retry. ``last_attempt``
-    is replaced each iteration (rather than being merged forward) so
-    we don't carry stale revision stamps across attempts.
+    On 409, decrypt the inline server-head envelope(s) — could be
+    shard-only, root-only, or both — re-apply the batch's mutations
+    on top of the new shard head, bump a fresh root revision, retry.
+    Each iteration's candidate is rebuilt rather than merged forward
+    so stale revision stamps don't bleed across attempts.
+
+    Returns the post-publish ``(root, shard)`` state.
     """
     from datetime import datetime, timezone
 
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    candidate = _apply_batch_to_manifest(
-        parent_manifest, batch,
+    pointer = _find_root_folder_pointer(parent_state.root, remote_folder_id)
+    folder_retention = (
+        dict(pointer["retention_policy"])
+        if pointer is not None and isinstance(pointer.get("retention_policy"), dict)
+        else None
+    )
+
+    candidate_shard = _apply_batch_to_shard(
+        parent_state.shard, batch,
         remote_folder_id=remote_folder_id,
+        folder_retention_policy=folder_retention,
         author_device_id=author_device_id,
         created_at=created_at,
     )
+    candidate_root = _bumped_root_for_shard_publish(
+        parent_state.root,
+        author_device_id=author_device_id,
+        created_at=created_at,
+    )
+    current_state = parent_state
     for attempt in range(max_retries):
         try:
-            return vault.publish_manifest(relay, candidate)
+            shard_out, root_out = vault.publish_shard_with_root(
+                relay, remote_folder_id, candidate_shard, candidate_root,
+            )
+            return _BindingFolderState(root=root_out, shard=shard_out)
         except VaultCASConflictError as exc:
-            envelope = exc.current_manifest_ciphertext_bytes()
-            if not envelope:
+            shard_envelope = exc.current_shard_ciphertext_bytes()
+            root_envelope = exc.current_root_ciphertext_bytes()
+            if not shard_envelope and not root_envelope:
+                # Neither side gave us a recovery payload — can't merge.
                 raise
-            server_head = decrypt_manifest_envelope(vault, envelope)
+            new_shard = (
+                vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
+                if shard_envelope else current_state.shard
+            )
+            new_root = (
+                vault.decrypt_root_envelope(root_envelope)
+                if root_envelope else current_state.root
+            )
             log.info(
-                "vault.sync.batch_cas_retry attempt=%d/%d batch_size=%d",
+                "vault.sync.batch_cas_retry attempt=%d/%d batch_size=%d "
+                "shard_conflict=%s root_conflict=%s",
                 attempt + 1, max_retries, len(batch),
+                bool(shard_envelope), bool(root_envelope),
             )
             # Backup-only is last-writer-wins; the replay below will
-            # land our version on top of the server head, demoting any
-            # concurrent writer's version on the same path to a prior
-            # version (or reviving a tombstone we're re-uploading over).
-            # Surface that per-path so an operator can correlate a
-            # "my other desktop's upload isn't the latest anymore"
-            # report against this cycle's CAS retry.
-            _log_batch_cas_steamrolls(
-                batch=batch,
-                server_head=server_head,
-                remote_folder_id=remote_folder_id,
+            # land our version on top of the server-head shard,
+            # demoting any concurrent writer's version on the same
+            # path to a prior version (or reviving a tombstone we're
+            # re-uploading over). Surface per-path so an operator can
+            # correlate "my other desktop's upload isn't the latest
+            # anymore" with this cycle's CAS retry.
+            _log_batch_cas_steamrolls(batch=batch, server_shard=new_shard)
+            current_state = _BindingFolderState(root=new_root, shard=new_shard)
+            pointer = _find_root_folder_pointer(new_root, remote_folder_id)
+            folder_retention = (
+                dict(pointer["retention_policy"])
+                if pointer is not None and isinstance(pointer.get("retention_policy"), dict)
+                else None
             )
-            candidate = _apply_batch_to_manifest(
-                server_head, batch,
+            candidate_shard = _apply_batch_to_shard(
+                new_shard, batch,
                 remote_folder_id=remote_folder_id,
+                folder_retention_policy=folder_retention,
+                author_device_id=author_device_id,
+                created_at=created_at,
+            )
+            candidate_root = _bumped_root_for_shard_publish(
+                new_root,
                 author_device_id=author_device_id,
                 created_at=created_at,
             )
     try:
-        return vault.publish_manifest(relay, candidate)
+        shard_out, root_out = vault.publish_shard_with_root(
+            relay, remote_folder_id, candidate_shard, candidate_root,
+        )
+        return _BindingFolderState(root=root_out, shard=shard_out)
     except VaultCASConflictError:
         log.warning(
             "vault.sync.batch_cas_exhausted batch_size=%d retries=%d",
@@ -985,28 +1118,20 @@ def _publish_batch_with_cas_retry(
 def _log_batch_cas_steamrolls(
     *,
     batch: list[_BatchEntry],
-    server_head: dict[str, Any],
-    remote_folder_id: str,
+    server_shard: dict[str, Any],
 ) -> None:
     """Emit one ``vault.sync.batch_cas_steamroll`` line per batched op
-    whose replay onto the server head will overwrite a concurrent
+    whose replay onto the server shard will overwrite a concurrent
     writer's work at the same path. For uploads, that means the server
     entry already has a version_id that isn't in our batch. For
     deletes, that means the server entry is still alive at publish-
     refetch time. Either case is correct backup-only semantics (last
     writer wins) — the log just makes the loss observable so an
     operator can answer "why isn't my other desktop's upload the
-    latest anymore" without spelunking through manifest history.
+    latest anymore" without spelunking through shard history.
     """
-    folder: dict[str, Any] | None = None
-    for f in server_head.get("remote_folders") or []:
-        if isinstance(f, dict) and f.get("remote_folder_id") == remote_folder_id:
-            folder = f
-            break
-    if folder is None:
-        return
     entries_by_path: dict[str, dict[str, Any]] = {}
-    for entry in folder.get("entries") or []:
+    for entry in server_shard.get("entries") or []:
         if not isinstance(entry, dict):
             continue
         path = str(entry.get("path", ""))
@@ -1060,14 +1185,14 @@ def _flush_batch(
     store: VaultBindingsStore,
     binding: VaultBinding,
     local_root: Path,
-    current_manifest: dict[str, Any],
+    state: _BindingFolderState,
     batch: list[_BatchEntry],
     author_device_id: str,
     max_retries: int = CAS_MAX_RETRIES,
-) -> tuple[list[SyncOpOutcome], dict[str, Any], bool]:
+) -> tuple[list[SyncOpOutcome], _BindingFolderState, bool]:
     """Publish the accumulated batch and run post-publish bookkeeping.
 
-    Returns ``(outcomes, manifest_after_publish, batch_failed)``. On
+    Returns ``(outcomes, state_after_publish, batch_failed)``. On
     a successful publish, every batched op is marked "uploaded" or
     "deleted" and its local-entry / pending-op rows are reconciled.
     On CAS exhaustion (or any other publish error), every batched op
@@ -1080,13 +1205,13 @@ def _flush_batch(
     Pause (F-Y08).
     """
     if not batch:
-        return [], current_manifest, False
+        return [], state, False
 
     try:
         published = _publish_batch_with_cas_retry(
             vault=vault,
             relay=relay,
-            parent_manifest=current_manifest,
+            parent_state=state,
             batch=batch,
             remote_folder_id=binding.remote_folder_id,
             author_device_id=author_device_id,
@@ -1101,7 +1226,7 @@ def _flush_batch(
         for entry in batch:
             store.mark_op_failed(entry.op.op_id, f"cas_conflict: {exc}")
             outcomes.append(_failed_outcome(entry, "cas_conflict"))
-        return outcomes, current_manifest, True
+        return outcomes, state, True
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "vault.sync.batch_failed binding=%s batch_size=%d error=%s",
@@ -1111,9 +1236,11 @@ def _flush_batch(
         for entry in batch:
             store.mark_op_failed(entry.op.op_id, str(exc))
             outcomes.append(_failed_outcome(entry, str(exc)))
-        return outcomes, current_manifest, True
+        return outcomes, state, True
 
-    new_revision = int(published.get("revision", current_manifest.get("revision", 0)))
+    new_revision = int(
+        published.root.get("root_revision", state.root.get("root_revision", 0))
+    )
     outcomes = []
     for entry in batch:
         if entry.kind == "upload":
@@ -1135,7 +1262,7 @@ def _flush_batch(
             ))
             store.delete_pending_op(entry.op.op_id)
             # SO-3 dedupe stub no longer needed — the publish landed,
-            # the chunk_ids are permanent in the manifest, and we
+            # the chunk_ids are permanent in the shard, and we
             # don't want the next cycle's prep to short-circuit on it
             # if the file is later edited and re-queued.
             if (
@@ -1165,8 +1292,10 @@ def _flush_batch(
             ))
 
     log.info(
-        "vault.sync.batch_published binding=%s batch_size=%d new_revision=%d",
+        "vault.sync.batch_published binding=%s batch_size=%d new_root_revision=%d "
+        "new_shard_revision=%d",
         binding.binding_id, len(batch), new_revision,
+        int(published.shard.get("shard_revision", 0)),
     )
     return outcomes, published, False
 

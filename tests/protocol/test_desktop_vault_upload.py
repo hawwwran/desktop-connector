@@ -1537,6 +1537,29 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
         vault.publish_shard_with_root(relay, rf_id, shard, next_root)
 
 
+def mirror_legacy_from_sharded(vault, relay) -> None:
+    """Inverse of :func:`seed_sharded_state_from_manifest`: rebuild the
+    unified manifest from the current root + shards on the relay and
+    publish it via legacy ``put_manifest`` so legacy ``fetch_manifest``
+    sees the latest sharded mutations.
+
+    Used by multi-device tests where a sharded publish on device A
+    must propagate to device B's two-way Phase A (which still reads
+    the legacy unified manifest). Goes away when twoway's Phase A is
+    ported to sharded in step 3.
+    """
+    from src.vault.manifest import assemble_unified_manifest
+
+    root = vault.decrypt_root_envelope(relay.root_envelope)
+    shards = {
+        fid: vault.decrypt_shard_envelope(s["envelope"], fid)
+        for fid, s in relay.shards.items()
+    }
+    unified = assemble_unified_manifest(root, shards)
+    relay.current_revision = int(unified["parent_revision"])
+    vault.publish_manifest(relay, unified)
+
+
 class CrashingRelay(FakeUploadRelay):
     """Variant that raises ``SimulatedCrashError`` after N PUTs.
 

@@ -533,6 +533,7 @@ relay log (filenames are local-only).
 | `vault.sync.refetch_after_failure_failed` | desktop | warning | `binding` | SO-2 — post-op-failure manifest refresh raised; cycle continues with the stale view |
 | `vault.sync.refetch_after_publish_failed` | desktop | warning | `binding` | Manifest re-fetch after our own publish failed; cycle continues |
 | `vault.sync.refetch_for_next_iter_failed` | desktop | warning | `binding` | Two-way next-iter re-fetch failed |
+| `vault.sync.refetch_state_failed` | desktop | warning | `binding` | Phase H — backup-only cycle's post-publish-failure sharded state re-fetch raised; cycle continues with the stale view |
 | `vault.sync.resume_cancelled` | desktop | info | `vault`, `session`, `chunks_done`, `total` | F-Y08 — resume_upload bailed mid-chunk-loop |
 | `vault.sync.resume_cancelled_pre_publish` | desktop | info | `vault`, `session` | F-Y08 — resume_upload bailed before CAS publish |
 | `vault.sync.scan_enqueued` | desktop | info | `binding`, `count` | "Sync now" catch-up scan enqueued upload/delete ops the watcher missed |
