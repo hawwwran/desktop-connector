@@ -470,13 +470,15 @@ class VaultImportRunnerTests(unittest.TestCase):
         active_active = empty
         vault = make_vault()
         try:
-            # Bootstrap sharded state only. run_import publishes via the
-            # legacy CAS path against relay_b's existing current_revision
-            # (initialized by FakeUploadRelay.__init__ from ``empty``), so
-            # we deliberately skip mirror_legacy_from_sharded — calling it
-            # would add a second entry to published_manifests and break
-            # the "manifest published exactly once" assertion below.
+            # Phase H step 7c: ``run_import`` publishes via per-folder
+            # ``publish_shard_with_root`` (sharded) — seed the sharded
+            # state so the relay's root + shard surface is ready before
+            # the merged-shard publish lands. Reset counters after the
+            # seed so the assertion below counts only run_import's
+            # publishes.
             seed_sharded_state_from_manifest(vault, relay_b, empty)
+            relay_b.published_shards = []
+            relay_b.published_roots = []
             result = run_import(
                 vault=vault, relay=relay_b,
                 bundle_path=bundle_path,
@@ -493,8 +495,12 @@ class VaultImportRunnerTests(unittest.TestCase):
         self.assertEqual(result.chunks_skipped, 0)
         # All chunks landed on relay B.
         self.assertEqual(set(relay_b.chunks), set(relay_a.chunks))
-        # Manifest published exactly once (one CAS publish — no conflicts).
-        self.assertEqual(len(relay_b.published_manifests), 1)
+        # One shard published exactly once (one CAS publish — no
+        # conflicts). The legacy ``published_manifests`` count stays
+        # at the bootstrap publish from ``FakeUploadRelay.__init__``-
+        # path seeding; ``published_shards`` is the post-step-7c
+        # authoritative count.
+        self.assertEqual(len(relay_b.published_shards), 1)
         self.assertIsNotNone(result.published_manifest)
         # Imported file visible in the published manifest.
         self.assertIsNotNone(

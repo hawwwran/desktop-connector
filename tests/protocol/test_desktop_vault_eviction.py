@@ -33,7 +33,6 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    mirror_legacy_from_sharded,
     seed_sharded_state_from_manifest,
 )
 
@@ -68,16 +67,12 @@ class VaultEvictionPassTests(unittest.TestCase):
                 remote_folder_id=DOCS_ID, remote_path="old.txt",
                 author_device_id=AUTHOR,
             )
-            mirror_legacy_from_sharded(vault, relay)
             after_delete = delete_file(
                 vault=vault, relay=relay, manifest=uploaded.manifest,
                 remote_folder_id=DOCS_ID, remote_path="old.txt",
                 author_device_id=AUTHOR,
                 deleted_at="2026-04-01T10:00:00.000Z",  # > 30 days ago
             )
-            # Step 5: ``delete_file`` is sharded; mirror to legacy so
-            # the (still-legacy) eviction publish sees the tombstone.
-            mirror_legacy_from_sharded(vault, relay)
             chunks_before = set(relay.chunks)
             self.assertGreater(len(chunks_before), 0)
 
@@ -115,14 +110,12 @@ class VaultEvictionPassTests(unittest.TestCase):
                 remote_folder_id=DOCS_ID, remote_path="fresh.txt",
                 author_device_id=AUTHOR,
             )
-            mirror_legacy_from_sharded(vault, relay)
             after_delete = delete_file(
                 vault=vault, relay=relay, manifest=uploaded.manifest,
                 remote_folder_id=DOCS_ID, remote_path="fresh.txt",
                 author_device_id=AUTHOR,
                 deleted_at="2026-05-01T10:00:00.000Z",
             )
-            mirror_legacy_from_sharded(vault, relay)
             result = eviction_pass(
                 vault=vault, relay=relay, manifest=after_delete,
                 author_device_id=AUTHOR,
@@ -161,13 +154,11 @@ class VaultEvictionPassTests(unittest.TestCase):
                     remote_folder_id=DOCS_ID, remote_path=path,
                     author_device_id=AUTHOR,
                 )
-                mirror_legacy_from_sharded(vault, relay)
                 delete_file(
                     vault=vault, relay=relay, manifest=uploaded.manifest,
                     remote_folder_id=DOCS_ID, remote_path=path,
                     author_device_id=AUTHOR, deleted_at=deleted_at,
                 )
-                mirror_legacy_from_sharded(vault, relay)
 
             current = _decrypt_current_manifest(vault, relay)
             # Set a target larger than what stage 1 can free.
@@ -206,7 +197,6 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
                 created_at="2026-04-01T10:00:00.000Z",
             )
-            mirror_legacy_from_sharded(vault, relay)
             local.write_bytes(b"v2 content - distinct bytes here")
             v2 = upload_file(
                 vault=vault, relay=relay, manifest=v1.manifest, local_path=local,
@@ -214,7 +204,6 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
                 created_at="2026-05-01T10:00:00.000Z",
             )
-            mirror_legacy_from_sharded(vault, relay)
 
             current = _decrypt_current_manifest(vault, relay)
             target = sum(len(v) for v in relay.chunks.values())  # demand all bytes
@@ -255,7 +244,6 @@ class VaultEvictionPassTests(unittest.TestCase):
                 remote_folder_id=DOCS_ID, remote_path="untouchable.txt",
                 author_device_id=AUTHOR,
             )
-            mirror_legacy_from_sharded(vault, relay)
             result = eviction_pass(
                 vault=vault, relay=relay, manifest=uploaded.manifest,
                 author_device_id=AUTHOR,
@@ -307,8 +295,11 @@ def _empty_manifest() -> dict:
 
 
 def _decrypt_current_manifest(vault, relay) -> dict:
-    from src.vault.ui.browser_model import decrypt_manifest as _decrypt
-    return _decrypt(vault, relay.current_envelope)
+    """Phase H step 7d: read the post-publish unified view by
+    assembling root + per-folder shards. The legacy
+    ``relay.current_envelope`` is no longer kept in sync by sharded
+    publishes."""
+    return vault.fetch_unified_manifest(relay)
 
 
 if __name__ == "__main__":

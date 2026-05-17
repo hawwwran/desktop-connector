@@ -826,28 +826,43 @@ Remaining Plan A checklist:
     ``test_desktop_vault_folder_runtime.py`` was renamed to
     ``fetch_unified_manifest`` to match.
 
-  * **7c — Production: ``import_/runner.py``.** The vault export →
-    vault import flow. Reads source vault state, writes to target
-    vault. Currently composes ``upload_file`` (already sharded
-    post-step 4) with ``publish_manifest`` for the merged
-    manifest. Port the publish to ``publish_root_manifest`` for
-    the folder-set merge + ``publish_shard_with_root`` for any
-    per-folder entry merges.
+  * [x] **7c** (2026-05-17) — Production: ``import_/runner.py``.
+    The §D9 merge result (a unified manifest produced by
+    ``merge_import_into``) is now published via per-folder
+    ``publish_shard_with_root`` instead of one legacy
+    ``publish_manifest``. New ``_publish_merge_via_sharded``
+    iterates the merged folder set, and a per-folder helper
+    overlays the merge entries on the server head's shard +
+    publishes with CAS retry. The merged folder-set is assumed
+    to already exist in the active vault root — adding brand-
+    new folder pointers stays a separate ``vault.add_remote_folder``
+    flow. ``ImportVault`` Protocol's legacy slot replaced with
+    the five sharded methods + ``fetch_unified_manifest``. The
+    import test was reset its sharded counters after seed (since
+    the seed itself does a sharded publish) and now asserts
+    ``len(relay_b.published_shards) == 1``. New event tags
+    ``vault.import.cas_retry`` / ``vault.import.cas_exhausted``
+    catalogued.
 
-  * **7d — Production: ``ops/eviction.py``.** The tricky one.
-    Stage 1 (expired tombstones) can span multiple folders; that
-    no longer fits ``publish_shard_with_root``'s one-folder scope
-    cleanly. Two design options:
-    (1) Per-affected-folder publishes — loses the atomic-stage
-        semantics but is the only fit for the current wire
-        surface; stages become "publish N shards in sequence";
-        partial failures leave a coherent vault (each shard
-        publish is its own CAS).
-    (2) A new ``publish_multi_shard_with_root`` endpoint — cleaner
-        but adds server-side scope.
-    Option 1 is the pragmatic call. Stage 2 + 3 are already
-    single-folder; just port them via the same pattern as ops/
-    delete.py.
+  * [x] **7d** (2026-05-17) — Production: ``ops/eviction.py``.
+    Took option 1 — per-affected-folder publishes after
+    ``gc_execute`` does the chunk deletes. Stage atomicity
+    downgrades from vault-wide to per-folder: a crash between
+    folder A's purge-publish and folder B's leaves A purged and
+    B's expired tombstones still queued; the next eviction run
+    picks up B. The chunks are already deleted by ``gc_execute``
+    before the manifest mutations, so partial publishes never
+    leave the manifest referencing absent chunks. ``_StageBatch``
+    grew a ``per_folder_mutations`` dict (folder_id → callable
+    that drops tombstoned entries or the named version from one
+    shard) replacing the unified ``apply_purge`` closure. The
+    test ``_decrypt_current_manifest`` helper now uses
+    ``vault.fetch_unified_manifest`` to read the post-publish
+    state; the ``mirror_legacy_from_sharded`` calls inserted in
+    step 5 are removed (eviction is sharded-native). New event
+    tags ``vault.eviction.cas_retry`` /
+    ``vault.eviction.cas_exhausted`` catalogued (cas_exhausted
+    gained a ``folder`` field since each folder is its own CAS).
 
   * [x] **7e** (2026-05-17) — Production: ``ops/integrity.py``.
     Read-only. Renamed ``_safe_fetch_manifest`` to call

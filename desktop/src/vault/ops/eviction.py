@@ -8,14 +8,20 @@ freed or the vault has no more historical material to drop:
 3. Hard-purge oldest historical version of each multi-version live file
 4. No candidates remain → caller surfaces the §D2 step-4 banner
 
-Each stage is a self-contained transaction:
+Each stage is a transaction sequence:
 
-- pure helper picks candidate chunk_ids + corresponding manifest mutation
+- pure helper picks candidate chunk_ids + per-folder shard mutations
 - relay ``gc_plan`` resolves which of those the server is willing to drop
   (e.g. shared chunks may still be referenced by another folder)
 - relay ``gc_execute`` actually deletes the ciphertext
-- the local manifest is mutated (chunks rewritten, versions/entries
-  pruned) and CAS-published so other devices see the cleaned state
+- per affected folder: build the post-purge shard, CAS-publish via
+  ``publish_shard_with_root`` so other devices see the cleaned state.
+  Phase H step 7d: the pre-port path published one vault-wide manifest
+  revision per stage; the sharded path publishes one shard revision
+  per affected folder. Stage atomicity downgrades from vault-wide to
+  per-folder — a crash between two folders' publishes leaves the
+  earlier one purged and the later one still expired; the next
+  eviction run picks up the residue.
 
 Activity-log events are emitted via standard ``logging``: every stage
 that does work logs ``vault.eviction.<event>`` so the diagnostics
@@ -28,16 +34,22 @@ import copy
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Protocol
 
 from ..binding.lifecycle import SyncCancelledError
-from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..manifest import (
+    assemble_unified_manifest,
     compute_recoverable_until,
-    normalize_manifest_plaintext,
+    normalize_root_manifest_plaintext,
+    normalize_shard_plaintext,
     DEFAULT_RETENTION_POLICY,
 )
 from ..relay_errors import VaultCASConflictError
+from ..upload.folder_state import (
+    FolderState,
+    fetch_folder_state,
+    find_root_folder_pointer,
+)
 
 
 log = logging.getLogger(__name__)
@@ -55,9 +67,25 @@ class EvictionVault(Protocol):
     @property
     def vault_access_secret(self) -> str | None: ...
 
-    def fetch_manifest(self, relay, *, local_index=None) -> dict: ...
+    def fetch_unified_manifest(self, relay, *, local_index=None) -> dict: ...
 
-    def publish_manifest(self, relay, manifest, *, local_index=None) -> dict: ...
+    def fetch_root_manifest(self, relay, *, local_index=None) -> dict: ...
+
+    def fetch_folder_shard(
+        self, relay, remote_folder_id: str, *,
+        expected_shard_hash: str | None = None,
+    ) -> dict: ...
+
+    def publish_shard_with_root(
+        self, relay, remote_folder_id: str,
+        shard: dict, root: dict,
+    ) -> tuple[dict, dict]: ...
+
+    def decrypt_root_envelope(self, envelope_bytes: bytes) -> dict: ...
+
+    def decrypt_shard_envelope(
+        self, envelope_bytes: bytes, remote_folder_id: str,
+    ) -> dict: ...
 
 
 class EvictionRelay(Protocol):
@@ -120,17 +148,19 @@ def eviction_pass(
     target is the eviction-driven flow that backs T6.6's 507 prompt;
     stages 2 and 3 only fire when stage 1 didn't free enough.
 
-    The caller decides whether to prompt the user before invoking; this
-    function performs the work and returns what was freed.
+    Phase H step 7d: ``manifest`` is accepted as the caller's view of
+    state (e.g. the assembled unified manifest the wizard was
+    rendering) but is re-read fresh per stage from the sharded relay
+    surface. Each stage publishes one shard revision per affected
+    folder via ``publish_shard_with_root``.
 
     F-U03: ``should_continue`` is checked between every stage. Each
-    stage publishes a single manifest revision atomically, so a Cancel
-    between stages leaves the vault in a coherent state — anything
-    freed by completed stages stays freed; remaining stages don't run.
-    Mid-stage cancel is intentionally not supported (it would require
-    unwinding a partial gc_execute + manifest publish).
+    stage's per-folder publishes are independent CAS units, so a
+    Cancel between folders leaves the already-purged shards purged
+    and skips the rest; the next eviction run picks up where we left
+    off.
     """
-    current_manifest = normalize_manifest_plaintext(manifest)
+    current_manifest = manifest
     bytes_freed = 0
     chunks_freed = 0
     stages: list[EvictionStageResult] = []
@@ -184,9 +214,7 @@ def eviction_pass(
 
     _check_cancel("stage_2")
 
-    # Stage 2 — unexpired tombstones, oldest deleted_at first. User has
-    # been warned via the §D2 100% banner; we surface the per-purge
-    # event in the activity log per spec.
+    # Stage 2 — unexpired tombstones, oldest deleted_at first.
     stage_2, current_manifest = _run_stage(
         vault=vault,
         relay=relay,
@@ -236,7 +264,7 @@ def eviction_pass(
             no_more_candidates=False,
         )
 
-    # Stage 4 — nothing left to drop. Caller surfaces the sync-stop banner.
+    # Stage 4 — nothing left to drop.
     log.info("vault.eviction.no_more_candidates target=%d freed=%d", target_bytes_to_free, bytes_freed)
     return EvictionResult(
         manifest=current_manifest,
@@ -257,7 +285,9 @@ class _StageBatch:
     chunk_ids: list[str]
     affected_paths: list[str]
     chunk_sizes: dict[str, int]  # ciphertext_size by chunk_id (for accounting)
-    apply_purge: Callable[[dict, set[str]], dict]
+    # Per-folder shard mutations: folder_id → callable that takes the
+    # current shard plaintext and returns the post-purge shard plaintext.
+    per_folder_mutations: dict[str, Callable[[dict[str, Any], set[str]], dict[str, Any]]]
 
 
 CandidatesFn = Callable[[dict[str, Any]], _StageBatch | None]
@@ -278,6 +308,9 @@ def _run_stage(
     if batch is None or not batch.chunk_ids:
         return None, manifest
 
+    # Use the unified manifest's revision as the plan-revision marker.
+    # The server tracks gc plans by an opaque manifest_revision; for
+    # the sharded path this is just a freshness anchor.
     revision = int(manifest.get("revision", 0))
     plan = relay.gc_plan(
         vault.vault_id,
@@ -298,21 +331,29 @@ def _run_stage(
     bytes_freed = int(execute_result.get("freed_ciphertext_bytes") or 0)
     deleted_count = int(execute_result.get("deleted_count") or 0)
     if bytes_freed == 0 and batch.chunk_sizes:
-        # Server didn't echo bytes? Compute from our local size table for
-        # accounting completeness.
         bytes_freed = sum(batch.chunk_sizes.get(c, 0) for c in safe_to_delete)
     if deleted_count == 0:
         deleted_count = len(safe_to_delete)
 
     purged = set(safe_to_delete)
-    mutated_manifest = batch.apply_purge(manifest, purged)
-    published = _publish_with_retry(
-        vault=vault,
-        relay=relay,
-        parent_manifest=manifest,
-        op=lambda parent: _bump_and_apply(parent, batch.apply_purge, purged, author_device_id),
-        local_index=local_index,
-    )
+
+    # Phase H step 7d: per affected folder, fetch state + apply mutation +
+    # publish_shard_with_root. Stage atomicity downgrades from vault-wide
+    # to per-folder; gc_execute already deleted the chunks so the
+    # shard mutations can lag if a crash interrupts mid-stage.
+    for folder_id, mutate in batch.per_folder_mutations.items():
+        _publish_folder_purge_with_retry(
+            vault=vault,
+            relay=relay,
+            remote_folder_id=folder_id,
+            mutate=mutate,
+            purged=purged,
+            author_device_id=author_device_id,
+        )
+
+    # Re-assemble a unified manifest from the post-publish state so the
+    # caller's next stage_fn sees the post-purge view.
+    post_manifest = vault.fetch_unified_manifest(relay, local_index=local_index)
 
     log.info(
         "%s freed_bytes=%d freed_chunks=%d paths=%d",
@@ -329,57 +370,95 @@ def _run_stage(
             bytes_freed=bytes_freed,
             affected_paths=list(batch.affected_paths),
         ),
-        published,
+        post_manifest,
     )
 
 
-def _bump_and_apply(
-    parent: dict[str, Any],
-    apply_purge: Callable[[dict, set[str]], dict],
-    purged: set[str],
-    author_device_id: str,
-) -> dict[str, Any]:
-    parent_n = normalize_manifest_plaintext(parent)
-    parent_revision = int(parent_n.get("revision", 0))
-    out = dict(parent_n)
-    out["revision"] = parent_revision + 1
-    out["parent_revision"] = parent_revision
-    out["created_at"] = _now_rfc3339()
-    out["author_device_id"] = str(author_device_id)
-    return apply_purge(out, purged)
-
-
-def _publish_with_retry(
+def _publish_folder_purge_with_retry(
     *,
     vault: EvictionVault,
     relay: EvictionRelay,
-    parent_manifest: dict[str, Any],
-    op: Callable[[dict[str, Any]], dict[str, Any]],
-    local_index: Any,
+    remote_folder_id: str,
+    mutate: Callable[[dict[str, Any], set[str]], dict[str, Any]],
+    purged: set[str],
+    author_device_id: str,
     max_retries: int = CAS_MAX_RETRIES,
-) -> dict[str, Any]:
-    candidate = op(parent_manifest)
-    for _ in range(max_retries):
+) -> FolderState:
+    """Fetch one folder's state, apply the purge mutation, publish via
+    ``publish_shard_with_root``. CAS retries decrypt the conflict
+    envelope and re-apply ``mutate`` on the rebased shard."""
+    state = fetch_folder_state(vault, relay, remote_folder_id, author_device_id)
+    for attempt in range(max_retries):
+        candidate_shard, candidate_root = _build_candidate(
+            state, remote_folder_id, author_device_id, mutate, purged,
+        )
         try:
-            return vault.publish_manifest(relay, candidate, local_index=local_index)
+            shard_out, root_out = vault.publish_shard_with_root(
+                relay, remote_folder_id, candidate_shard, candidate_root,
+            )
+            return FolderState(root=root_out, shard=shard_out)
         except VaultCASConflictError as exc:
-            envelope = exc.current_manifest_ciphertext_bytes()
-            if not envelope:
+            shard_envelope = exc.current_shard_ciphertext_bytes()
+            root_envelope = exc.current_root_ciphertext_bytes()
+            if not shard_envelope and not root_envelope:
                 raise
-            server_head = decrypt_manifest_envelope(vault, envelope)
-            candidate = op(server_head)
-    # F-D25: distinguish exhaustion from a first-attempt 409 so the
-    # activity log can flag eviction passes that gave up against a
-    # busy multi-device vault.
+            new_shard = (
+                vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
+                if shard_envelope else state.shard
+            )
+            new_root = (
+                vault.decrypt_root_envelope(root_envelope)
+                if root_envelope else state.root
+            )
+            log.info(
+                "vault.eviction.cas_retry attempt=%d/%d folder=%s "
+                "shard_conflict=%s root_conflict=%s",
+                attempt + 1, max_retries, remote_folder_id,
+                bool(shard_envelope), bool(root_envelope),
+            )
+            state = FolderState(root=new_root, shard=new_shard)
+    # F-D25: one final attempt; exhaustion-tag if still 409.
+    candidate_shard, candidate_root = _build_candidate(
+        state, remote_folder_id, author_device_id, mutate, purged,
+    )
     try:
-        return vault.publish_manifest(relay, candidate, local_index=local_index)
+        shard_out, root_out = vault.publish_shard_with_root(
+            relay, remote_folder_id, candidate_shard, candidate_root,
+        )
+        return FolderState(root=root_out, shard=shard_out)
     except VaultCASConflictError:
         log.warning(
-            "vault.eviction.cas_exhausted vault=%s retries=%d",
-            getattr(vault, "vault_id", "?"),
-            max_retries,
+            "vault.eviction.cas_exhausted vault=%s folder=%s retries=%d",
+            getattr(vault, "vault_id", "?"), remote_folder_id, max_retries,
         )
         raise
+
+
+def _build_candidate(
+    state: FolderState,
+    remote_folder_id: str,
+    author_device_id: str,
+    mutate: Callable[[dict[str, Any], set[str]], dict[str, Any]],
+    purged: set[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    created_at = _now_rfc3339()
+    parent_n = normalize_shard_plaintext(state.shard)
+    parent_revision = int(parent_n.get("shard_revision", 0))
+    mutated = mutate(parent_n, purged)
+    mutated["shard_revision"] = parent_revision + 1
+    mutated["parent_shard_revision"] = parent_revision
+    mutated["created_at"] = created_at
+    mutated["author_device_id"] = str(author_device_id)
+    mutated["remote_folder_id"] = remote_folder_id
+
+    root_n = normalize_root_manifest_plaintext(state.root)
+    parent_root_revision = int(root_n.get("root_revision", 0))
+    candidate_root = dict(root_n)
+    candidate_root["root_revision"] = parent_root_revision + 1
+    candidate_root["parent_root_revision"] = parent_root_revision
+    candidate_root["created_at"] = created_at
+    candidate_root["author_device_id"] = str(author_device_id)
+    return mutated, candidate_root
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +475,8 @@ def _expired_tombstone_candidates(
     chunk_ids: list[str] = []
     sizes: dict[str, int] = {}
     paths: list[str] = []
-    targets: set[tuple[str, str]] = set()  # (folder_id, entry_path)
+    # Per-folder targets: folder_id -> set of (entry_path,) tuples to drop.
+    targets_by_folder: dict[str, set[str]] = {}
 
     now_dt = _parse_iso(now_iso)
     if now_dt is None:
@@ -420,20 +500,22 @@ def _expired_tombstone_candidates(
             for cid, size in _entry_chunks(entry):
                 chunk_ids.append(cid)
                 sizes[cid] = size
-            targets.add((folder_id, str(entry.get("path", ""))))
+            targets_by_folder.setdefault(folder_id, set()).add(str(entry.get("path", "")))
             paths.append(str(entry.get("path", "")))
 
     if not chunk_ids:
         return None
 
-    def apply_purge(current: dict, purged: set[str]) -> dict:
-        return _drop_tombstoned_entries(current, targets, purged)
+    per_folder_mutations = {
+        folder_id: _make_drop_tombstoned_mutation(target_paths)
+        for folder_id, target_paths in targets_by_folder.items()
+    }
 
     return _StageBatch(
         chunk_ids=chunk_ids,
         affected_paths=paths,
         chunk_sizes=sizes,
-        apply_purge=apply_purge,
+        per_folder_mutations=per_folder_mutations,
     )
 
 
@@ -464,23 +546,17 @@ def _unexpired_tombstone_candidates(manifest: dict[str, Any]) -> _StageBatch | N
     if not chunk_ids:
         return None
 
-    targets = {(folder_id, path)}
-
-    def apply_purge(current: dict, purged: set[str]) -> dict:
-        return _drop_tombstoned_entries(current, targets, purged)
-
     return _StageBatch(
         chunk_ids=chunk_ids,
         affected_paths=[path],
         chunk_sizes=sizes,
-        apply_purge=apply_purge,
+        per_folder_mutations={folder_id: _make_drop_tombstoned_mutation({path})},
     )
 
 
 def _oldest_version_candidates(manifest: dict[str, Any]) -> _StageBatch | None:
     """Pick the single oldest non-current version among all live files."""
     best: tuple[str, str, str, str, dict[str, Any], dict[str, Any]] | None = None
-    # (created_at_or_modified, folder_id, entry_path, version_id, entry, version)
 
     for folder in manifest.get("remote_folders", []) or []:
         if not isinstance(folder, dict):
@@ -491,7 +567,7 @@ def _oldest_version_candidates(manifest: dict[str, Any]) -> _StageBatch | None:
                 continue
             versions = [v for v in entry.get("versions", []) or [] if isinstance(v, dict)]
             if len(versions) < 2:
-                continue  # never drop the only / latest
+                continue
             latest_id = str(entry.get("latest_version_id") or "")
             history = [v for v in versions if str(v.get("version_id", "")) != latest_id]
             if not history:
@@ -529,64 +605,54 @@ def _oldest_version_candidates(manifest: dict[str, Any]) -> _StageBatch | None:
     if not chunk_ids:
         return None
 
-    target = (folder_id, path, version_id)
-
-    def apply_purge(current: dict, purged: set[str]) -> dict:
-        return _drop_old_version(current, target, purged)
-
     return _StageBatch(
         chunk_ids=chunk_ids,
         affected_paths=[path],
         chunk_sizes=sizes,
-        apply_purge=apply_purge,
+        per_folder_mutations={
+            folder_id: _make_drop_version_mutation(path, version_id),
+        },
     )
 
 
 # ---------------------------------------------------------------------------
-# Manifest mutation helpers
+# Shard mutation factories
 # ---------------------------------------------------------------------------
 
 
-def _drop_tombstoned_entries(
-    manifest: dict[str, Any],
-    targets: Iterable[tuple[str, str]],
-    purged_chunk_ids: set[str],
-) -> dict[str, Any]:
-    """Remove tombstoned entries whose chunks are now physically purged."""
-    out = normalize_manifest_plaintext(manifest)
-    target_set = {(str(f), str(p)) for f, p in targets}
-    for folder in out.get("remote_folders", []) or []:
-        if not isinstance(folder, dict):
-            continue
-        folder_id = str(folder.get("remote_folder_id", ""))
+def _make_drop_tombstoned_mutation(
+    target_paths: set[str],
+) -> Callable[[dict[str, Any], set[str]], dict[str, Any]]:
+    """Build a shard-mutation closure that drops tombstoned entries at
+    ``target_paths`` whose chunks were purged.
+
+    The ``purged`` set is supplied at call time so the closure can be
+    re-applied with a fresh server head on CAS retry.
+    """
+    def mutate(shard: dict[str, Any], _purged: set[str]) -> dict[str, Any]:
+        out = normalize_shard_plaintext(shard)
         kept_entries = []
-        for entry in folder.get("entries", []) or []:
+        for entry in out.get("entries", []) or []:
             if not isinstance(entry, dict):
                 kept_entries.append(entry)
                 continue
             entry_path = str(entry.get("path", ""))
-            if (folder_id, entry_path) in target_set and bool(entry.get("deleted")):
-                # Drop the entry entirely once the server confirmed the chunks gone.
+            if entry_path in target_paths and bool(entry.get("deleted")):
                 continue
             kept_entries.append(entry)
-        folder["entries"] = kept_entries
-    return out
+        out["entries"] = kept_entries
+        return out
+    return mutate
 
 
-def _drop_old_version(
-    manifest: dict[str, Any],
-    target: tuple[str, str, str],
-    purged_chunk_ids: set[str],
-) -> dict[str, Any]:
-    """Drop one historical version from a live entry."""
-    out = normalize_manifest_plaintext(manifest)
-    folder_id, path, version_id = target
-    for folder in out.get("remote_folders", []) or []:
-        if not isinstance(folder, dict):
-            continue
-        if str(folder.get("remote_folder_id", "")) != folder_id:
-            continue
-        for entry in folder.get("entries", []) or []:
+def _make_drop_version_mutation(
+    path: str, version_id: str,
+) -> Callable[[dict[str, Any], set[str]], dict[str, Any]]:
+    """Build a shard-mutation closure that drops one historical version
+    from the live entry at ``path``."""
+    def mutate(shard: dict[str, Any], _purged: set[str]) -> dict[str, Any]:
+        out = normalize_shard_plaintext(shard)
+        for entry in out.get("entries", []) or []:
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("path", "")) != path:
@@ -596,7 +662,8 @@ def _drop_old_version(
                 if isinstance(v, dict) and str(v.get("version_id", "")) != version_id
             ]
             entry["versions"] = kept_versions
-    return out
+        return out
+    return mutate
 
 
 # ---------------------------------------------------------------------------

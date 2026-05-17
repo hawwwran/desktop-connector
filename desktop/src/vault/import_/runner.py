@@ -33,7 +33,14 @@ from .bundle import (
     preview_import,
 )
 from ..relay_errors import VaultCASConflictError
-from ..manifest import merge_with_remote_head, normalize_manifest_plaintext
+from ..manifest import (
+    assemble_unified_manifest,
+    make_folder_shard,
+    normalize_manifest_plaintext,
+    normalize_root_manifest_plaintext,
+    normalize_shard_plaintext,
+)
+from ..upload.folder_state import fetch_folder_state, FolderState
 
 
 log = logging.getLogger(__name__)
@@ -93,9 +100,29 @@ class ImportVault(Protocol):
     @property
     def vault_access_secret(self) -> str | None: ...
 
-    def fetch_manifest(self, relay, *, local_index=None) -> dict: ...
+    # Phase H step 7c: import reads + writes via sharded methods. The
+    # ``manifest=`` kwarg accepted by ``run_import`` is the caller's
+    # snapshot used for the §D9 merge math; the actual publish lands
+    # per-folder on the sharded surface.
+    def fetch_root_manifest(self, relay, *, local_index=None) -> dict: ...
 
-    def publish_manifest(self, relay, manifest, *, local_index=None) -> dict: ...
+    def fetch_folder_shard(
+        self, relay, remote_folder_id: str, *,
+        expected_shard_hash: str | None = None,
+    ) -> dict: ...
+
+    def publish_shard_with_root(
+        self, relay, remote_folder_id: str,
+        shard: dict, root: dict,
+    ) -> tuple[dict, dict]: ...
+
+    def decrypt_root_envelope(self, envelope_bytes: bytes) -> dict: ...
+
+    def decrypt_shard_envelope(
+        self, envelope_bytes: bytes, remote_folder_id: str,
+    ) -> dict: ...
+
+    def fetch_unified_manifest(self, relay, *, local_index=None) -> dict: ...
 
 
 class ImportRelay(Protocol):
@@ -305,11 +332,10 @@ def run_import(
         chunks_uploaded, chunks_skipped + already_present,
         len(bundle_chunk_ids), bytes_uploaded,
     )
-    published = _publish_with_cas_retry(
+    published = _publish_merge_via_sharded(
         vault=vault,
         relay=relay,
-        parent_manifest=active_manifest,
-        candidate=merge.manifest,
+        merged_manifest=merge.manifest,
         author_device_id=author_device_id,
         local_index=local_index,
     )
@@ -329,34 +355,162 @@ def run_import(
     )
 
 
-def _publish_with_cas_retry(
+def _publish_merge_via_sharded(
     *,
     vault: ImportVault,
     relay: Any,
-    parent_manifest: dict[str, Any],
-    candidate: dict[str, Any],
+    merged_manifest: dict[str, Any],
     author_device_id: str,
     local_index: Any,
     max_retries: int = CAS_MAX_RETRIES,
 ) -> dict[str, Any]:
-    rebased_parent = parent_manifest
-    last_attempt = candidate
-    for _ in range(max_retries):
+    """Phase H step 7c: publish the §D9 merge result via per-folder
+    ``publish_shard_with_root`` calls instead of one legacy
+    ``publish_manifest``.
+
+    Each folder in ``merged_manifest`` that has any entries lands as
+    its own shard publish (one CAS unit). Folders the merge left
+    empty are skipped. The merged folder-set is assumed to already
+    exist in the active vault root — adding brand-new folder
+    pointers is a separate ``vault.add_remote_folder`` flow (the
+    bundle preview UI exposes it). Returns a synthesized unified
+    manifest assembled from the post-publish sharded state.
+    """
+    merged_n = normalize_manifest_plaintext(merged_manifest)
+    timestamp = str(merged_n.get("created_at") or "")
+
+    # Iterate folders in the merge. For each, run a per-folder publish
+    # with CAS retry — gather entries from the merge as the candidate
+    # shard contents.
+    for folder in merged_n.get("remote_folders", []) or []:
+        if not isinstance(folder, dict):
+            continue
+        folder_id = str(folder.get("remote_folder_id", ""))
+        if not folder_id:
+            continue
+        merge_entries = list(folder.get("entries", []) or [])
+        if not merge_entries:
+            continue
+        _publish_folder_merge_with_retry(
+            vault=vault,
+            relay=relay,
+            remote_folder_id=folder_id,
+            merge_entries=merge_entries,
+            author_device_id=author_device_id,
+            timestamp=timestamp,
+            max_retries=max_retries,
+        )
+
+    return vault.fetch_unified_manifest(relay, local_index=local_index)
+
+
+def _publish_folder_merge_with_retry(
+    *,
+    vault: ImportVault,
+    relay: Any,
+    remote_folder_id: str,
+    merge_entries: list[dict[str, Any]],
+    author_device_id: str,
+    timestamp: str,
+    max_retries: int,
+) -> FolderState:
+    """Publish one folder's merged-shard via ``publish_shard_with_root``.
+
+    On CAS conflict, fetches the server head and re-applies the merge
+    entries (overlay semantics: entries in ``merge_entries`` replace
+    any same-path entry on the server; entries only on the server
+    are preserved). This matches the unified-manifest merge_into
+    behaviour scoped to one folder.
+    """
+    state = fetch_folder_state(vault, relay, remote_folder_id, author_device_id)
+    for attempt in range(max_retries):
+        candidate_shard, candidate_root = _build_candidate(
+            state, remote_folder_id, merge_entries, author_device_id, timestamp,
+        )
         try:
-            return vault.publish_manifest(relay, last_attempt, local_index=local_index)
-        except VaultCASConflictError as exc:
-            envelope = exc.current_manifest_ciphertext_bytes()
-            if not envelope:
-                raise
-            server_head = decrypt_manifest_envelope(vault, envelope)
-            last_attempt = merge_with_remote_head(
-                parent=rebased_parent,
-                local_attempt=last_attempt,
-                server_head=server_head,
-                author_device_id=author_device_id,
+            shard_out, root_out = vault.publish_shard_with_root(
+                relay, remote_folder_id, candidate_shard, candidate_root,
             )
-            rebased_parent = server_head
-    return vault.publish_manifest(relay, last_attempt, local_index=local_index)
+            return FolderState(root=root_out, shard=shard_out)
+        except VaultCASConflictError as exc:
+            shard_envelope = exc.current_shard_ciphertext_bytes()
+            root_envelope = exc.current_root_ciphertext_bytes()
+            if not shard_envelope and not root_envelope:
+                raise
+            new_shard = (
+                vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
+                if shard_envelope else state.shard
+            )
+            new_root = (
+                vault.decrypt_root_envelope(root_envelope)
+                if root_envelope else state.root
+            )
+            log.info(
+                "vault.import.cas_retry attempt=%d/%d folder=%s "
+                "shard_conflict=%s root_conflict=%s",
+                attempt + 1, max_retries, remote_folder_id,
+                bool(shard_envelope), bool(root_envelope),
+            )
+            state = FolderState(root=new_root, shard=new_shard)
+    # F-D25: one final attempt; exhaustion-tag if still 409.
+    candidate_shard, candidate_root = _build_candidate(
+        state, remote_folder_id, merge_entries, author_device_id, timestamp,
+    )
+    try:
+        shard_out, root_out = vault.publish_shard_with_root(
+            relay, remote_folder_id, candidate_shard, candidate_root,
+        )
+        return FolderState(root=root_out, shard=shard_out)
+    except VaultCASConflictError:
+        log.warning(
+            "vault.import.cas_exhausted vault=%s folder=%s retries=%d",
+            getattr(vault, "vault_id", "?"), remote_folder_id, max_retries,
+        )
+        raise
+
+
+def _build_candidate(
+    state: FolderState,
+    remote_folder_id: str,
+    merge_entries: list[dict[str, Any]],
+    author_device_id: str,
+    timestamp: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Overlay the merge entries onto the current shard. Same-path
+    entries from the merge replace the server's entry; server-only
+    entries (unrelated paths) are preserved."""
+    parent_n = normalize_shard_plaintext(state.shard)
+    parent_revision = int(parent_n.get("shard_revision", 0))
+    merge_paths = {
+        str(e.get("path", "")) for e in merge_entries if isinstance(e, dict)
+    }
+    kept_entries = [
+        e for e in parent_n.get("entries", []) or []
+        if isinstance(e, dict) and str(e.get("path", "")) not in merge_paths
+    ]
+    out = dict(parent_n)
+    out["entries"] = kept_entries + [
+        e for e in merge_entries if isinstance(e, dict)
+    ]
+    out["shard_revision"] = parent_revision + 1
+    out["parent_shard_revision"] = parent_revision
+    out["created_at"] = timestamp or _now_rfc3339_default()
+    out["author_device_id"] = str(author_device_id)
+    out["remote_folder_id"] = remote_folder_id
+
+    root_n = normalize_root_manifest_plaintext(state.root)
+    parent_root_revision = int(root_n.get("root_revision", 0))
+    candidate_root = dict(root_n)
+    candidate_root["root_revision"] = parent_root_revision + 1
+    candidate_root["parent_root_revision"] = parent_root_revision
+    candidate_root["created_at"] = out["created_at"]
+    candidate_root["author_device_id"] = str(author_device_id)
+    return out, candidate_root
+
+
+def _now_rfc3339_default() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _emit_progress(
