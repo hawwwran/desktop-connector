@@ -886,3 +886,43 @@ class VaultBrowser(
             GLib.idle_add(succeed)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ------------------------------------------------------------------ Add remote folder
+    def _open_add_folder_dialog(self) -> None:
+        """Open the Folders-tab add-folder dialog from the browser.
+
+        Reuses ``vault_folders.dialog_add_folder.open_add_folder_dialog``
+        with a minimal context shim — the dialog only reads
+        ``vault_id`` / ``config`` / ``runtime`` / ``parent_window`` and
+        writes ``selection_state`` + calls ``refresh_all``; both writes
+        are no-ops here apart from triggering a manifest refresh on
+        success.
+        """
+        vault_id = self._resolve_vault_id()
+        if not vault_id:
+            self._set_status("No local vault is connected.", "error")
+            return
+
+        from ..vault.folder.runtime import VaultRuntime
+        from ..vault_folders.dialog_add_folder import open_add_folder_dialog
+
+        runtime = VaultRuntime(
+            config_dir=self.config_dir,
+            config=self.config,
+            vault_id=vault_id,
+            local_index=self.local_index,
+        )
+
+        class _BrowserCtx:
+            pass
+
+        ctx = _BrowserCtx()
+        ctx.app = self._app
+        ctx.parent_window = self.win
+        ctx.config = self.config
+        ctx.config_dir = self.config_dir
+        ctx.vault_id = vault_id
+        ctx.runtime = runtime
+        ctx.selection_state = {"folder_id": None}
+        ctx.refresh_all = lambda *_args, **_kw: self._refresh_manifest_async()
+        open_add_folder_dialog(ctx)

@@ -87,8 +87,11 @@ class PanesMixin:
         the tree shape visually. Depth 0 (the Vault root) gets no inset.
 
         Wave 3.3 (2026-05-13): non-root rows get a hamburger MenuButton
-        suffix with Download folder / Delete folder. The Vault root row
-        is unchanged — you can't download or delete "everything".
+        suffix with Download folder / Delete folder.
+
+        The Vault root row gets its own hamburger with "Create remote
+        folder…" — without it, a brand-new empty vault offers no
+        affordance to grow its first folder from the browser.
         """
         row = Gtk.ListBoxRow()
         row._vault_path = path  # type: ignore[attr-defined]
@@ -109,6 +112,18 @@ class PanesMixin:
             # Non-root: attach per-row hamburger with Download / Delete.
             body.append(
                 self._make_row_menu_button(folder={"path": path, "name": name}),
+            )
+        else:
+            # Root row: hamburger with "Create remote folder…".
+            body.append(
+                self._make_card_menu_button(
+                    a11y_label="Actions for the vault root",
+                    items=[(
+                        "Create remote folder…",
+                        lambda: self._open_add_folder_dialog(),
+                        None,
+                    )],
+                ),
             )
         row.set_child(body)
         return row

@@ -97,6 +97,7 @@ class LayoutMixin:
         # first so the SplitButton lands to the left of it (primary
         # action visually leftmost of the end cluster).
         overflow_menu = Gio.Menu()
+        overflow_menu.append("Add remote folder…", "win.add-folder")
         overflow_menu.append("Refresh", "win.refresh")
         overflow_menu.append("Show deleted", "win.show-deleted")
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic")
@@ -129,6 +130,16 @@ class LayoutMixin:
             "activate", lambda *_a: self._refresh_manifest_async(),
         )
         self.win.add_action(refresh_action)
+
+        # "Add remote folder…" opens the same dialog the Folders tab in
+        # Vault Settings uses, so a brand-new vault can grow a first
+        # folder without round-tripping through Settings.
+        add_folder_action = Gio.SimpleAction.new("add-folder", None)
+        add_folder_action.connect(
+            "activate", lambda *_a: self._open_add_folder_dialog(),
+        )
+        self.win.add_action(add_folder_action)
+        self._add_folder_action = add_folder_action
 
         # Show-deleted is a stateful boolean action; the menu binds it
         # automatically as a check-style row. The off-tree

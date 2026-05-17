@@ -135,6 +135,23 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_wires_add_remote_folder(self) -> None:
+        """A fresh empty vault must offer "Create remote folder…" from
+        the sidebar's root-row hamburger (and the top-bar overflow menu)
+        so the user isn't stranded at the root without round-tripping
+        to Vault Settings → Folders.
+        """
+        source = _read_browser_source()
+        for needle in (
+            'overflow_menu.append("Add remote folder…"',
+            '"Create remote folder…"',
+            'add-folder',
+            'open_add_folder_dialog',
+            '_open_add_folder_dialog',
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, source)
+
     def test_browser_window_wires_soft_delete_and_show_deleted_toggle(self) -> None:
         source = _read_browser_source()
 
