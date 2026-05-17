@@ -66,7 +66,7 @@ class DeleteRestoreMixin:
                     self.config_dir, self.config, vault_id,
                 )
                 try:
-                    current_manifest = vault.fetch_manifest(
+                    current_manifest = vault.fetch_unified_manifest(
                         relay, local_index=self.local_index,
                     )
                     published = mutate({

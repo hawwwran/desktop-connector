@@ -877,7 +877,46 @@ Remaining Plan A checklist:
     (``list_root_revisions`` / ``list_shard_revisions``) would be
     a phase H+1 addition.
 
-  * **7f — Vault class + tests + server: nuke the legacy surface.**
+  * [~] **7f** (2026-05-17, in progress) — Vault class + tests + server: nuke the legacy surface.
+
+  Done in this commit:
+  - ``binding/sync.py``'s ``_execute_op`` / ``_execute_upload`` /
+    ``_execute_delete`` / ``_promote_to_delete`` (~390 lines of
+    dead code, the pre-SO-3 single-op publish path obsoleted by
+    step 2's batched publish) deleted.
+  - ``windows_vault_browser/*.py`` flipped all ``vault.fetch_manifest``
+    callsites to ``vault.fetch_unified_manifest`` (sharded under
+    the hood). After this commit production code has zero
+    ``vault.fetch_manifest`` or ``vault.publish_manifest`` calls.
+
+  Remaining for future commits (estimated multi-commit work):
+  - Remove ``Vault.fetch_manifest`` / ``Vault.publish_manifest``
+    declarations themselves. Blocked on ~55 test sites that still
+    invoke ``vault.publish_manifest(relay, manifest)`` directly for
+    seed setup; each needs migrating to a pure sharded seed
+    pattern (or the helpers ``seed_sharded_state_from_manifest`` +
+    ``mirror_legacy_from_sharded`` rewritten to not need it).
+  - Remove ``FakeUploadRelay.put_manifest`` / ``get_manifest``.
+    Same dependency: test sites that need a legacy mirror would
+    need migrating first.
+  - Remove ``assemble_unified_manifest`` from the manifest module
+    (production callers: ``vault.fetch_unified_manifest`` and
+    ``upload`` / ``ops/delete`` synthesized-return paths — all
+    still needed for caller compat until the result-shape rename
+    to ``.root`` + ``.shard`` lands).
+  - Drop the manifest module's legacy helpers
+    (``merge_with_remote_head`` — now unused in production;
+    ``add_or_append_file_version`` /
+    ``find_file_entry`` / ``tombstone_file_entry`` —
+    still used by tests as fixture builders + by
+    ``vault.fetch_unified_manifest``'s synthesis path).
+  - Server: drop ``vault_manifests`` table +
+    ``GET/PUT /api/vaults/{id}/manifest`` endpoints. Flip
+    ``Vault.create_new`` to write a root envelope.
+  - Drop ``temp/migrate_vault_to_shards.py`` and the
+    ``manifest_v1.json`` test vector.
+
+  Originally specified in this commit:
     Once 7a–7e land:
     - Drop ``Vault.fetch_manifest`` / ``publish_manifest`` /
       ``decrypt_manifest`` shims (the latter is the

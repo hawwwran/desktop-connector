@@ -83,7 +83,7 @@ class UploadsMixin:
                     self.config_dir, self.config, vault_id,
                 )
                 try:
-                    current_manifest = vault.fetch_manifest(
+                    current_manifest = vault.fetch_unified_manifest(
                         relay, local_index=self.local_index,
                     )
                     device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
@@ -311,7 +311,7 @@ class UploadsMixin:
                     self.config_dir, self.config, vault_id,
                 )
                 try:
-                    current_manifest = vault.fetch_manifest(
+                    current_manifest = vault.fetch_unified_manifest(
                         relay, local_index=self.local_index,
                     )
                     device_id = str(getattr(self.config, "device_id", "") or "0" * 32)

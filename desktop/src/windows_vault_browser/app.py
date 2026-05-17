@@ -838,7 +838,7 @@ class VaultBrowser(
                     self.config_dir, self.config, vault_id,
                 )
                 try:
-                    manifest = vault.fetch_manifest(
+                    manifest = vault.fetch_unified_manifest(
                         relay, local_index=self.local_index,
                     )
                 finally:

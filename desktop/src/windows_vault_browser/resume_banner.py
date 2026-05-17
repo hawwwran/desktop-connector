@@ -137,7 +137,7 @@ class ResumeBannerMixin:
                         if cancel_event.is_set():
                             break
                         try:
-                            current_manifest = vault.fetch_manifest(
+                            current_manifest = vault.fetch_unified_manifest(
                                 relay, local_index=self.local_index,
                             )
                             result = resume_upload(
