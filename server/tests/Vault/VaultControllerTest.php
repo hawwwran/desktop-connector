@@ -287,16 +287,16 @@ final class VaultControllerTest extends TestCase
         $masterKey = random_bytes(32);
         $nonce = random_bytes(24);
         $plaintext = json_encode([
-            'schema' => 'dc-vault-manifest-v1',
-            'revision' => 5,
-            'parent_revision' => 4,
+            'schema' => 'dc-vault-root-v1',
+            'root_revision' => 5,
+            'parent_root_revision' => 4,
             'remote_folders' => [],
         ]);
 
-        $aad = VaultCrypto::buildManifestAad(
+        $aad = VaultCrypto::buildRootAad(
             self::VAULT_ID, 5, 4, self::DEVICE_ID
         );
-        $subkey = VaultCrypto::deriveSubkey('dc-vault-v1/manifest', $masterKey);
+        $subkey = VaultCrypto::deriveSubkey('dc-vault-v1/root', $masterKey);
         $ct = VaultCrypto::aeadEncrypt($plaintext, $subkey, $nonce, $aad);
         // Decrypt round-trip must return the original bytes byte-exact.
         self::assertSame(
@@ -752,7 +752,7 @@ final class VaultControllerTest extends TestCase
     {
         $hash = hash('sha256', $cipher);
         (new VaultFolderShardsRepository($this->db))->tryCAS(
-            self::VAULT_ID, $folderId, $parent, $rev, $hash, $cipher, strlen($cipher),
+            self::VAULT_ID, $folderId, $parent, $rev, $parent, $hash, $cipher, strlen($cipher),
             self::DEVICE_ID, self::NOW + 1,
         );
     }

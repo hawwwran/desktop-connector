@@ -34,7 +34,6 @@ require_once __DIR__ . '/../src/Repositories/ChunkRepository.php';
 require_once __DIR__ . '/../src/Repositories/FasttrackRepository.php';
 require_once __DIR__ . '/../src/Repositories/PingRateRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultsRepository.php';
-require_once __DIR__ . '/../src/Repositories/VaultManifestsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultRootManifestsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultFolderShardsRepository.php';
 require_once __DIR__ . '/../src/Repositories/VaultChunksRepository.php';
@@ -218,15 +217,6 @@ $router->vaultPut('/api/vaults/{vault_id}/folders/{folder_id}/shard-with-root', 
 // these single-manifest endpoints until the mechanical port to
 // ``getRoot`` / ``putShardWithRoot`` lands. Removed in the final
 // Phase H cleanup commit.
-$router->vaultGet('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
-    VaultController::getManifest($db, $ctx);
-});
-$router->vaultPut('/api/vaults/{vault_id}/manifest', function (RequestContext $ctx) use ($db) {
-    VaultController::putManifest($db, $ctx);
-});
-$router->vaultGet('/api/vaults/{vault_id}/manifest/revisions/{revision}', function (RequestContext $ctx) use ($db) {
-    VaultController::getManifestRevision($db, $ctx);
-});
 $router->vaultPut('/api/vaults/{vault_id}/chunks/{chunk_id}', function (RequestContext $ctx) use ($db) {
     VaultController::putChunk($db, $ctx);
 });

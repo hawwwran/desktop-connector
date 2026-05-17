@@ -63,7 +63,6 @@ final class VaultSchemaTest extends TestCase
             'vault_folder_shards',
             'vault_gc_jobs',
             'vault_join_requests',
-            'vault_manifests',
             'vault_migration_intents',
             'vault_op_log_segments',
             'vault_root_manifests',

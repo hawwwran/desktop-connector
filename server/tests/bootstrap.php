@@ -29,7 +29,6 @@ require_once $root . '/src/Auth/VaultAuthService.php';
 // Repositories.
 require_once $root . '/src/Repositories/DeviceRepository.php';
 require_once $root . '/src/Repositories/VaultsRepository.php';
-require_once $root . '/src/Repositories/VaultManifestsRepository.php';
 require_once $root . '/src/Repositories/VaultRootManifestsRepository.php';
 require_once $root . '/src/Repositories/VaultFolderShardsRepository.php';
 require_once $root . '/src/Repositories/VaultChunksRepository.php';

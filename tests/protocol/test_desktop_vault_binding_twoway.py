@@ -102,11 +102,9 @@ class TwoWayCycleTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
@@ -130,7 +128,6 @@ class TwoWayCycleTests(unittest.TestCase):
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path=path, author_device_id=AUTHOR,
             )
-            seed_sharded_state_from_manifest(vault, relay, res.manifest)
         finally:
             vault.close()
         return res.manifest
@@ -157,12 +154,6 @@ class TwoWayCycleTests(unittest.TestCase):
         next_manifest["author_device_id"] = AUTHOR
         vault = _vault()
         try:
-            # Phase H step 4: upload_file no longer mirrors to legacy,
-            # so the legacy current_revision has drifted from the
-            # caller-supplied manifest revision. Reset before the CAS
-            # publish so the chain stays coherent for the next call.
-            relay.current_revision = int(next_manifest["parent_revision"])
-            vault.publish_manifest(relay, next_manifest)
             seed_sharded_state_from_manifest(vault, relay, next_manifest)
         finally:
             vault.close()
@@ -723,17 +714,15 @@ class TwoWayFetchManifestPerOpTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = _CountingTwoWayRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = _CountingTwoWayRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
-        # Discard setup-time get_manifest calls so the assertions count
+        # Discard setup-time get_root calls so the assertions count
         # only Phase A + Phase B traffic.
-        relay.get_manifest_count = 0
+        relay.root_gets = 0
         return relay
 
     def _make_two_way_binding(self, *, last_revision: int):
@@ -752,7 +741,7 @@ class TwoWayFetchManifestPerOpTests(unittest.TestCase):
 
     def test_phase_b_does_not_fetch_per_successful_op(self) -> None:
         relay = self._empty_remote()
-        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+        binding = self._make_two_way_binding(last_revision=int(relay.root_revision))
 
         for i in range(5):
             path = f"tw{i}.txt"
@@ -784,11 +773,11 @@ class TwoWayFetchManifestPerOpTests(unittest.TestCase):
         #
         # Pre-SO-2 this would be ≥ 1 + N (= 6) because every
         # ``outcome.status in {"uploaded","deleted","failed"}`` triggered
-        # ``head = vault.fetch_manifest(relay)`` inside the inner loop.
+        # ``head = vault.fetch_root_manifest(relay)`` inside the inner loop.
         self.assertLessEqual(
-            relay.get_manifest_count, 2,
-            "two-way Phase B is calling fetch_manifest per op; "
-            f"saw {relay.get_manifest_count} fetches for 5 successful "
+            relay.root_gets, 2,
+            "two-way Phase B is calling fetch_root_manifest per op; "
+            f"saw {relay.root_gets} fetches for 5 successful "
             "ops — SO-2 regression",
         )
 
@@ -834,16 +823,13 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = _TwoWayBatchProbeRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = _TwoWayBatchProbeRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
-        relay.put_manifest_attempt_count = 0
-        relay.published_manifests = []
+        relay.publish_attempt_count = 0
         relay.published_shards = []
         relay.published_roots = []
         relay.shard_with_root_puts = 0
@@ -867,7 +853,7 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         """5 uploads in a two-way cycle should produce one CAS publish
         (the K=50 default), not 5 single publishes."""
         relay = self._empty_remote()
-        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+        binding = self._make_two_way_binding(last_revision=int(relay.root_revision))
 
         for i in range(5):
             path = f"tw{i}.txt"
@@ -891,9 +877,9 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         self.assertEqual(result.succeeded_count, 5)
         self.assertEqual(result.failed_count, 0)
         self.assertEqual(
-            relay.put_manifest_attempt_count, 1,
+            relay.publish_attempt_count, 1,
             "two-way Phase B did per-op publishes instead of batching; "
-            f"saw {relay.put_manifest_attempt_count} publish attempts "
+            f"saw {relay.publish_attempt_count} publish attempts "
             "for 5 ops — SO-3 two-way regression",
         )
 
@@ -901,7 +887,7 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         """7 ops with batch_size=3 → exactly 3 publishes (3 + 3 + 1
         cycle-end flush of the partial batch)."""
         relay = self._empty_remote()
-        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+        binding = self._make_two_way_binding(last_revision=int(relay.root_revision))
 
         for i in range(7):
             path = f"sm{i}.txt"
@@ -924,7 +910,7 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
             vault.close()
 
         self.assertEqual(result.succeeded_count, 7)
-        self.assertEqual(relay.put_manifest_attempt_count, 3)
+        self.assertEqual(relay.publish_attempt_count, 3)
 
     def test_cas_conflict_aborts_batch_next_iteration_completes(self) -> None:
         """A CAS conflict on the two-way batch publish aborts (no
@@ -934,7 +920,7 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         second iteration succeeds.
         """
         relay = self._empty_remote()
-        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+        binding = self._make_two_way_binding(last_revision=int(relay.root_revision))
 
         for i in range(3):
             path = f"cf{i}.txt"
@@ -972,7 +958,7 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         # deleted them).
         self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
         # Two publish attempts: 1 conflict + 1 success.
-        self.assertEqual(relay.put_manifest_attempt_count, 2)
+        self.assertEqual(relay.publish_attempt_count, 2)
         # Conflict budget exhausted.
         self.assertEqual(relay.cas_conflicts_to_inject, 0)
         # ``relay.published_shards`` only counts successful CAS,
@@ -988,7 +974,7 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         from src.vault.binding.twoway import MAX_TWO_WAY_ITERATIONS
 
         relay = self._empty_remote()
-        binding = self._make_two_way_binding(last_revision=int(relay.current_revision))
+        binding = self._make_two_way_binding(last_revision=int(relay.root_revision))
 
         for i in range(3):
             path = f"perm{i}.txt"
@@ -1021,74 +1007,33 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         # We attempted exactly MAX_TWO_WAY_ITERATIONS publishes
         # (one per iteration's batch flush).
         self.assertEqual(
-            relay.put_manifest_attempt_count, MAX_TWO_WAY_ITERATIONS,
+            relay.publish_attempt_count, MAX_TWO_WAY_ITERATIONS,
             f"expected {MAX_TWO_WAY_ITERATIONS} publish attempts (one "
             "per iteration), saw "
-            f"{relay.put_manifest_attempt_count} — outer-loop cap "
+            f"{relay.publish_attempt_count} — outer-loop cap "
             "is not gating the retries",
         )
 
 
 class _CountingTwoWayRelay(FakeUploadRelay):
-    """``FakeUploadRelay`` that counts ``get_manifest`` for SO-2 pinning."""
+    """``FakeUploadRelay`` that counts ``get_root`` calls for SO-2 pinning."""
 
-    def __init__(self, *, manifest: dict) -> None:
-        super().__init__(manifest=manifest)
-        self.get_manifest_count = 0
-
-    def get_manifest(self, vault_id, vault_access_secret):
-        self.get_manifest_count += 1
-        return super().get_manifest(vault_id, vault_access_secret)
+    # Inherits ``root_gets`` counter from FakeUploadRelay; provided as a
+    # named subclass so the test reads more clearly.
+    pass
 
 
 class _TwoWayBatchProbeRelay(FakeUploadRelay):
-    """Relay that counts ``put_manifest`` attempts and can inject CAS
-    conflicts on demand, scoped to the two-way batched-publish tests.
-    Same shape as ``BatchProbeRelay`` in the batched-publish test
-    file; duplicated here rather than imported across test modules.
+    """Relay that counts ``put_shard_with_root`` attempts and can inject
+    CAS conflicts on demand, scoped to the two-way batched-publish
+    tests. Same shape as ``BatchProbeRelay`` in the batched-publish
+    test file; duplicated here rather than imported across test modules.
     """
 
-    def __init__(self, *, manifest: dict) -> None:
-        super().__init__(manifest=manifest)
-        self.put_manifest_attempt_count = 0
+    def __init__(self) -> None:
+        super().__init__()
+        self.publish_attempt_count = 0
         self.cas_conflicts_to_inject = 0
-
-    def put_manifest(
-        self,
-        vault_id,
-        vault_access_secret,
-        *,
-        expected_current_revision,
-        new_revision,
-        parent_revision,
-        manifest_hash,
-        manifest_ciphertext,
-    ):
-        import base64
-
-        self.put_manifest_attempt_count += 1
-        if self.cas_conflicts_to_inject > 0:
-            self.cas_conflicts_to_inject -= 1
-            from src.vault.relay_errors import VaultCASConflictError
-            raise VaultCASConflictError({
-                "code": "vault_manifest_conflict",
-                "message": "injected CAS conflict (two-way SO-3 test)",
-                "details": {
-                    "current_revision": self.current_revision,
-                    "current_manifest_hash": self.current_hash,
-                    "current_manifest_ciphertext":
-                        base64.b64encode(self.current_envelope).decode("ascii"),
-                    "current_manifest_size": len(self.current_envelope),
-                },
-            })
-        return super().put_manifest(
-            vault_id, vault_access_secret,
-            expected_current_revision=expected_current_revision,
-            new_revision=new_revision,
-            parent_revision=parent_revision,
-            manifest_hash=manifest_hash,
-            manifest_ciphertext=manifest_ciphertext,
-        )
 
     def put_shard_with_root(
         self, vault_id, vault_access_secret, remote_folder_id, *,
@@ -1096,7 +1041,7 @@ class _TwoWayBatchProbeRelay(FakeUploadRelay):
     ):
         import base64
 
-        self.put_manifest_attempt_count += 1
+        self.publish_attempt_count += 1
         if self.cas_conflicts_to_inject > 0:
             self.cas_conflicts_to_inject -= 1
             from src.vault.relay_errors import VaultCASConflictError

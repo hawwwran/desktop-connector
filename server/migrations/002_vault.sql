@@ -26,8 +26,6 @@ CREATE TABLE IF NOT EXISTS vaults (
     encrypted_header          BLOB NOT NULL,                                      -- envelope per formats §9
     header_revision           INTEGER NOT NULL DEFAULT 1,
     header_hash               TEXT NOT NULL,                                      -- hex sha-256
-    current_manifest_revision INTEGER NOT NULL DEFAULT 1,
-    current_manifest_hash     TEXT NOT NULL,                                      -- hex sha-256
     used_ciphertext_bytes     INTEGER NOT NULL DEFAULT 0,                         -- A21: global, unique chunks
     chunk_count               INTEGER NOT NULL DEFAULT 0,
     quota_ciphertext_bytes    INTEGER NOT NULL DEFAULT 1073741824,                -- D2: 1 GB default
@@ -41,18 +39,11 @@ CREATE TABLE IF NOT EXISTS vaults (
     updated_at                INTEGER NOT NULL
 );
 
--- immutable manifest revisions (CAS chain, formats §10)
-CREATE TABLE IF NOT EXISTS vault_manifests (
-    vault_id            TEXT NOT NULL,
-    revision            INTEGER NOT NULL,
-    parent_revision     INTEGER NOT NULL DEFAULT 0,                                -- 0 = genesis
-    manifest_hash       TEXT NOT NULL,                                             -- hex sha-256
-    manifest_ciphertext BLOB NOT NULL,                                             -- envelope per formats §10.1
-    manifest_size       INTEGER NOT NULL,
-    author_device_id    TEXT NOT NULL,
-    created_at          INTEGER NOT NULL,
-    PRIMARY KEY (vault_id, revision)
-);
+-- Pre-sharding ``vault_manifests`` table — removed during the
+-- manifest-sharding finalisation. ``vault_root_manifests`` (root
+-- envelopes) + ``vault_folder_shards`` (per-folder shards) replace
+-- it; both live in migration 005. Old deployments get a ``DROP TABLE
+-- IF EXISTS vault_manifests`` from ``Database::migrate``.
 
 -- relay-stored encrypted chunks (D13, A19)
 CREATE TABLE IF NOT EXISTS vault_chunks (
@@ -139,7 +130,6 @@ CREATE TABLE IF NOT EXISTS vault_op_log_segments (
 -- indexes for hot-path lookups
 CREATE INDEX IF NOT EXISTS idx_vault_chunks_state           ON vault_chunks(state, last_referenced_at);
 CREATE INDEX IF NOT EXISTS idx_vault_chunks_vault           ON vault_chunks(vault_id, state);
-CREATE INDEX IF NOT EXISTS idx_vault_manifests_vault        ON vault_manifests(vault_id, revision DESC);
 -- F-S16: indexes on removed tables (vault_chunk_uploads,
 -- vault_audit_events) intentionally absent.
 CREATE INDEX IF NOT EXISTS idx_vault_join_requests_vault    ON vault_join_requests(vault_id, state);

@@ -256,7 +256,7 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                     relay = create_vault_relay(config)
                     vault = open_local_vault_from_grant(config_dir, config, vault_id)
                     try:
-                        active_manifest = vault.fetch_manifest(relay, local_index=local_index)
+                        active_manifest = vault.fetch_unified_manifest(relay, local_index=local_index)
                         contents, bundle_manifest, preview = open_bundle_for_preview(
                             vault=vault,
                             bundle_path=state["bundle_path"],
@@ -354,7 +354,7 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                     relay = create_vault_relay(config)
                     vault = open_local_vault_from_grant(config_dir, config, vault_id)
                     try:
-                        active_manifest = vault.fetch_manifest(relay, local_index=local_index)
+                        active_manifest = vault.fetch_unified_manifest(relay, local_index=local_index)
                         device_id = str(getattr(config, "device_id", "") or "0" * 32)
                         result = run_import(
                             vault=vault, relay=relay,

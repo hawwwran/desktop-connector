@@ -85,15 +85,9 @@ class BackupOnlySyncTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        # FakeUploadRelay stores current_revision from the manifest but
-        # leaves current_envelope = b"" — fetch_manifest would explode.
-        # Lower current_revision so parent_revision=0 ⇒ CAS passes, then
-        # publish to populate the encrypted envelope.
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
@@ -117,7 +111,6 @@ class BackupOnlySyncTests(unittest.TestCase):
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path=path, author_device_id=AUTHOR,
             )
-            seed_sharded_state_from_manifest(vault, relay, res.manifest)
         finally:
             vault.close()
         return res.manifest
@@ -475,17 +468,15 @@ class FetchManifestPerOpTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = CountingRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = CountingRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
-        # Discard any get_manifest calls from setup so the assertions
+        # Discard any get_root calls from setup so the assertions
         # below count *cycle-driven* fetches only.
-        relay.get_manifest_count = 0
+        relay.state_fetch_count = 0
         return relay
 
     def _make_bound_binding(self, *, last_revision: int) -> "VaultBinding":
@@ -503,7 +494,7 @@ class FetchManifestPerOpTests(unittest.TestCase):
 
     def test_backup_only_cycle_does_not_fetch_per_successful_op(self) -> None:
         relay = self._empty_remote()
-        binding = self._make_bound_binding(last_revision=int(relay.current_revision))
+        binding = self._make_bound_binding(last_revision=int(relay.root_revision))
 
         # Five tiny files all under one binding.
         for i in range(5):
@@ -534,9 +525,9 @@ class FetchManifestPerOpTests(unittest.TestCase):
         # remaining fetch happens because the caller didn't pass a
         # ``manifest`` argument; passing one would zero this out.
         self.assertEqual(
-            relay.get_manifest_count, 1,
+            relay.state_fetch_count, 1,
             "expected exactly one cycle-driven fetch_manifest "
-            f"(initial head); saw {relay.get_manifest_count}. "
+            f"(initial head); saw {relay.state_fetch_count}. "
             "Per-op manifest GET regressed — see "
             "docs/plans/vault-large-folder-perf.md SO-2.",
         )
@@ -548,7 +539,7 @@ class FetchManifestPerOpTests(unittest.TestCase):
         # "exactly one state fetch per cycle, not per op" — i.e. count
         # equals 1 regardless of how many ops the cycle drains.
         relay = self._empty_remote()
-        binding = self._make_bound_binding(last_revision=int(relay.current_revision))
+        binding = self._make_bound_binding(last_revision=int(relay.root_revision))
 
         for i in range(3):
             path = f"g{i}.txt"
@@ -561,8 +552,17 @@ class FetchManifestPerOpTests(unittest.TestCase):
 
         vault = _vault()
         try:
-            head = vault.fetch_manifest(relay)
-            relay.get_manifest_count = 0  # baseline after this priming fetch
+            from src.vault.manifest import assemble_unified_manifest
+            root = vault.fetch_root_manifest(relay)
+            shards = {
+                pointer["remote_folder_id"]: vault.fetch_folder_shard(
+                    relay, pointer["remote_folder_id"],
+                )
+                for pointer in root.get("remote_folders", [])
+                if pointer.get("shard_hash")
+            }
+            head = assemble_unified_manifest(root, shards)
+            relay.state_fetch_count = 0  # baseline after this priming fetch
             run_backup_only_cycle(
                 vault=vault, relay=relay,
                 store=self.store, binding=binding,
@@ -573,15 +573,15 @@ class FetchManifestPerOpTests(unittest.TestCase):
             vault.close()
 
         self.assertEqual(
-            relay.get_manifest_count, 1,
+            relay.state_fetch_count, 1,
             "expected exactly one cycle-driven state fetch (root) "
             "regardless of op count; per-op refetch regressed — saw "
-            f"{relay.get_manifest_count}",
+            f"{relay.state_fetch_count}",
         )
 
     def test_backup_only_cycle_refetches_after_failed_op(self) -> None:
         relay = self._empty_remote()
-        binding = self._make_bound_binding(last_revision=int(relay.current_revision))
+        binding = self._make_bound_binding(last_revision=int(relay.root_revision))
 
         (self.local_root / "boom.txt").write_bytes(b"x" * 64)
         self.store.coalesce_op(
@@ -611,9 +611,9 @@ class FetchManifestPerOpTests(unittest.TestCase):
         # 2 fetches expected: 1 initial + 1 post-failure refresh (F-Y07
         # path is preserved for "world changed" recovery).
         self.assertEqual(
-            relay.get_manifest_count, 2,
+            relay.state_fetch_count, 2,
             "expected 1 initial + 1 post-failure fetch_manifest; "
-            f"saw {relay.get_manifest_count}",
+            f"saw {relay.state_fetch_count}",
         )
 
 
@@ -688,11 +688,9 @@ class FlushAndSyncTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
@@ -756,11 +754,9 @@ class FlushAndSyncTests(unittest.TestCase):
                 created_by_device_id=AUTHOR, entries=[],
             )],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
@@ -805,11 +801,9 @@ class FlushAndSyncTests(unittest.TestCase):
                 created_by_device_id=AUTHOR, entries=[],
             )],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
@@ -858,22 +852,18 @@ class CountingRelay(FakeUploadRelay):
     cycle-driven state fetch.
 
     Used by :class:`FetchManifestPerOpTests` to pin SO-2 — every extra
-    GET on the success path is a regression and shows up here. After
-    Phase H step 2 the cycle reads root + shard rather than the unified
-    manifest, so this counter bumps on either ``get_manifest`` (legacy
-    fallback) or ``get_root`` (sharded path).
+    GET on the success path is a regression and shows up here. The
+    sharded cycle reads the root + this binding's shard once per
+    cycle; this counter increments on every ``get_root`` so the SO-2
+    pinning ("one state fetch per cycle, not per op") still holds.
     """
 
-    def __init__(self, *, manifest: dict) -> None:
-        super().__init__(manifest=manifest)
-        self.get_manifest_count = 0
-
-    def get_manifest(self, vault_id, vault_access_secret):
-        self.get_manifest_count += 1
-        return super().get_manifest(vault_id, vault_access_secret)
+    def __init__(self) -> None:
+        super().__init__()
+        self.state_fetch_count = 0
 
     def get_root(self, vault_id, vault_access_secret):
-        self.get_manifest_count += 1
+        self.state_fetch_count += 1
         return super().get_root(vault_id, vault_access_secret)
 
 

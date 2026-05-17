@@ -324,20 +324,18 @@ class DisconnectTests(unittest.TestCase):
 
 
 class _FakeVault:
+    """Minimal vault stub. The lifecycle tests that hand it in expect the
+    sync entry point to bail before touching any vault methods (state !=
+    bound), so the stub doesn't need to implement them.
+    """
     vault_id = VAULT_ID
     master_key = b"\x00" * 32
     vault_access_secret = "vault-secret"
 
-    def fetch_manifest(self, relay, *, local_index=None):
-        return {"revision": 0, "remote_folders": []}
-
-    def publish_manifest(self, relay, manifest, *, local_index=None):
-        return manifest
-
 
 class _FakeRelay:
-    def get_manifest(self, vault_id, vault_access_secret):
-        return {"manifest_revision": 0, "manifest_ciphertext": b"", "manifest_hash": ""}
+    """Companion stub for :class:`_FakeVault`."""
+    pass
 
 
 class CatalogConsistencyTests(unittest.TestCase):

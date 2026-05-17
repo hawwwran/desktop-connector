@@ -71,6 +71,7 @@ final class VaultFolderShardsRepositoryTest extends TestCase
             self::VAULT_ID, self::FOLDER_A,
             0,                        // expected (genesis bootstrap)
             1,                        // new
+            0,                        // parent
             str_repeat('a', 64),
             'SHARD-A-1',
             9,
@@ -88,10 +89,10 @@ final class VaultFolderShardsRepositoryTest extends TestCase
     public function test_tryCAS_advances_existing_folder(): void
     {
         $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 0, 1, str_repeat('a', 64), 'GEN', 3, self::AUTHOR, self::NOW + 1,
+            self::VAULT_ID, self::FOLDER_A, 0, 1, 0, str_repeat('a', 64), 'GEN', 3, self::AUTHOR, self::NOW + 1,
         );
         $conflict = $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 1, 2, str_repeat('b', 64), 'NXT', 3, self::AUTHOR, self::NOW + 2,
+            self::VAULT_ID, self::FOLDER_A, 1, 2, 1, str_repeat('b', 64), 'NXT', 3, self::AUTHOR, self::NOW + 2,
         );
         self::assertNull($conflict);
 
@@ -103,16 +104,16 @@ final class VaultFolderShardsRepositoryTest extends TestCase
     public function test_tryCAS_returns_a1_shard_payload_on_conflict(): void
     {
         $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 0, 1, str_repeat('a', 64), 'GEN', 3, self::AUTHOR, self::NOW + 1,
+            self::VAULT_ID, self::FOLDER_A, 0, 1, 0, str_repeat('a', 64), 'GEN', 3, self::AUTHOR, self::NOW + 1,
         );
         $first = $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 1, 2, str_repeat('w', 64), 'WIN', 3, self::AUTHOR, self::NOW + 2,
+            self::VAULT_ID, self::FOLDER_A, 1, 2, 1, str_repeat('w', 64), 'WIN', 3, self::AUTHOR, self::NOW + 2,
         );
         self::assertNull($first);
 
         // Second writer with stale expected — should lose.
         $conflict = $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 1, 2, str_repeat('l', 64), 'LOSE', 4, self::AUTHOR, self::NOW + 3,
+            self::VAULT_ID, self::FOLDER_A, 1, 2, 1, str_repeat('l', 64), 'LOSE', 4, self::AUTHOR, self::NOW + 3,
         );
         self::assertNotNull($conflict);
         self::assertSame(self::FOLDER_A, $conflict['remote_folder_id']);
@@ -126,15 +127,15 @@ final class VaultFolderShardsRepositoryTest extends TestCase
         // Acceptance criterion: a conflict on folder A doesn't lock
         // folder B's CAS chain.
         $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 0, 1, str_repeat('a', 64), 'A-GEN', 5, self::AUTHOR, self::NOW + 1,
+            self::VAULT_ID, self::FOLDER_A, 0, 1, 0, str_repeat('a', 64), 'A-GEN', 5, self::AUTHOR, self::NOW + 1,
         );
 
         // Two writers on different folders should both succeed.
         $resA = $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 1, 2, str_repeat('a', 64), 'A-2', 3, self::AUTHOR, self::NOW + 2,
+            self::VAULT_ID, self::FOLDER_A, 1, 2, 1, str_repeat('a', 64), 'A-2', 3, self::AUTHOR, self::NOW + 2,
         );
         $resB = $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_B, 0, 1, str_repeat('b', 64), 'B-GEN', 5, self::AUTHOR, self::NOW + 3,
+            self::VAULT_ID, self::FOLDER_B, 0, 1, 0, str_repeat('b', 64), 'B-GEN', 5, self::AUTHOR, self::NOW + 3,
         );
         self::assertNull($resA);
         self::assertNull($resB);
@@ -173,7 +174,7 @@ final class VaultFolderShardsRepositoryTest extends TestCase
     {
         // Advance shard alone first.
         $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 0, 1, str_repeat('x', 64), 'X', 1, self::AUTHOR, self::NOW + 1,
+            self::VAULT_ID, self::FOLDER_A, 0, 1, 0, str_repeat('x', 64), 'X', 1, self::AUTHOR, self::NOW + 1,
         );
         // Atomic publish thinks shard is at 0 (stale).
         $res = $this->shardsRepo->tryAtomicShardWithRootCAS(
@@ -215,7 +216,7 @@ final class VaultFolderShardsRepositoryTest extends TestCase
     {
         // Advance both independently.
         $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 0, 1, str_repeat('s', 64), 'S', 1, self::AUTHOR, self::NOW + 1,
+            self::VAULT_ID, self::FOLDER_A, 0, 1, 0, str_repeat('s', 64), 'S', 1, self::AUTHOR, self::NOW + 1,
         );
         $this->rootRepo->tryCAS(
             self::VAULT_ID, 1, 2, str_repeat('r', 64), 'R', 1, self::AUTHOR, self::NOW + 2,
@@ -238,7 +239,7 @@ final class VaultFolderShardsRepositoryTest extends TestCase
     {
         // Pre-advance shard so the atomic call's shard expectation is stale.
         $this->shardsRepo->tryCAS(
-            self::VAULT_ID, self::FOLDER_A, 0, 1, str_repeat('x', 64), 'X', 1, self::AUTHOR, self::NOW + 1,
+            self::VAULT_ID, self::FOLDER_A, 0, 1, 0, str_repeat('x', 64), 'X', 1, self::AUTHOR, self::NOW + 1,
         );
 
         $res = $this->shardsRepo->tryAtomicShardWithRootCAS(

@@ -151,6 +151,7 @@ class VaultFolderShardsRepository
         string $remoteFolderId,
         int $expectedCurrentShardRevision,
         int $newShardRevision,
+        int $parentShardRevision,
         string $shardHash,
         string $shardCiphertext,
         int $shardSize,
@@ -198,12 +199,14 @@ class VaultFolderShardsRepository
                 return $conflict;
             }
 
-            // 3. Insert the immutable history row.
+            // 3. Insert the immutable history row. Parent comes from the
+            //    envelope's stated chain (new - 1 for normal edits, the
+            //    source-relay's parent for migration replication).
             $this->create(
                 $vaultId,
                 $remoteFolderId,
                 $newShardRevision,
-                $expectedCurrentShardRevision,
+                $parentShardRevision,
                 $shardHash,
                 $shardCiphertext,
                 $shardSize,

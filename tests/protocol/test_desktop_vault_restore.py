@@ -37,7 +37,6 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    mirror_legacy_from_sharded,
     seed_sharded_state_from_manifest,
 )
 
@@ -78,11 +77,9 @@ class RestoreRemoteFolderTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             current = manifest
             for path, content in files.items():
@@ -95,7 +92,6 @@ class RestoreRemoteFolderTests(unittest.TestCase):
                     remote_path=path, author_device_id=AUTHOR,
                 )
                 current = res.manifest
-                seed_sharded_state_from_manifest(vault, relay, current)
             if with_tombstone is not None:
                 current = tombstone_file_entry(
                     current,
@@ -106,16 +102,12 @@ class RestoreRemoteFolderTests(unittest.TestCase):
                 )
                 current["revision"] = int(current["revision"]) + 1
                 current["parent_revision"] = current["revision"] - 1
-                relay.current_revision = int(current["parent_revision"])
-                vault.publish_manifest(relay, current)
                 seed_sharded_state_from_manifest(vault, relay, current)
-            mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
-        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
         observer = _vault()
         try:
-            published = _decrypt(observer, relay.current_envelope)
+            published = observer.fetch_unified_manifest(relay)
         finally:
             observer.close()
         return relay, published
@@ -357,11 +349,9 @@ class RestoreAtDateTests(unittest.TestCase):
                 ),
             ],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             current = manifest
             payloads = {
@@ -384,14 +374,11 @@ class RestoreAtDateTests(unittest.TestCase):
                     created_at=ts,
                 )
                 current = res.manifest
-                seed_sharded_state_from_manifest(vault, relay, current)
-            mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
-        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
         observer = _vault()
         try:
-            published = _decrypt(observer, relay.current_envelope)
+            published = observer.fetch_unified_manifest(relay)
         finally:
             observer.close()
         return relay, published, payloads
@@ -402,7 +389,7 @@ class RestoreAtDateTests(unittest.TestCase):
         """Restoring to a 2-week-old snapshot writes the snapshot bytes;
         current state on the relay is unchanged (never published)."""
         relay, manifest, payloads = self._seed_versions()
-        published_count = len(relay.published_manifests)
+        published_count = len(relay.published_shards)
         cutoff = datetime(2026, 2, 15, 0, 0, tzinfo=timezone.utc)
 
         vault = _vault()
@@ -424,7 +411,7 @@ class RestoreAtDateTests(unittest.TestCase):
             (self.dest / "beta.txt").read_bytes(), payloads["beta.txt-v1"],
         )
         # Relay was never republished by the restore.
-        self.assertEqual(len(relay.published_manifests), published_count)
+        self.assertEqual(len(relay.published_shards), published_count)
 
     def test_cutoff_before_any_version_yields_empty_restore(self) -> None:
         relay, manifest, _ = self._seed_versions()
@@ -473,11 +460,9 @@ class RestoreAtDateTests(unittest.TestCase):
                 created_by_device_id=AUTHOR, entries=[],
             )],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             local = self.tmpdir / "src_alpha.txt"
             local.write_bytes(b"alpha bytes")
@@ -487,23 +472,18 @@ class RestoreAtDateTests(unittest.TestCase):
                 remote_path="alpha.txt", author_device_id=AUTHOR,
                 created_at="2026-01-01T12:00:00.000Z",
             )
-            seed_sharded_state_from_manifest(vault, relay, res.manifest)
             current = tombstone_file_entry(
                 res.manifest, remote_folder_id=DOCS_ID, path="alpha.txt",
                 deleted_at="2026-02-01T12:00:00.000Z", author_device_id=AUTHOR,
             )
             current["revision"] = int(current["revision"]) + 1
             current["parent_revision"] = current["revision"] - 1
-            relay.current_revision = int(current["parent_revision"])
-            vault.publish_manifest(relay, current)
             seed_sharded_state_from_manifest(vault, relay, current)
-            mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
-        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
         observer = _vault()
         try:
-            published = _decrypt(observer, relay.current_envelope)
+            published = observer.fetch_unified_manifest(relay)
         finally:
             observer.close()
 

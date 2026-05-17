@@ -132,7 +132,7 @@ def build_activity_tab(ctx: MainContext, win) -> "Gtk.Box":
                     config_dir, config, vault_id_undashed,
                 )
                 try:
-                    manifest = vault.fetch_manifest(relay)
+                    manifest = vault.fetch_unified_manifest(relay)
                 finally:
                     vault.close()
             except Exception as exc:  # noqa: BLE001

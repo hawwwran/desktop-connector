@@ -13,9 +13,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
-from src.vault import Vault  # noqa: E402
 from src.vault.state.local_index import DB_FILENAME, VaultLocalIndex  # noqa: E402
-from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 
 
@@ -23,7 +21,6 @@ VAULT_ID = "ABCD2345WXYZ"
 AUTHOR = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
 DOCS_ID = "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa"
 PHOTOS_ID = "rf_v1_bbbbbbbbbbbbbbbbbbbbbbbb"
-MASTER_KEY = bytes.fromhex("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
 
 
 def _folder(remote_folder_id: str, name: str, *, created_at: str = "2026-05-03T13:00:00.000Z") -> dict:
@@ -113,31 +110,6 @@ class VaultRemoteFoldersCacheTests(unittest.TestCase):
 
             self.assertEqual(mode, 0o600)
             self.assertEqual(index.list_remote_folders(VAULT_ID), [])
-
-    def test_vault_decrypt_manifest_can_refresh_local_index(self) -> None:
-        from tests.protocol.test_desktop_vault_manifest import _manifest_vector
-
-        case = _manifest_vector("manifest-v1-t4-add-remote-folder")
-        with tempfile.TemporaryDirectory() as tmp:
-            index = VaultLocalIndex(Path(tmp))
-            vault = Vault(
-                vault_id=case["inputs"]["vault_id"],
-                master_key=MASTER_KEY,
-                recovery_secret=None,
-                vault_access_secret="unused",
-                header_revision=1,
-                manifest_revision=int(case["inputs"]["revision"]),
-                manifest_ciphertext=bytes.fromhex(case["expected"]["envelope_bytes"]),
-                crypto=DefaultVaultCrypto,
-            )
-
-            manifest = vault.decrypt_manifest(local_index=index)
-
-            self.assertEqual(manifest["remote_folders"][0]["remote_folder_id"], DOCS_ID)
-            self.assertEqual(
-                [row["remote_folder_id"] for row in index.list_remote_folders(VAULT_ID)],
-                [DOCS_ID],
-            )
 
 
 if __name__ == "__main__":

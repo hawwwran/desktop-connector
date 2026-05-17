@@ -131,11 +131,9 @@ class UploadFileCancellationTests(unittest.TestCase):
                 entries=[],
             )],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
@@ -195,9 +193,15 @@ class UploadFileCancellationTests(unittest.TestCase):
         # Exactly one chunk PUT before the bail; the manifest was NOT
         # published (the version is still absent from the head).
         self.assertEqual(len(relay.put_calls), 1)
-        head = relay.current_manifest
-        from src.vault.manifest import find_file_entry
-        self.assertIsNone(find_file_entry(head, DOCS_ID, "big.bin"))
+        observer = _vault()
+        try:
+            head_shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
+        finally:
+            observer.close()
+        entry_paths = {e["path"] for e in head_shard.get("entries", [])}
+        self.assertNotIn("big.bin", entry_paths)
 
 
 class BackupOnlyCycleCancellationTests(unittest.TestCase):
@@ -232,11 +236,9 @@ class BackupOnlyCycleCancellationTests(unittest.TestCase):
                 entries=[],
             )],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
@@ -374,11 +376,9 @@ class TwoWayCycleCancellationTests(unittest.TestCase):
                 entries=[],
             )],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()

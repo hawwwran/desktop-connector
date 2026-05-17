@@ -2,29 +2,21 @@
 
 from __future__ import annotations
 
-import base64
-import json
 import os
 import sys
 import unittest
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
+from _paths import ensure_desktop_on_path  # noqa: E402
 
 ensure_desktop_on_path()
 
 from src.vault.manifest import (  # noqa: E402
-    add_remote_folder,
-    canonical_manifest_json,
     make_manifest,
     make_remote_folder,
     normalize_manifest_plaintext,
-    remove_remote_folder,
     rename_remote_folder,
 )
-from src.vault import Vault  # noqa: E402
-from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"
@@ -32,19 +24,6 @@ AUTHOR = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
 DOCS_ID = "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa"
 PHOTOS_ID = "rf_v1_bbbbbbbbbbbbbbbbbbbbbbbb"
 MASTER_KEY = bytes.fromhex("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
-
-
-def _manifest_vector(name: str) -> dict:
-    path = Path(REPO_ROOT, "tests/protocol/vault-v1/manifest_v1.json")
-    cases = json.loads(path.read_text(encoding="utf-8"))
-    for case in cases:
-        if case["name"] == name:
-            return case
-    raise AssertionError(f"missing vector case: {name}")
-
-
-def _manifest_vector_plaintext(name: str) -> bytes:
-    return base64.b64decode(_manifest_vector(name)["inputs"]["manifest_plaintext"])
 
 
 class VaultManifestSchemaTests(unittest.TestCase):
@@ -92,72 +71,6 @@ class VaultManifestSchemaTests(unittest.TestCase):
         self.assertEqual(folder["retention_policy"], {"keep_deleted_days": 30, "keep_versions": 10})
         self.assertEqual(folder["ignore_patterns"], [])
         self.assertEqual(folder["state"], "active")
-
-    def test_vault_decrypt_manifest_normalizes_legacy_vector_without_remote_folders(self) -> None:
-        case = _manifest_vector("manifest-v1-legacy-no-remote-folders")
-        vault = Vault(
-            vault_id=case["inputs"]["vault_id"],
-            master_key=MASTER_KEY,
-            recovery_secret=None,
-            vault_access_secret="unused",
-            header_revision=1,
-            manifest_revision=int(case["inputs"]["revision"]),
-            manifest_ciphertext=bytes.fromhex(case["expected"]["envelope_bytes"]),
-            crypto=DefaultVaultCrypto,
-        )
-
-        manifest = vault.decrypt_manifest()
-
-        self.assertEqual(manifest["remote_folders"], [])
-
-    def test_add_remote_folder_matches_t4_vector_plaintext(self) -> None:
-        base = make_manifest(
-            vault_id=VAULT_ID,
-            revision=2,
-            parent_revision=1,
-            created_at="2026-05-03T13:00:00.000Z",
-            author_device_id=AUTHOR,
-        )
-        folder = make_remote_folder(
-            remote_folder_id=DOCS_ID,
-            display_name_enc="Documents",
-            created_at="2026-05-03T13:00:00.000Z",
-            created_by_device_id=AUTHOR,
-            ignore_patterns=[".git/", "node_modules/", "*.tmp"],
-        )
-
-        plaintext = canonical_manifest_json(add_remote_folder(base, folder))
-
-        self.assertEqual(plaintext, _manifest_vector_plaintext("manifest-v1-t4-add-remote-folder"))
-
-    def test_remove_remote_folder_matches_t4_vector_plaintext(self) -> None:
-        docs = make_remote_folder(
-            remote_folder_id=DOCS_ID,
-            display_name_enc="Documents",
-            created_at="2026-05-03T13:00:00.000Z",
-            created_by_device_id=AUTHOR,
-            ignore_patterns=[".git/", "node_modules/", "*.tmp"],
-        )
-        photos = make_remote_folder(
-            remote_folder_id=PHOTOS_ID,
-            display_name_enc="Photos",
-            created_at="2026-05-03T13:01:00.000Z",
-            created_by_device_id=AUTHOR,
-            retention_policy={"keep_deleted_days": 60, "keep_versions": 20},
-            ignore_patterns=["*.tmp"],
-        )
-        base = make_manifest(
-            vault_id=VAULT_ID,
-            revision=3,
-            parent_revision=2,
-            created_at="2026-05-03T13:05:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[docs, photos],
-        )
-
-        plaintext = canonical_manifest_json(remove_remote_folder(base, PHOTOS_ID))
-
-        self.assertEqual(plaintext, _manifest_vector_plaintext("manifest-v1-t4-remove-remote-folder"))
 
     def test_rename_remote_folder_only_changes_display_name(self) -> None:
         docs = make_remote_folder(
@@ -560,36 +473,6 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
             if v["version_id"] == latest_id
         )
         self.assertEqual(latest["modified_at"], "2026-05-04T15:00:00.000Z")
-
-    def test_publish_manifest_rejects_inherited_revision_pair(self) -> None:
-        """Integration test for the publish-side enforcement. A
-        manifest body with the *parent's* revision (i.e. forgot to
-        bump) must trip ``ManifestRevisionInvariantError`` *before*
-        any AEAD encryption or relay POST.
-        """
-        from src.vault.manifest import ManifestRevisionInvariantError
-
-        VAULT_ACCESS_SECRET = "vault-secret"
-        vault = Vault(
-            vault_id=VAULT_ID, master_key=MASTER_KEY,
-            recovery_secret=None,
-            vault_access_secret=VAULT_ACCESS_SECRET,
-            header_revision=1, manifest_revision=5,
-            manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
-        )
-
-        class _ShouldNotBeCalledRelay:
-            def put_manifest(self, *args, **kwargs):
-                raise AssertionError(
-                    "publish_manifest must reject before reaching the relay"
-                )
-
-        bad = self._manifest_at(revision=5, parent_revision=5)  # not bumped
-        try:
-            with self.assertRaises(ManifestRevisionInvariantError):
-                vault.publish_manifest(_ShouldNotBeCalledRelay(), bad)
-        finally:
-            vault.close()
 
 
 if __name__ == "__main__":

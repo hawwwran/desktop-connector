@@ -12,8 +12,6 @@ gi.require_version("Adw", "1")
 from gi.repository import Gtk, Adw, GLib
 
 from ..vault.ops.clear import (
-    build_clear_folder_manifest,
-    build_clear_vault_manifest,
     confirm_folder_clear_text_matches,
     confirm_vault_clear_text_matches,
 )
@@ -85,9 +83,9 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
     # ---------------------------------------------------------------
     # F-U22: Clear folder / Clear whole vault / Schedule hard purge
     # Each gated behind a typed-confirmation dialog (§gaps §13).
-    # Backend pure-functions: vault_clear.{build_clear_folder_manifest,
-    # build_clear_vault_manifest, confirm_*_text_matches} +
-    # vault_purge_schedule.{schedule_purge, cancel_purge}.
+    # Backend: vault.ops.clear.{clear_folder, clear_vault,
+    # confirm_*_text_matches} + vault.ops.purge_schedule.
+    # {schedule_purge, cancel_purge}.
     # ---------------------------------------------------------------
 
     danger_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
@@ -219,24 +217,24 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
                 from ..vault.binding.runtime import (
                     create_vault_relay, open_local_vault_from_grant,
                 )
+                from ..vault.ops.clear import clear_folder
                 config.reload()
                 relay = create_vault_relay(config)
                 vault = open_local_vault_from_grant(
                     config_dir, config, vault_id_undashed,
                 )
                 try:
-                    manifest = vault.fetch_manifest(relay)
                     device_id = config.device_id or ("0" * 32)
                     deleted_at = datetime.now(timezone.utc).strftime(
                         "%Y-%m-%dT%H:%M:%S.000Z"
                     )
-                    next_manifest = build_clear_folder_manifest(
-                        manifest,
+                    clear_folder(
+                        vault=vault,
+                        relay=relay,
                         remote_folder_id=folder_id,
                         author_device_id=device_id,
                         deleted_at=deleted_at,
                     )
-                    vault.publish_manifest(relay, next_manifest)
                 finally:
                     vault.close()
             except Exception as exc:  # noqa: BLE001
@@ -343,23 +341,23 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
                 from ..vault.binding.runtime import (
                     create_vault_relay, open_local_vault_from_grant,
                 )
+                from ..vault.ops.clear import clear_vault
                 config.reload()
                 relay = create_vault_relay(config)
                 vault = open_local_vault_from_grant(
                     config_dir, config, vault_id_undashed,
                 )
                 try:
-                    manifest = vault.fetch_manifest(relay)
                     device_id = config.device_id or ("0" * 32)
                     deleted_at = datetime.now(timezone.utc).strftime(
                         "%Y-%m-%dT%H:%M:%S.000Z"
                     )
-                    next_manifest = build_clear_vault_manifest(
-                        manifest,
+                    clear_vault(
+                        vault=vault,
+                        relay=relay,
                         author_device_id=device_id,
                         deleted_at=deleted_at,
                     )
-                    vault.publish_manifest(relay, next_manifest)
                 finally:
                     vault.close()
             except Exception as exc:  # noqa: BLE001

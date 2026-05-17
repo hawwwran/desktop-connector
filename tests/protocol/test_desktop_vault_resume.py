@@ -74,9 +74,17 @@ class FakeResumeRelay:
         self.put_header_calls = 0
         self.get_header_calls = 0
 
-    def create_vault(self, **kwargs) -> dict:
+    def create_vault(
+        self,
+        vault_id,
+        vault_access_token_hash,
+        encrypted_header,
+        header_hash,
+        initial_root_ciphertext,
+        initial_root_hash,
+        **kwargs,
+    ) -> dict:
         self.create_calls += 1
-        vault_id = kwargs["vault_id"]
         if vault_id in self.vaults:
             # Mirror the server's vault_already_exists 409 — the resume
             # path should never invoke this on an existing vault.
@@ -84,13 +92,13 @@ class FakeResumeRelay:
                 f"Relay rejected vault creation: HTTP 409 vault_already_exists"
             )
         self.vaults[vault_id] = {
-            "encrypted_header": kwargs["encrypted_header"],
-            "header_hash": kwargs["header_hash"],
+            "encrypted_header": encrypted_header,
+            "header_hash": header_hash,
             "header_revision": 1,
-            "vault_access_token_hash": kwargs["vault_access_token_hash"],
-            "manifest_envelope_bytes": kwargs["initial_manifest_ciphertext"],
-            "manifest_hash": kwargs["initial_manifest_hash"],
-            "manifest_revision": 1,
+            "vault_access_token_hash": vault_access_token_hash,
+            "root_envelope": initial_root_ciphertext,
+            "root_hash": initial_root_hash,
+            "root_revision": 1,
         }
         return {"vault_id": vault_id, "header_revision": 1}
 
@@ -425,7 +433,7 @@ class CompletePendingPublishTests(unittest.TestCase):
         vault_access_secret = "bearer-secret"
 
         class FailingRelay(FakeResumeRelay):
-            def create_vault(self, **kwargs):
+            def create_vault(self, *args, **kwargs):
                 raise RuntimeError("Relay rejected vault creation: HTTP 500")
 
         with tempfile.TemporaryDirectory() as tmp:

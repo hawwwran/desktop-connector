@@ -403,7 +403,6 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            mirror_legacy_from_sharded,
             seed_sharded_state_from_manifest,
         )
 
@@ -416,6 +415,37 @@ class VaultImportRunnerTests(unittest.TestCase):
                 recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
                 header_revision=1, manifest_revision=1,
                 manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+            )
+
+        def encrypt_manifest_envelope(manifest: dict) -> bytes:
+            """Encrypt a unified manifest into the legacy envelope shape
+            still embedded by the export bundle."""
+            from src.vault.crypto import (
+                aead_encrypt, build_manifest_aad,
+                build_manifest_envelope, derive_subkey,
+            )
+            from src.vault.manifest import (
+                canonical_manifest_json, normalize_manifest_plaintext,
+            )
+            import secrets as _secrets
+            normalized = normalize_manifest_plaintext(manifest)
+            plaintext = canonical_manifest_json(normalized)
+            subkey = derive_subkey("dc-vault-v1/manifest", bytes(MASTER_KEY))
+            nonce = _secrets.token_bytes(24)
+            aad = build_manifest_aad(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+            )
+            ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+            return build_manifest_envelope(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+                nonce=nonce,
+                aead_ciphertext_and_tag=ciphertext,
             )
 
         empty = make_manifest(
@@ -435,14 +465,10 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
 
         # 1. Build a relay that already has one file. Export it.
-        relay_a = FakeUploadRelay(manifest=empty)
+        relay_a = FakeUploadRelay()
         vault = make_vault()
         try:
-            # Bootstrap Phase H sharded state + legacy mirror so
-            # upload_file (sharded-only publish) leaves a coherent
-            # legacy envelope behind for the export step.
             seed_sharded_state_from_manifest(vault, relay_a, empty)
-            mirror_legacy_from_sharded(vault, relay_a)
             local_a = self.tmpdir / "exported.txt"
             local_a.write_bytes(b"exported content for the import flow")
             uploaded = upload_file(
@@ -450,12 +476,10 @@ class VaultImportRunnerTests(unittest.TestCase):
                 local_path=local_a, remote_folder_id=MASTER_DOCS_ID,
                 remote_path="exported.txt", author_device_id=MASTER_AUTHOR,
             )
-            seed_sharded_state_from_manifest(vault, relay_a, uploaded.manifest)
-            mirror_legacy_from_sharded(vault, relay_a)
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay_a,
-                manifest_envelope=relay_a.current_envelope,
+                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
                 manifest_plaintext=uploaded.manifest,
                 output_path=bundle_path,
                 passphrase="user-export-passphrase",
@@ -466,7 +490,7 @@ class VaultImportRunnerTests(unittest.TestCase):
             vault.close()
 
         # 2. Fresh empty target relay simulates "import to a different relay".
-        relay_b = FakeUploadRelay(manifest=empty)
+        relay_b = FakeUploadRelay()
         active_active = empty
         vault = make_vault()
         try:
@@ -521,7 +545,6 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            mirror_legacy_from_sharded,
             seed_sharded_state_from_manifest,
         )
 
@@ -541,7 +564,7 @@ class VaultImportRunnerTests(unittest.TestCase):
                 )
             ],
         )
-        relay = FakeUploadRelay(manifest=empty)
+        relay = FakeUploadRelay()
         vault = Vault(
             vault_id=MASTER_VAULT_ID, master_key=MASTER_KEY,
             recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
@@ -550,11 +573,10 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         try:
             seed_sharded_state_from_manifest(vault, relay, empty)
-            mirror_legacy_from_sharded(vault, relay)
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay,
-                manifest_envelope=relay.current_envelope or b"\x00" * 200,
+                manifest_envelope=b"\x00" * 200,
                 manifest_plaintext=empty,
                 output_path=bundle_path,
                 passphrase="user-export-passphrase",
@@ -598,7 +620,6 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            mirror_legacy_from_sharded,
             seed_sharded_state_from_manifest,
         )
 
@@ -611,6 +632,35 @@ class VaultImportRunnerTests(unittest.TestCase):
                 recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
                 header_revision=1, manifest_revision=1,
                 manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+            )
+
+        def encrypt_manifest_envelope(manifest: dict) -> bytes:
+            from src.vault.crypto import (
+                aead_encrypt, build_manifest_aad,
+                build_manifest_envelope, derive_subkey,
+            )
+            from src.vault.manifest import (
+                canonical_manifest_json, normalize_manifest_plaintext,
+            )
+            import secrets as _secrets
+            normalized = normalize_manifest_plaintext(manifest)
+            plaintext = canonical_manifest_json(normalized)
+            subkey = derive_subkey("dc-vault-v1/manifest", bytes(MASTER_KEY))
+            nonce = _secrets.token_bytes(24)
+            aad = build_manifest_aad(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+            )
+            ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+            return build_manifest_envelope(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+                nonce=nonce,
+                aead_ciphertext_and_tag=ciphertext,
             )
 
         manifest_a = make_manifest(
@@ -637,11 +687,10 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         # Vault A: two folders, uploads one file into the PICS_ID folder
         # that doesn't yet exist in vault B's manifest.
-        relay_a = FakeUploadRelay(manifest=manifest_a)
+        relay_a = FakeUploadRelay()
         vault = make_vault()
         try:
             seed_sharded_state_from_manifest(vault, relay_a, manifest_a)
-            mirror_legacy_from_sharded(vault, relay_a)
             local_pic = self.tmpdir / "exported.png"
             local_pic.write_bytes(b"\x89PNG\r\n\x1a\n" + b"a" * 100)
             uploaded = upload_file(
@@ -649,12 +698,10 @@ class VaultImportRunnerTests(unittest.TestCase):
                 local_path=local_pic, remote_folder_id=PICS_ID,
                 remote_path="exported.png", author_device_id=MASTER_AUTHOR,
             )
-            seed_sharded_state_from_manifest(vault, relay_a, uploaded.manifest)
-            mirror_legacy_from_sharded(vault, relay_a)
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay_a,
-                manifest_envelope=relay_a.current_envelope,
+                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
                 manifest_plaintext=uploaded.manifest,
                 output_path=bundle_path,
                 passphrase="user-export-passphrase",
@@ -679,7 +726,7 @@ class VaultImportRunnerTests(unittest.TestCase):
                 ),
             ],
         )
-        relay_b = FakeUploadRelay(manifest=manifest_b_initial)
+        relay_b = FakeUploadRelay()
         vault = make_vault()
         try:
             seed_sharded_state_from_manifest(vault, relay_b, manifest_b_initial)

@@ -56,11 +56,9 @@ class VaultEvictionPassTests(unittest.TestCase):
         local.write_bytes(b"content destined for the bin")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
@@ -99,11 +97,9 @@ class VaultEvictionPassTests(unittest.TestCase):
         local.write_bytes(b"content within retention")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
@@ -135,11 +131,9 @@ class VaultEvictionPassTests(unittest.TestCase):
     def test_force_purge_runs_stage2_when_target_unmet_after_stage1(self) -> None:
         # Two tombstones: one expired (for stage 1), one fresh (forces stage 2).
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             for path, deleted_at in [
                 ("expired.txt", "2026-04-01T10:00:00.000Z"),
@@ -147,8 +141,7 @@ class VaultEvictionPassTests(unittest.TestCase):
             ]:
                 local = self.tmpdir / path
                 local.write_bytes(f"content for {path}".encode("utf-8"))
-                head = _decrypt_current_manifest(vault, relay) if relay.current_envelope else manifest
-                seed_sharded_state_from_manifest(vault, relay, head)
+                head = _decrypt_current_manifest(vault, relay) if relay.root_envelope else manifest
                 uploaded = upload_file(
                     vault=vault, relay=relay, manifest=head, local_path=local,
                     remote_folder_id=DOCS_ID, remote_path=path,
@@ -185,11 +178,9 @@ class VaultEvictionPassTests(unittest.TestCase):
         local.write_bytes(b"v1 content")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             v1 = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
@@ -233,11 +224,9 @@ class VaultEvictionPassTests(unittest.TestCase):
         local.write_bytes(b"only current - cannot evict")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
@@ -273,11 +262,9 @@ class VaultEvictionPassTests(unittest.TestCase):
         local.write_bytes(b"content that will be stranded after crash")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
@@ -359,10 +346,8 @@ def _empty_manifest() -> dict:
 
 
 def _decrypt_current_manifest(vault, relay) -> dict:
-    """Phase H step 7d: read the post-publish unified view by
-    assembling root + per-folder shards. The legacy
-    ``relay.current_envelope`` is no longer kept in sync by sharded
-    publishes."""
+    """Read the post-publish unified view by assembling root +
+    per-folder shards via the sharded fetch API."""
     return vault.fetch_unified_manifest(relay)
 
 

@@ -168,6 +168,32 @@ class Database
         $this->db->exec('DROP TABLE IF EXISTS vault_chunk_uploads');
         $this->db->exec('DROP TABLE IF EXISTS vault_audit_events');
 
+        // Pre-sharding ``vault_manifests`` table — replaced by the
+        // sharded ``vault_root_manifests`` + ``vault_folder_shards``
+        // pair from migration 005. Old deployments get this DROP so
+        // the dead schema doesn't accumulate.
+        $this->db->exec('DROP INDEX IF EXISTS idx_vault_manifests_vault');
+        $this->db->exec('DROP TABLE IF EXISTS vault_manifests');
+
+        // Drop the legacy vaults.current_manifest_* columns on
+        // upgrades from a pre-sharding schema. SQLite 3.35+ supports
+        // ALTER TABLE DROP COLUMN; older versions would need the
+        // table-rebuild pattern. PRAGMA table_info gates the call so
+        // a fresh install (where the columns never existed) is a
+        // no-op.
+        $vaultsCols = [];
+        $vinfo = $this->db->query("PRAGMA table_info(vaults)");
+        while ($row = $vinfo->fetchArray(SQLITE3_ASSOC)) {
+            $vaultsCols[$row['name']] = true;
+        }
+        $vinfo->finalize();
+        if (isset($vaultsCols['current_manifest_revision'])) {
+            $this->db->exec('ALTER TABLE vaults DROP COLUMN current_manifest_revision');
+        }
+        if (isset($vaultsCols['current_manifest_hash'])) {
+            $this->db->exec('ALTER TABLE vaults DROP COLUMN current_manifest_hash');
+        }
+
         // T9.2 — relay-migration intent table (idempotent CREATE IF NOT EXISTS).
         $migrationSql = file_get_contents(__DIR__ . '/../migrations/003_vault_migration.sql');
         if ($migrationSql !== false) {
@@ -211,11 +237,6 @@ class Database
         // strict-warning mode.
         $info->finalize();
 
-        // Phase H transition: the legacy ``vault_manifests`` table is
-        // retained alongside the sharded tables so production callers
-        // can keep publishing legacy single-manifest revisions until
-        // the mechanical port flips them. The final Phase H cleanup
-        // commit will drop this table.
         if (!isset($vaultColumns['current_root_revision'])) {
             $this->db->exec(
                 "ALTER TABLE vaults ADD COLUMN current_root_revision INTEGER NOT NULL DEFAULT 1"

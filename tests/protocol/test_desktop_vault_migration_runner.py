@@ -16,7 +16,6 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
-from src.vault.ui.browser_model import decrypt_manifest as _decrypt_manifest  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 from src.vault.migration.state import load_state, save_state, MigrationRecord  # noqa: E402
@@ -35,7 +34,6 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    mirror_legacy_from_sharded,
     seed_sharded_state_from_manifest,
 )
 
@@ -47,14 +45,14 @@ TARGET_URL = "https://target.example.com/SERVICES/dc"
 
 # ---------------------------------------------------------------------------
 # A relay fake that supports both upload + migration semantics. We layer the
-# migration methods on top of the existing FakeUploadRelay so chunk + manifest
-# logic stays identical between upload and migration tests.
+# migration methods on top of the existing FakeUploadRelay so chunk + sharded
+# manifest logic stays identical between upload and migration tests.
 # ---------------------------------------------------------------------------
 
 
 class FakeMigrationRelay(FakeUploadRelay):
-    def __init__(self, *, manifest: dict, vault_id: str = VAULT_ID) -> None:
-        super().__init__(manifest=manifest)
+    def __init__(self, *, vault_id: str = VAULT_ID) -> None:
+        super().__init__()
         self.vault_id = vault_id
         self.vault_created = False
         self.vault_access_token_hash: bytes = b""
@@ -64,18 +62,18 @@ class FakeMigrationRelay(FakeUploadRelay):
         self.migrated_to: str | None = None
         self.migration_intents: dict[str, dict] = {}
 
-    # --- target-side: create_vault, get_header, get_manifest ----------------
+    # --- target-side: create_vault, get_header --------------------------
 
     def create_vault(
         self,
-        *,
         vault_id: str,
         vault_access_token_hash: bytes,
         encrypted_header: bytes,
         header_hash: str,
-        initial_manifest_ciphertext: bytes,
-        initial_manifest_hash: str,
-        initial_manifest_revision: int | None = None,
+        initial_root_ciphertext: bytes,
+        initial_root_hash: str,
+        *,
+        initial_root_revision: int | None = None,
         initial_header_revision: int | None = None,
     ) -> dict:
         if self.vault_created:
@@ -88,13 +86,18 @@ class FakeMigrationRelay(FakeUploadRelay):
         self.encrypted_header = bytes(encrypted_header)
         self.header_hash = header_hash
         self.header_revision = int(initial_header_revision or 1)
-        self.current_revision = int(initial_manifest_revision or 1)
-        self.current_envelope = bytes(initial_manifest_ciphertext)
-        self.current_hash = initial_manifest_hash
+        # Mirror the inherited sharded-surface slots so subsequent
+        # ``get_root`` / ``put_shard`` calls see the seeded state. The
+        # legacy ``current_envelope`` / ``current_revision`` slots are
+        # intentionally left untouched — the sharded runner never
+        # reads them.
+        self.root_envelope = bytes(initial_root_ciphertext)
+        self.root_hash = initial_root_hash
+        self.root_revision = int(initial_root_revision or 1)
         return {
             "vault_id": vault_id,
             "header_revision": self.header_revision,
-            "manifest_revision": self.current_revision,
+            "root_revision": self.root_revision,
         }
 
     def get_header(self, vault_id, vault_access_secret) -> dict:
@@ -106,14 +109,6 @@ class FakeMigrationRelay(FakeUploadRelay):
             "quota_ciphertext_bytes": 1073741824,
             "used_ciphertext_bytes": sum(len(v) for v in self.chunks.values()),
             "migrated_to": self.migrated_to,
-        }
-
-    def get_manifest(self, vault_id, vault_access_secret) -> dict:
-        return {
-            "vault_id": vault_id,
-            "manifest_revision": int(self.current_revision),
-            "manifest_ciphertext": bytes(self.current_envelope),
-            "manifest_hash": self.current_hash,
         }
 
     # --- source-side: migration_start / verify_source / commit --------------
@@ -148,10 +143,18 @@ class FakeMigrationRelay(FakeUploadRelay):
         intent = self.migration_intents.get(vault_id)
         if intent is None:
             raise RuntimeError("vault_invalid_request: no intent")
+        # Mirror the server's sharded verify-source payload: root_hash
+        # + per-folder shard_hashes map. The chunk_count is the
+        # union-of-shards distinct count.
+        shard_hashes = {
+            rf_id: str(state.get("hash") or "")
+            for rf_id, state in self.shards.items()
+        }
         return {
             "vault_id": vault_id,
-            "manifest_revision": int(self.current_revision),
-            "manifest_hash": self.current_hash,
+            "root_revision": int(self.root_revision),
+            "root_hash": self.root_hash,
+            "shard_hashes": shard_hashes,
             "chunk_count": len(self.chunks),
             "used_ciphertext_bytes": sum(len(v) for v in self.chunks.values()),
             "target_relay_url": intent["target_relay_url"],
@@ -197,11 +200,11 @@ class VaultMigrationRunnerTests(unittest.TestCase):
 
     def test_full_migration_copies_chunks_and_publishes_state(self) -> None:
         """T9.3 + T9.4: source vault with two files migrates verbatim."""
-        source_relay, source_envelope_at_t0 = self._populated_source(files={
+        source_relay, source_root_at_t0 = self._populated_source(files={
             "alpha.txt": b"alpha content for migration",
             "beta.bin": b"beta binary blob, distinct content",
         })
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
 
         vault = _vault()
         try:
@@ -220,10 +223,16 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         self.assertGreater(result.chunks_copied, 0)
         # All source chunks now on target.
         self.assertEqual(set(target_relay.chunks), set(source_relay.chunks))
-        # Manifest envelope verbatim.
-        self.assertEqual(target_relay.current_envelope, source_relay.current_envelope)
-        self.assertEqual(target_relay.current_revision, source_relay.current_revision)
-        self.assertEqual(target_relay.current_hash, source_relay.current_hash)
+        # Root envelope verbatim.
+        self.assertEqual(target_relay.root_envelope, source_relay.root_envelope)
+        self.assertEqual(target_relay.root_revision, source_relay.root_revision)
+        self.assertEqual(target_relay.root_hash, source_relay.root_hash)
+        # Each per-folder shard envelope copied verbatim too.
+        self.assertEqual(set(target_relay.shards), set(source_relay.shards))
+        for rf_id, src_state in source_relay.shards.items():
+            tgt_state = target_relay.shards[rf_id]
+            self.assertEqual(tgt_state["envelope"], src_state["envelope"])
+            self.assertEqual(tgt_state["hash"], src_state["hash"])
         # Source has been committed into read-only / migrated state.
         self.assertEqual(source_relay.migrated_to, TARGET_URL)
         # State file gone (post-commit cleanup).
@@ -239,7 +248,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
             "x.txt": b"first chunk content",
             "y.txt": b"second chunk content distinct",
         })
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
 
         # Pre-seed target with an in-progress state file + half the chunks.
         # A real client would land here when the process died after some
@@ -264,16 +273,15 @@ class VaultMigrationRunnerTests(unittest.TestCase):
                 "token": "mig_v1_" + "x" * 30,
             }
             # Bootstrap target as the runner would have done before crashing.
-            import hashlib
             token_hash = hashlib.sha256(VAULT_ACCESS_SECRET.encode("ascii")).digest()
             target_relay.create_vault(
-                vault_id=VAULT_ID,
-                vault_access_token_hash=token_hash,
-                encrypted_header=b"hdr",
-                header_hash="h" * 64,
-                initial_manifest_ciphertext=source_relay.current_envelope,
-                initial_manifest_hash=source_relay.current_hash,
-                initial_manifest_revision=source_relay.current_revision,
+                VAULT_ID,
+                token_hash,
+                b"hdr",
+                "h" * 64,
+                source_relay.root_envelope,
+                source_relay.root_hash,
+                initial_root_revision=source_relay.root_revision,
                 initial_header_revision=1,
             )
             # Pre-place one chunk.
@@ -308,7 +316,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         source_relay, _ = self._populated_source(
             files={"k.txt": b"committed callback test"},
         )
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
 
         captured_records: list = []
         # When the callback runs, the state file MUST still exist —
@@ -358,7 +366,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         source_relay, _ = self._populated_source(
             files={"k.txt": b"flaky callback test"},
         )
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
 
         attempts = {"n": 0}
 
@@ -430,7 +438,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         source_relay, _ = self._populated_source(
             files={"k.txt": b"committed content"},
         )
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
 
         # Drive the first run all the way through commit.
         vault = _vault()
@@ -500,7 +508,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         source_relay, _ = self._populated_source(
             files={"k.txt": b"aligned content"},
         )
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
         vault = _vault()
         try:
             with self.assertLogs(
@@ -542,7 +550,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
             "b.txt": b"beta bytes",
             "c.txt": b"gamma bytes",
         })
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
 
         vault = _vault()
         try:
@@ -558,44 +566,52 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         finally:
             vault.close()
 
-        # Drop one chunk from the target relay AND from the manifest's
-        # version that referenced it, so the target's
-        # ``_count_unique_chunks`` returns one less than the source's.
-        # We pop the first chunk_id from ``target_relay.chunks``; the
-        # source still claims all of them via ``migration_verify_source``
-        # because we don't touch the source's chunks dict.
+        # Drop one chunk from the target relay AND from the target's
+        # shard plaintext (re-publish the matching folder shard with
+        # the dropped chunk excised). The runner's
+        # ``_count_unique_chunks_in_shards`` walks the target's shards,
+        # so we need a fresh shard envelope to reflect the deletion.
         dropped_cid = next(iter(target_relay.chunks))
         del target_relay.chunks[dropped_cid]
 
-        # Re-publish the target's manifest with the dropped chunk
-        # excised from its referencing version. We need this so
-        # ``_count_unique_chunks`` (which walks the target manifest)
-        # reflects the deletion.
-        from src.vault.ui.browser_model import decrypt_manifest
-        observer = _vault()
-        try:
-            target_manifest = decrypt_manifest(
-                observer, target_relay.current_envelope,
-            )
-        finally:
-            observer.close()
-        for folder in target_manifest.get("remote_folders", []):
-            for entry in folder.get("entries", []) or []:
-                for version in entry.get("versions", []) or []:
-                    version["chunks"] = [
-                        c for c in version.get("chunks", []) or []
-                        if str(c.get("chunk_id")) != dropped_cid
-                    ]
-        target_manifest["revision"] = int(target_manifest.get("revision", 0)) + 1
-        target_manifest["parent_revision"] = (
-            int(target_manifest["revision"]) - 1
-        )
-        target_manifest["created_at"] = "2026-05-04T10:30:00.000Z"
-        target_manifest["author_device_id"] = AUTHOR
+        # Re-publish each folder shard with the dropped chunk removed.
         vault = _vault()
         try:
-            vault.publish_manifest(target_relay, target_manifest)
-            seed_sharded_state_from_manifest(vault, target_relay, target_manifest)
+            target_root = vault.fetch_root_manifest(target_relay)
+            for pointer in target_root.get("remote_folders", []) or []:
+                rf_id = str(pointer.get("remote_folder_id") or "")
+                if not rf_id:
+                    continue
+                if int(pointer.get("shard_revision") or 0) <= 0:
+                    continue
+                shard = vault.fetch_folder_shard(target_relay, rf_id)
+                changed = False
+                for entry in shard.get("entries", []) or []:
+                    for version in entry.get("versions", []) or []:
+                        original = version.get("chunks", []) or []
+                        filtered = [
+                            c for c in original
+                            if str(c.get("chunk_id")) != dropped_cid
+                        ]
+                        if len(filtered) != len(original):
+                            version["chunks"] = filtered
+                            changed = True
+                if not changed:
+                    continue
+                # Bump the shard chain + root pointer atomically.
+                shard_rev = int(shard["shard_revision"])
+                shard["shard_revision"] = shard_rev + 1
+                shard["parent_shard_revision"] = shard_rev
+                shard["created_at"] = "2026-05-04T10:30:00.000Z"
+                shard["author_device_id"] = AUTHOR
+                root_rev = int(target_root["root_revision"])
+                next_root = dict(target_root)
+                next_root["root_revision"] = root_rev + 1
+                next_root["parent_root_revision"] = root_rev
+                next_root["created_at"] = "2026-05-04T10:30:00.000Z"
+                next_root["author_device_id"] = AUTHOR
+                vault.publish_shard_with_root(target_relay, rf_id, shard, next_root)
+                target_root = vault.fetch_root_manifest(target_relay)
         finally:
             vault.close()
 
@@ -634,17 +650,13 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         """T9.4: tampered chunks on the target produce mismatches and
         prevent the commit transition."""
         source_relay, _ = self._populated_source(files={"k.txt": b"verify content"})
-        target_relay = FakeMigrationRelay(manifest=_empty_manifest())
+        target_relay = FakeMigrationRelay()
 
         vault = _vault()
         try:
             # Run far enough to set up target, but tamper one chunk before
             # verify to force the sample-decrypt to fail.
-            from src.vault.migration.runner import (
-                _bootstrap_target_and_inventory,
-                _copy_chunks,
-            )
-            from src.vault.migration.state import save_state, MigrationRecord, transition
+            from src.vault.migration.state import save_state, MigrationRecord
 
             record = MigrationRecord(
                 vault_id=VAULT_ID, state="started",
@@ -711,50 +723,43 @@ class VaultMigrationRunnerTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _populated_source(self, *, files: dict[str, bytes]) -> tuple[FakeMigrationRelay, bytes]:
-        """Build a source relay seeded with ``files`` already uploaded."""
+        """Build a source relay seeded with ``files`` already uploaded.
+
+        Sharded shape: the source relay's ``root_envelope`` and
+        per-folder ``shards`` are populated via the same Phase-H
+        helpers the live sync engine uses. The legacy unified manifest
+        slots are intentionally left untouched — the migration runner
+        only reads the sharded surface.
+        """
         manifest = _empty_manifest()
-        relay = FakeMigrationRelay(manifest=manifest)
-        # Create vault first so the source has the right header / token.
-        token_hash = hashlib.sha256(VAULT_ACCESS_SECRET.encode("ascii")).digest()
-        relay.create_vault(
-            vault_id=VAULT_ID,
-            vault_access_token_hash=token_hash,
-            encrypted_header=b"src-header-bytes",
-            header_hash="h" * 64,
-            initial_manifest_ciphertext=b"initial-manifest-stub",
-            initial_manifest_hash="m" * 64,
-        )
+        relay = FakeMigrationRelay()
+        # Mark the vault as created on the source side; the migration
+        # runner never calls create_vault on the source, but the
+        # fake's get_header reads the header_revision slot.
+        relay.vault_created = True
+        relay.header_revision = 1
+        relay.encrypted_header = b"src-header-bytes"
+        relay.header_hash = "h" * 64
         vault = _vault()
         try:
-            # ``create_vault`` above already initialized
-            # ``relay.current_envelope`` + ``current_revision``, so we
-            # only need to bootstrap the Phase H sharded state (root +
-            # shards) before invoking ``upload_file``. ``upload_file``
-            # now publishes via the sharded surface only, so we mirror
-            # back into the legacy envelope after each call — the
-            # migration runner still reads ``get_manifest`` (legacy).
+            # Seed the sharded root + shard for the empty manifest's
+            # ``DOCS_ID`` folder so ``upload_file`` has a base shard
+            # revision to publish on top of.
             seed_sharded_state_from_manifest(vault, relay, manifest)
-            mirror_legacy_from_sharded(vault, relay)
+            current_manifest = manifest
             for path, content in files.items():
                 local = self.tmpdir / path.replace("/", "_")
                 local.write_bytes(content)
                 res = upload_file(
                     vault=vault, relay=relay,
-                    manifest=_decrypt_current_manifest(vault, relay) or manifest,
+                    manifest=current_manifest,
                     local_path=local, remote_folder_id=DOCS_ID,
                     remote_path=path, author_device_id=AUTHOR,
                 )
-                seed_sharded_state_from_manifest(vault, relay, res.manifest)
-                mirror_legacy_from_sharded(vault, relay)
+                current_manifest = res.manifest
         finally:
             vault.close()
-        return relay, relay.current_envelope
-
-
-def _decrypt_current_manifest(vault, relay):
-    if not relay.current_envelope or relay.current_envelope == b"initial-manifest-stub":
-        return None
-    return _decrypt_manifest(vault, relay.current_envelope)
+        return relay, relay.root_envelope
 
 
 def _vault() -> Vault:

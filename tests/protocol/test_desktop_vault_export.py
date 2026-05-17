@@ -39,7 +39,6 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    mirror_legacy_from_sharded,
     seed_sharded_state_from_manifest,
 )
 
@@ -74,7 +73,7 @@ class VaultExportWriterTests(unittest.TestCase):
             "nested/beta.txt": b"beta content here, distinct bytes",
         })
         bundle_path = self.tmpdir / "vault.dcvault"
-        manifest_envelope = relay.current_envelope
+        manifest_envelope = _build_legacy_manifest_envelope(manifest)
         vault = self._vault()
         try:
             result = write_export_bundle(
@@ -120,7 +119,7 @@ class VaultExportWriterTests(unittest.TestCase):
         the destination. A retry produces a complete file from the same
         vault state."""
         manifest, relay = self._populated_relay({"a.txt": b"a", "b.txt": b"b" * 32})
-        manifest_envelope = relay.current_envelope
+        manifest_envelope = _build_legacy_manifest_envelope(manifest)
         bundle_path = self.tmpdir / "vault.dcvault"
 
         # First attempt: relay raises after the second chunk fetch.
@@ -257,7 +256,7 @@ class VaultExportVerifierTests(unittest.TestCase):
         try:
             write_export_bundle(
                 vault=vault, relay=relay,
-                manifest_envelope=relay.current_envelope,
+                manifest_envelope=_build_legacy_manifest_envelope(manifest),
                 manifest_plaintext=manifest,
                 output_path=bundle_path,
                 passphrase=PASSPHRASE,
@@ -308,17 +307,10 @@ def _empty_manifest() -> dict:
 
 def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, FakeUploadRelay]:
     manifest = _empty_manifest()
-    relay = FakeUploadRelay(manifest=manifest)
+    relay = FakeUploadRelay()
     vault = _vault()
     try:
-        # FakeUploadRelay.__init__ already seeds the legacy
-        # current_revision from ``manifest``; the Phase-H-ported
-        # upload_file publishes via the sharded surface only, so we
-        # bootstrap the sharded state and then mirror it back to the
-        # legacy envelope (the export bundle pipeline still reads
-        # ``relay.current_envelope``).
         seed_sharded_state_from_manifest(vault, relay, manifest)
-        mirror_legacy_from_sharded(vault, relay)
         current_manifest = manifest
         for relative, content in files.items():
             local = tmpdir / relative.replace("/", "_")
@@ -329,17 +321,64 @@ def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, 
                 remote_path=relative, author_device_id=AUTHOR,
             )
             current_manifest = res.manifest
-            seed_sharded_state_from_manifest(vault, relay, current_manifest)
-            mirror_legacy_from_sharded(vault, relay)
     finally:
         vault.close()
-    from src.vault.ui.browser_model import decrypt_manifest as _decrypt
+    # Assemble the unified manifest view that the export bundle still
+    # embeds as a single ``manifest_envelope`` record. After Phase H
+    # the relay no longer maintains a legacy single envelope, so we
+    # build it here from the post-upload sharded state.
+    from src.vault.manifest import assemble_unified_manifest
     vault_observer = _vault()
     try:
-        published = _decrypt(vault_observer, relay.current_envelope)
+        root = vault_observer.fetch_root_manifest(relay)
+        shards = {
+            pointer["remote_folder_id"]: vault_observer.fetch_folder_shard(
+                relay, pointer["remote_folder_id"],
+            )
+            for pointer in root.get("remote_folders", [])
+            if pointer.get("shard_hash")
+        }
+        published = assemble_unified_manifest(root, shards)
     finally:
         vault_observer.close()
     return published, relay
+
+
+def _build_legacy_manifest_envelope(manifest: dict) -> bytes:
+    """Encrypt a unified manifest dict into the legacy single-envelope
+    bytes shape that the export bundle still embeds. Phase H removed
+    the relay-side surface, but the bundle format keeps a single
+    ``RECORD_TYPE_MANIFEST`` record for backwards compatibility on
+    older readers — synthesize it here from the unified plaintext.
+    """
+    from src.vault.crypto import (
+        aead_encrypt,
+        build_manifest_aad,
+        build_manifest_envelope,
+        derive_subkey,
+    )
+    from src.vault.manifest import canonical_manifest_json, normalize_manifest_plaintext
+    import secrets as _secrets
+
+    normalized = normalize_manifest_plaintext(manifest)
+    plaintext = canonical_manifest_json(normalized)
+    subkey = derive_subkey("dc-vault-v1/manifest", bytes(MASTER_KEY))
+    nonce = _secrets.token_bytes(24)
+    aad = build_manifest_aad(
+        vault_id=str(normalized["vault_id"]),
+        revision=int(normalized["revision"]),
+        parent_revision=int(normalized["parent_revision"]),
+        author_device_id=str(normalized["author_device_id"]),
+    )
+    ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+    return build_manifest_envelope(
+        vault_id=str(normalized["vault_id"]),
+        revision=int(normalized["revision"]),
+        parent_revision=int(normalized["parent_revision"]),
+        author_device_id=str(normalized["author_device_id"]),
+        nonce=nonce,
+        aead_ciphertext_and_tag=ciphertext,
+    )
 
 
 # Convenience method on the test class so each test reads naturally.

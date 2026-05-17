@@ -37,7 +37,6 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    mirror_legacy_from_sharded,
     seed_sharded_state_from_manifest,
 )
 
@@ -79,11 +78,9 @@ class VaultBaselineTests(unittest.TestCase):
                 )
             ],
         )
-        relay = FakeUploadRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             current = manifest
             for path, content in files.items():
@@ -96,7 +93,6 @@ class VaultBaselineTests(unittest.TestCase):
                     remote_path=path, author_device_id=AUTHOR,
                 )
                 current = res.manifest
-                seed_sharded_state_from_manifest(vault, relay, current)
             if with_tombstone is not None:
                 current = tombstone_file_entry(
                     current,
@@ -107,16 +103,21 @@ class VaultBaselineTests(unittest.TestCase):
                 )
                 current["revision"] = int(current["revision"]) + 1
                 current["parent_revision"] = current["revision"] - 1
-                relay.current_revision = int(current["parent_revision"])
-                vault.publish_manifest(relay, current)
                 seed_sharded_state_from_manifest(vault, relay, current)
-            mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
-        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
+        from src.vault.manifest import assemble_unified_manifest
         observer = _vault()
         try:
-            published = _decrypt(observer, relay.current_envelope)
+            root = observer.fetch_root_manifest(relay)
+            shards = {
+                pointer["remote_folder_id"]: observer.fetch_folder_shard(
+                    relay, pointer["remote_folder_id"],
+                )
+                for pointer in root.get("remote_folders", [])
+                if pointer.get("shard_hash")
+            }
+            published = assemble_unified_manifest(root, shards)
         finally:
             observer.close()
         return relay, published

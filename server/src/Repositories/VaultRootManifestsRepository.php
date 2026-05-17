@@ -3,12 +3,11 @@
 /**
  * Owns the immutable root-manifest revision chain in `vault_root_manifests`
  * and the head pointer that lives on `vaults.current_root_revision` /
- * `vaults.current_root_hash`. Replaces the legacy
- * ``VaultManifestsRepository`` after the Phase B sharding migration.
+ * `vaults.current_root_hash`. The pre-sharding ``vault_manifests`` table
+ * has been retired.
  *
  * The hot path is ``tryCAS()``: it advances the head and inserts a new
- * revision row atomically. Same two non-obvious constraints as the
- * legacy repo:
+ * revision row atomically. Two non-obvious constraints:
  *
  *   - The conditional UPDATE on `vaults` is the CAS primitive. Splitting
  *     into SELECT-then-UPDATE re-opens a class of TOCTOU races that

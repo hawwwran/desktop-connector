@@ -54,8 +54,6 @@ from .crypto import (
     aead_encrypt,
     build_header_aad,
     build_header_envelope,
-    build_manifest_aad,
-    build_manifest_envelope,
     build_recovery_aad,
     build_root_aad,
     build_root_envelope,
@@ -67,19 +65,15 @@ from .crypto import (
 )
 from .manifest import (
     assemble_unified_manifest,
-    assert_publishable_revision,
     assert_publishable_root_revision,
     assert_publishable_shard_revision,
     bump_root_revision,
     bump_shard_revision,
-    canonical_manifest_json,
     canonical_root_json,
     canonical_shard_json,
     make_folder_shard,
-    make_manifest,
     make_root_folder_pointer,
     make_root_manifest,
-    normalize_manifest_plaintext,
     normalize_root_manifest_plaintext,
     normalize_shard_plaintext,
 )
@@ -304,40 +298,42 @@ class Vault(RemoteFoldersMixin):
         )
         header_hash = hashlib.sha256(header_envelope).hexdigest()
 
-        # Genesis manifest — empty folder list, no op-log entries
-        # yet. Phase H transition: the production code paths still use
-        # the legacy single-manifest shape, so we publish a legacy
-        # manifest envelope on create. Once the Phase H mechanical port
-        # flips every caller to the sharded surface, this will switch
-        # back to a root envelope (the sharded code in ``vault.py``
-        # already supports both via the dual decrypt path).
+        # Genesis root manifest — empty folder list, no op-log entries
+        # yet. The relay's ``vault_root_manifests`` row is created
+        # alongside the ``vaults`` row in the same POST, so the first
+        # ``GET /api/vaults/{id}/root`` after this returns successfully
+        # instead of 404'ing on a vault that exists but has no root.
         author_device_id = "0" * 32  # caller plugs in a real device id later
-        manifest_plaintext = canonical_manifest_json(make_manifest(
+        root_plaintext = canonical_root_json(make_root_manifest(
             vault_id=vault_id,
-            revision=1,
-            parent_revision=0,
+            root_revision=1,
+            parent_root_revision=0,
             created_at=_now_rfc3339(),
             author_device_id=author_device_id,
             remote_folders=[],
             operation_log_tail=[],
             archived_op_segments=[],
         ))
-        manifest_subkey = derive_subkey("dc-vault-v1/manifest", master_key)
-        manifest_nonce = secrets.token_bytes(24)
-        manifest_aad = build_manifest_aad(
-            vault_id=vault_id, revision=1, parent_revision=0,
+        root_subkey = derive_subkey("dc-vault-v1/root", master_key)
+        root_nonce = secrets.token_bytes(24)
+        root_aad = build_root_aad(
+            vault_id=vault_id,
+            root_revision=1,
+            parent_root_revision=0,
             author_device_id=author_device_id,
         )
-        manifest_ciphertext = aead_encrypt(
-            manifest_plaintext, manifest_subkey, manifest_nonce, manifest_aad,
+        root_ciphertext = aead_encrypt(
+            root_plaintext, root_subkey, root_nonce, root_aad,
         )
-        manifest_envelope = build_manifest_envelope(
-            vault_id=vault_id, revision=1, parent_revision=0,
+        root_envelope = build_root_envelope(
+            vault_id=vault_id,
+            root_revision=1,
+            parent_root_revision=0,
             author_device_id=author_device_id,
-            nonce=manifest_nonce,
-            aead_ciphertext_and_tag=manifest_ciphertext,
+            nonce=root_nonce,
+            aead_ciphertext_and_tag=root_ciphertext,
         )
-        manifest_hash = hashlib.sha256(manifest_envelope).hexdigest()
+        root_hash = hashlib.sha256(root_envelope).hexdigest()
 
         log.info("vault.prepare.ok vault_id=%s", vault_id[:8] + "…")
         instance = cls(
@@ -347,7 +343,7 @@ class Vault(RemoteFoldersMixin):
             vault_access_secret=vault_access_secret,
             header_revision=1,
             manifest_revision=1,
-            manifest_ciphertext=manifest_envelope,
+            manifest_ciphertext=root_envelope,
             crypto=crypto,
             recovery_envelope_meta={
                 "envelope_id": recovery_envelope_id,
@@ -358,17 +354,20 @@ class Vault(RemoteFoldersMixin):
                 "aead_ciphertext_and_tag": recovery_envelope_ct,
             },
         )
+        # Seed the sharded slots locally so callers don't need a fetch
+        # round-trip just to read what we just published.
+        instance._root_envelope = root_envelope
+        instance._root_revision = 1
         # Publish payload is held on the instance so a later
         # publish_initial() retry uses byte-identical bundles. Cleared
-        # after a successful POST. Field names mirror the legacy wire
-        # contract (``initial_manifest_*``).
+        # after a successful POST.
         instance._pending_publish = {
             "vault_id": vault_id,
             "vault_access_token_hash": token_hash,
             "encrypted_header": header_envelope,
             "header_hash": header_hash,
-            "initial_manifest_ciphertext": manifest_envelope,
-            "initial_manifest_hash": manifest_hash,
+            "initial_root_ciphertext": root_envelope,
+            "initial_root_hash": root_hash,
         }
         return instance
 
@@ -880,97 +879,6 @@ class Vault(RemoteFoldersMixin):
             )
             shards_by_id[rf_id] = shard
         return assemble_unified_manifest(root, shards_by_id)
-
-    # -- Legacy fetch_manifest / publish_manifest (Phase D back-compat) --
-    #
-    # During Phase D these continue to talk to the legacy relay methods
-    # (``get_manifest`` / ``put_manifest``). The production
-    # ``VaultHttpRelay`` keeps those methods on its surface as raise-
-    # NotImplementedError stubs because the matching server endpoints
-    # were removed in Phase B — production callers that haven't been
-    # migrated yet will crash at runtime. Tests use fake relays that
-    # implement the legacy interface byte-identically to the
-    # pre-sharding code, so the protocol suite stays green. Phase E
-    # ports the sync engine; Phase F ports cross-shard ops; Phase H
-    # removes these legacy methods + the unified-manifest assembler.
-
-    def fetch_manifest(self, relay: RelayProtocol, *, local_index=None) -> dict:
-        """Fetch, store, decrypt, and optionally cache the current manifest.
-
-        Legacy compat surface (see method-block comment above). New code
-        should call ``fetch_root_manifest`` + ``fetch_folder_shard``
-        directly so only the relevant folder's shard ships over the
-        wire.
-        """
-        if self._closed:
-            raise ValueError("vault is closed")
-        resp = relay.get_manifest(self._vault_id, self._vault_access_secret)
-        envelope = resp.get("manifest_ciphertext", resp.get("manifest_envelope_bytes"))
-        if not isinstance(envelope, (bytes, bytearray)):
-            raise ValueError("relay returned an invalid manifest ciphertext")
-        self._manifest_ciphertext = bytes(envelope)
-        self._manifest_revision = int(resp.get("revision", self._manifest_revision or 0))
-        return self.decrypt_manifest(local_index=local_index)
-
-    def publish_manifest(
-        self,
-        relay: RelayProtocol,
-        manifest: dict,
-        *,
-        local_index=None,
-    ) -> dict:
-        """Encrypt and CAS-publish a new (legacy unified) manifest revision.
-
-        Legacy compat surface (see method-block comment above). New code
-        should call ``publish_shard_with_root`` for normal edits;
-        ``publish_root_manifest`` for folder-set changes;
-        ``publish_folder_shard`` for retention-only edits.
-        """
-        if self._closed or not self._master_key:
-            raise ValueError("vault is closed")
-
-        normalized = normalize_manifest_plaintext(manifest)
-        assert_publishable_revision(normalized)
-        revision = int(normalized["revision"])
-        parent_revision = int(normalized["parent_revision"])
-        author_device_id = str(normalized["author_device_id"])
-
-        manifest_plaintext = canonical_manifest_json(normalized)
-        manifest_subkey = derive_subkey("dc-vault-v1/manifest", bytes(self._master_key))
-        manifest_nonce = secrets.token_bytes(24)
-        manifest_aad = build_manifest_aad(
-            vault_id=self._vault_id,
-            revision=revision,
-            parent_revision=parent_revision,
-            author_device_id=author_device_id,
-        )
-        manifest_ciphertext = aead_encrypt(
-            manifest_plaintext, manifest_subkey, manifest_nonce, manifest_aad,
-        )
-        manifest_envelope = build_manifest_envelope(
-            vault_id=self._vault_id,
-            revision=revision,
-            parent_revision=parent_revision,
-            author_device_id=author_device_id,
-            nonce=manifest_nonce,
-            aead_ciphertext_and_tag=manifest_ciphertext,
-        )
-        manifest_hash = hashlib.sha256(manifest_envelope).hexdigest()
-
-        relay.put_manifest(
-            self._vault_id,
-            self._vault_access_secret,
-            expected_current_revision=parent_revision,
-            new_revision=revision,
-            parent_revision=parent_revision,
-            manifest_hash=manifest_hash,
-            manifest_ciphertext=manifest_envelope,
-        )
-        self._manifest_revision = revision
-        self._manifest_ciphertext = manifest_envelope
-        if local_index is not None:
-            local_index.refresh_remote_folders_cache(normalized)
-        return normalized
 
     # -- Internal envelope-builders --
 

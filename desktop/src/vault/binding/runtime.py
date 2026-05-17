@@ -111,51 +111,21 @@ class VaultHttpRelay:
     def create_vault(
         self, vault_id, vault_access_token_hash, encrypted_header,
         header_hash,
-        # Phase H transition: accept either ``initial_root_*`` (sharded
-        # path, dormant until Phase H mechanical port) or
-        # ``initial_manifest_*`` (legacy single-manifest path that
-        # production callers still use). Exactly one of each pair MUST
-        # be supplied; mixing raises ``TypeError`` so a caller that
-        # forgot to pick a path doesn't silently hit the wrong server
-        # surface.
-        initial_root_ciphertext=None, initial_root_hash=None,
+        initial_root_ciphertext, initial_root_hash,
         *,
-        initial_manifest_ciphertext=None, initial_manifest_hash=None,
-        initial_root_revision=None, initial_manifest_revision=None,
+        initial_root_revision=None,
         initial_header_revision=None,
     ):
-        has_root = (
-            initial_root_ciphertext is not None and initial_root_hash is not None
-        )
-        has_manifest = (
-            initial_manifest_ciphertext is not None and initial_manifest_hash is not None
-        )
-        if has_root == has_manifest:
-            raise TypeError(
-                "create_vault requires exactly one of "
-                "(initial_root_ciphertext, initial_root_hash) or "
-                "(initial_manifest_ciphertext, initial_manifest_hash)"
-            )
         payload = {
             "vault_id": vault_id,
             "vault_access_token_hash": base64.b64encode(vault_access_token_hash).decode("ascii"),
             "encrypted_header": base64.b64encode(encrypted_header).decode("ascii"),
             "header_hash": header_hash,
+            "initial_root_ciphertext": base64.b64encode(initial_root_ciphertext).decode("ascii"),
+            "initial_root_hash": initial_root_hash,
         }
-        if has_root:
-            payload["initial_root_ciphertext"] = base64.b64encode(
-                initial_root_ciphertext,
-            ).decode("ascii")
-            payload["initial_root_hash"] = initial_root_hash
-            if initial_root_revision is not None:
-                payload["initial_root_revision"] = int(initial_root_revision)
-        else:
-            payload["initial_manifest_ciphertext"] = base64.b64encode(
-                initial_manifest_ciphertext,
-            ).decode("ascii")
-            payload["initial_manifest_hash"] = initial_manifest_hash
-            if initial_manifest_revision is not None:
-                payload["initial_manifest_revision"] = int(initial_manifest_revision)
+        if initial_root_revision is not None:
+            payload["initial_root_revision"] = int(initial_root_revision)
         if initial_header_revision is not None:
             payload["initial_header_revision"] = int(initial_header_revision)
         resp = self._conn.request("POST", "/api/vaults", json=payload)
@@ -231,61 +201,6 @@ class VaultHttpRelay:
             return data
         except Exception as exc:
             raise RuntimeError("Relay returned an invalid vault header response.") from exc
-
-    def get_manifest(self, vault_id, vault_access_secret):
-        """Legacy single-manifest GET — restored for the Phase H
-        transition. The final cleanup commit will delete this once
-        every caller is on the sharded ``get_root`` /
-        ``get_shard`` path.
-        """
-        resp = self._conn.request(
-            "GET",
-            f"/api/vaults/{vault_id}/manifest",
-            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
-        )
-        if resp is None:
-            raise RuntimeError("Could not reach the relay while fetching the vault manifest.")
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Relay rejected vault manifest fetch: HTTP {resp.status_code} "
-                f"{self._error_message(resp)}"
-            )
-        try:
-            body = resp.json()
-            data = body["data"]
-            data["manifest_ciphertext"] = base64.b64decode(data["manifest_ciphertext"])
-            return data
-        except Exception as exc:
-            raise RuntimeError("Relay returned an invalid vault manifest response.") from exc
-
-    def put_manifest(
-        self,
-        vault_id,
-        vault_access_secret,
-        *,
-        expected_current_revision,
-        new_revision,
-        parent_revision,
-        manifest_hash,
-        manifest_ciphertext,
-    ):
-        """Legacy single-manifest CAS publish — restored for the
-        Phase H transition. The final cleanup commit will delete this.
-        """
-        payload = {
-            "expected_current_revision": int(expected_current_revision),
-            "new_revision": int(new_revision),
-            "parent_revision": int(parent_revision),
-            "manifest_hash": manifest_hash,
-            "manifest_ciphertext": base64.b64encode(manifest_ciphertext).decode("ascii"),
-        }
-        resp = self._conn.request(
-            "PUT",
-            f"/api/vaults/{vault_id}/manifest",
-            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
-            json=payload,
-        )
-        return self._handle_manifest_like_publish(resp, kind="manifest")
 
     def get_root(self, vault_id, vault_access_secret):
         resp = self._conn.request(
@@ -730,16 +645,6 @@ class VaultLocalDevelopmentRelay:
 
     def get_header(self, vault_id, vault_access_secret):
         raise NotImplementedError("local development relay does not support header fetch")
-
-    def get_manifest(self, vault_id, vault_access_secret):
-        raise NotImplementedError(
-            "local development relay does not support legacy manifest fetch",
-        )
-
-    def put_manifest(self, vault_id, vault_access_secret, **kwargs):
-        raise NotImplementedError(
-            "local development relay does not support legacy manifest publish",
-        )
 
     def get_root(self, vault_id, vault_access_secret):
         raise NotImplementedError("local development relay does not support root fetch")

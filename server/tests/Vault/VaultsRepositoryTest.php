@@ -59,9 +59,6 @@ final class VaultsRepositoryTest extends TestCase
         self::assertSame(self::VAULT_ID, $row['vault_id']);
         self::assertSame(1, (int)$row['header_revision']);
         self::assertSame(1, (int)$row['current_root_revision']);
-        // Legacy column kept on disk after the Phase B sharding
-        // migration; current_root_* is now authoritative.
-        self::assertSame(1, (int)$row['current_manifest_revision']);
         self::assertSame(0, (int)$row['used_ciphertext_bytes']);
         self::assertSame(0, (int)$row['chunk_count']);
         self::assertSame(1073741824, (int)$row['quota_ciphertext_bytes']);   // D2: 1 GB default

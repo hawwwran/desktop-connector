@@ -78,14 +78,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local = self.tmpdir / "guarded.txt"
         local.write_bytes(b"manifest-must-reflect-this-upload")
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             result = upload_file(
@@ -128,16 +125,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         (root / "sub" / "leaf.txt").write_bytes(b"leaf content")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
             from src.vault.upload import upload_folder
 
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             result = upload_folder(
@@ -171,14 +165,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local.write_bytes(payload)
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             result = upload_file(
@@ -217,14 +208,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local.write_bytes(b"deterministic content " * 1024)
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             first = upload_file(
@@ -237,7 +225,6 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 author_device_id=AUTHOR,
                 chunk_size=4 * 1024,
             )
-            mirror_legacy_from_sharded(vault, relay)
             self.assertGreater(first.chunks_uploaded, 0)
             self.assertEqual(first.chunks_skipped, 0)
             chunks_after_first = dict(relay.chunks)
@@ -263,7 +250,10 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         # short-circuited at the file-fingerprint level, before chunk
         # encrypt/PUT and before any manifest mutation.
         self.assertEqual(relay.chunks, chunks_after_first)
-        self.assertEqual(len(relay.published_manifests), 1)
+        # First upload published one shard-with-root pair; the no-op
+        # second pass added nothing.
+        self.assertEqual(len(relay.published_shards), 1)
+        self.assertEqual(len(relay.published_roots), 1)
         entry = find_file_entry(second.manifest, DOCS_ID, "twice.bin")
         self.assertEqual(len(entry["versions"]), 1)
         self.assertEqual(entry["latest_version_id"], first.version_id)
@@ -273,14 +263,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local.write_bytes(b"q" * (16 * 1024))
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest, quota_after_n_chunks=1)
+        relay = FakeUploadRelay(quota_after_n_chunks=1)
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             with self.assertRaises(VaultQuotaExceededError) as ctx:
@@ -299,7 +286,8 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 507)
         # Manifest must NOT have been published when an upload aborted.
-        self.assertEqual(len(relay.published_manifests), 0)
+        self.assertEqual(len(relay.published_shards), 0)
+        self.assertEqual(len(relay.published_roots), 0)
         # Chunks accepted before the 507 are kept (idempotent retries are
         # supposed to skip them) but no new file entry exists yet.
         self.assertGreaterEqual(len(relay.chunks), 1)
@@ -309,14 +297,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local.write_bytes(b"first content")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             first = upload_file(
@@ -389,14 +374,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local = self.tmpdir / "live.txt"
         local.write_bytes(b"live")
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             first = upload_file(
@@ -500,15 +482,12 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local.write_bytes(b"resume-test " * 4096)  # 49152 bytes → 6 chunks @ 8 KiB
 
         manifest = _empty_manifest()
-        relay = CrashingRelay(manifest=manifest, fail_after_n_puts=3)
+        relay = CrashingRelay(fail_after_n_puts=3)
         cache_dir = self.tmpdir / "resume_cache"
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             with self.assertRaises(SimulatedCrashError):
@@ -535,7 +514,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             done = sum(1 for c in session.chunks if c["done"])
             self.assertEqual(done, 2)
             self.assertEqual(len(relay.chunks), 3)
-            self.assertEqual(len(relay.published_manifests), 0)
+            self.assertEqual(len(relay.published_shards), 0)
 
             # Resume on a fresh non-crashing relay that *retains* the chunks
             # already stored. Acceptance: only the missing chunks are PUT.
@@ -548,14 +527,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 session=session,
                 resume_cache_dir=cache_dir,
             )
-            mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
 
         new_puts = relay.put_calls[len(puts_before_resume):]
         self.assertEqual(len(new_puts), 3)  # exactly the 3 still-pending chunks
         self.assertEqual(len(relay.chunks), 6)
-        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(len(relay.published_shards), 1)
         self.assertEqual(result.chunks_uploaded, 3)
         self.assertEqual(result.chunks_skipped, 3)
         self.assertEqual(list_resumable_sessions(VAULT_ID, cache_dir), [])
@@ -584,15 +562,12 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         # there's typically a 1-chunk gap between relay state and
         # session state — the F-D12 mixed-signal branch is exercised
         # naturally here without needing a contrived fixture.
-        relay = CrashingRelay(manifest=manifest, fail_after_n_puts=4)
+        relay = CrashingRelay(fail_after_n_puts=4)
         cache_dir = self.tmpdir / "resume_cache"
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             with self.assertRaises(SimulatedCrashError):
@@ -668,15 +643,12 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local.write_bytes(b"clean session contents")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         cache_dir = self.tmpdir / "resume_cache"
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             upload_file(
@@ -699,15 +671,12 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         (root / "docs" / "README.md").write_bytes(b"# Project\n")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         progress: list = []
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             result = upload_folder(
@@ -721,15 +690,14 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 chunk_size=8 * 1024,
                 progress=progress.append,
             )
-            mirror_legacy_from_sharded(vault, relay)
         finally:
             vault.close()
 
         self.assertEqual(len(result.uploaded), 3)
         self.assertEqual(len(result.skipped), 0)
         # All three additions land in a single CAS-publish — atomic batch.
-        self.assertEqual(len(relay.published_manifests), 1)
-        self.assertEqual(relay.current_revision, 2)
+        self.assertEqual(len(relay.published_shards), 1)
+        self.assertEqual(len(relay.published_roots), 1)
 
         # Final manifest holds all three entries under the requested sub-path.
         for rel in ("batch/src/main.py", "batch/src/lib/util.py", "batch/docs/README.md"):
@@ -825,14 +793,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 )
             ],
         )
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             result = upload_folder(
@@ -864,14 +829,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         (root / "huge.bin").write_bytes(b"x" * 10 * 1024)
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             with self.assertLogs("src.vault.upload", level="INFO") as captured:
@@ -901,14 +863,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         (root / "alias.txt").symlink_to(root / "real.txt")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             with self.assertLogs("src.vault.upload", level="INFO") as captured:
@@ -958,14 +917,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             return original_lstat(self_inner)
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             with _mock.patch.object(Path, "lstat", _denied_lstat), \
@@ -1002,14 +958,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         (root / "beta.txt").write_bytes(b"beta contents")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             first = upload_folder(
@@ -1017,8 +970,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 remote_folder_id=DOCS_ID, remote_sub_path="batch",
                 author_device_id=AUTHOR,
             )
-            mirror_legacy_from_sharded(vault, relay)
-            self.assertEqual(len(relay.published_manifests), 1)
+            self.assertEqual(len(relay.published_shards), 1)
             second = upload_folder(
                 vault=vault, relay=relay, manifest=first.manifest, local_root=root,
                 remote_folder_id=DOCS_ID, remote_sub_path="batch",
@@ -1029,7 +981,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # Identical contents: zero new chunk PUTs and zero new manifest
         # publishes the second time around.
-        self.assertEqual(len(relay.published_manifests), 1)
+        self.assertEqual(len(relay.published_shards), 1)
         self.assertEqual(second.bytes_uploaded, 0)
         self.assertTrue(all(r.skipped_identical for r in second.uploaded))
 
@@ -1046,14 +998,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         seed_local = self.tmpdir / "seed.txt"
         seed_local.write_bytes(b"seed payload, becomes version 1")
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         seed_vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            seed_vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(seed_vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             seed_res = upload_file(
@@ -1066,7 +1015,6 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 author_device_id=device_seed,
                 created_at="2026-05-04T09:00:00.000Z",
             )
-            mirror_legacy_from_sharded(seed_vault, relay)
         finally:
             seed_vault.close()
 
@@ -1093,8 +1041,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 author_device_id=device_a,
                 created_at="2026-05-04T10:00:00.000Z",
             )
-            mirror_legacy_from_sharded(vault_a, relay)
-            self.assertEqual(relay.current_revision, 3)
+            self.assertEqual(len(relay.published_shards), 2)  # seed + A
 
             res_b = upload_file(
                 vault=vault_b,
@@ -1107,14 +1054,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 # Later modified_at so B wins the tie-break deterministically.
                 created_at="2026-05-04T11:00:00.000Z",
             )
-            mirror_legacy_from_sharded(vault_b, relay)
         finally:
             vault_a.close()
             vault_b.close()
 
         # Three CAS-publishes total (seed + A direct + B after retry).
-        self.assertEqual(relay.current_revision, 4)
-        self.assertEqual(len(relay.published_manifests), 3)
+        self.assertEqual(len(relay.published_shards), 3)
+        self.assertEqual(len(relay.published_roots), 3)
 
         entry = find_file_entry(res_b.manifest, DOCS_ID, "report.txt")
         self.assertIsNotNone(entry)
@@ -1137,14 +1083,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         seed_local = self.tmpdir / "seed.txt"
         seed_local.write_bytes(b"seed for tied path")
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         seed_vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            seed_vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(seed_vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             shared_parent = upload_file(
@@ -1205,15 +1148,12 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local_b.write_bytes(b"beta beta beta beta beta beta beta")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault_a = _vault()
         vault_b = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault_a.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault_a, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             # Phase H step 4: snapshot B's pre-A view before A publishes
@@ -1227,7 +1167,6 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 remote_folder_id=DOCS_ID, remote_path="taken.bin",
                 author_device_id="a" * 32,
             )
-            mirror_legacy_from_sharded(vault_a, relay)
             # Different file_id because B started from the pre-A manifest
             # and didn't see A's entry — same path, fresh entry_id.
             upload_file(
@@ -1236,30 +1175,20 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 author_device_id="b" * 32,
                 parent_state=pre_a_state_b,
             )
-            mirror_legacy_from_sharded(vault_b, relay)
         finally:
             vault_a.close()
             vault_b.close()
 
-        # Walk the final manifest: original "taken.bin" (from A) and the
+        # Walk the final shard: original "taken.bin" (from A) and the
         # imported-renamed copy ("taken (imported).bin" from B) coexist.
-        folder = next(
-            f for f in relay.published_manifests[-1]["ciphertext"][:0] or []
-            if False
-        ) if False else None  # placeholder so the assertion below reads cleanly
-        from src.vault.ui.browser_model import decrypt_manifest as _decrypt
-        published_envelope = relay.current_envelope
         vault_observer = _vault()
         try:
-            head = _decrypt(vault_observer, published_envelope)
+            head_shard = vault_observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
         finally:
             vault_observer.close()
-        entry_paths = {
-            e["path"]
-            for f in head["remote_folders"]
-            if f["remote_folder_id"] == DOCS_ID
-            for e in f["entries"]
-        }
+        entry_paths = {e["path"] for e in head_shard["entries"]}
         self.assertIn("taken.bin", entry_paths)
         self.assertIn("taken (imported).bin", entry_paths)
 
@@ -1267,14 +1196,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         local = self.tmpdir / "first.txt"
         local.write_bytes(b"first")
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
             # Reset publish counters so tests can count only post-init publishes.
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             first = upload_file(
@@ -1320,13 +1246,10 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         (seed_dir / "shared").mkdir(parents=True)
         (seed_dir / "shared" / "tied.txt").write_bytes(b"seed for tied path")
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         seed_vault = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            seed_vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(seed_vault, relay, manifest)
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             shared_parent = upload_folder(
@@ -1410,14 +1333,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         (dir_b / "shared" / "taken.bin").write_bytes(b"beta beta beta beta beta beta beta")
 
         manifest = _empty_manifest()
-        relay = FakeUploadRelay(manifest=manifest)
+        relay = FakeUploadRelay()
         vault_a = _vault()
         vault_b = _vault()
         try:
-            relay.current_revision = int(manifest.get("parent_revision", 0))
-            vault_a.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault_a, relay, manifest)
-            relay.published_manifests = []
             relay.published_shards = []
             relay.published_roots = []
             from src.vault.upload.folder_state import fetch_folder_state
@@ -1466,30 +1386,24 @@ class SimulatedCrashError(RuntimeError):
 
 
 class FakeUploadRelay:
-    """In-memory fake of the chunk + manifest relay surface.
+    """In-memory fake of the chunk + sharded manifest relay surface.
 
-    Implements just enough CAS to drive the §D4 retry loop in tests:
-    the latest-published envelope and revision are kept, and a stale
-    ``expected_current_revision`` raises a ``VaultCASConflictError``
-    with the freshly-published envelope embedded — same shape the real
-    server returns per §A1.
+    Implements just enough CAS to drive the per-folder shard + root
+    publish loop: the latest-published envelopes and revisions are kept,
+    and a stale ``expected_current_*_revision`` raises a
+    ``VaultCASConflictError`` with the freshly-published envelope
+    embedded — same shape the real server returns per §A1.
     """
 
-    def __init__(self, *, manifest: dict, quota_after_n_chunks: int | None = None) -> None:
+    def __init__(self, *, quota_after_n_chunks: int | None = None) -> None:
         self.chunks: dict[str, bytes] = {}
         self.put_calls: list[str] = []
         self.batch_head_calls: list[list[str]] = []
-        self.published_manifests: list[dict] = []
-        self.current_manifest = manifest
-        self.current_revision = int(manifest.get("revision", 0))
-        self.current_envelope: bytes = b""
-        self.current_hash: str = ""
         self._quota_remaining = quota_after_n_chunks
-        # Phase H sharded surface (root + per-folder shards). The
-        # legacy manifest state above is kept separate so existing
-        # tests stay green; sync tests that need the sharded surface
-        # seed it explicitly via the publish_root_manifest /
-        # publish_shard_with_root path (mirrors FakeShardedRelay).
+        # Phase H sharded surface (root + per-folder shards). Seed via
+        # :func:`seed_sharded_state_from_manifest` from a unified
+        # manifest dict, or call publish_root_manifest /
+        # publish_shard_with_root directly.
         self.root_envelope: bytes = b""
         self.root_revision: int = 0
         self.root_hash: str = ""
@@ -1579,52 +1493,6 @@ class FakeUploadRelay:
             self._quota_remaining -= 1
         self.chunks[chunk_id] = bytes(body)
         return {"created": True, "stored_size": len(body)}
-
-    # --- manifest relay ------------------------------------------------
-    def get_manifest(self, vault_id, vault_access_secret):
-        return {
-            "manifest_revision": self.current_revision,
-            "manifest_ciphertext": self.current_envelope,
-            "manifest_hash": self.current_hash,
-        }
-
-    def put_manifest(
-        self,
-        vault_id,
-        vault_access_secret,
-        *,
-        expected_current_revision,
-        new_revision,
-        parent_revision,
-        manifest_hash,
-        manifest_ciphertext,
-    ):
-        if int(expected_current_revision) != self.current_revision:
-            import base64
-
-            raise VaultCASConflictError({
-                "code": "vault_manifest_conflict",
-                "message": "fake CAS conflict",
-                "details": {
-                    "current_revision": self.current_revision,
-                    "current_manifest_hash": self.current_hash,
-                    "current_manifest_ciphertext":
-                        base64.b64encode(self.current_envelope).decode("ascii"),
-                    "current_manifest_size": len(self.current_envelope),
-                },
-            })
-
-        self.published_manifests.append({
-            "expected_current_revision": expected_current_revision,
-            "new_revision": new_revision,
-            "parent_revision": parent_revision,
-            "manifest_hash": manifest_hash,
-            "ciphertext": bytes(manifest_ciphertext),
-        })
-        self.current_revision = int(new_revision)
-        self.current_envelope = bytes(manifest_ciphertext)
-        self.current_hash = manifest_hash
-        return {"new_revision": new_revision}
 
     # --- sharded surface (Phase H) -------------------------------------
     def get_root(self, vault_id, vault_access_secret):
@@ -1792,19 +1660,19 @@ class FakeUploadRelay:
 
 
 def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
-    """Mirror a legacy unified manifest into FakeUploadRelay's sharded
-    surface so the Phase-H-ported sync engine can fetch a root + shard
-    pair instead of the legacy manifest.
+    """Seed a FakeUploadRelay's sharded state from a unified manifest.
 
-    Bumps the root chain by one publish per folder so each folder's
-    pointer carries its actual shard_hash (auto-patched by
-    publish_shard_with_root). The legacy ``vault.publish_manifest``
-    path is what sync tests historically used to seed state; this
-    helper is the missing second-half-of-publish that the Phase H
-    sync engine needs.
+    Translates a unified manifest dict (the ergonomic shape callers
+    build with ``make_manifest`` / ``make_remote_folder``) into the
+    sequence of ``publish_root_manifest`` + ``publish_shard_with_root``
+    calls that mirror what a fresh vault would emit after each folder
+    was added and populated. Bumps the root chain by one publish per
+    folder so each folder's pointer carries its actual shard_hash
+    (auto-patched by publish_shard_with_root).
 
-    Re-runnable: calling it after each mutation keeps the sharded
-    view aligned with the legacy ``relay.current_manifest`` view.
+    Re-runnable: a subsequent call diffs the manifest against the
+    relay's current shards and prunes any shards for folders the new
+    manifest no longer mentions.
     """
     from src.vault.manifest import (
         make_folder_shard,
@@ -1875,34 +1743,6 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
         vault.publish_shard_with_root(relay, rf_id, shard, next_root)
 
 
-def mirror_legacy_from_sharded(vault, relay) -> None:
-    """Rebuild the unified manifest from the current root + shards and
-    publish it via legacy ``put_manifest`` so legacy ``fetch_manifest``
-    reflects the latest sharded mutations.
-
-    Advances ``relay.current_revision`` by exactly one per call (the
-    next legacy revision after the relay's current state), regardless
-    of how many sharded operations have happened underneath. Tests
-    that count legacy revisions ("bootstrap + upload + delete = 3
-    publishes") therefore stay readable as the upload module ports
-    over to sharded. Removed in step 7 alongside the legacy path.
-    """
-    from src.vault.manifest import assemble_unified_manifest
-
-    root = vault.decrypt_root_envelope(relay.root_envelope)
-    shards = {
-        fid: vault.decrypt_shard_envelope(s["envelope"], fid)
-        for fid, s in relay.shards.items()
-    }
-    unified = assemble_unified_manifest(root, shards)
-    # Advance the legacy revision chain by exactly one — independent
-    # of the sharded chain's revision pacing.
-    legacy_parent = int(relay.current_revision)
-    unified["parent_revision"] = legacy_parent
-    unified["revision"] = legacy_parent + 1
-    vault.publish_manifest(relay, unified)
-
-
 class CrashingRelay(FakeUploadRelay):
     """Variant that raises ``SimulatedCrashError`` after N PUTs.
 
@@ -1911,8 +1751,8 @@ class CrashingRelay(FakeUploadRelay):
     "done" or move on to chunk N+1.
     """
 
-    def __init__(self, *, manifest, fail_after_n_puts):
-        super().__init__(manifest=manifest)
+    def __init__(self, *, fail_after_n_puts):
+        super().__init__()
         self.fail_after_n_puts = fail_after_n_puts
 
     def put_chunk(self, vault_id, vault_access_secret, chunk_id, body):

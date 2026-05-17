@@ -66,7 +66,6 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    mirror_legacy_from_sharded,
     seed_sharded_state_from_manifest,
 )
 
@@ -196,11 +195,9 @@ class MultiDeviceH7Tests(unittest.TestCase):
                 ),
             ],
         )
-        self.relay = FakeUploadRelay(manifest=manifest)
-        self.relay.current_revision = int(manifest.get("parent_revision", 0))
+        self.relay = FakeUploadRelay()
         bootstrap = _make_vault()
         try:
-            bootstrap.publish_manifest(self.relay, manifest)
             seed_sharded_state_from_manifest(bootstrap, self.relay, manifest)
         finally:
             bootstrap.close()

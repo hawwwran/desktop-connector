@@ -51,13 +51,13 @@ class DangerZoneRowsPresentTests(unittest.TestCase):
     def test_clear_folder_section_wired(self) -> None:
         """Clear-folder UI references the backend function + typed gate."""
         self.assertIn("Clear folder", self.text)
-        self.assertIn("build_clear_folder_manifest", self.text)
+        self.assertIn("clear_folder(", self.text)
         self.assertIn("confirm_folder_clear_text_matches", self.text)
 
     def test_clear_whole_vault_section_wired(self) -> None:
         """Clear-vault UI references the backend function + typed gate."""
         self.assertIn("Clear whole vault", self.text)
-        self.assertIn("build_clear_vault_manifest", self.text)
+        self.assertIn("clear_vault(", self.text)
         # vault-id confirmation is shared with schedule-purge so this
         # function appears at least twice (clear + schedule).
         self.assertGreaterEqual(

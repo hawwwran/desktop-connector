@@ -358,23 +358,6 @@ class VaultHeaderTamperedError extends VaultApiError
 }
 
 /**
- * 422 vault_manifest_tampered. Manifest envelope's deterministic prefix
- * disagrees with the body claims. Permanent — never retried.
- */
-class VaultManifestTamperedError extends VaultApiError
-{
-    public function __construct(string $reason)
-    {
-        parent::__construct(
-            status: 422,
-            errorCode: 'vault_manifest_tampered',
-            message: $reason,
-            details: ['reason' => $reason],
-        );
-    }
-}
-
-/**
  * 422 vault_root_tampered. Root manifest envelope's deterministic prefix
  * disagrees with the body claims (or with the URL-supplied vault id).
  * Permanent — never retried.

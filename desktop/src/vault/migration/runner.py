@@ -12,16 +12,20 @@ Pipeline:
 
 1. **start**   — `POST source /migration/start` (gets bearer token,
                   records intent on source).
-2. **bootstrap target** — `POST target /api/vaults` with `initial_manifest_revision =
-                  source.current_revision`. The source's manifest envelope
-                  (AAD bound to that revision) is stored verbatim on
-                  the target — no re-encryption needed.
-3. **copy chunks** — for each chunk_id in the source's manifest, batch-HEAD
-                  on the target; if missing, GET source / PUT target.
-4. **verify**  — `GET source /migration/verify-source` + `GET target /header`,
-                  compare manifest_hash + chunk_count + used_ciphertext_bytes;
-                  random-sample N chunks from the target and try AEAD-decrypt
-                  with the live vault's master key (T9.4).
+2. **bootstrap target** — `POST target /api/vaults` with the source's
+                  root envelope embedded verbatim (``initial_root_*``).
+                  After create, replicate each per-folder shard via
+                  `PUT target /folders/{rf_id}/shard`. AAD is bound to
+                  the same revisions on source and target so the bytes
+                  are copy-verbatim — no re-encryption.
+3. **copy chunks** — for each chunk_id referenced by the source's root +
+                  shards, batch-HEAD on the target; if missing, GET
+                  source / PUT target.
+4. **verify**  — `GET source /migration/verify-source` returns
+                  ``root_hash`` + per-folder ``shard_hashes`` map.
+                  Refetch the target's root + shards and compare each
+                  hash; random-sample N chunks from the target and try
+                  AEAD-decrypt with the live vault's master key (T9.4).
 5. **commit**  — `PUT source /migration/commit` (stamps migrated_to).
 6. **idle**    — clear state file; caller swaps active relay URL in config.
 """
@@ -32,9 +36,8 @@ import logging
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Protocol
+from typing import Any, Callable, Protocol
 
-from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
 from ..crypto import (
     aead_decrypt,
     build_chunk_aad,
@@ -63,6 +66,12 @@ class MigrationVault(Protocol):
     @property
     def vault_access_secret(self) -> str | None: ...
 
+    def decrypt_root_envelope(self, envelope_bytes: bytes) -> dict: ...
+
+    def decrypt_shard_envelope(
+        self, envelope_bytes: bytes, remote_folder_id: str,
+    ) -> dict: ...
+
 
 class MigrationRelay(Protocol):
     """Both source and target relay implement this surface."""
@@ -71,7 +80,27 @@ class MigrationRelay(Protocol):
 
     def get_header(self, vault_id: str, vault_access_secret: str) -> dict: ...
 
-    def get_manifest(self, vault_id: str, vault_access_secret: str) -> dict: ...
+    def get_root(self, vault_id: str, vault_access_secret: str) -> dict: ...
+
+    def get_shard(
+        self,
+        vault_id: str,
+        vault_access_secret: str,
+        remote_folder_id: str,
+    ) -> dict: ...
+
+    def put_shard(
+        self,
+        vault_id: str,
+        vault_access_secret: str,
+        remote_folder_id: str,
+        *,
+        expected_current_shard_revision: int,
+        new_shard_revision: int,
+        parent_shard_revision: int,
+        shard_hash: str,
+        shard_ciphertext: bytes,
+    ) -> dict: ...
 
     def batch_head_chunks(
         self, vault_id: str, vault_access_secret: str, chunk_ids: list[str],
@@ -109,7 +138,9 @@ class MigrationProgress:
 @dataclass
 class MigrationVerifyOutcome:
     matches: bool
-    mismatches: list[str] = field(default_factory=list)   # subset of {"manifest_hash","chunk_count","used_bytes","chunk_sample"}
+    # subset of {"root_hash", "shard_hash:<rf_id>", "chunk_count",
+    # "used_bytes", "chunk_sample"}.
+    mismatches: list[str] = field(default_factory=list)
     sample_size: int = 0
     sample_passed: int = 0
 
@@ -201,7 +232,7 @@ def run_migration(
         save_state(record, config_dir)
 
     if record.state == "copying":
-        bootstrap, chunk_inventory = _bootstrap_target_and_inventory(
+        _bootstrap, chunk_inventory = _bootstrap_target_and_inventory(
             vault=vault,
             source_relay=source_relay,
             target_relay=target_relay,
@@ -217,19 +248,20 @@ def run_migration(
         save_state(record, config_dir)
     else:
         copied = skipped = bytes_copied = 0
-        bootstrap = None
 
     # ── verifying (T9.4) ────────────────────────────────────────────────
     verify = MigrationVerifyOutcome(matches=True, mismatches=[])
     if record.state == "verified":
+        # The verify step always re-fetches the target's root + shards
+        # rather than reusing the cached bootstrap plaintext, so the
+        # check covers a fresh round-trip (a relay that lied during
+        # bootstrap can't slip through by stashing the right
+        # plaintext in our cache).
         verify = _verify_migration(
             vault=vault,
             source_relay=source_relay,
             target_relay=target_relay,
             sample_size=sample_size,
-            cached_manifest_envelope=(
-                bootstrap["manifest_envelope"] if bootstrap is not None else None
-            ),
         )
         if not verify.matches:
             log.warning(
@@ -355,12 +387,27 @@ def _bootstrap_target_and_inventory(
     source_relay: MigrationRelay,
     target_relay: MigrationRelay,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Create the target vault (or detect it already exists) + return chunk plan."""
+    """Create the target vault (or detect it already exists) + return chunk plan.
+
+    Sharded migration shape: the source's root envelope is copied
+    verbatim into the target vault row (``initial_root_*``), then each
+    per-folder shard is replicated via ``put_shard`` so the target's
+    hash chain matches the source byte-for-byte. AEAD AAD is bound to
+    the same ``(vault_id, revision, parent_revision, author)`` tuple
+    on both sides — no re-encryption needed.
+    """
     source_header = source_relay.get_header(vault.vault_id, vault.vault_access_secret)
-    source_manifest = source_relay.get_manifest(vault.vault_id, vault.vault_access_secret)
-    manifest_envelope = source_manifest["manifest_ciphertext"]
-    manifest_hash = source_manifest["manifest_hash"]
-    manifest_revision = int(source_manifest["manifest_revision"])
+    source_root = source_relay.get_root(vault.vault_id, vault.vault_access_secret)
+    root_envelope = source_root["root_ciphertext"]
+    if isinstance(root_envelope, (bytearray, memoryview)):
+        root_envelope = bytes(root_envelope)
+    root_hash = str(source_root["root_hash"])
+    root_revision = int(source_root["root_revision"])
+
+    # Decrypt the source root so we can enumerate folder pointers (we
+    # need each remote_folder_id to fetch + replicate its shard, and
+    # the union of shards' chunk_ids is the migration chunk plan).
+    root_plaintext = vault.decrypt_root_envelope(root_envelope)
 
     # We don't know the target's vault_access_token_hash from the source
     # alone (that hash is sha256(secret), and the device retains the
@@ -370,13 +417,13 @@ def _bootstrap_target_and_inventory(
     token_hash = hashlib.sha256(vault.vault_access_secret.encode("ascii")).digest()
     try:
         target_relay.create_vault(
-            vault_id=vault.vault_id,
-            vault_access_token_hash=token_hash,
-            encrypted_header=source_header["encrypted_header"],
-            header_hash=source_header["header_hash"],
-            initial_manifest_ciphertext=manifest_envelope,
-            initial_manifest_hash=manifest_hash,
-            initial_manifest_revision=manifest_revision,
+            vault.vault_id,
+            token_hash,
+            source_header["encrypted_header"],
+            source_header["header_hash"],
+            root_envelope,
+            root_hash,
+            initial_root_revision=root_revision,
             initial_header_revision=int(source_header.get("header_revision", 1)),
         )
     except RuntimeError as exc:
@@ -386,13 +433,83 @@ def _bootstrap_target_and_inventory(
         if "vault_already_exists" not in str(exc):
             raise
 
-    bundle_manifest = decrypt_manifest_envelope(vault, manifest_envelope)
+    # Fetch + replicate each shard. The source's shard envelope bytes
+    # carry AAD bound to (vault_id, remote_folder_id, shard_revision,
+    # parent_shard_revision, author) — the same on the target — so a
+    # straight byte-copy preserves the §10.C hash chain.
+    shards_by_id: dict[str, dict[str, Any]] = {}
+    pointers = root_plaintext.get("remote_folders") or []
+    for pointer in pointers:
+        if not isinstance(pointer, dict):
+            continue
+        rf_id = str(pointer.get("remote_folder_id") or "")
+        if not rf_id:
+            continue
+        # A freshly added folder may have ``shard_revision == 0`` (no
+        # shard published yet). Skip — there's nothing to copy.
+        pointer_shard_rev = int(pointer.get("shard_revision") or 0)
+        if pointer_shard_rev <= 0:
+            continue
+        try:
+            source_shard = source_relay.get_shard(
+                vault.vault_id, vault.vault_access_secret, rf_id,
+            )
+        except Exception as exc:
+            from ..relay_errors import VaultNotFoundError
+            if isinstance(exc, VaultNotFoundError):
+                # Pointer-without-shard on the source side too; skip
+                # rather than abort the migration.
+                continue
+            raise
+        shard_envelope = source_shard["shard_ciphertext"]
+        if isinstance(shard_envelope, (bytearray, memoryview)):
+            shard_envelope = bytes(shard_envelope)
+        shard_hash = str(source_shard["shard_hash"])
+        shard_revision = int(source_shard["shard_revision"])
+        parent_shard_revision = int(
+            source_shard.get("parent_shard_revision") or max(0, shard_revision - 1)
+        )
+        # Replicate to the target. Genesis insert on the target side
+        # uses ``expected_current_shard_revision=0`` regardless of the
+        # source's revision; the envelope's deterministic prefix on the
+        # wire still carries ``shard_revision=N``, so the §10.C hash
+        # chain matches once the bytes land. NOTE: the production
+        # server's ``putShard`` currently rejects ``new != expected + 1``
+        # — a relaxation to allow ``expected=0 && new=N`` for a genesis
+        # insert is required for shards with revision > 1 to migrate.
+        try:
+            target_relay.put_shard(
+                vault.vault_id,
+                vault.vault_access_secret,
+                rf_id,
+                expected_current_shard_revision=0,
+                new_shard_revision=shard_revision,
+                parent_shard_revision=parent_shard_revision,
+                shard_hash=shard_hash,
+                shard_ciphertext=shard_envelope,
+            )
+        except Exception as exc:
+            # Idempotent re-entry: a prior run already published the
+            # shard. The shard's CAS layer surfaces this as a conflict
+            # error whose payload includes the current hash; if it
+            # matches what we'd publish, treat as a no-op.
+            from ..relay_errors import VaultCASConflictError
+            if not isinstance(exc, VaultCASConflictError):
+                raise
+            details = getattr(exc, "details", {}) or {}
+            current_hash = str(details.get("current_shard_hash") or "")
+            current_rev = int(details.get("current_shard_revision") or 0)
+            if current_hash != shard_hash or current_rev != shard_revision:
+                raise
+        shards_by_id[rf_id] = vault.decrypt_shard_envelope(shard_envelope, rf_id)
+
+    # Walk the decrypted root + shards to enumerate every chunk_id the
+    # vault references. Each version's chunks live inside its folder's
+    # shard, never in the root — the root only carries pointers.
     chunk_ids: list[str] = []
     seen: set[str] = set()
-    for folder in bundle_manifest.get("remote_folders", []) or []:
-        if not isinstance(folder, dict):
-            continue
-        for entry in folder.get("entries", []) or []:
+    for rf_id, shard in shards_by_id.items():
+        for entry in shard.get("entries", []) or []:
             if not isinstance(entry, dict):
                 continue
             for version in entry.get("versions", []) or []:
@@ -408,10 +525,11 @@ def _bootstrap_target_and_inventory(
 
     return (
         {
-            "manifest_envelope": manifest_envelope,
-            "manifest_hash": manifest_hash,
-            "manifest_revision": manifest_revision,
-            "manifest_plaintext": bundle_manifest,
+            "root_envelope": root_envelope,
+            "root_hash": root_hash,
+            "root_revision": root_revision,
+            "root_plaintext": root_plaintext,
+            "shards_by_id": shards_by_id,
         },
         chunk_ids,
     )
@@ -463,43 +581,105 @@ def _verify_migration(
     source_relay: MigrationRelay,
     target_relay: MigrationRelay,
     sample_size: int,
-    cached_manifest_envelope: bytes | None,
 ) -> MigrationVerifyOutcome:
+    """Compare source aggregates against the target's hash chain.
+
+    The source's ``migration_verify_source`` now reports ``root_hash``
+    + per-folder ``shard_hashes``; the target's root + shards are
+    re-fetched and hashed for equality. AEAD-sample N chunks on the
+    target to detect bytes-in-transit corruption.
+    """
     src = source_relay.migration_verify_source(
         vault.vault_id, vault.vault_access_secret,
     )
     tgt_header = target_relay.get_header(vault.vault_id, vault.vault_access_secret)
-    tgt_manifest = target_relay.get_manifest(vault.vault_id, vault.vault_access_secret)
+    tgt_root = target_relay.get_root(vault.vault_id, vault.vault_access_secret)
 
     mismatches: list[str] = []
-    if str(src.get("manifest_hash") or "") != str(tgt_manifest.get("manifest_hash") or ""):
-        mismatches.append("manifest_hash")
+    src_root_hash = str(src.get("root_hash") or "")
+    tgt_root_hash = str(tgt_root.get("root_hash") or "")
+    if src_root_hash != tgt_root_hash:
+        mismatches.append("root_hash")
 
-    src_chunks = int(src.get("chunk_count") or 0)
+    # Compare each per-folder shard_hash. The map is keyed by
+    # remote_folder_id; an empty server-side map ({}) returns as either
+    # a Python dict (json.loads of {}) or a list when the json layer
+    # collapses to []. Coerce safely.
+    src_shard_hashes_raw = src.get("shard_hashes") or {}
+    if isinstance(src_shard_hashes_raw, dict):
+        src_shard_hashes: dict[str, str] = {
+            str(k): str(v) for k, v in src_shard_hashes_raw.items()
+        }
+    else:
+        src_shard_hashes = {}
+
+    src_chunks_total = int(src.get("chunk_count") or 0)
     src_bytes = int(src.get("used_ciphertext_bytes") or 0)
     tgt_used = int(tgt_header.get("used_ciphertext_bytes") or 0)
     if src_bytes != tgt_used:
         mismatches.append("used_bytes")
 
-    # Random-sample chunk decrypt on the target (T9.4): pull N chunks
-    # from the target and try AEAD-decrypt with the live master key. A
-    # mismatch here means the bytes drifted in transit.
-    envelope = cached_manifest_envelope or tgt_manifest["manifest_ciphertext"]
-    bundle_manifest = decrypt_manifest_envelope(vault, envelope)
+    # Walk the target's root + shards live (no caching from bootstrap)
+    # so a relay that lied during bootstrap can't slip through. For each
+    # folder the source reports a ``shard_hash``; pull the matching
+    # shard from the target and compare ``sha256(envelope_bytes)``.
+    target_root_envelope = tgt_root["root_ciphertext"]
+    if isinstance(target_root_envelope, (bytearray, memoryview)):
+        target_root_envelope = bytes(target_root_envelope)
+    target_root_plaintext = vault.decrypt_root_envelope(target_root_envelope)
+    target_shards_by_id: dict[str, dict[str, Any]] = {}
+    target_shard_hashes: dict[str, str] = {}
+    for pointer in target_root_plaintext.get("remote_folders") or []:
+        if not isinstance(pointer, dict):
+            continue
+        rf_id = str(pointer.get("remote_folder_id") or "")
+        if not rf_id:
+            continue
+        pointer_shard_rev = int(pointer.get("shard_revision") or 0)
+        if pointer_shard_rev <= 0:
+            continue
+        try:
+            tgt_shard = target_relay.get_shard(
+                vault.vault_id, vault.vault_access_secret, rf_id,
+            )
+        except Exception as exc:
+            from ..relay_errors import VaultNotFoundError
+            if isinstance(exc, VaultNotFoundError):
+                target_shard_hashes[rf_id] = ""
+                continue
+            raise
+        shard_envelope = tgt_shard["shard_ciphertext"]
+        if isinstance(shard_envelope, (bytearray, memoryview)):
+            shard_envelope = bytes(shard_envelope)
+        target_shard_hashes[rf_id] = str(tgt_shard.get("shard_hash") or "")
+        target_shards_by_id[rf_id] = vault.decrypt_shard_envelope(
+            shard_envelope, rf_id,
+        )
+
+    # Per-folder shard_hash diff. We compare on the union of keys so a
+    # folder that's present on the source but missing on the target
+    # (or vice versa) still surfaces.
+    for rf_id in sorted(set(src_shard_hashes) | set(target_shard_hashes)):
+        src_h = src_shard_hashes.get(rf_id, "")
+        tgt_h = target_shard_hashes.get(rf_id, "")
+        if src_h != tgt_h:
+            mismatches.append(f"shard_hash:{rf_id}")
 
     # F-C06: explicit chunk-count comparison. The pre-fix proxy
     # (`if src_chunks and sample_size_actual == 0`) only fired when
     # the target manifest had zero chunks AND the source claimed any —
-    # it missed the realistic case where the target manifest had
-    # *some* chunks but fewer than the source claimed (e.g. a partial
-    # copy that crashed mid-stream). Compare unique chunk_ids in the
-    # target against the source's reported count directly.
-    tgt_chunks = _count_unique_chunks(bundle_manifest)
-    if src_chunks != tgt_chunks:
+    # it missed the realistic case where the target had *some* chunks
+    # but fewer than the source claimed (e.g. a partial copy that
+    # crashed mid-stream). Walk the target's decrypted shards and
+    # count distinct chunk_ids; compare to the source's reported total.
+    tgt_chunks = _count_unique_chunks_in_shards(target_shards_by_id)
+    if src_chunks_total != tgt_chunks:
         mismatches.append("chunk_count")
 
     sample_passed = 0
-    sample_chunks = _pick_random_sample(bundle_manifest, sample_size)
+    sample_chunks = _pick_random_sample_from_shards(
+        target_root_plaintext, target_shards_by_id, sample_size,
+    )
     sample_size_actual = len(sample_chunks)
     chunk_subkey = derive_subkey("dc-vault-v1/chunk", bytes(vault.master_key))
     transient_failures = 0
@@ -545,9 +725,6 @@ def _verify_migration(
         sample_passed += 1
     if sample_size_actual > 0 and sample_passed < sample_size_actual:
         mismatches.append("chunk_sample")
-    # The "chunk_count" mismatch is now decided up front via
-    # ``_count_unique_chunks`` (F-C06); the prior proxy here ran AFTER
-    # the AEAD sampling loop and only when ``sample_size_actual == 0``.
     return MigrationVerifyOutcome(
         matches=len(mismatches) == 0,
         mismatches=mismatches,
@@ -605,20 +782,22 @@ def _audit_source_committed_to_target(
     )
 
 
-def _count_unique_chunks(manifest: dict[str, Any]) -> int:
+def _count_unique_chunks_in_shards(
+    shards_by_id: dict[str, dict[str, Any]],
+) -> int:
     """F-C06: count distinct ``chunk_id`` values across all live and
-    historical versions in the manifest. The source's ``chunk_count``
-    surface is the same de-duped count; this helper produces the
-    target-side number to compare against directly so a partial copy
-    (target has fewer chunks than the source claims) trips the verify
-    instead of relying on the random-sample loop to incidentally
-    catch it.
+    historical versions across every shard. The source's
+    ``chunk_count`` surface is the same de-duped count; this helper
+    produces the target-side number to compare against directly so a
+    partial copy (target has fewer chunks than the source claims)
+    trips the verify instead of relying on the random-sample loop to
+    incidentally catch it.
     """
     seen: set[str] = set()
-    for folder in manifest.get("remote_folders", []) or []:
-        if not isinstance(folder, dict):
+    for shard in shards_by_id.values():
+        if not isinstance(shard, dict):
             continue
-        for entry in folder.get("entries", []) or []:
+        for entry in shard.get("entries", []) or []:
             if not isinstance(entry, dict):
                 continue
             for version in entry.get("versions", []) or []:
@@ -633,16 +812,26 @@ def _count_unique_chunks(manifest: dict[str, Any]) -> int:
     return len(seen)
 
 
-def _pick_random_sample(
-    manifest: dict[str, Any], sample_size: int,
+def _pick_random_sample_from_shards(
+    root: dict[str, Any],
+    shards_by_id: dict[str, dict[str, Any]],
+    sample_size: int,
 ) -> list[dict[str, Any]]:
-    """Walk the manifest and pick up to ``sample_size`` chunks at random."""
+    """Enumerate ``(chunk_id, remote_folder_id, entry_id, version_id,
+    index, plaintext_size)`` tuples across the root's folders and the
+    matching shard entries, then pick up to ``sample_size`` at random.
+    """
     all_chunks: list[dict[str, Any]] = []
-    for folder in manifest.get("remote_folders", []) or []:
-        if not isinstance(folder, dict):
+    for pointer in root.get("remote_folders", []) or []:
+        if not isinstance(pointer, dict):
             continue
-        rid = str(folder.get("remote_folder_id", ""))
-        for entry in folder.get("entries", []) or []:
+        rid = str(pointer.get("remote_folder_id", ""))
+        if not rid:
+            continue
+        shard = shards_by_id.get(rid)
+        if shard is None:
+            continue
+        for entry in shard.get("entries", []) or []:
             if not isinstance(entry, dict):
                 continue
             eid = str(entry.get("entry_id", ""))

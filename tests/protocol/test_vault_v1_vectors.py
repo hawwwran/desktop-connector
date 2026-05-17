@@ -10,11 +10,8 @@ Schema lock: T0 §A18 in
 Byte-format reference: ``docs/protocol/vault-v1-formats.md``.
 
 Files filled so far:
-    root_v1.json + shard_v1.json (2026-05-16) — manifest sharding pair
-    that replaces the legacy single-envelope manifest_v1.json. The
-    latter survives on disk only as a transitional fixture for tests
-    that haven't moved off the pre-sharding Vault.publish_manifest
-    flow yet; see ``vault-v1/README.md``.
+    root_v1.json + shard_v1.json (2026-05-16) — manifest sharding pair.
+    See ``vault-v1/README.md`` for the broader vector catalog.
 """
 
 from __future__ import annotations

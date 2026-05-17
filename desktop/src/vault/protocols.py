@@ -25,28 +25,6 @@ class RelayProtocol(Protocol):
         vault_access_secret: str,
     ) -> dict: ...
 
-    # Legacy unified-manifest surface — kept on the Protocol during
-    # Phase D so test fakes can keep their pre-sharding implementations
-    # while production code migrates to ``get_root``/``get_shard``.
-    # Phase H removes both.
-    def get_manifest(
-        self,
-        vault_id: str,
-        vault_access_secret: str,
-    ) -> dict: ...
-
-    def put_manifest(
-        self,
-        vault_id: str,
-        vault_access_secret: str,
-        *,
-        expected_current_revision: int,
-        new_revision: int,
-        parent_revision: int,
-        manifest_hash: str,
-        manifest_ciphertext: bytes,
-    ) -> dict: ...
-
     def get_root(
         self,
         vault_id: str,

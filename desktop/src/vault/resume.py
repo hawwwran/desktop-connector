@@ -43,15 +43,15 @@ from .crypto import (
     aead_encrypt,
     build_header_aad,
     build_header_envelope,
-    build_manifest_aad,
-    build_manifest_envelope,
     build_recovery_aad,
+    build_root_aad,
+    build_root_envelope,
     derive_recovery_wrap_key,
     derive_subkey,
     normalize_vault_id,
 )
 from .ids import _generate_id_v1, _genesis_fingerprint_hex
-from .manifest import canonical_manifest_json, make_manifest
+from .manifest import canonical_root_json, make_root_manifest
 
 log = logging.getLogger(__name__)
 
@@ -253,7 +253,7 @@ def complete_pending_publish(
             canonical[:8] + "…", new_revision,
         )
     else:
-        manifest_envelope, manifest_hash = _build_genesis_manifest(
+        root_envelope, root_hash = _build_genesis_root(
             vault_id=canonical,
             master_key=master_key_bytes,
             now_provider=now_provider,
@@ -262,12 +262,12 @@ def complete_pending_publish(
             vault_access_secret.encode("ascii"),
         ).digest()
         relay.create_vault(
-            vault_id=canonical,
-            vault_access_token_hash=token_hash,
-            encrypted_header=header_envelope,
-            header_hash=header_hash,
-            initial_manifest_ciphertext=manifest_envelope,
-            initial_manifest_hash=manifest_hash,
+            canonical,
+            token_hash,
+            header_envelope,
+            header_hash,
+            root_envelope,
+            root_hash,
         )
         log.info("vault.resume.create.ok vault=%s", canonical[:8] + "…")
 
@@ -430,46 +430,50 @@ def _seal_header(
     return header_envelope, header_hash
 
 
-def _build_genesis_manifest(
+def _build_genesis_root(
     *,
     vault_id: str,
     master_key: bytes,
     now_provider=None,
 ):
-    """Return ``(manifest_envelope_bytes, manifest_hash_hex)`` — fresh
-    genesis manifest at revision 1 with author_device_id zero.
+    """Return ``(root_envelope_bytes, root_hash_hex)`` — fresh genesis
+    root manifest at revision 1 with author_device_id zero.
 
     Mirrors the shape ``Vault.prepare_new`` builds for the POST. Only used
     on the resume-via-POST path (relay 404'd on get_header).
     """
     author_device_id = "0" * 32
-    manifest_plaintext = canonical_manifest_json(make_manifest(
+    root_plaintext = canonical_root_json(make_root_manifest(
         vault_id=vault_id,
-        revision=1,
-        parent_revision=0,
+        root_revision=1,
+        parent_root_revision=0,
         created_at=(now_provider or _now_rfc3339)(),
         author_device_id=author_device_id,
         remote_folders=[],
         operation_log_tail=[],
         archived_op_segments=[],
     ))
-    manifest_subkey = derive_subkey("dc-vault-v1/manifest", master_key)
-    manifest_nonce = secrets.token_bytes(24)
-    manifest_aad = build_manifest_aad(
-        vault_id=vault_id, revision=1, parent_revision=0,
+    root_subkey = derive_subkey("dc-vault-v1/root", master_key)
+    root_nonce = secrets.token_bytes(24)
+    root_aad = build_root_aad(
+        vault_id=vault_id,
+        root_revision=1,
+        parent_root_revision=0,
         author_device_id=author_device_id,
     )
-    manifest_ciphertext = aead_encrypt(
-        manifest_plaintext, manifest_subkey, manifest_nonce, manifest_aad,
+    root_ciphertext = aead_encrypt(
+        root_plaintext, root_subkey, root_nonce, root_aad,
     )
-    manifest_envelope = build_manifest_envelope(
-        vault_id=vault_id, revision=1, parent_revision=0,
+    root_envelope = build_root_envelope(
+        vault_id=vault_id,
+        root_revision=1,
+        parent_root_revision=0,
         author_device_id=author_device_id,
-        nonce=manifest_nonce,
-        aead_ciphertext_and_tag=manifest_ciphertext,
+        nonce=root_nonce,
+        aead_ciphertext_and_tag=root_ciphertext,
     )
-    manifest_hash = hashlib.sha256(manifest_envelope).hexdigest()
-    return manifest_envelope, manifest_hash
+    root_hash = hashlib.sha256(root_envelope).hexdigest()
+    return root_envelope, root_hash
 
 
 def _put_header(

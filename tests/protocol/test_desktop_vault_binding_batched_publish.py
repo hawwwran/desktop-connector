@@ -103,17 +103,14 @@ class _BatchTestBase(unittest.TestCase):
                 ),
             ],
         )
-        relay = BatchProbeRelay(manifest=manifest)
-        relay.current_revision = int(manifest.get("parent_revision", 0))
+        relay = BatchProbeRelay()
         vault = _vault()
         try:
-            vault.publish_manifest(relay, manifest)
             seed_sharded_state_from_manifest(vault, relay, manifest)
         finally:
             vault.close()
         # Discard the setup publish so the per-test counters start clean.
-        relay.put_manifest_attempt_count = 0
-        relay.published_manifests = []
+        relay.publish_attempt_count = 0
         relay.published_shards = []
         relay.published_roots = []
         relay.shard_with_root_puts = 0
@@ -133,7 +130,6 @@ class _BatchTestBase(unittest.TestCase):
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path=path, author_device_id=AUTHOR,
             )
-            seed_sharded_state_from_manifest(vault, relay, res.manifest)
         finally:
             vault.close()
         return res.manifest
@@ -185,9 +181,9 @@ class CleanBatchTests(_BatchTestBase):
         # SO-3: exactly one publish covers all five mutations. Pre-SO-3
         # this would be five.
         self.assertEqual(
-            relay.put_manifest_attempt_count, 1,
+            relay.publish_attempt_count, 1,
             "expected exactly one CAS publish for a 5-op batch; "
-            f"saw {relay.put_manifest_attempt_count}",
+            f"saw {relay.publish_attempt_count}",
         )
         self.assertEqual(len(relay.published_shards), 1)
 
@@ -238,7 +234,7 @@ class CleanBatchTests(_BatchTestBase):
 
         self.assertEqual(result.succeeded_count, 7)
         # 3 + 3 + 1 (cycle-end flush of the partial batch)
-        self.assertEqual(relay.put_manifest_attempt_count, 3)
+        self.assertEqual(relay.publish_attempt_count, 3)
         self.assertEqual(len(relay.published_shards), 3)
 
 
@@ -280,7 +276,7 @@ class CASConflictMidBatchTests(_BatchTestBase):
             self.assertEqual(outcome.status, "uploaded")
 
         # 2 attempts: 1 conflict + 1 success. 1 publish recorded.
-        self.assertEqual(relay.put_manifest_attempt_count, 2)
+        self.assertEqual(relay.publish_attempt_count, 2)
         self.assertEqual(len(relay.published_shards), 1)
         self.assertEqual(relay.cas_conflicts_to_inject, 0)
 
@@ -313,8 +309,9 @@ class MixedUploadAndDeleteTests(_BatchTestBase):
         manifest = self._seed_remote_file(
             relay, manifest, path="goner.txt", content=b"please go",
         )
-        relay.put_manifest_attempt_count = 0
-        relay.published_manifests = []
+        relay.publish_attempt_count = 0
+        relay.published_shards = []
+        relay.published_roots = []
         relay.published_shards = []
         relay.published_roots = []
         relay.shard_with_root_puts = 0
@@ -359,7 +356,7 @@ class MixedUploadAndDeleteTests(_BatchTestBase):
         # 2 uploaded + 1 deleted in a single publish.
         statuses = sorted(o.status for o in result.outcomes)
         self.assertEqual(statuses, ["deleted", "uploaded", "uploaded"])
-        self.assertEqual(relay.put_manifest_attempt_count, 1)
+        self.assertEqual(relay.publish_attempt_count, 1)
         self.assertEqual(len(relay.published_shards), 1)
 
         # Verify the post-publish shard carries:
@@ -525,7 +522,7 @@ class CycleEndCancelFlushTests(_BatchTestBase):
         # commit. The third never entered prep.
         uploaded = [o for o in result.outcomes if o.status == "uploaded"]
         self.assertEqual(len(uploaded), 2)
-        self.assertEqual(relay.put_manifest_attempt_count, 1)
+        self.assertEqual(relay.publish_attempt_count, 1)
         # Op 3 stays queued for the next cycle.
         remaining = self.store.list_pending_ops(binding.binding_id)
         self.assertEqual(len(remaining), 1)
@@ -569,7 +566,7 @@ class CycleEndCancelFlushTests(_BatchTestBase):
         # Single publish attempt — proves we didn't burn the retry
         # budget after the user clicked Pause (F-Y08).
         self.assertEqual(
-            relay.put_manifest_attempt_count, 1,
+            relay.publish_attempt_count, 1,
             "cancel-flush published more than once — retry storm "
             "leaked through F-Y08 gate",
         )
@@ -594,8 +591,9 @@ class SkippedIdenticalInsideBatchTests(_BatchTestBase):
         manifest = self._seed_remote_file(
             relay, manifest, path="same.txt", content=b"already-here",
         )
-        relay.put_manifest_attempt_count = 0
-        relay.published_manifests = []
+        relay.publish_attempt_count = 0
+        relay.published_shards = []
+        relay.published_roots = []
         relay.published_shards = []
         relay.published_roots = []
         relay.shard_with_root_puts = 0
@@ -633,7 +631,7 @@ class SkippedIdenticalInsideBatchTests(_BatchTestBase):
         self.assertEqual(statuses, ["skipped", "uploaded"])
         # Exactly one publish (covers new.txt only — same.txt didn't
         # enter the batch).
-        self.assertEqual(relay.put_manifest_attempt_count, 1)
+        self.assertEqual(relay.publish_attempt_count, 1)
         # Both pending ops dequeued; both local entries stamped.
         self.assertEqual(self.store.list_pending_ops(binding.binding_id), [])
         same_entry = self.store.get_local_entry(binding.binding_id, "same.txt")
@@ -746,58 +744,23 @@ class BatchProbeRelay(FakeUploadRelay):
     on demand.
 
     Used by the SO-3 tests to confirm the batch shape:
-    ``put_manifest_attempt_count`` counts every publish attempt
-    (legacy ``put_manifest`` or sharded ``put_shard_with_root``;
-    success or 409). ``cas_conflicts_to_inject`` flips a one-shot 409
-    on the next attempt — the inline envelope mirrors what the real
-    server returns per §A1 so the §D4 rebase loop in
+    ``publish_attempt_count`` counts every shard-with-root publish
+    attempt (success or 409). ``cas_conflicts_to_inject`` flips a
+    one-shot 409 on the next attempt — the inline envelope mirrors
+    what the real server returns per §A1 so the §D4 rebase loop in
     ``_publish_batch_with_cas_retry`` has real ciphertext to decrypt.
     """
 
-    def __init__(self, *, manifest: dict) -> None:
-        super().__init__(manifest=manifest)
-        self.put_manifest_attempt_count = 0
+    def __init__(self) -> None:
+        super().__init__()
+        self.publish_attempt_count = 0
         self.cas_conflicts_to_inject = 0
-
-    def put_manifest(
-        self,
-        vault_id,
-        vault_access_secret,
-        *,
-        expected_current_revision,
-        new_revision,
-        parent_revision,
-        manifest_hash,
-        manifest_ciphertext,
-    ):
-        self.put_manifest_attempt_count += 1
-        if self.cas_conflicts_to_inject > 0:
-            self.cas_conflicts_to_inject -= 1
-            raise VaultCASConflictError({
-                "code": "vault_manifest_conflict",
-                "message": "injected CAS conflict (SO-3 test)",
-                "details": {
-                    "current_revision": self.current_revision,
-                    "current_manifest_hash": self.current_hash,
-                    "current_manifest_ciphertext":
-                        base64.b64encode(self.current_envelope).decode("ascii"),
-                    "current_manifest_size": len(self.current_envelope),
-                },
-            })
-        return super().put_manifest(
-            vault_id, vault_access_secret,
-            expected_current_revision=expected_current_revision,
-            new_revision=new_revision,
-            parent_revision=parent_revision,
-            manifest_hash=manifest_hash,
-            manifest_ciphertext=manifest_ciphertext,
-        )
 
     def put_shard_with_root(
         self, vault_id, vault_access_secret, remote_folder_id, *,
         shard, root,
     ):
-        self.put_manifest_attempt_count += 1
+        self.publish_attempt_count += 1
         if self.cas_conflicts_to_inject > 0:
             self.cas_conflicts_to_inject -= 1
             current = self.shards.get(remote_folder_id, {})
