@@ -792,17 +792,27 @@ Remaining Plan A checklist:
   pulled in below as a separate commit so progress lands
   incrementally instead of in one untested mega-diff.
 
-  * **7a — Production: ``remote_folders.py`` + ``FakeManifestRelay``.**
-    Smallest piece. ``add_remote_folder`` / ``rename_remote_folder``
-    / ``update_remote_folder_settings`` all mutate the root
-    folder-pointer set — a clean ``publish_root_manifest`` port.
-    Blocked on porting ``FakeManifestRelay`` to also expose
-    ``get_root`` / ``put_root`` so the legacy CAS-tracking
-    assertions in ``test_desktop_vault_folders.py``
-    (``put_calls[0]["expected_current_revision"]`` etc.) can be
-    flipped to root-revision counters. The relay can be built
-    around ``publish_root_manifest``'s wire shape; the manifest
-    vector fixture stays for now.
+  * [x] **7a** (2026-05-17) — Production: ``remote_folders.py`` +
+    ``FakeManifestRelay``. ``add_remote_folder`` /
+    ``rename_remote_folder`` / ``update_remote_folder_settings``
+    now mutate the root folder-pointer set via
+    ``publish_root_manifest``; the shared private
+    ``_mutate_root_and_publish`` runs the fetch → mutate → bump →
+    publish path and refreshes the local-index folder cache from
+    the published root. Returns a synthesized unified manifest
+    (with empty per-folder shard views) so callers' ``result["revision"]``
+    / ``result["remote_folders"]`` reads keep working.
+    ``FakeManifestRelay`` was rewritten as ``FakeRootRelay`` with
+    only ``get_root`` / ``put_root`` (legacy ``put_manifest`` is
+    gone — nothing in this test file needs it anymore). The three
+    tests in ``test_desktop_vault_folders.py`` are rewritten to
+    seed an empty genesis root via ``vault.publish_root_manifest``
+    and to assert on root-revision counters
+    (``put_root_calls[0]["expected_current_root_revision"]`` etc.).
+    Genesis-root + add = revision 2; rename = revision 3 — the
+    chain math is cleaner than the legacy vector-seeded variant.
+    The unrelated ``manifest-v1-legacy-no-remote-folders`` test
+    vector is no longer referenced from this file.
 
   * **7b — Production: ``folder/runtime.py``, ``ui/browser_model.py``.**
     Both are read-mostly. ``folder/runtime.py`` is a

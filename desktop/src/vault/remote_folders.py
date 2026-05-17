@@ -1,16 +1,23 @@
 """Remote-folder mutations on top of the Vault publish flow.
 
-Each method fetches the current head, mutates exactly one field, and
-CAS-publishes the next revision. All three share the same shape:
-fetch → bump revision + parent_revision + author + timestamp →
-manifest helper → ``self.publish_manifest``.
+Each method fetches the current root manifest, mutates exactly one
+folder pointer (add / rename / settings), and CAS-publishes the next
+root revision via ``publish_root_manifest``. All three share the
+same shape: fetch root → bump revision + parent_revision + author +
+timestamp → mutate pointer → publish_root_manifest. Returns a
+synthesized unified manifest (no shards walked — folder-set + per-
+folder metadata is the only thing the caller needs after these ops)
+so existing callers' ``result["revision"]`` / ``result["remote_folders"]``
+access keeps working.
 """
 
+import copy
+
 from .manifest import (
-    add_remote_folder as manifest_add_remote_folder,
+    assemble_unified_manifest,
     generate_remote_folder_id,
-    make_remote_folder,
-    rename_remote_folder as manifest_rename_remote_folder,
+    make_root_folder_pointer,
+    normalize_root_manifest_plaintext,
 )
 from .canonical import _now_rfc3339
 from .protocols import RelayProtocol
@@ -28,29 +35,32 @@ class RemoteFoldersMixin:
         remote_folder_id: str | None = None,
         local_index=None,
     ) -> dict:
-        """Fetch head, append one remote folder, and publish a new revision."""
+        """Fetch root, append one remote folder pointer, publish_root_manifest."""
         name = str(display_name).strip()
         if not name:
             raise ValueError("folder name is required")
 
-        current = self.fetch_manifest(relay, local_index=local_index)
-        parent_revision = int(current["revision"])
         timestamp = created_at or _now_rfc3339()
-        next_manifest = dict(current)
-        next_manifest["revision"] = parent_revision + 1
-        next_manifest["parent_revision"] = parent_revision
-        next_manifest["created_at"] = timestamp
-        next_manifest["author_device_id"] = str(author_device_id)
-
-        folder = make_remote_folder(
+        new_pointer = make_root_folder_pointer(
             remote_folder_id=remote_folder_id or generate_remote_folder_id(),
             display_name_enc=name,
             created_at=timestamp,
             created_by_device_id=str(author_device_id),
             ignore_patterns=ignore_patterns,
         )
-        updated = manifest_add_remote_folder(next_manifest, folder)
-        return self.publish_manifest(relay, updated, local_index=local_index)
+
+        def mutate(root: dict) -> dict:
+            out = normalize_root_manifest_plaintext(root)
+            out["remote_folders"] = list(out["remote_folders"]) + [new_pointer]
+            return out
+
+        return self._mutate_root_and_publish(
+            relay,
+            mutate=mutate,
+            author_device_id=author_device_id,
+            timestamp=timestamp,
+            local_index=local_index,
+        )
 
     def rename_remote_folder(
         self,
@@ -62,22 +72,34 @@ class RemoteFoldersMixin:
         created_at: str | None = None,
         local_index=None,
     ) -> dict:
-        """Fetch head, flip one folder's display_name_enc, CAS-publish (T4.5)."""
+        """Fetch root, flip one folder's display_name_enc, CAS-publish (T4.5)."""
         name = str(new_display_name).strip()
         if not name:
             raise ValueError("folder name is required")
-
-        current = self.fetch_manifest(relay, local_index=local_index)
-        parent_revision = int(current["revision"])
         timestamp = created_at or _now_rfc3339()
-        next_manifest = dict(current)
-        next_manifest["revision"] = parent_revision + 1
-        next_manifest["parent_revision"] = parent_revision
-        next_manifest["created_at"] = timestamp
-        next_manifest["author_device_id"] = str(author_device_id)
 
-        updated = manifest_rename_remote_folder(next_manifest, remote_folder_id, name)
-        return self.publish_manifest(relay, updated, local_index=local_index)
+        def mutate(root: dict) -> dict:
+            out = normalize_root_manifest_plaintext(root)
+            found = False
+            new_pointers = []
+            for p in out["remote_folders"]:
+                if p.get("remote_folder_id") == remote_folder_id:
+                    new_pointers.append(_pointer_with(p, display_name_enc=name))
+                    found = True
+                else:
+                    new_pointers.append(p)
+            if not found:
+                raise ValueError(f"unknown remote folder: {remote_folder_id}")
+            out["remote_folders"] = new_pointers
+            return out
+
+        return self._mutate_root_and_publish(
+            relay,
+            mutate=mutate,
+            author_device_id=author_device_id,
+            timestamp=timestamp,
+            local_index=local_index,
+        )
 
     def update_remote_folder_settings(
         self,
@@ -90,31 +112,87 @@ class RemoteFoldersMixin:
         created_at: str | None = None,
         local_index=None,
     ) -> dict:
-        """Fetch head, edit display_name_enc and/or ignore_patterns, CAS-publish.
+        """Fetch root, edit display_name_enc and/or ignore_patterns, CAS-publish.
 
         Used by the Folders tab's Configure dialog so the user can
         change the folder's name and ignore patterns after creation —
         previously the patterns were locked in at first init.
         """
-        from .manifest import update_remote_folder_settings as _update
-
         if new_display_name is None and ignore_patterns is None:
             raise ValueError(
                 "update_remote_folder_settings: nothing to change",
             )
-
-        current = self.fetch_manifest(relay, local_index=local_index)
-        parent_revision = int(current["revision"])
         timestamp = created_at or _now_rfc3339()
-        next_manifest = dict(current)
-        next_manifest["revision"] = parent_revision + 1
-        next_manifest["parent_revision"] = parent_revision
-        next_manifest["created_at"] = timestamp
-        next_manifest["author_device_id"] = str(author_device_id)
-
-        updated = _update(
-            next_manifest, remote_folder_id,
-            new_display_name=new_display_name,
-            ignore_patterns=ignore_patterns,
+        normalized_name = (
+            str(new_display_name).strip() if new_display_name is not None else None
         )
-        return self.publish_manifest(relay, updated, local_index=local_index)
+        if normalized_name == "":
+            raise ValueError("folder name is required")
+
+        def mutate(root: dict) -> dict:
+            out = normalize_root_manifest_plaintext(root)
+            found = False
+            new_pointers = []
+            for p in out["remote_folders"]:
+                if p.get("remote_folder_id") != remote_folder_id:
+                    new_pointers.append(p)
+                    continue
+                found = True
+                edits: dict = {}
+                if normalized_name is not None:
+                    edits["display_name_enc"] = normalized_name
+                if ignore_patterns is not None:
+                    edits["ignore_patterns"] = list(ignore_patterns)
+                new_pointers.append(_pointer_with(p, **edits))
+            if not found:
+                raise ValueError(f"unknown remote folder: {remote_folder_id}")
+            out["remote_folders"] = new_pointers
+            return out
+
+        return self._mutate_root_and_publish(
+            relay,
+            mutate=mutate,
+            author_device_id=author_device_id,
+            timestamp=timestamp,
+            local_index=local_index,
+        )
+
+    # ------------------------------------------------------------------
+
+    def _mutate_root_and_publish(
+        self,
+        relay: RelayProtocol,
+        *,
+        mutate,
+        author_device_id: str,
+        timestamp: str,
+        local_index,
+    ) -> dict:
+        """Phase H step 7a: fetch root, apply ``mutate``, bump revision,
+        publish via ``publish_root_manifest``. Refreshes the local-index
+        remote-folders cache from the published root so callers' next
+        ``list_remote_folders`` read picks up the change immediately.
+        Returns a synthesized unified manifest assembled from the
+        published root with empty per-folder shard views — folder-
+        mutating ops never read shard contents, and callers that need
+        entry data fetch them separately via ``fetch_folder_shard``.
+        """
+        current_root = self.fetch_root_manifest(relay, local_index=local_index)
+        parent_root_revision = int(current_root.get("root_revision", 0))
+        candidate = mutate(current_root)
+        candidate["root_revision"] = parent_root_revision + 1
+        candidate["parent_root_revision"] = parent_root_revision
+        candidate["created_at"] = timestamp
+        candidate["author_device_id"] = str(author_device_id)
+
+        published_root = self.publish_root_manifest(relay, candidate, local_index=local_index)
+        unified = assemble_unified_manifest(published_root, {})
+        if local_index is not None:
+            local_index.refresh_remote_folders_cache(unified)
+        return unified
+
+
+def _pointer_with(pointer: dict, **edits) -> dict:
+    out = copy.deepcopy(pointer)
+    out.update(edits)
+    return out
