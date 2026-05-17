@@ -171,14 +171,34 @@ class MigrationIntegrationTests(unittest.TestCase):
             self.assertEqual(summary["shards_skipped"], [])
             self.assertTrue(summary["root_published"])
 
-            # Round-trip: fetch root + every shard, assemble, compare
-            # entries.
+            # Hash-chain consistency: every root pointer's shard_hash
+            # must equal sha256 of the actually-stored shard envelope.
+            # This is the §10.C invariant; the prior migration helper
+            # re-encrypted shards under fresh nonces and stored
+            # never-published hashes in the pointer, which this
+            # assertion catches.
             root_back = vault.fetch_root_manifest(relay)
-            shards_back = {
-                pointer["remote_folder_id"]:
-                    vault.fetch_folder_shard(relay, pointer["remote_folder_id"])
-                for pointer in root_back["remote_folders"]
-            }
+            import hashlib as _hashlib
+            for pointer in root_back["remote_folders"]:
+                rf_id = pointer["remote_folder_id"]
+                expected = pointer["shard_hash"]
+                actual = _hashlib.sha256(relay.shards[rf_id]["envelope"]).hexdigest()
+                self.assertEqual(
+                    expected, actual,
+                    f"root pointer for {rf_id} carries shard_hash={expected!r} "
+                    f"but the stored shard envelope hashes to {actual!r}",
+                )
+
+            # Round-trip: fetch root + every shard with §10.C check,
+            # assemble, compare entries. Passing
+            # ``expected_shard_hash`` forces the new wire-layer chain
+            # check to fire — if the migration drifted, this raises.
+            shards_back = {}
+            for pointer in root_back["remote_folders"]:
+                rf_id = pointer["remote_folder_id"]
+                shards_back[rf_id] = vault.fetch_folder_shard(
+                    relay, rf_id, expected_shard_hash=pointer["shard_hash"],
+                )
             unified_back = assemble_unified_manifest(root_back, shards_back)
 
             # The reassembled manifest's per-folder entry sets must

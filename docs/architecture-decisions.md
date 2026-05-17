@@ -132,8 +132,23 @@ hash against the trusted root pointer before consuming the
 shard's entries (formats §10.C). A relay-side rollback that
 serves an older shard envelope (still authenticated under the
 vault's AEAD key) fails this compare and surfaces as
-``vault_shard_tampered`` — same shape as the
-``manifest_revision_floor`` rollback detection in §3.7.
+``VaultShardHashMismatchError`` on the client — same shape as
+the ``manifest_revision_floor`` rollback detection in §3.7.
+
+**Where the chain is sealed and checked.** The shard-envelope
+hash is non-deterministic (random per-publish nonce), so callers
+cannot pre-compute it. ``Vault.publish_shard_with_root``
+encrypts the shard first, then patches the matching pointer in
+the supplied root with ``shard_hash =
+sha256(shard_envelope_bytes)`` before sealing the root — the
+§10.C invariant holds at the wire boundary without forcing
+callers to thread the hash through manually. The standalone
+``publish_folder_shard`` (used by the migration script + future
+retention-only edits) returns ``(plaintext, envelope_hash)`` so
+the caller can patch a separately-published root. On the read
+side, ``fetch_unified_manifest`` passes each pointer's
+``shard_hash`` into ``fetch_folder_shard`` as
+``expected_shard_hash``; mismatch raises before AEAD decrypt.
 
 **Why not** keep the single-envelope shape with delta
 encoding? Two reasons. (1) Delta encoding requires server-side

@@ -239,7 +239,7 @@ class CountShardEntriesTests(unittest.TestCase):
         }
         self.assertEqual(count_shard_entries(shard), 3)
 
-    def test_per_folder_count_ignores_non_file_entries(self) -> None:
+    def test_per_folder_count_skips_non_dict_entries(self) -> None:
         from src.vault.binding.preflight import count_shard_entries
         shard = {
             "entries": [
@@ -248,11 +248,12 @@ class CountShardEntriesTests(unittest.TestCase):
                 "not-a-dict",
             ],
         }
-        # Files-only is the count_manifest_entries semantic too — we
-        # mirror it exactly for the shard variant. Non-dict entries are
-        # skipped silently; dict entries with any type are counted (so a
-        # future ``type=folder`` entry inside a shard would count, but
-        # v1 has no such shape).
+        # The shard helper mirrors ``count_manifest_entries`` exactly:
+        # every dict entry's versions count, regardless of ``type``;
+        # only non-dict entries are skipped. v1 has no entry types
+        # other than ``"file"``, so this is just a defensive shape
+        # guarantee — both the legacy and shard variants would count
+        # any future ``type`` value with the same arithmetic.
         self.assertEqual(count_shard_entries(shard), 2)
 
 

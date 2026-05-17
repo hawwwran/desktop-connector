@@ -144,6 +144,42 @@ class VaultManifestRollbackError(RuntimeError):
         )
 
 
+class VaultShardHashMismatchError(RuntimeError):
+    """A fetched shard envelope's hash disagrees with the trusted root pointer.
+
+    Raised when a §10.C hash-chain check fails: the relay returned a
+    shard envelope whose ``sha256(envelope_bytes)`` does not match the
+    ``shard_hash`` recorded in the freshly-fetched (AEAD-verified) root
+    pointer for that ``remote_folder_id``. AEAD on the shard itself
+    succeeds in that scenario because the bytes are an authentic prior
+    shard — what fails is the cross-envelope consistency the root
+    pledges. Caught at decrypt time so the per-folder rollback is
+    surfaced before any plaintext shard entries are consumed.
+
+    Same trust shape as :class:`VaultManifestRollbackError` for the
+    root revision floor; the two together close the rollback window
+    on each axis of the sharded manifest.
+    """
+
+    def __init__(
+        self,
+        *,
+        vault_id: str,
+        remote_folder_id: str,
+        expected_shard_hash: str,
+        actual_shard_hash: str,
+    ) -> None:
+        self.vault_id = str(vault_id)
+        self.remote_folder_id = str(remote_folder_id)
+        self.expected_shard_hash = str(expected_shard_hash)
+        self.actual_shard_hash = str(actual_shard_hash)
+        super().__init__(
+            f"vault relay served a shard for {self.remote_folder_id} whose "
+            f"sha256 ({self.actual_shard_hash!r}) does not match the trusted "
+            f"root pointer's shard_hash ({self.expected_shard_hash!r})"
+        )
+
+
 class VaultCASConflictError(VaultRelayError):
     """Server rejected a manifest publish because the CAS revision moved (HTTP 409).
 

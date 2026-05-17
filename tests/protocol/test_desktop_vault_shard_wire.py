@@ -415,7 +415,8 @@ class FolderShardWireTests(unittest.TestCase):
         vault = _vault()
         try:
             _seed_genesis(vault, relay)
-            # Advance shard out of band.
+            # Advance shard out of band — caller's local view says
+            # revision 0 but the relay is already at revision 5.
             relay.shards[FOLDER_A] = {
                 "envelope": b"\x00" * 100,
                 "revision": 5,
@@ -431,7 +432,12 @@ class FolderShardWireTests(unittest.TestCase):
             root_v2 = make_root_manifest(
                 vault_id=VAULT_ID, root_revision=2, parent_root_revision=1,
                 created_at="2026-05-04T10:00:00.000Z", author_device_id=AUTHOR,
-                remote_folders=[],
+                remote_folders=[make_root_folder_pointer(
+                    remote_folder_id=FOLDER_A, display_name_enc="A",
+                    created_at="2026-05-04T10:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    shard_revision=1, shard_hash="ph",
+                )],
             )
             with self.assertRaises(VaultCASConflictError):
                 vault.publish_shard_with_root(relay, FOLDER_A, shard, root_v2)
@@ -477,6 +483,179 @@ class UnifiedManifestCompatTests(unittest.TestCase):
             # Exactly one root GET + one shard GET hit the relay.
             self.assertEqual(relay.root_gets, 1)
             self.assertEqual(relay.shard_gets.get(FOLDER_A), 1)
+        finally:
+            vault.close()
+
+
+class ShardHashChainTests(unittest.TestCase):
+    """§10.C verifies that ``sha256(shard_envelope_bytes)`` matches the
+    trusted root pointer's ``shard_hash`` before plaintext entries are
+    consumed. These tests exercise the verification path at the wire
+    layer (the only place the envelope bytes are still in scope).
+    """
+
+    def _publish_a(self, vault: Vault, relay: FakeShardedRelay) -> None:
+        """Publish folder A with one empty shard via the atomic path so
+        the relay carries a valid (shard, root) pair where the root's
+        pointer hash matches the stored shard envelope.
+        """
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=FOLDER_A,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T10:00:00.000Z", author_device_id=AUTHOR,
+        )
+        root_v2 = make_root_manifest(
+            vault_id=VAULT_ID, root_revision=2, parent_root_revision=1,
+            created_at="2026-05-04T10:00:00.000Z", author_device_id=AUTHOR,
+            remote_folders=[make_root_folder_pointer(
+                remote_folder_id=FOLDER_A, display_name_enc="A",
+                created_at="2026-05-04T10:00:00.000Z",
+                created_by_device_id=AUTHOR,
+                shard_revision=1, shard_hash="ph-overwritten-by-vault",
+            )],
+        )
+        vault.publish_shard_with_root(relay, FOLDER_A, shard, root_v2)
+
+    def test_publish_shard_with_root_patches_pointer_hash(self) -> None:
+        """Sanity: the atomic publish writes a root pointer whose
+        ``shard_hash`` equals ``sha256(published_shard_envelope)``.
+        """
+        relay = FakeShardedRelay()
+        vault = _vault()
+        try:
+            _seed_genesis(vault, relay)
+            self._publish_a(vault, relay)
+
+            # The relay's stored root must agree with the relay's
+            # stored shard on the §10.C anchor.
+            root_back = vault.fetch_root_manifest(relay)
+            pointer = next(
+                p for p in root_back["remote_folders"]
+                if p["remote_folder_id"] == FOLDER_A
+            )
+            import hashlib
+            actual_envelope_hash = hashlib.sha256(
+                relay.shards[FOLDER_A]["envelope"]
+            ).hexdigest()
+            self.assertEqual(pointer["shard_hash"], actual_envelope_hash)
+        finally:
+            vault.close()
+
+    def test_fetch_unified_manifest_detects_shard_rollback(self) -> None:
+        """The §10.C anchor catches a per-shard rollback: a relay that
+        serves an older but still AEAD-valid shard envelope for a
+        folder must surface as ``VaultShardHashMismatchError`` before
+        the legacy entry shape is assembled.
+        """
+        from src.vault.relay_errors import VaultShardHashMismatchError
+
+        relay = FakeShardedRelay()
+        vault = _vault()
+        try:
+            _seed_genesis(vault, relay)
+            self._publish_a(vault, relay)
+
+            # Snapshot the current (revision 1) envelope.
+            old_envelope = relay.shards[FOLDER_A]["envelope"]
+            old_hash = relay.shards[FOLDER_A]["hash"]
+
+            # Bump folder A to revision 2 by publishing a new shard
+            # under the same vault key. This writes a fresh envelope
+            # whose hash differs from ``old_hash`` and also patches
+            # the root pointer.
+            shard_v2 = make_folder_shard(
+                vault_id=VAULT_ID, remote_folder_id=FOLDER_A,
+                shard_revision=2, parent_shard_revision=1,
+                created_at="2026-05-04T10:00:30.000Z",
+                author_device_id=AUTHOR,
+            )
+            root_v3 = make_root_manifest(
+                vault_id=VAULT_ID, root_revision=3, parent_root_revision=2,
+                created_at="2026-05-04T10:00:30.000Z", author_device_id=AUTHOR,
+                remote_folders=[make_root_folder_pointer(
+                    remote_folder_id=FOLDER_A, display_name_enc="A",
+                    created_at="2026-05-04T10:00:00.000Z",
+                    created_by_device_id=AUTHOR,
+                    shard_revision=2, shard_hash="ph-overwritten-by-vault",
+                )],
+            )
+            vault.publish_shard_with_root(relay, FOLDER_A, shard_v2, root_v3)
+            new_hash = relay.shards[FOLDER_A]["hash"]
+            self.assertNotEqual(old_hash, new_hash)
+
+            # Simulate a relay-side rollback: keep the root at revision
+            # 3 (so its pointer carries the new envelope's hash), but
+            # serve the *old* envelope on the next get_shard call.
+            relay.shards[FOLDER_A]["envelope"] = old_envelope
+            relay.shards[FOLDER_A]["hash"] = old_hash
+
+            with self.assertRaises(VaultShardHashMismatchError) as cm:
+                vault.fetch_unified_manifest(relay)
+            err = cm.exception
+            self.assertEqual(err.remote_folder_id, FOLDER_A)
+            self.assertEqual(err.expected_shard_hash, new_hash)
+        finally:
+            vault.close()
+
+    def test_fetch_folder_shard_explicit_hash_check(self) -> None:
+        """``fetch_folder_shard`` with ``expected_shard_hash`` raises
+        on mismatch but succeeds when the hash matches.
+        """
+        from src.vault.relay_errors import VaultShardHashMismatchError
+
+        relay = FakeShardedRelay()
+        vault = _vault()
+        try:
+            _seed_genesis(vault, relay)
+            self._publish_a(vault, relay)
+
+            correct_hash = relay.shards[FOLDER_A]["hash"]
+            # Happy path: the right hash decrypts successfully.
+            shard = vault.fetch_folder_shard(
+                relay, FOLDER_A, expected_shard_hash=correct_hash,
+            )
+            self.assertEqual(shard["remote_folder_id"], FOLDER_A)
+
+            # Wrong hash raises before AEAD even runs.
+            with self.assertRaises(VaultShardHashMismatchError):
+                vault.fetch_folder_shard(
+                    relay, FOLDER_A,
+                    expected_shard_hash="00" * 32,
+                )
+        finally:
+            vault.close()
+
+
+class PublishShardWithRootGuardrailTests(unittest.TestCase):
+    def test_raises_when_pointer_for_folder_missing(self) -> None:
+        """A misuse: caller forgot to add a folder pointer to the root
+        before calling ``publish_shard_with_root``. Without the
+        pointer, there's nowhere to record the shard's hash; we fail
+        fast instead of silently publishing an unanchored shard.
+        """
+        relay = FakeShardedRelay()
+        vault = _vault()
+        try:
+            _seed_genesis(vault, relay)
+
+            shard = make_folder_shard(
+                vault_id=VAULT_ID, remote_folder_id=FOLDER_A,
+                shard_revision=1, parent_shard_revision=0,
+                created_at="2026-05-04T10:00:00.000Z", author_device_id=AUTHOR,
+            )
+            # Root with NO folder pointer for FOLDER_A.
+            root_v2 = make_root_manifest(
+                vault_id=VAULT_ID, root_revision=2, parent_root_revision=1,
+                created_at="2026-05-04T10:00:00.000Z", author_device_id=AUTHOR,
+                remote_folders=[],
+            )
+            with self.assertRaises(ValueError) as cm:
+                vault.publish_shard_with_root(relay, FOLDER_A, shard, root_v2)
+            self.assertIn(FOLDER_A, str(cm.exception))
+            # No state moved on the relay.
+            self.assertEqual(relay.shard_with_root_puts, 0)
+            self.assertEqual(relay.root_revision, 1)
+            self.assertNotIn(FOLDER_A, relay.shards)
         finally:
             vault.close()
 

@@ -175,7 +175,7 @@ The full code table — including required `details` fields and retry classes (`
 | `PUT /api/vaults/{id}/header` | yes (CAS) | `expected_header_revision` mismatch returns 409 `vault_manifest_conflict`. |
 | `PUT /api/vaults/{id}/root` | yes (CAS) | `expected_current_root_revision` mismatch returns 409 `vault_root_conflict` carrying the current root envelope inline (§A1-root shape). |
 | `PUT /api/vaults/{id}/folders/{folder_id}/shard` | yes (CAS) | `expected_current_shard_revision` mismatch returns 409 `vault_shard_conflict` carrying the current shard envelope inline (§A1-shard shape). |
-| `PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root` | yes (atomic CAS) | Either both publishes land or neither; 409 carries the side that conflicted plus that side's current envelope inline. Mismatched `shard_hash` aborts with 422 `vault_shard_hash_mismatch`. |
+| `PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root` | yes (atomic CAS) | Either both publishes land or neither; 409 carries the side that conflicted plus that side's current envelope inline. Hash-chain consistency (`shard_hash == sha256(shard_envelope)`) is enforced at the **reader's** §10.C decrypt path — the relay cannot cross-check (root plaintext is sealed). |
 | `PUT /api/vaults/{id}/chunks/{chunk_id}` | yes | Same `chunk_id` + same ciphertext: 200 OK. Same id + different ciphertext: 422 `vault_chunk_size_mismatch` or `vault_chunk_tampered`. |
 | `GET` / `HEAD` (any) | yes | Pure reads. |
 | `POST /chunks/batch-head` | yes | Pure read; no state. |

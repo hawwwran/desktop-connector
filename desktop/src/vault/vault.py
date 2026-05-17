@@ -603,16 +603,26 @@ class Vault(RemoteFoldersMixin):
         self,
         relay: RelayProtocol,
         remote_folder_id: str,
+        *,
+        expected_shard_hash: str | None = None,
     ) -> dict:
         """Fetch + decrypt a folder shard envelope.
 
-        Per §10.C the caller is expected to verify
-        ``sha256(envelope) == root.remote_folders[i].shard_hash`` against
-        the trusted root before consuming entries; this method returns
-        the decrypted plaintext but does **not** automatically check the
-        hash chain (the caller has the matching root pointer; the Vault
-        doesn't keep one in memory). ``fetch_unified_manifest`` is the
-        compat surface that runs the chain check.
+        Per §10.C, a fetched shard's ``sha256(envelope_bytes)`` must equal
+        the trusted root pointer's ``shard_hash`` for the same
+        ``remote_folder_id``. AEAD alone is not sufficient: a malicious
+        or rolled-back relay can serve an authentic *prior* shard
+        envelope whose AAD-bound revision pair still matches its own
+        embedded bytes, so AEAD decrypt succeeds but the data is stale.
+        Pass ``expected_shard_hash=root.remote_folders[i].shard_hash``
+        (extracted from a freshly-fetched, AEAD-verified root) to run
+        the §10.C compare before decrypt and raise
+        :class:`VaultShardHashMismatchError` on drift.
+
+        Callers without a trusted root pointer in hand (e.g. a probe
+        test that's setting up state) can omit the kwarg, in which
+        case AEAD remains the only integrity gate.
+        ``fetch_unified_manifest`` always supplies the hash.
         """
         if self._closed:
             raise ValueError("vault is closed")
@@ -621,6 +631,16 @@ class Vault(RemoteFoldersMixin):
         if not isinstance(envelope, (bytes, bytearray)):
             raise ValueError("relay returned an invalid shard ciphertext")
         envelope_bytes = bytes(envelope)
+        if expected_shard_hash is not None and expected_shard_hash != "":
+            actual = hashlib.sha256(envelope_bytes).hexdigest()
+            if actual != expected_shard_hash:
+                from .relay_errors import VaultShardHashMismatchError
+                raise VaultShardHashMismatchError(
+                    vault_id=self._vault_id,
+                    remote_folder_id=remote_folder_id,
+                    expected_shard_hash=expected_shard_hash,
+                    actual_shard_hash=actual,
+                )
         shard_revision = int(resp.get("shard_revision", 0))
         parent_shard_revision = int(resp.get("parent_shard_revision", 0))
         plaintext = aead_decrypt(
@@ -643,13 +663,23 @@ class Vault(RemoteFoldersMixin):
         relay: RelayProtocol,
         remote_folder_id: str,
         shard: dict,
-    ) -> dict:
+    ) -> tuple[dict, str]:
         """Encrypt + CAS-publish a new shard revision for one folder.
 
         Strongly discouraged for normal edits — use
         :meth:`publish_shard_with_root` so the root's shard_hash stays
-        in sync. The standalone publish is for retention-purge passes
-        that touch only the shard.
+        in sync atomically. The standalone publish is for retention-purge
+        passes and the one-shot migration script, both of which patch
+        the root pointer in a separate publish.
+
+        Returns ``(normalized_shard_plaintext, envelope_hash)``. The
+        ``envelope_hash`` is ``sha256(published_envelope_bytes)`` — the
+        value the caller MUST store in
+        ``root.remote_folders[i].shard_hash`` before the next root
+        publish, so §10.C readers can verify this shard. Shard envelope
+        encryption is non-deterministic (random nonce), so the caller
+        cannot recompute this hash later; it is only knowable at
+        publish time, which is why the method returns it.
         """
         if self._closed or not self._master_key:
             raise ValueError("vault is closed")
@@ -672,7 +702,7 @@ class Vault(RemoteFoldersMixin):
             shard_hash=envelope_hash,
             shard_ciphertext=envelope_bytes,
         )
-        return normalized
+        return normalized, envelope_hash
 
     def publish_shard_with_root(
         self,
@@ -683,11 +713,21 @@ class Vault(RemoteFoldersMixin):
     ) -> dict:
         """Atomic per-folder shard + root publish (§6.8).
 
-        The **primary** publish path for sync engines. The client is
-        responsible for keeping ``root.remote_folders[i].shard_hash``
-        consistent with ``sha256(shard_envelope)`` — the relay can't
-        cross-check that (the root plaintext is sealed). Returns the
-        normalized shard + root dicts as a tuple of two dicts.
+        The **primary** publish path for sync engines. Encrypts the
+        shard first, then patches the matching folder pointer in the
+        supplied root with ``shard_hash =
+        sha256(shard_envelope_bytes)`` and ``shard_revision =
+        new_shard_revision`` so the §10.C hash chain holds at the
+        wire boundary. Callers only need to set ``shard_hash`` to any
+        placeholder (or omit it on a freshly-added pointer); the Vault
+        owns the real value because shard envelope encryption is
+        non-deterministic and the hash is only knowable post-encrypt.
+
+        The pointer for ``remote_folder_id`` MUST already exist in
+        ``root.remote_folders`` — call ``publish_root_manifest`` to
+        add a brand-new folder pointer before its first shard publish.
+        Returns the normalized shard + root dicts as a tuple of two
+        dicts (the root reflects the patched pointer).
         """
         if self._closed or not self._master_key:
             raise ValueError("vault is closed")
@@ -702,6 +742,24 @@ class Vault(RemoteFoldersMixin):
         )
 
         root_n = normalize_root_manifest_plaintext(root)
+        # §10.C: the root pointer for this folder MUST carry the
+        # just-computed shard envelope hash. The shard nonce was
+        # generated above and never leaves this method, so callers
+        # cannot know the right hash; we own it here and patch the
+        # pointer before sealing the root.
+        pointer_patched = False
+        for pointer in root_n.get("remote_folders", []):
+            if str(pointer.get("remote_folder_id", "")) == remote_folder_id:
+                pointer["shard_hash"] = shard_env_hash
+                pointer["shard_revision"] = s_rev
+                pointer_patched = True
+                break
+        if not pointer_patched:
+            raise ValueError(
+                f"root.remote_folders has no pointer for {remote_folder_id!r}; "
+                "publish a root with the new folder pointer first"
+            )
+
         assert_publishable_root_revision(root_n)
         r_rev = int(root_n["root_revision"])
         r_parent = int(root_n["parent_root_revision"])
@@ -747,14 +805,29 @@ class Vault(RemoteFoldersMixin):
 
         Used by callers that haven't been ported to the shard-aware
         fetch path yet (Phase E + F migrate them; Phase H removes this
-        method). Hash-chains each shard against the root before
-        decrypt — same trust pattern as §10.C.
+        method). Each shard is fetched with the root pointer's
+        ``shard_hash`` as ``expected_shard_hash`` so the §10.C check
+        fires per shard — a relay-side per-folder rollback raises
+        :class:`VaultShardHashMismatchError` before any plaintext
+        entries are consumed.
+
+        Pointers whose ``shard_hash`` is empty (``""``) denote a freshly
+        added folder that has not yet had a shard published; the
+        ``get_shard`` call would 404 anyway, so we skip the fetch and
+        let the assembled view show the pointer with ``entries: []``.
         """
         root = self.fetch_root_manifest(relay, local_index=local_index)
         shards_by_id: dict[str, dict] = {}
         for pointer in root.get("remote_folders", []):
             rf_id = str(pointer.get("remote_folder_id", ""))
-            shard = self.fetch_folder_shard(relay, rf_id)
+            expected_hash = str(pointer.get("shard_hash", ""))
+            if expected_hash == "":
+                # Pointer exists in the root but no shard has been
+                # published yet — skip the fetch.
+                continue
+            shard = self.fetch_folder_shard(
+                relay, rf_id, expected_shard_hash=expected_hash,
+            )
             shards_by_id[rf_id] = shard
         return assemble_unified_manifest(root, shards_by_id)
 

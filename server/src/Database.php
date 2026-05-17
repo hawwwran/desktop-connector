@@ -187,39 +187,97 @@ class Database
         // has never shipped, so the legacy `vault_manifests` data is
         // discarded; the dev twin re-seeds its vault via the suite-
         // start setup.
-        $shardingSql = file_get_contents(__DIR__ . '/../migrations/005_vault_manifest_shards.sql');
-        if ($shardingSql !== false) {
-            // ``ALTER TABLE ADD COLUMN`` fails if the column already
-            // exists; on fresh installs the column is brand-new, on
-            // upgrades from a prior dev twin it might already exist.
-            // SQLite doesn't support ``IF NOT EXISTS`` for ALTER, so
-            // we probe via ``PRAGMA table_info`` and route the run
-            // through one of two branches.
-            $hasRootColumns = false;
-            $info = $this->db->query("PRAGMA table_info(vaults)");
-            while ($row = $info->fetchArray(SQLITE3_ASSOC)) {
-                if ($row['name'] === 'current_root_revision') {
-                    $hasRootColumns = true;
-                    break;
-                }
-            }
-            // Finalize the PRAGMA cursor before any DDL runs — leaving
-            // it open holds a read lock that fights the migration's
-            // ``DROP TABLE`` statement and emits a "database table is
-            // locked" warning under PHPUnit's strict-warning mode.
-            $info->finalize();
-            if (!$hasRootColumns) {
-                $this->db->exec($shardingSql);
-            } else {
-                // Re-run only the CREATE TABLE / INDEX statements (all
-                // idempotent via IF NOT EXISTS); skip the ALTER TABLE
-                // statements that would fail.
-                $createOnly = preg_replace(
-                    '/ALTER TABLE [^;]+;/i', '', $shardingSql,
-                );
-                $this->db->exec($createOnly);
-            }
+        //
+        // ``ALTER TABLE ADD COLUMN`` fails if the column already
+        // exists; on fresh installs the columns are brand-new, on
+        // upgrades from a prior dev twin they might already exist.
+        // SQLite has no ``IF NOT EXISTS`` for ALTER, so we probe
+        // ``PRAGMA table_info`` per column and run only the ALTERs
+        // that are still needed. The CREATE TABLE / INDEX statements
+        // are unconditionally idempotent via ``IF NOT EXISTS``; the
+        // ``DROP TABLE IF EXISTS vault_manifests`` is also a no-op
+        // on a re-run. Each statement is executed directly from PHP
+        // (no SQL-file regex parsing) so a future migration adding a
+        // semicolon inside a quoted literal won't fight a fragile
+        // splitter.
+        $vaultColumns = [];
+        $info = $this->db->query("PRAGMA table_info(vaults)");
+        while ($row = $info->fetchArray(SQLITE3_ASSOC)) {
+            $vaultColumns[$row['name']] = true;
         }
+        // Finalize the PRAGMA cursor before any DDL runs — leaving
+        // it open holds a read lock that fights the migration's
+        // ``DROP TABLE`` statement and emits a "database table is
+        // locked" warning under PHPUnit's strict-warning mode.
+        $info->finalize();
+
+        $this->db->exec('DROP TABLE IF EXISTS vault_manifests');
+        if (!isset($vaultColumns['current_root_revision'])) {
+            $this->db->exec(
+                "ALTER TABLE vaults ADD COLUMN current_root_revision INTEGER NOT NULL DEFAULT 1"
+            );
+        }
+        if (!isset($vaultColumns['current_root_hash'])) {
+            $this->db->exec(
+                "ALTER TABLE vaults ADD COLUMN current_root_hash TEXT NOT NULL DEFAULT ''"
+            );
+        }
+
+        // Three new tables + their indexes. ``IF NOT EXISTS`` on each
+        // makes re-runs a no-op. The byte-exact schemas live in
+        // migrations/005_vault_manifest_shards.sql as the canonical
+        // record + documentation; this PHP path is the executor and
+        // must stay in sync with the file (server/tests/Vault/
+        // VaultSchemaTest covers the round-trip).
+        $this->db->exec(
+            'CREATE TABLE IF NOT EXISTS vault_root_manifests (
+                vault_id              TEXT    NOT NULL,
+                root_revision         INTEGER NOT NULL,
+                parent_root_revision  INTEGER NOT NULL DEFAULT 0,
+                root_hash             TEXT    NOT NULL,
+                root_ciphertext       BLOB    NOT NULL,
+                root_size             INTEGER NOT NULL,
+                author_device_id      TEXT    NOT NULL,
+                created_at            INTEGER NOT NULL,
+                PRIMARY KEY (vault_id, root_revision)
+            )'
+        );
+        $this->db->exec(
+            'CREATE INDEX IF NOT EXISTS idx_vault_root_manifests_vault
+                ON vault_root_manifests (vault_id, root_revision DESC)'
+        );
+        $this->db->exec(
+            'CREATE TABLE IF NOT EXISTS vault_folder_shards (
+                vault_id              TEXT    NOT NULL,
+                remote_folder_id      TEXT    NOT NULL,
+                shard_revision        INTEGER NOT NULL,
+                parent_shard_revision INTEGER NOT NULL DEFAULT 0,
+                shard_hash            TEXT    NOT NULL,
+                shard_ciphertext      BLOB    NOT NULL,
+                shard_size            INTEGER NOT NULL,
+                author_device_id      TEXT    NOT NULL,
+                created_at            INTEGER NOT NULL,
+                PRIMARY KEY (vault_id, remote_folder_id, shard_revision)
+            )'
+        );
+        $this->db->exec(
+            'CREATE INDEX IF NOT EXISTS idx_vault_folder_shards_vault
+                ON vault_folder_shards (vault_id, remote_folder_id, shard_revision DESC)'
+        );
+        $this->db->exec(
+            "CREATE TABLE IF NOT EXISTS vault_folder_shard_heads (
+                vault_id                TEXT    NOT NULL,
+                remote_folder_id        TEXT    NOT NULL,
+                current_shard_revision  INTEGER NOT NULL,
+                current_shard_hash      TEXT    NOT NULL DEFAULT '',
+                updated_at              INTEGER NOT NULL,
+                PRIMARY KEY (vault_id, remote_folder_id)
+            )"
+        );
+        $this->db->exec(
+            'CREATE INDEX IF NOT EXISTS idx_vault_folder_shard_heads_vault
+                ON vault_folder_shard_heads (vault_id)'
+        );
     }
 
     public function query(string $sql, array $params = []): SQLite3Result

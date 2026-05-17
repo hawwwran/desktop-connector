@@ -62,14 +62,56 @@ def _vault() -> Vault:
     )
 
 
-def _pointer(rf: str, *, shard_revision: int = 1) -> dict:
+def _pointer(rf: str, *, shard_revision: int = 1, shard_hash: str = "placeholder") -> dict:
     return make_root_folder_pointer(
         remote_folder_id=rf, display_name_enc="X",
         created_at="2026-05-04T10:00:00.000Z",
         created_by_device_id=AUTHOR,
         shard_revision=shard_revision,
-        shard_hash="placeholder",
+        shard_hash=shard_hash,
     )
+
+
+def _bootstrap_three_folders(vault: Vault, relay: FakeShardedRelay) -> None:
+    """Publish FOLDER_A / FOLDER_B / FOLDER_C with one shard each.
+
+    Each iteration carries previous folders' pointers with their
+    *current* relay-stored shard_hash so the root's §10.C chain stays
+    intact across publishes — without this, the second publish would
+    overwrite folder A's pointer with a placeholder hash, and a
+    subsequent fetch_unified_manifest would raise
+    ``VaultShardHashMismatchError`` on folder A.
+    """
+    folders = [FOLDER_A, FOLDER_B, FOLDER_C]
+    for idx, rf in enumerate(folders, start=1):
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=rf,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T10:00:00.000Z",
+            author_device_id=AUTHOR,
+        )
+        remote_folders = []
+        for prev_rf in folders[:idx]:
+            if prev_rf == rf:
+                # Current folder — Vault patches the pointer's
+                # shard_hash on publish, so a placeholder is fine.
+                remote_folders.append(_pointer(prev_rf, shard_revision=1))
+            else:
+                # Previously-published folder — preserve the relay's
+                # stored hash so this root's pointer stays consistent.
+                remote_folders.append(_pointer(
+                    prev_rf,
+                    shard_revision=1,
+                    shard_hash=relay.shards[prev_rf]["hash"],
+                ))
+        root = make_root_manifest(
+            vault_id=VAULT_ID,
+            root_revision=1 + idx, parent_root_revision=idx,
+            created_at="2026-05-04T10:00:00.000Z",
+            author_device_id=AUTHOR,
+            remote_folders=remote_folders,
+        )
+        vault.publish_shard_with_root(relay, rf, shard, root)
 
 
 class LazyShardLoadTests(unittest.TestCase):
@@ -78,27 +120,7 @@ class LazyShardLoadTests(unittest.TestCase):
         vault = _vault()
         try:
             _seed_genesis(vault, relay)
-
-            # Bootstrap three folders so each has a shard the relay
-            # can serve when asked.
-            for idx, rf in enumerate([FOLDER_A, FOLDER_B, FOLDER_C], start=1):
-                shard = make_folder_shard(
-                    vault_id=VAULT_ID, remote_folder_id=rf,
-                    shard_revision=1, parent_shard_revision=0,
-                    created_at="2026-05-04T10:00:00.000Z",
-                    author_device_id=AUTHOR,
-                )
-                root = make_root_manifest(
-                    vault_id=VAULT_ID,
-                    root_revision=1 + idx, parent_root_revision=idx,
-                    created_at="2026-05-04T10:00:00.000Z",
-                    author_device_id=AUTHOR,
-                    remote_folders=[
-                        _pointer(prev_rf, shard_revision=1)
-                        for prev_rf in [FOLDER_A, FOLDER_B, FOLDER_C][:idx]
-                    ],
-                )
-                vault.publish_shard_with_root(relay, rf, shard, root)
+            _bootstrap_three_folders(vault, relay)
 
             # Reset the probe counters so the assertion below ignores
             # the bootstrap traffic.
@@ -133,24 +155,7 @@ class LazyShardLoadTests(unittest.TestCase):
         vault = _vault()
         try:
             _seed_genesis(vault, relay)
-            for idx, rf in enumerate([FOLDER_A, FOLDER_B, FOLDER_C], start=1):
-                shard = make_folder_shard(
-                    vault_id=VAULT_ID, remote_folder_id=rf,
-                    shard_revision=1, parent_shard_revision=0,
-                    created_at="2026-05-04T10:00:00.000Z",
-                    author_device_id=AUTHOR,
-                )
-                root = make_root_manifest(
-                    vault_id=VAULT_ID,
-                    root_revision=1 + idx, parent_root_revision=idx,
-                    created_at="2026-05-04T10:00:00.000Z",
-                    author_device_id=AUTHOR,
-                    remote_folders=[
-                        _pointer(prev_rf, shard_revision=1)
-                        for prev_rf in [FOLDER_A, FOLDER_B, FOLDER_C][:idx]
-                    ],
-                )
-                vault.publish_shard_with_root(relay, rf, shard, root)
+            _bootstrap_three_folders(vault, relay)
 
             relay.shard_gets = {}
             relay.root_gets = 0
