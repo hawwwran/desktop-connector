@@ -229,6 +229,12 @@ class RemoteFoldersMixin:
         published root with empty per-folder shard views — folder-
         mutating ops never read shard contents, and callers that need
         entry data fetch them separately via ``fetch_folder_shard``.
+
+        WARNING: callers MUST NOT compute usage / file-count / any
+        per-folder aggregation from the returned manifest — every
+        folder's ``entries`` list is empty. Use
+        ``vault.fetch_unified_manifest`` (or an async usage-refresh
+        path) when entry data is needed.
         """
         current_root = self.fetch_root_manifest(relay, local_index=local_index)
         parent_root_revision = int(current_root.get("root_revision", 0))

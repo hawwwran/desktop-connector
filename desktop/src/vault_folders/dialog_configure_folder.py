@@ -19,7 +19,6 @@ from gi.repository import Gtk, Adw, GLib  # noqa: E402
 
 from ..vault.error_messages import humanize
 from ..vault.folder.ui_state import parse_ignore_patterns_text
-from ..vault.state.usage import calculate_vault_usage
 from .context import FoldersContext
 from .data import lookup_folder_settings
 
@@ -131,7 +130,14 @@ def open_configure_folder_dialog(
         def worker() -> None:
             try:
                 author_device_id = ctx.config.device_id or ("0" * 32)
-                manifest = ctx.runtime.update_remote_folder_settings(
+                # ``update_remote_folder_settings`` returns a unified
+                # manifest with EMPTY per-folder shard views (root-only
+                # mutation; rename / ignore_patterns don't touch shards).
+                # Don't recompute usage from it — the zero entries would
+                # overwrite the sidebar's real usage values. The rename
+                # / ignore-patterns mutations don't change usage; the
+                # prior state stays correct.
+                ctx.runtime.update_remote_folder_settings(
                     remote_folder_id=remote_folder_id,
                     author_device_id=author_device_id,
                     new_display_name=new_name if name_changed else None,
@@ -139,7 +145,6 @@ def open_configure_folder_dialog(
                         new_patterns if patterns_changed else None
                     ),
                 )
-                usage = calculate_vault_usage(manifest).by_folder
             except Exception as exc:  # noqa: BLE001
                 error_message = humanize(exc)
 
@@ -158,7 +163,6 @@ def open_configure_folder_dialog(
                 return
 
             def succeed() -> bool:
-                ctx.usage_by_folder_state["value"] = usage
                 dialog.close()
                 ctx.refresh_all(f"Saved {new_name}.")
                 return False

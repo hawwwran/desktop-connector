@@ -21,7 +21,6 @@ from ..vault.folder.ui_state import (
     default_ignore_patterns_text,
     parse_ignore_patterns_text,
 )
-from ..vault.state.usage import calculate_vault_usage
 from .context import FoldersContext
 from .dialog_response_details import _present_response_details_dialog
 
@@ -156,12 +155,18 @@ def open_add_folder_dialog(ctx: FoldersContext, _btn=None) -> None:
         def worker() -> None:
             try:
                 author_device_id = ctx.config.device_id or ("0" * 32)
+                # ``add_remote_folder`` returns a unified manifest with
+                # EMPTY per-folder shard views (root-only mutation; no
+                # shards walked). Don't recompute usage from it — the
+                # zero entries would overwrite the sidebar's real usage
+                # values. Existing folders' usage is unchanged by this
+                # op; the freshly-added folder starts empty, which is
+                # the correct rendering.
                 manifest = ctx.runtime.add_remote_folder(
                     display_name=folder_name,
                     ignore_patterns=patterns,
                     author_device_id=author_device_id,
                 )
-                usage = calculate_vault_usage(manifest).by_folder
             except Exception as exc:  # noqa: BLE001
                 error_message = humanize(exc)
                 error_details = getattr(exc, "response_text", None) or None
@@ -180,7 +185,6 @@ def open_add_folder_dialog(ctx: FoldersContext, _btn=None) -> None:
                 return
 
             def succeed() -> bool:
-                ctx.usage_by_folder_state["value"] = usage
                 dialog.close()
                 # Auto-select the freshly-added folder so the user
                 # lands on its detail pane and can immediately wire
