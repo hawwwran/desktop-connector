@@ -468,6 +468,15 @@ def _publish_batch_with_cas_retry(
             root_envelope = exc.current_root_ciphertext_bytes()
             if not shard_envelope and not root_envelope:
                 raise
+            is_last = attempt == max_retries - 1
+            if is_last:
+                log.warning(
+                    "vault.upload.batch_cas_exhausted vault=%s additions=%d attempts=%d",
+                    getattr(vault, "vault_id", "?"),
+                    len(additions),
+                    max_retries,
+                )
+                raise
             new_shard = (
                 vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
                 if shard_envelope else current_state.shard
@@ -483,33 +492,7 @@ def _publish_batch_with_cas_retry(
                 bool(shard_envelope), bool(root_envelope),
             )
             current_state = FolderState(root=new_root, shard=new_shard)
-    # F-D25: same exhaustion log as the single-version helper, scoped
-    # to the batch path so a folder-upload's terminal CAS failure shows
-    # up with its own event tag.
-    candidate_shard = _apply_additions_to_shard(
-        current_state.shard, additions,
-        remote_folder_id=remote_folder_id,
-        author_device_id=author_device_id,
-        created_at=timestamp,
-    )
-    candidate_root = _bumped_root_for_shard_publish(
-        current_state.root,
-        author_device_id=author_device_id,
-        created_at=timestamp,
-    )
-    try:
-        shard_out, root_out = vault.publish_shard_with_root(
-            relay, remote_folder_id, candidate_shard, candidate_root,
-        )
-        return FolderState(root=root_out, shard=shard_out)
-    except VaultCASConflictError:
-        log.warning(
-            "vault.upload.batch_cas_exhausted vault=%s additions=%d retries=%d",
-            getattr(vault, "vault_id", "?"),
-            len(additions),
-            max_retries,
-        )
-        raise
+    raise AssertionError("unreachable: loop exits via return or raise")
 
 
 def _apply_additions_to_shard(

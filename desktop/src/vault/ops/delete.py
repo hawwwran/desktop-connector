@@ -281,6 +281,14 @@ def _publish_shard_with_retry(
             root_envelope = exc.current_root_ciphertext_bytes()
             if not shard_envelope and not root_envelope:
                 raise
+            is_last = attempt == max_retries - 1
+            if is_last:
+                log.warning(
+                    "vault.delete.cas_exhausted vault=%s attempts=%d",
+                    getattr(vault, "vault_id", "?"),
+                    max_retries,
+                )
+                raise
             new_shard = (
                 vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
                 if shard_envelope else current_state.shard
@@ -296,22 +304,7 @@ def _publish_shard_with_retry(
                 bool(shard_envelope), bool(root_envelope),
             )
             current_state = FolderState(root=new_root, shard=new_shard)
-    # F-D25: one final attempt; exhaustion-tag if it still 409s.
-    candidate_shard, candidate_root = _build_candidate(
-        current_state, remote_folder_id, author_device_id, op,
-    )
-    try:
-        shard_out, root_out = vault.publish_shard_with_root(
-            relay, remote_folder_id, candidate_shard, candidate_root,
-        )
-        return FolderState(root=root_out, shard=shard_out)
-    except VaultCASConflictError:
-        log.warning(
-            "vault.delete.cas_exhausted vault=%s retries=%d",
-            getattr(vault, "vault_id", "?"),
-            max_retries,
-        )
-        raise
+    raise AssertionError("unreachable: loop exits via return or raise")
 
 
 def _build_candidate(

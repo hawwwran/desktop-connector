@@ -96,7 +96,7 @@ def run_two_way_cycle(
     SO-3 extension: Phase B drains pending ops in batches of
     ``batch_size`` (default :data:`PUBLISH_BATCH_SIZE`) using the
     same primitives as :func:`run_backup_only_cycle`. The key
-    difference from backup-only: batches use ``max_retries=0`` — on
+    difference from backup-only: batches use ``max_retries=1`` — on
     CAS conflict we abort the batch and break Phase B early so the
     outer iteration loop re-runs Phase A on the refreshed state. Phase A
     is where the §D4 keep-both conflict-rename detection lives;
@@ -226,7 +226,7 @@ def run_two_way_cycle(
             batch.append(batch_entry)
 
             if len(batch) >= batch_size:
-                # SO-3 two-way variant: ``max_retries=0`` so a CAS
+                # SO-3 two-way variant: ``max_retries=1`` so a CAS
                 # conflict aborts the batch rather than blind-replays.
                 # The outer iteration loop re-runs Phase A on the
                 # refreshed head, which applies the concurrent
@@ -241,7 +241,7 @@ def run_two_way_cycle(
                     state=state,
                     batch=batch,
                     author_device_id=author_device_id,
-                    max_retries=0,
+                    max_retries=1,
                 )
                 for outcome in batch_outcomes:
                     _emit_twoway(outcome)
@@ -263,7 +263,7 @@ def run_two_way_cycle(
                     break
 
         # Cycle-end flush of the partial batch (if any). Same
-        # ``max_retries=0`` policy — single attempt; on CAS conflict
+        # ``max_retries=1`` policy — single attempt; on CAS conflict
         # drop the batch and let the next iteration re-run Phase A.
         if batch:
             batch_outcomes, state, batch_failed = _flush_batch(
@@ -275,7 +275,7 @@ def run_two_way_cycle(
                 state=state,
                 batch=batch,
                 author_device_id=author_device_id,
-                max_retries=0,
+                max_retries=1,
             )
             for outcome in batch_outcomes:
                 _emit_twoway(outcome)

@@ -527,7 +527,7 @@ def run_backup_only_cycle(
         cancelled_still_active = cancelled and (
             should_continue is None or not should_continue()
         )
-        flush_max_retries = 0 if cancelled_still_active else CAS_MAX_RETRIES
+        flush_max_retries = 1 if cancelled_still_active else CAS_MAX_RETRIES
         batch_outcomes, state, batch_failed = _flush_batch(
             vault=vault,
             relay=relay,
@@ -1067,6 +1067,13 @@ def _publish_batch_with_cas_retry(
             if not shard_envelope and not root_envelope:
                 # Neither side gave us a recovery payload — can't merge.
                 raise
+            is_last = attempt == max_retries - 1
+            if is_last:
+                log.warning(
+                    "vault.sync.batch_cas_exhausted batch_size=%d attempts=%d",
+                    len(batch), max_retries,
+                )
+                raise
             new_shard = (
                 vault.decrypt_shard_envelope(shard_envelope, remote_folder_id)
                 if shard_envelope else current_state.shard
@@ -1108,17 +1115,7 @@ def _publish_batch_with_cas_retry(
                 author_device_id=author_device_id,
                 created_at=created_at,
             )
-    try:
-        shard_out, root_out = vault.publish_shard_with_root(
-            relay, remote_folder_id, candidate_shard, candidate_root,
-        )
-        return _BindingFolderState(root=root_out, shard=shard_out)
-    except VaultCASConflictError:
-        log.warning(
-            "vault.sync.batch_cas_exhausted batch_size=%d retries=%d",
-            len(batch), max_retries,
-        )
-        raise
+    raise AssertionError("unreachable: loop exits via return or raise")
 
 
 def _log_batch_cas_steamrolls(
@@ -1205,10 +1202,10 @@ def _flush_batch(
     is marked "failed" so the cycle's failed_count reflects reality;
     pending-op rows survive for the next cycle.
 
-    ``max_retries`` caps the §D4 CAS retry budget. The cycle-end
-    flush passes ``0`` when a cancel is still active so we attempt
-    one publish but don't burn a retry storm after the user clicked
-    Pause (F-Y08).
+    ``max_retries`` is the total publish-attempt budget (≥ 1). The
+    cycle-end flush passes ``1`` when a cancel is still active so we
+    attempt one publish but don't burn a retry storm after the user
+    clicked Pause (F-Y08).
     """
     if not batch:
         return [], state, False
