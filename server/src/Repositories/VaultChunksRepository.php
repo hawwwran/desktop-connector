@@ -297,6 +297,62 @@ class VaultChunksRepository
             [':vid' => $vaultId, ':cid' => $chunkId]
         );
     }
+
+    /**
+     * Enumerate every chunk row still in ``purged`` state for ``$vaultId``.
+     * Used by the residual-unlink reaper invoked at the start of
+     * ``gcExecute`` (review §1.C2): a gc/execute that crashed or hit
+     * EBUSY/EIO between the state flip and the unlink left orphan blobs
+     * on disk with no further retry path; this enumerator gives the
+     * reaper the storage_paths it needs.
+     *
+     * @return list<array{chunk_id: string, storage_path: string}>
+     */
+    public function listPurged(string $vaultId, int $limit = 1024): array
+    {
+        $rows = $this->db->queryAll(
+            'SELECT chunk_id, storage_path
+             FROM vault_chunks
+             WHERE vault_id = :vid AND state = :state
+             LIMIT :lim',
+            [
+                ':vid'   => $vaultId,
+                ':state' => self::STATE_PURGED,
+                ':lim'   => $limit,
+            ]
+        );
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = [
+                'chunk_id'     => (string)$row['chunk_id'],
+                'storage_path' => (string)$row['storage_path'],
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Conditional row delete used by the §1.C2 residual reaper. Returns
+     * true iff a row in state ``purged`` was deleted. The state guard
+     * defends against the §1.C1 revival race: between the reaper reading
+     * a purged row and the reaper deciding the unlink succeeded, a
+     * concurrent ``putChunk`` may have flipped the same row back to
+     * ``active``. An unconditional delete in that window would erase a
+     * legitimately-revived row's metadata while its blob is on disk.
+     */
+    public function deleteIfPurged(string $vaultId, string $chunkId): bool
+    {
+        $this->db->execute(
+            'DELETE FROM vault_chunks
+             WHERE vault_id = :vid AND chunk_id = :cid AND state = :state',
+            [
+                ':vid'   => $vaultId,
+                ':cid'   => $chunkId,
+                ':state' => self::STATE_PURGED,
+            ]
+        );
+        return $this->db->changes() === 1;
+    }
 }
 
 /**

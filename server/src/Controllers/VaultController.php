@@ -976,6 +976,42 @@ class VaultController
             || $state === VaultChunksRepository::STATE_RETAINED;
     }
 
+    /**
+     * Review §1.C2: residual-unlink reaper. Walks rows in ``purged``
+     * state, retries the file unlink (idempotent — a missing file is
+     * treated as success), then conditionally deletes the row when the
+     * blob is verifiably gone. ``deleteIfPurged`` keeps the delete
+     * state-guarded so a concurrent §1.C1 revival can't be erased.
+     *
+     * Failures are logged and skipped — the orphan stays for the next
+     * gc/execute to retry, so a sticky EBUSY/EIO doesn't break the GC
+     * pass that's about to follow.
+     */
+    private static function reapResidualPurged(
+        Database $db,
+        string $vaultId,
+        VaultChunksRepository $chunksRepo
+    ): void {
+        foreach ($chunksRepo->listPurged($vaultId) as $row) {
+            $relativePath = (string)$row['storage_path'];
+            $chunkId = (string)$row['chunk_id'];
+            $absPath = VaultStorage::root() . '/' . $relativePath;
+            $fileGone = !is_file($absPath);
+            if (!$fileGone) {
+                $fileGone = @unlink($absPath) === true;
+                if (!$fileGone) {
+                    AppLog::log('vault', sprintf(
+                        'vault.gc.unlink_failed chunk=%s path=%s',
+                        substr($chunkId, 0, 12),
+                        $absPath,
+                    ), 'warning');
+                    continue;
+                }
+            }
+            $chunksRepo->deleteIfPurged($vaultId, $chunkId);
+        }
+    }
+
     // ===================================================================
     //  6.11  POST /api/vaults/{vault_id}/chunks/batch-head
     // ===================================================================
@@ -1196,6 +1232,17 @@ class VaultController
         $chunksRepo = new VaultChunksRepository($db);
         $vaultsRepo = new VaultsRepository($db);
 
+        // Review §1.C2: residual-unlink reaper. A previous gcExecute that
+        // committed `state := purged` but crashed (or hit EBUSY/EIO)
+        // before its post-commit unlink left an orphan blob on disk with
+        // no scheduled retry — line 1206 below skips purged rows, so the
+        // file would leak forever. Walk the purged set, retry the unlink,
+        // and delete the row only when the file is verifiably gone. The
+        // ``deleteIfPurged`` state guard defends against the §1.C1
+        // revival race (a concurrent putChunk may have flipped the row
+        // back to active in the meantime).
+        self::reapResidualPurged($db, $vaultId, $chunksRepo);
+
         // F-S12: collect plans first, then commit DB state in a single
         // transaction, then unlink files. A crash mid-loop now leaves
         // either (a) no DB change + files intact, or (b) all DB changes
@@ -1203,7 +1250,8 @@ class VaultController
         // cleaned up at next gc/execute call which is idempotent now).
         $deletedCount = 0;
         $freedBytes   = 0;
-        $unlinkPaths  = [];
+        /** @var list<array{chunk_id: string, path: string}> $unlinkTargets */
+        $unlinkTargets = [];
         $now = time();
 
         $db->execute('BEGIN IMMEDIATE');
@@ -1219,7 +1267,10 @@ class VaultController
                 $chunksRepo->setState($vaultId, $cid, VaultChunksRepository::STATE_PURGED);
                 $deletedCount++;
                 $freedBytes += (int)$row['ciphertext_size'];
-                $unlinkPaths[] = VaultStorage::root() . '/' . (string)$row['storage_path'];
+                $unlinkTargets[] = [
+                    'chunk_id' => (string)$cid,
+                    'path'     => VaultStorage::root() . '/' . (string)$row['storage_path'],
+                ];
             }
             if ($deletedCount > 0) {
                 $vaultsRepo->incUsedBytes($vaultId, -$freedBytes, -$deletedCount, $now);
@@ -1232,16 +1283,28 @@ class VaultController
         }
 
         // After-commit unlinks. A failure here is logged; the bytes
-        // count is already debited from the vault, so leftover files
-        // are dead-weight that the next purge will clean up.
-        foreach ($unlinkPaths as $absPath) {
-            if (is_file($absPath) && @unlink($absPath) === false) {
-                AppLog::log('vault', sprintf(
-                    'vault.gc.unlink_failed plan=%s path=%s',
-                    substr($planId, 0, 12),
-                    $absPath,
-                ), 'warning');
+        // count is already debited from the vault. Successful unlinks
+        // also delete the now-orphan ``purged`` row so it doesn't keep
+        // looping through the §1.C2 reaper on every subsequent
+        // gc/execute — ``deleteIfPurged`` keeps the delete state-guarded
+        // for the §1.C1 revival race. Persistent EBUSY/EIO leaves the
+        // row in place; the next gc/execute's residual reaper retries.
+        foreach ($unlinkTargets as $target) {
+            $absPath = $target['path'];
+            $chunkId = $target['chunk_id'];
+            $fileGone = !is_file($absPath);
+            if (!$fileGone) {
+                $fileGone = @unlink($absPath) === true;
+                if (!$fileGone) {
+                    AppLog::log('vault', sprintf(
+                        'vault.gc.unlink_failed plan=%s path=%s',
+                        substr($planId, 0, 12),
+                        $absPath,
+                    ), 'warning');
+                    continue;
+                }
             }
+            $chunksRepo->deleteIfPurged($vaultId, $chunkId);
         }
 
         Router::json([

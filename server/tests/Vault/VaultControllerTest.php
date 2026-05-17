@@ -830,44 +830,41 @@ final class VaultControllerTest extends TestCase
     }
 
     /**
-     * Regression for review §1.C1. Sequence:
-     *   1. PUT chunk → 201, blob on disk, bytes counted.
-     *   2. gc/plan + gc/execute → row 'purged', blob unlinked, bytes freed.
-     *   3. PUT chunk again with identical bytes.
-     * Pre-fix: head() returned the purged row, controller skipped reserve,
-     * put() returned 'already_exists', controller 200'd with no disk write.
-     * Post-fix: row flips back to 'active', controller re-reserves bytes
-     * and writes the blob, status is 201, and a follow-up GET succeeds.
+     * Regression for review §1.C1: putChunk against an existing row in
+     * ``purged`` state must re-charge quota and revive the row, then
+     * write the blob. Pre-fix head() returned the purged row, controller
+     * skipped reserve, put() returned 'already_exists', controller 200'd
+     * with no disk write.
+     *
+     * Simulates the race window after gc/execute committed but before
+     * (or after a failed) unlink — i.e. the only durable scenario where
+     * a row remains in ``purged`` after the §1.C2 reaper runs. (When
+     * unlink succeeds the row is now deleted; that path goes through
+     * the normal "insert fresh" branch of put() which the existing
+     * happy-path test already covers.)
      */
-    public function test_putChunk_after_gc_purge_revives_blob(): void
+    public function test_putChunk_against_purged_row_revives_blob(): void
     {
         $chunkId = 'ch_v1_repurge234abcdefghijklmn';
         $bytes = 're-upload-after-purge-bytes';
 
         $this->uploadChunk($chunkId, $bytes);
-        self::assertFileExists(VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId));
+        $absPath = VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId);
+        self::assertFileExists($absPath);
 
-        $planRes = $this->invoke(fn() => VaultController::gcPlan(
-            $this->db,
-            $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
-                'root_revision'       => 1,
-                'encrypted_gc_auth'   => 'x',
-                'candidate_chunk_ids' => [$chunkId],
-            ])
-        ));
-        $planId = $planRes['json']['data']['plan_id'];
-        $this->invoke(fn() => VaultController::gcExecute(
-            $this->db,
-            $this->jctx('POST', ['vault_id' => self::VAULT_ID], ['plan_id' => $planId])
-        ));
+        // Simulate the post-gc/execute pre-unlink state directly: row
+        // ``purged``, bytes already debited, file may or may not still
+        // exist on disk. We unlink + decrement to mirror gc/execute's
+        // committed-but-not-cleaned-up state, then call putChunk.
+        $repo = new VaultChunksRepository($this->db);
+        $repo->setState(self::VAULT_ID, $chunkId, VaultChunksRepository::STATE_PURGED);
+        (new VaultsRepository($this->db))->incUsedBytes(self::VAULT_ID, -strlen($bytes), -1, self::NOW);
+        @unlink($absPath);
+        self::assertFileDoesNotExist($absPath);
 
-        self::assertFileDoesNotExist(VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId));
         $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
         self::assertSame(0, (int)$vault['used_ciphertext_bytes']);
         self::assertSame(0, (int)$vault['chunk_count']);
-        $purged = (new VaultChunksRepository($this->db))->get(self::VAULT_ID, $chunkId);
-        self::assertNotNull($purged);
-        self::assertSame(VaultChunksRepository::STATE_PURGED, $purged['state']);
 
         // Re-upload the same chunk: must restore disk + counters.
         $res = $this->invoke(fn() => VaultController::putChunk(
@@ -877,7 +874,6 @@ final class VaultControllerTest extends TestCase
         self::assertSame(201, $res['status'], 'purged-row re-upload must be treated as fresh insert');
         self::assertTrue($res['json']['data']['stored']);
 
-        $absPath = VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId);
         self::assertFileExists($absPath);
         self::assertSame($bytes, file_get_contents($absPath));
 
@@ -885,7 +881,7 @@ final class VaultControllerTest extends TestCase
         self::assertSame(strlen($bytes), (int)$vault['used_ciphertext_bytes']);
         self::assertSame(1, (int)$vault['chunk_count']);
 
-        $revived = (new VaultChunksRepository($this->db))->get(self::VAULT_ID, $chunkId);
+        $revived = $repo->get(self::VAULT_ID, $chunkId);
         self::assertSame(VaultChunksRepository::STATE_ACTIVE, $revived['state']);
 
         // GET must serve the byte-identical blob (was 404 pre-fix).
@@ -895,6 +891,53 @@ final class VaultControllerTest extends TestCase
         ));
         self::assertSame(200, $getRes['status']);
         self::assertSame($bytes, $getRes['raw']);
+    }
+
+    /**
+     * Regression for review §1.C2: a previous gc/execute that committed
+     * the state flip but failed to unlink (EBUSY / EIO / process crash
+     * post-COMMIT) leaves an orphan blob on disk plus a stale ``purged``
+     * row. The reaper invoked at the start of the next gc/execute must
+     * retry the unlink and, on success, delete the row so it doesn't
+     * leak forever — line 1206 of the historical gcExecute skipped
+     * purged rows, so without the reaper nothing would ever clean them.
+     */
+    public function test_gcExecute_reaps_residual_purged_blobs(): void
+    {
+        $chunkId = 'ch_v1_residual2abcdefghijklmno';
+        $bytes = 'orphan-residual';
+        $this->uploadChunk($chunkId, $bytes);
+        $absPath = VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId);
+        self::assertFileExists($absPath);
+
+        // Simulate "gc/execute flipped state and freed bytes but failed
+        // to unlink"  — the F-S12 post-commit failure window.
+        $repo = new VaultChunksRepository($this->db);
+        $repo->setState(self::VAULT_ID, $chunkId, VaultChunksRepository::STATE_PURGED);
+        (new VaultsRepository($this->db))->incUsedBytes(self::VAULT_ID, -strlen($bytes), -1, self::NOW);
+        self::assertFileExists($absPath, 'unlink-failed scenario: blob still present');
+
+        // Fire any gc/execute (empty plan suffices) — the reaper pass
+        // at the top of the controller must clean the residual blob.
+        $planRes = $this->invoke(fn() => VaultController::gcPlan(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                'root_revision'       => 1,
+                'encrypted_gc_auth'   => 'x',
+                'candidate_chunk_ids' => [],
+            ])
+        ));
+        $planId = $planRes['json']['data']['plan_id'];
+        $this->invoke(fn() => VaultController::gcExecute(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], ['plan_id' => $planId])
+        ));
+
+        self::assertFileDoesNotExist($absPath, 'reaper must retry the unlink');
+        self::assertNull(
+            $repo->get(self::VAULT_ID, $chunkId),
+            'reaper must remove the orphan row once the blob is gone'
+        );
     }
 
     // ===================================================================
