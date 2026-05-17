@@ -849,15 +849,18 @@ Remaining Plan A checklist:
     single-folder; just port them via the same pattern as ops/
     delete.py.
 
-  * **7e — Production: ``ops/integrity.py``.** Read-only.
-    ``run_quick_check`` and ``run_full_check`` use
-    ``vault.fetch_manifest`` to grab the head + walk chunk refs;
-    port to ``fetch_root_manifest`` + iterate all
-    ``fetch_folder_shard`` calls + assemble. ``run_full_check``'s
-    historical-revision walk (``relay.list_manifest_revisions``)
-    needs a sharded equivalent ``list_root_revisions`` +
-    ``list_shard_revisions`` — possibly new server endpoints, or
-    a flag to skip historical scope until the server side lands.
+  * [x] **7e** (2026-05-17) — Production: ``ops/integrity.py``.
+    Read-only. Renamed ``_safe_fetch_manifest`` to call
+    ``vault.fetch_unified_manifest`` (sharded root + shards,
+    assembled). ``IntegrityVault`` Protocol gains the
+    ``fetch_unified_manifest`` slot. The two integrity test fakes
+    (``_FakeVault``, ``_Locked``) had their ``fetch_manifest``
+    method renamed to ``fetch_unified_manifest``. The full-check
+    historical-revision walk via
+    ``relay.list_manifest_revisions`` stays as-is — those server
+    endpoints still exist and the sharded equivalents
+    (``list_root_revisions`` / ``list_shard_revisions``) would be
+    a phase H+1 addition.
 
   * **7f — Vault class + tests + server: nuke the legacy surface.**
     Once 7a–7e land:

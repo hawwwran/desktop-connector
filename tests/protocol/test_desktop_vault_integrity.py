@@ -63,7 +63,7 @@ class _FakeVault:
     def __init__(self, manifest):
         self._manifest = manifest
 
-    def fetch_manifest(self, relay, *, local_index=None):
+    def fetch_unified_manifest(self, relay, *, local_index=None):
         return self._manifest
 
 
@@ -118,7 +118,7 @@ class QuickCheckTests(unittest.TestCase):
             vault_id: str = VAULT_ID
             master_key = None
             vault_access_secret = None
-            def fetch_manifest(self, *_args, **_kwargs):
+            def fetch_unified_manifest(self, *_args, **_kwargs):
                 self.fetched = True
                 return {}
         vault = _Locked()

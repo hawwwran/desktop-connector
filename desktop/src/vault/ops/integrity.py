@@ -61,7 +61,11 @@ class IntegrityVault(Protocol):
     @property
     def vault_access_secret(self) -> str | None: ...
 
-    def fetch_manifest(self, relay, *, local_index=None) -> dict[str, Any]: ...
+    # Phase H step 7e: integrity reads through the sharded
+    # ``fetch_unified_manifest`` compat wrapper (root + per-folder
+    # shards, assembled). Step 7f removes the wrapper and integrity
+    # walks shards directly.
+    def fetch_unified_manifest(self, relay, *, local_index=None) -> dict[str, Any]: ...
 
 
 class IntegrityRelay(Protocol):
@@ -314,7 +318,7 @@ def _safe_fetch_manifest(
     vault: IntegrityVault, relay: IntegrityRelay, report: IntegrityReport,
 ) -> dict[str, Any] | None:
     try:
-        return vault.fetch_manifest(relay)
+        return vault.fetch_unified_manifest(relay)
     except Exception as exc:  # noqa: BLE001
         report.add(IntegrityIssue(
             kind="manifest_fetch_failed",
