@@ -473,6 +473,7 @@ relay log (filenames are local-only).
 | `vault.repair.marked_broken` | desktop | info | `count`, `author`, `revision` | T17.4 — broken-version markers committed |
 | `vault.restore.cancelled` | desktop | info | `vault`, `folder`, `files_done`, `total`, optional `cutoff` | F-U03 — restore cancelled between files |
 | `vault.restore.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`, `source_version_id` (truncated) | F-510 — restore-version published; Activity-tab "Restored" anchor |
+| `vault.restore.folder_completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path_prefix`, `restored` | Bulk-restore folder: every tombstoned file at-or-under `path_prefix` was re-published from its last-known version |
 | `vault.restore.skip_symlinked_dest` | desktop | warning | `path`, `reason` | F-D28 — refused to write through a symlink in destination |
 | `vault.restore.skip_unsafe` | desktop | warning | `path` | Restore refused a path traversing outside the destination |
 | `vault.restore.skipped_identical_at_cutoff` | desktop | info | `path`, `version` | F-D16 — restore-at-date short-circuited identical bytes; preserves "restored from snapshot" intent in the activity log |

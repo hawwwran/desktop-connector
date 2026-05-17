@@ -21,6 +21,7 @@ from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.ops.delete import (  # noqa: E402
     delete_file,
     delete_folder_contents,
+    restore_folder_contents,
     restore_version_to_current,
 )
 from src.vault.manifest import (  # noqa: E402
@@ -314,6 +315,60 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         self.assertFalse(
             find_file_entry(published, DOCS_ID, "Photos/p.jpg")["deleted"]
         )
+
+    def test_restore_folder_contents_lifts_every_tombstone_under_prefix(self) -> None:
+        empty = _empty_manifest()
+        relay = FakeUploadRelay()
+        vault = _vault()
+        try:
+            seed_sharded_state_from_manifest(vault, relay, empty)
+            for sub in ("Invoices/2026/a.pdf", "Invoices/2026/b.pdf", "Photos/p.jpg"):
+                local = self.tmpdir / sub.replace("/", "_")
+                local.write_bytes(f"content for {sub}".encode("utf-8"))
+                upload_file(
+                    vault=vault, relay=relay,
+                    manifest=_decrypt_current_manifest(vault, relay),
+                    local_path=local, remote_folder_id=DOCS_ID,
+                    remote_path=sub, author_device_id=AUTHOR,
+                )
+            # Delete every file under the Documents shard first so the
+            # restore has something to lift.
+            head = _decrypt_current_manifest(vault, relay)
+            after_delete, _ = delete_folder_contents(
+                vault=vault, relay=relay, manifest=head,
+                remote_folder_id=DOCS_ID, path_prefix="",
+                author_device_id=AUTHOR,
+                deleted_at="2026-05-04T18:00:00.000Z",
+            )
+            puts_before_restore = list(relay.put_calls)
+
+            restored, paths_restored = restore_folder_contents(
+                vault=vault, relay=relay, manifest=after_delete,
+                remote_folder_id=DOCS_ID, path_prefix="Invoices/2026",
+                author_device_id=AUTHOR,
+                created_at="2026-05-05T08:00:00.000Z",
+            )
+        finally:
+            vault.close()
+
+        # Only the matching subtree comes back; the Photos tombstone
+        # stays.
+        self.assertCountEqual(
+            paths_restored,
+            ["Invoices/2026/a.pdf", "Invoices/2026/b.pdf"],
+        )
+        for path in paths_restored:
+            entry = find_file_entry(restored, DOCS_ID, path)
+            self.assertFalse(entry["deleted"])
+            self.assertNotIn("deleted_at", entry)
+            self.assertEqual(entry["restored_by_device_id"], AUTHOR)
+        self.assertTrue(
+            find_file_entry(restored, DOCS_ID, "Photos/p.jpg")["deleted"],
+        )
+        # No new chunk uploads for a bulk restore — every restored
+        # version points at the chunks of the entry's last-known
+        # version.
+        self.assertEqual(relay.put_calls, puts_before_restore)
 
     def test_restore_version_promotes_chosen_version_without_uploading(self) -> None:
         local = self.tmpdir / "report.txt"

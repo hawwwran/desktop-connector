@@ -593,6 +593,37 @@ class VaultBrowser(
             return
         self._confirm_delete_file(dict(file_row))
 
+    def _menu_action_restore_file(self, file_row: dict) -> None:
+        """Per-row file menu: confirm + restore a tombstoned file.
+
+        Skipped (with a clear message) when the file isn't actually
+        deleted — keeps the action idempotent against a stale popover.
+        """
+        if not bool(file_row.get("deleted")):
+            self._set_status(
+                "File is not deleted; nothing to restore.", "error",
+            )
+            return
+        self._confirm_restore_file(dict(file_row))
+
+    def _menu_action_restore_folder(self, folder_path: str) -> None:
+        """Per-row folder menu: confirm + bulk-restore the folder.
+
+        Resolves ``folder_path`` to ``(remote_folder_id, sub_path)`` so
+        the bulk restore op runs on the right shard with the right
+        path prefix.
+        """
+        destination = self._resolve_upload_destination_for(folder_path)
+        if destination is None:
+            self._set_status(
+                f"Cannot restore '{folder_path}' — not inside an active "
+                "remote folder.",
+                "error",
+            )
+            return
+        remote_folder_id, sub_path = destination
+        self._confirm_restore_folder(remote_folder_id, sub_path)
+
     def _menu_action_download_folder(self, folder_path: str) -> None:
         """Per-row sidebar menu: download the folder at ``folder_path``.
 

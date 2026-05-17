@@ -246,6 +246,115 @@ class DeleteRestoreMixin:
         dlg.connect("response", on_response)
         dlg.present(self.win)
 
+    def _confirm_restore_file(self, file_row: dict) -> None:
+        """Restore a tombstoned file by promoting its latest version.
+
+        The new version inherits the old version's chunk references —
+        no new uploads — and clears the ``deleted`` flag. Restoring
+        any file under a previously "all deleted" folder automatically
+        un-deletes that folder in the browser view, since the
+        ``deleted`` flag on folder rows is computed live from the
+        descendants' tombstone state.
+        """
+        from ..vault.ops.delete import restore_version_to_current
+
+        remote_folder_id = str(file_row.get("remote_folder_id") or "")
+        relative_path = str(file_row.get("relative_path") or "")
+        latest_version_id = str(file_row.get("latest_version_id") or "")
+        if not remote_folder_id or not relative_path or not latest_version_id:
+            self._set_status("Cannot restore: missing metadata.", "error")
+            return
+
+        display_path = str(file_row.get("path") or relative_path)
+        dlg = Adw.AlertDialog(
+            heading=f"Restore {display_path}?",
+            body=(
+                "Lifts the tombstone and re-publishes the file's last "
+                "known version. Stored chunks are reused — no extra "
+                "upload."
+            ),
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("restore", "Restore")
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "restore":
+                return
+            self.config.reload()
+            device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+
+            def mutate(ctx: dict) -> dict:
+                return restore_version_to_current(
+                    vault=ctx["vault"], relay=ctx["relay"],
+                    manifest=ctx["manifest"],
+                    remote_folder_id=remote_folder_id,
+                    remote_path=relative_path,
+                    source_version_id=latest_version_id,
+                    author_device_id=device_id,
+                    local_index=self.local_index,
+                )
+            self._run_delete_worker(
+                label=f"Restoring {display_path}",
+                mutate=mutate,
+            )
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
+    def _confirm_restore_folder(
+        self, remote_folder_id: str, sub_path: str,
+    ) -> None:
+        """Bulk-restore every tombstoned file under ``sub_path``.
+
+        Mirrors :func:`_confirm_delete_folder`. One sharded publish
+        flips every tombstoned descendant back to live; the browser's
+        ``deleted`` flag on folder rows is computed from the
+        descendants, so the parent chain un-dims automatically.
+        """
+        from ..vault.ops.delete import restore_folder_contents
+
+        target_label = sub_path or "this remote folder's contents"
+        dlg = Adw.AlertDialog(
+            heading=f"Restore contents of {target_label}?",
+            body=(
+                "Every tombstoned file under this path is re-published "
+                "from its last-known version. Stored chunks are reused — "
+                "no extra upload."
+            ),
+        )
+        dlg.add_response("cancel", "Cancel")
+        dlg.add_response("restore", "Restore folder contents")
+        dlg.set_default_response("cancel")
+        dlg.set_close_response("cancel")
+        dlg.set_response_appearance("restore", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "restore":
+                return
+            self.config.reload()
+            device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+
+            def mutate(ctx: dict) -> dict:
+                published, _restored = restore_folder_contents(
+                    vault=ctx["vault"], relay=ctx["relay"],
+                    manifest=ctx["manifest"],
+                    remote_folder_id=remote_folder_id,
+                    path_prefix=sub_path,
+                    author_device_id=device_id,
+                    local_index=self.local_index,
+                )
+                return published
+            self._run_delete_worker(
+                label=f"Restoring contents of {target_label}",
+                mutate=mutate,
+            )
+
+        dlg.connect("response", on_response)
+        dlg.present(self.win)
+
     def _confirm_and_delete(self, _btn: Gtk.Button) -> None:
         file_row = self.state.selected_file
         destination = self._resolve_upload_destination()

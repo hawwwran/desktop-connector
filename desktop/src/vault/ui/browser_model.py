@@ -145,6 +145,10 @@ def list_folder(
     prefix_with_slash = prefix + "/" if prefix else ""
 
     child_folder_names: set[str] = set()
+    # Track which child folder names contain at least one live (non-
+    # tombstoned) entry. A subfolder with only deleted descendants gets
+    # the ``deleted`` flag on its row so the UI can dim it.
+    child_folder_has_live: set[str] = set()
     files: list[dict[str, Any]] = []
 
     for entry in entries:
@@ -158,6 +162,8 @@ def list_folder(
             continue
         if len(remainder) > 1:
             child_folder_names.add(remainder[0])
+            if not bool(entry.get("deleted")):
+                child_folder_has_live.add(remainder[0])
             continue
         if str(entry.get("type", "file")) != "file":
             continue
@@ -169,6 +175,7 @@ def list_folder(
             path="/".join([parts[0], *relative_parts, name]),
             folder=folder,
             relative_path="/".join([*relative_parts, name]),
+            deleted=name not in child_folder_has_live,
         )
         for name in child_folder_names
     ]
@@ -250,6 +257,10 @@ class _ChildBucket:
     """Immediate children of one parent-path inside one remote folder."""
 
     subfolders: set[str] = field(default_factory=set)
+    # Subset of ``subfolders`` containing at least one live (non-
+    # tombstoned) descendant. Drives the dim styling for "all files
+    # under this folder are deleted" rows in show-deleted mode.
+    live_subfolders: set[str] = field(default_factory=set)
     files: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -323,6 +334,7 @@ class BrowserIndex:
                 path="/".join([parts[0], *relative_parts, name]),
                 folder=folder,
                 relative_path="/".join([*relative_parts, name]),
+                deleted=name not in bucket.live_subfolders,
             )
             for name in bucket.subfolders
         ]
@@ -375,11 +387,14 @@ class BrowserIndex:
             parent_path = "/".join(entry_parts[:-1])
             bucket = index.setdefault(parent_path, _ChildBucket())
             bucket.files.append(entry)
+            entry_is_live = not bool(entry.get("deleted"))
             for depth in range(len(entry_parts) - 1):
                 ancestor_parent = "/".join(entry_parts[:depth])
                 ancestor_name = entry_parts[depth]
                 ancestor_bucket = index.setdefault(ancestor_parent, _ChildBucket())
                 ancestor_bucket.subfolders.add(ancestor_name)
+                if entry_is_live:
+                    ancestor_bucket.live_subfolders.add(ancestor_name)
         self._folder_cache[cache_key] = index
         return index
 
@@ -458,6 +473,7 @@ def _folder_row(
     path: str,
     folder: dict[str, Any],
     relative_path: str,
+    deleted: bool = False,
 ) -> dict[str, Any]:
     return {
         "kind": "folder",
@@ -465,7 +481,11 @@ def _folder_row(
         "path": path,
         "remote_folder_id": str(folder.get("remote_folder_id", "")),
         "relative_path": relative_path,
-        "status": "Folder",
+        # ``deleted`` is true when every file under this subfolder is
+        # tombstoned. Surfaces in show-deleted mode so the browser can
+        # dim the row the same way it dims tombstoned files.
+        "deleted": bool(deleted),
+        "status": "Deleted" if deleted else "Folder",
     }
 
 

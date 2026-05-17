@@ -240,17 +240,24 @@ class PanesMixin:
         return row
 
     def _make_folder_card_row(self, folder: dict) -> Gtk.ListBoxRow:
-        """Folder card: icon + name + 'Folder' subtitle + hamburger."""
+        """Folder card: icon + name + 'Folder' subtitle + hamburger.
+
+        Dim + "Deleted" subtitle match the file-card treatment for
+        tombstoned items so users browsing in show-deleted mode see a
+        consistent grayed-out shape across both kinds of row.
+        """
         row = Gtk.ListBoxRow()
         row._vault_kind = "folder"  # type: ignore[attr-defined]
         row._vault_folder_path = str(folder["path"])  # type: ignore[attr-defined]
         row._vault_file_row = None  # type: ignore[attr-defined]
 
+        deleted = bool(folder.get("deleted"))
+        subtitle = "Deleted folder" if deleted else "Folder"
         body = self._make_card_body(
             icon_name="folder-symbolic",
             title=str(folder["name"]),
-            subtitle_parts=["Folder"],
-            dim=False,
+            subtitle_parts=[subtitle],
+            dim=deleted,
         )
         # Hamburger menu — Download folder / Delete folder.
         body.append(self._make_row_menu_button(folder=folder))
@@ -352,18 +359,26 @@ class PanesMixin:
             target_name = str(folder.get("name") or folder.get("path") or "folder")
             a11y_label = f"Actions for folder {target_name}"
             folder_path = str(folder["path"])
+            folder_deleted = bool(folder.get("deleted"))
             items: list[tuple[str, object, str | None]] = [
                 (
                     "Download folder",
                     lambda: self._menu_action_download_folder(folder_path),
                     None,
                 ),
-                (
+            ]
+            if folder_deleted:
+                items.append((
+                    "Restore folder",
+                    lambda: self._menu_action_restore_folder(folder_path),
+                    None,
+                ))
+            else:
+                items.append((
                     "Delete folder",
                     lambda: self._menu_action_delete_folder(folder_path),
                     "destructive-action",
-                ),
-            ]
+                ))
         elif file_row is not None:
             target_name = str(file_row.get("name", "")) or "file"
             a11y_label = f"Actions for file {target_name}"
@@ -382,7 +397,13 @@ class PanesMixin:
                     lambda: self._menu_action_versions(captured),
                     None,
                 ))
-            if not deleted:
+            if deleted:
+                items.append((
+                    "Restore",
+                    lambda: self._menu_action_restore_file(captured),
+                    None,
+                ))
+            else:
                 items.append((
                     "Delete",
                     lambda: self._menu_action_delete_file(captured),

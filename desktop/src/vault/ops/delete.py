@@ -244,6 +244,135 @@ def restore_version_to_current(
     )
 
 
+def restore_folder_contents(
+    *,
+    vault: DeleteVault,
+    relay: Any,
+    manifest: dict[str, Any],
+    remote_folder_id: str,
+    path_prefix: str,
+    author_device_id: str,
+    created_at: str | None = None,
+    local_index: Any = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Bulk-restore every tombstoned file at or under ``path_prefix``.
+
+    Symmetric to :func:`delete_folder_contents`: one sharded publish
+    flips every tombstoned entry under ``path_prefix`` back to a live
+    version by minting a fresh ``version_id`` that points at the
+    chunks of the entry's last-known version. Mirrors what the user
+    gets if they restore each file individually, but in a single CAS
+    cycle so the manifest revision count stays sane on a folder full
+    of deletions.
+
+    Empty ``path_prefix`` means "everything in this shard" — used by
+    the browser's per-folder "Restore" action when an entire remote
+    folder's contents were cleared.
+
+    Returns ``(published_unified_manifest, paths_restored)``; the
+    second element reflects what landed in the winning CAS attempt.
+    """
+    import unicodedata  # local — keep the top-of-file import set focused
+
+    timestamp = str(created_at or _now_rfc3339())
+    captured: list[list[str]] = []
+
+    def op(shard: dict[str, Any], retention: dict[str, int] | None) -> dict[str, Any]:
+        prefix_norm = (
+            normalize_manifest_path(path_prefix) if path_prefix else ""
+        )
+        targets: list[tuple[str, dict[str, Any]]] = []
+        for entry in shard.get("entries", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("type", "file")) != "file":
+                continue
+            if not bool(entry.get("deleted")):
+                continue
+            entry_path = unicodedata.normalize(
+                "NFC", str(entry.get("path", "")),
+            )
+            if prefix_norm and not (
+                entry_path == prefix_norm
+                or entry_path.startswith(prefix_norm + "/")
+            ):
+                continue
+            # Restore from the entry's latest version (the same one
+            # ``delete_file`` left a tombstone on top of). Fall back
+            # to the newest version dict if ``latest_version_id``
+            # isn't resolvable.
+            latest_id = str(entry.get("latest_version_id", ""))
+            source: dict[str, Any] | None = None
+            for v in entry.get("versions", []) or []:
+                if isinstance(v, dict) and str(v.get("version_id", "")) == latest_id:
+                    source = v
+                    break
+            if source is None:
+                versions_list = [
+                    v for v in (entry.get("versions") or [])
+                    if isinstance(v, dict)
+                ]
+                if versions_list:
+                    source = versions_list[-1]
+            if source is None:
+                continue
+            targets.append((entry_path, source))
+
+        out = shard
+        restored: list[str] = []
+        for entry_path, source in targets:
+            new_version = {
+                "version_id": generate_file_version_id(),
+                "created_at": timestamp,
+                "modified_at": timestamp,
+                "logical_size": int(source.get("logical_size", 0)),
+                "ciphertext_size": int(source.get("ciphertext_size", 0)),
+                "content_fingerprint": str(source.get("content_fingerprint", "")),
+                "author_device_id": str(author_device_id),
+                "chunks": [
+                    {
+                        "chunk_id": str(c.get("chunk_id", "")),
+                        "index": int(c.get("index", 0)),
+                        "plaintext_size": int(c.get("plaintext_size", 0)),
+                        "ciphertext_size": int(c.get("ciphertext_size", 0)),
+                    }
+                    for c in source.get("chunks", []) or []
+                    if isinstance(c, dict)
+                ],
+                "restored_from_version_id": str(source.get("version_id", "")),
+            }
+            out = restore_file_entry_in_shard(
+                out, path=entry_path, new_version=new_version,
+                author_device_id=author_device_id,
+            )
+            restored.append(entry_path)
+        captured.append(restored)
+        return out
+
+    published_state = _publish_shard_with_retry(
+        vault=vault, relay=relay,
+        remote_folder_id=remote_folder_id,
+        author_device_id=author_device_id,
+        op=op,
+    )
+    last_restored = captured[-1] if captured else []
+    log.info(
+        "vault.restore.folder_completed vault=%s revision=%d "
+        "remote_folder_id=%s path_prefix=%s restored=%d",
+        vault.vault_id,
+        int(published_state.root.get("root_revision", 0)),
+        remote_folder_id,
+        path_prefix,
+        len(last_restored),
+    )
+    return (
+        assemble_unified_manifest(
+            published_state.root, {remote_folder_id: published_state.shard},
+        ),
+        last_restored,
+    )
+
+
 def _publish_shard_with_retry(
     *,
     vault: DeleteVault,

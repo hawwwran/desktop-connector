@@ -70,6 +70,21 @@ class VaultBrowserTreeWalkTests(unittest.TestCase):
         with self.assertRaisesRegex(KeyError, "folder not found"):
             list_folder(_nested_manifest(), "Missing")
 
+    def test_subfolder_with_only_tombstones_is_marked_deleted(self) -> None:
+        """In show-deleted mode, a subfolder whose every descendant is
+        tombstoned reports ``deleted=True`` so the browser can dim its
+        row the same way it dims tombstoned files.
+        """
+        folders, _files = list_folder(
+            _nested_manifest(), "Documents/Invoices", include_deleted=True,
+        )
+        by_name = {f["name"]: f for f in folders}
+        self.assertEqual(set(by_name), {"2025", "2026"})
+        self.assertTrue(by_name["2025"]["deleted"])
+        self.assertEqual(by_name["2025"]["status"], "Deleted")
+        self.assertFalse(by_name["2026"]["deleted"])
+        self.assertEqual(by_name["2026"]["status"], "Folder")
+
 
 class SplitPathSafetyTests(unittest.TestCase):
     """F-519 — ``..`` components are dropped + a skip_unsafe warning fires."""
