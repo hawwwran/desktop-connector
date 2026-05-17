@@ -1381,17 +1381,13 @@ def merge_local_version_into_shard(
 
     out = normalize_shard_plaintext(server_shard)
     normalized_path = normalize_manifest_path(path)
-    parent_version_ids: set[str] = set()
-    if parent_shard is not None:
-        parent_n = normalize_shard_plaintext(parent_shard)
-        for parent_entry in parent_n.get("entries", []) or []:
-            if not isinstance(parent_entry, dict):
-                continue
-            if str(parent_entry.get("entry_id", "")) != entry_id:
-                continue
-            for v in parent_entry.get("versions", []) or []:
-                if isinstance(v, dict):
-                    parent_version_ids.add(str(v.get("version_id", "")))
+    # ``parent_shard`` is accepted in the signature to mirror the legacy
+    # ``_merge_folder_entries`` shape (which used it to filter
+    # ``local_versions_new`` across multiple local entries). The single-
+    # version helper doesn't iterate multiple local entries, so the
+    # filter is unnecessary; deduplication of an already-present
+    # ``version_id`` is handled inline below by ``server_version_ids``.
+    _ = parent_shard  # retained-for-callsite-compat; no behavior
 
     new_version = copy.deepcopy(version)
     target = None

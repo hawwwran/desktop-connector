@@ -760,7 +760,7 @@ class Vault(RemoteFoldersMixin):
         remote_folder_id: str,
         shard: dict,
         root: dict,
-    ) -> dict:
+    ) -> tuple[dict, dict]:
         """Atomic per-folder shard + root publish (§6.8).
 
         The **primary** publish path for sync engines. Encrypts the

@@ -1817,6 +1817,15 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
     author = str(manifest.get("author_device_id", ""))
     vault_id = str(manifest.get("vault_id", "")) or vault.vault_id
 
+    # Prune any shards for folders the manifest no longer includes
+    # (e.g., a prior seed staged folder X and a subsequent reseed
+    # removes it). Without this, ``relay.shards`` keeps a stale entry
+    # that's not in the new root — silently inconsistent.
+    manifest_folder_ids = {str(f.get("remote_folder_id", "")) for f in folders}
+    for stale_id in list(relay.shards.keys()):
+        if stale_id not in manifest_folder_ids:
+            relay.shards.pop(stale_id, None)
+
     pointers = []
     for folder in folders:
         rf_id = str(folder["remote_folder_id"])
