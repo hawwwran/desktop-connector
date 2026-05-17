@@ -213,7 +213,9 @@ class SyncVault(Protocol):
         self, relay, root, *, local_index=None,
     ) -> dict[str, Any]: ...
 
-    def fetch_folder_shard(self, relay, remote_folder_id) -> dict[str, Any]: ...
+    def fetch_folder_shard(
+        self, relay, remote_folder_id, *, expected_shard_hash: str | None = None,
+    ) -> dict[str, Any]: ...
 
     def publish_folder_shard(
         self, relay, remote_folder_id, shard,
@@ -222,6 +224,14 @@ class SyncVault(Protocol):
     def publish_shard_with_root(
         self, relay, remote_folder_id, shard, root,
     ): ...
+
+    def decrypt_shard_envelope(
+        self, envelope_bytes: bytes, remote_folder_id: str,
+    ) -> dict[str, Any]: ...
+
+    def decrypt_root_envelope(
+        self, envelope_bytes: bytes,
+    ) -> dict[str, Any]: ...
 
     def fetch_unified_manifest(
         self, relay, *, local_index=None,
