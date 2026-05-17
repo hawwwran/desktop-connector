@@ -6,6 +6,7 @@ export-reminder banner, and a "Test recovery now" button that opens
 the in-vault recovery test dialog.
 """
 
+import threading
 from datetime import datetime, timezone
 
 import gi
@@ -330,8 +331,16 @@ def build_recovery_tab(ctx: MainContext, win: "Adw.ApplicationWindow") -> "Gtk.B
                     bool(kit_path["path"]),
                     wipe_switch.get_active(),
                 )
+                # Review §6.C1: off-load the recovery verify (Argon2id
+                # — 1-10s by spec) to a worker thread. A blocking call
+                # here freezes the GTK main loop and reads as "the
+                # app crashed", driving users to force-quit and lose
+                # the recovery test. Mirror the worker shape used by
+                # fresh_unlock_prompt.py:213-245 — settle on the main
+                # thread via GLib.idle_add.
                 set_status("Testing recovery...", "dim-label")
                 test_btn.set_sensitive(False)
+                close_btn.set_sensitive(False)
                 try:
                     meta = recovery_envelope_meta_from_json(
                         (config._data.get("vault") or {}).get("recovery_envelope_meta")
@@ -344,51 +353,76 @@ def build_recovery_tab(ctx: MainContext, win: "Adw.ApplicationWindow") -> "Gtk.B
                         type(exc).__name__,
                     )
 
-                try:
-                    result = run_recovery_material_test(
-                        kit_path["path"],
-                        passphrase=passphrase_entry.get_text(),
-                        vault_id=vault_id_entry.get_text(),
-                        envelope_meta=meta,
-                        wipe_after_success=wipe_switch.get_active(),
-                    )
-                except Exception:
-                    log.exception("vault.recovery_test.run.exception")
-                    set_status("Recovery test failed unexpectedly. Check the log for details.", "error")
-                    test_btn.set_sensitive(True)
-                    return
-                finally:
-                    test_btn.set_sensitive(True)
+                kit = kit_path["path"]
+                passphrase = passphrase_entry.get_text()
+                vault_id_typed = vault_id_entry.get_text()
+                wipe_after = wipe_switch.get_active()
 
-                log.info(
-                    "vault.recovery_test.result ok=%s wiped=%s message=%s",
-                    result.ok,
-                    result.wiped,
-                    result.message,
-                )
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-                if "vault" not in config._data or not isinstance(config._data.get("vault"), dict):
-                    config._data["vault"] = {}
-                config._data["vault"]["recovery_last_tested"] = now
-                if result.ok:
-                    config._data["vault"]["recovery_status"] = "Verified"
-                    config.save()
-                    refresh_recovery_summary("Verified", now)
-                    set_status(result.message, "success")
-                    # F-LT11: a successful recovery test is the user
-                    # typing the recovery passphrase and Argon2id
-                    # verifying it — same proof the mini-prompt asks
-                    # for. Stamp so the next destructive op in this
-                    # process picks up the active window.
-                    fresh_unlock.stamp_fresh_unlock()
-                    if result.wiped:
-                        kit_path["path"] = None
-                        kit_entry.set_text("")
-                else:
-                    config._data["vault"]["recovery_status"] = "Failed"
-                    config.save()
-                    refresh_recovery_summary("Failed", now)
-                    set_status(result.message, "error")
+                def worker() -> None:
+                    try:
+                        result = run_recovery_material_test(
+                            kit,
+                            passphrase=passphrase,
+                            vault_id=vault_id_typed,
+                            envelope_meta=meta,
+                            wipe_after_success=wipe_after,
+                        )
+                        exc: Exception | None = None
+                    except Exception as e:  # noqa: BLE001
+                        result = None
+                        exc = e
+                        log.exception("vault.recovery_test.run.exception")
+
+                    def settle() -> bool:
+                        test_btn.set_sensitive(True)
+                        close_btn.set_sensitive(True)
+                        if exc is not None:
+                            set_status(
+                                "Recovery test failed unexpectedly. "
+                                "Check the log for details.",
+                                "error",
+                            )
+                            return False
+                        log.info(
+                            "vault.recovery_test.result ok=%s wiped=%s message=%s",
+                            result.ok,
+                            result.wiped,
+                            result.message,
+                        )
+                        now = datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%d %H:%M:%S UTC"
+                        )
+                        if (
+                            "vault" not in config._data
+                            or not isinstance(config._data.get("vault"), dict)
+                        ):
+                            config._data["vault"] = {}
+                        config._data["vault"]["recovery_last_tested"] = now
+                        if result.ok:
+                            config._data["vault"]["recovery_status"] = "Verified"
+                            config.save()
+                            refresh_recovery_summary("Verified", now)
+                            set_status(result.message, "success")
+                            # F-LT11: a successful recovery test is the
+                            # user typing the passphrase and Argon2id
+                            # verifying it — same proof the mini-prompt
+                            # asks for. Stamp so the next destructive
+                            # op in this process picks up the active
+                            # window.
+                            fresh_unlock.stamp_fresh_unlock()
+                            if result.wiped:
+                                kit_path["path"] = None
+                                kit_entry.set_text("")
+                        else:
+                            config._data["vault"]["recovery_status"] = "Failed"
+                            config.save()
+                            refresh_recovery_summary("Failed", now)
+                            set_status(result.message, "error")
+                        return False
+
+                    GLib.idle_add(settle)
+
+                threading.Thread(target=worker, daemon=True).start()
 
             test_btn.connect("clicked", on_test)
             # F-U17: ``Adw.Dialog.present(parent)`` ties the

@@ -616,36 +616,66 @@ def show_vault_onboard(config_dir: Path):
                 export_status.set_label(f"Saved to: {target_path}")
                 delete_switch.set_sensitive(True)
 
-                # 2) Real recovery verify — re-derive wrap_key from
-                #    the saved kit + the typed passphrase, AEAD-decrypt
-                #    the recovery envelope. Poly1305 verifies the
-                #    kit/passphrase combo end-to-end.
-                ok_, msg = verify_recovery_kit(
-                    target_path,
-                    passphrase=state["passphrase"],
-                    envelope_meta=state["recovery_envelope_meta"],
-                )
-                if ok_:
-                    verify_status.remove_css_class("error")
-                    verify_status.remove_css_class("dim-label")
-                    verify_status.add_css_class("success")
-                    verify_status.set_label(
-                        f"✓ Recovery verified — {msg}."
-                    )
-                    state["verify_passed"] = True
-                    confirm_check.set_sensitive(True)
-                else:
-                    verify_status.remove_css_class("success")
-                    verify_status.remove_css_class("dim-label")
-                    verify_status.add_css_class("error")
-                    verify_status.set_label(
-                        f"✗ {msg}. Check that you typed the passphrase correctly, "
-                        "then click Export and verify recovery kit again."
-                    )
-                    state["verify_passed"] = False
-                    confirm_check.set_active(False)
-                    confirm_check.set_sensitive(False)
+                # Review §6.C2: verify_recovery_kit runs Argon2id (1-10s
+                # by spec). Doing it inline on the file-dialog callback
+                # locks the wizard mid-Done-gating and pushes panicked
+                # users to close the window — losing fresh recovery
+                # material. Off-load to a worker; settle on the main
+                # thread.
+                verify_status.remove_css_class("error")
+                verify_status.remove_css_class("success")
+                verify_status.add_css_class("dim-label")
+                verify_status.set_label("Verifying recovery kit…")
+                export_btn.set_sensitive(False)
+                state["verify_passed"] = False
+                confirm_check.set_sensitive(False)
+                confirm_check.set_active(False)
                 _refresh_done_button()
+
+                passphrase = state["passphrase"]
+                envelope_meta_local = state["recovery_envelope_meta"]
+
+                def verify_worker() -> None:
+                    try:
+                        ok_, msg = verify_recovery_kit(
+                            target_path,
+                            passphrase=passphrase,
+                            envelope_meta=envelope_meta_local,
+                        )
+                        exc: Exception | None = None
+                    except Exception as e:  # noqa: BLE001
+                        ok_, msg = False, f"Verify failed: {type(e).__name__}"
+                        exc = e
+
+                    def settle() -> bool:
+                        export_btn.set_sensitive(True)
+                        if exc is not None or not ok_:
+                            verify_status.remove_css_class("success")
+                            verify_status.remove_css_class("dim-label")
+                            verify_status.add_css_class("error")
+                            verify_status.set_label(
+                                f"✗ {msg}. Check that you typed the "
+                                "passphrase correctly, then click "
+                                "Export and verify recovery kit again."
+                            )
+                            state["verify_passed"] = False
+                            confirm_check.set_active(False)
+                            confirm_check.set_sensitive(False)
+                        else:
+                            verify_status.remove_css_class("error")
+                            verify_status.remove_css_class("dim-label")
+                            verify_status.add_css_class("success")
+                            verify_status.set_label(
+                                f"✓ Recovery verified — {msg}."
+                            )
+                            state["verify_passed"] = True
+                            confirm_check.set_sensitive(True)
+                        _refresh_done_button()
+                        return False
+
+                    GLib.idle_add(settle)
+
+                threading.Thread(target=verify_worker, daemon=True).start()
 
             file_dialog.save(parent=win, callback=on_file_chosen)
 
@@ -1108,6 +1138,12 @@ def show_vault_onboard(config_dir: Path):
             Reuses the in-memory ``Vault`` so the publish payload is
             byte-identical. If the relay accepts on retry, the wizard
             transitions to the normal post-publish state.
+
+            Review §6.C3: the retried relay POST has worst-case
+            duration of the full HTTP timeout — exactly the case the
+            user is retrying. Doing it inline locks the wizard for
+            the whole retry. Off-load to a worker; settle on the main
+            thread.
             """
             from ..vault.binding.runtime import create_vault_relay
 
@@ -1125,26 +1161,37 @@ def show_vault_onboard(config_dir: Path):
             export_status.add_css_class("dim-label")
             export_status.set_label("Retrying publish…")
 
-            try:
-                relay = create_vault_relay(config)
-                vault.publish_initial(relay)
-                state["published"] = True
-            except Exception as exc:
-                _set_export_status_error(
-                    f"Retry failed: {exc}. The local unlock material is "
-                    "still saved; you can close this window and try again "
-                    "later from the Vault setup wizard."
-                )
-                retry_publish_btn.set_sensitive(True)
-                return
+            def retry_worker() -> None:
+                try:
+                    relay = create_vault_relay(config)
+                    vault.publish_initial(relay)
+                    publish_exc: Exception | None = None
+                except Exception as exc:  # noqa: BLE001
+                    publish_exc = exc
 
-            try:
-                _commit_after_publish(vault)
-            except Exception as exc:
-                _set_export_status_error(
-                    f"Vault published, but config.json could not be "
-                    f"updated: {exc}."
-                )
+                def settle() -> bool:
+                    if publish_exc is not None:
+                        _set_export_status_error(
+                            f"Retry failed: {publish_exc}. The local "
+                            "unlock material is still saved; you can "
+                            "close this window and try again later "
+                            "from the Vault setup wizard."
+                        )
+                        retry_publish_btn.set_sensitive(True)
+                        return False
+                    state["published"] = True
+                    try:
+                        _commit_after_publish(vault)
+                    except Exception as commit_exc:  # noqa: BLE001
+                        _set_export_status_error(
+                            f"Vault published, but config.json could "
+                            f"not be updated: {commit_exc}."
+                        )
+                    return False
+
+                GLib.idle_add(settle)
+
+            threading.Thread(target=retry_worker, daemon=True).start()
 
         retry_publish_btn.connect("clicked", on_retry_publish)
 
