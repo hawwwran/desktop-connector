@@ -348,8 +348,11 @@ Exfiltration: attacker creates `~/Documents/note.txt -> /etc/shadow` in a Docume
 
 ### High
 
-#### §3.H1 — Detector records AFTER watcher enqueues delete op
+#### ~~§3.H1~~ — Detector records AFTER watcher enqueues delete op
+**Fix landed:** e26cf1b 2026-05-17
 **File:** `desktop/src/vault/binding/filesystem_watcher.py:212-218`, `runtime_watchers.py:137`
+
+**Approach:** Re-order `observe_with_detector` so `detector.record` runs first, then check `verdict.tripped` and early-return without forwarding (so the trip-causing event itself doesn't enter the pending-ops queue).
 
 `_enqueue_delete_if_synced` immediately `store.coalesce_op`s the delete. The detector record happens *after* the wrapped `observe` returns. Sequence for the 200th malicious delete: enqueue tombstone #200 → detector trips → pause binding. Op #200 is already in the queue.
 
