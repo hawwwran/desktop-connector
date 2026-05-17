@@ -577,6 +577,143 @@ class VaultImportRunnerTests(unittest.TestCase):
         self.assertEqual(result.action, "refuse")
         self.assertIsNone(result.published_manifest)
 
+    def test_run_import_creates_root_pointers_for_bundle_only_folders(self) -> None:
+        """Phase H step 7c crash-fix: importing a bundle whose folder set
+        is a superset of the active vault's must auto-create the missing
+        root pointers before per-folder shard publish — otherwise
+        ``fetch_folder_state`` raises ``ValueError`` partway through,
+        leaving the import partially applied.
+        """
+        from src.vault import Vault
+        from src.vault.crypto import DefaultVaultCrypto
+        from src.vault.export.bundle import write_export_bundle
+        from src.vault.import_.bundle import ImportMergeResolution
+        from src.vault.import_.runner import run_import
+        from src.vault.upload import upload_file
+        from tests.protocol.test_desktop_vault_manifest import (
+            AUTHOR as MASTER_AUTHOR,
+            DOCS_ID as MASTER_DOCS_ID,
+            MASTER_KEY,
+            VAULT_ID as MASTER_VAULT_ID,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay,
+            mirror_legacy_from_sharded,
+            seed_sharded_state_from_manifest,
+        )
+
+        PICS_ID = "rf_v1_bbbbbbbbbbbbbbbbbbbbbbbb"
+        VAULT_ACCESS_SECRET = "vault-secret"
+
+        def make_vault() -> Vault:
+            return Vault(
+                vault_id=MASTER_VAULT_ID, master_key=MASTER_KEY,
+                recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
+                header_revision=1, manifest_revision=1,
+                manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+            )
+
+        manifest_a = make_manifest(
+            vault_id=MASTER_VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=MASTER_AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=MASTER_DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-01T10:00:00.000Z",
+                    created_by_device_id=MASTER_AUTHOR,
+                    entries=[],
+                ),
+                make_remote_folder(
+                    remote_folder_id=PICS_ID,
+                    display_name_enc="Pictures",
+                    created_at="2026-05-01T10:00:00.000Z",
+                    created_by_device_id=MASTER_AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        # Vault A: two folders, uploads one file into the PICS_ID folder
+        # that doesn't yet exist in vault B's manifest.
+        relay_a = FakeUploadRelay(manifest=manifest_a)
+        vault = make_vault()
+        try:
+            seed_sharded_state_from_manifest(vault, relay_a, manifest_a)
+            mirror_legacy_from_sharded(vault, relay_a)
+            local_pic = self.tmpdir / "exported.png"
+            local_pic.write_bytes(b"\x89PNG\r\n\x1a\n" + b"a" * 100)
+            uploaded = upload_file(
+                vault=vault, relay=relay_a, manifest=manifest_a,
+                local_path=local_pic, remote_folder_id=PICS_ID,
+                remote_path="exported.png", author_device_id=MASTER_AUTHOR,
+            )
+            seed_sharded_state_from_manifest(vault, relay_a, uploaded.manifest)
+            mirror_legacy_from_sharded(vault, relay_a)
+            bundle_path = self.tmpdir / "vault.dcvault"
+            write_export_bundle(
+                vault=vault, relay=relay_a,
+                manifest_envelope=relay_a.current_envelope,
+                manifest_plaintext=uploaded.manifest,
+                output_path=bundle_path,
+                passphrase="user-export-passphrase",
+                argon_memory_kib=8192, argon_iterations=2,
+            )
+        finally:
+            vault.close()
+
+        # Vault B: starts with only DOCS_ID — PICS_ID is bundle-only.
+        manifest_b_initial = make_manifest(
+            vault_id=MASTER_VAULT_ID,
+            revision=1, parent_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=MASTER_AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=MASTER_DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-01T10:00:00.000Z",
+                    created_by_device_id=MASTER_AUTHOR,
+                    entries=[],
+                ),
+            ],
+        )
+        relay_b = FakeUploadRelay(manifest=manifest_b_initial)
+        vault = make_vault()
+        try:
+            seed_sharded_state_from_manifest(vault, relay_b, manifest_b_initial)
+            relay_b.published_shards = []
+            relay_b.published_roots = []
+            result = run_import(
+                vault=vault, relay=relay_b,
+                bundle_path=bundle_path,
+                passphrase="user-export-passphrase",
+                active_manifest=manifest_b_initial,
+                resolution=ImportMergeResolution(per_folder={}),
+                author_device_id=MASTER_AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(result.action, "merge")
+        # Pre-flight published a root with the new PICS_ID pointer; the
+        # per-folder shard publish then landed the imported file.
+        self.assertGreaterEqual(len(relay_b.published_roots), 1)
+        self.assertEqual(len(relay_b.published_shards), 1)
+        self.assertEqual(relay_b.published_shards[0]["remote_folder_id"], PICS_ID)
+        # Final manifest has both folder pointers and the imported file.
+        self.assertIsNotNone(result.published_manifest)
+        folder_ids = {
+            f["remote_folder_id"]
+            for f in result.published_manifest.get("remote_folders", [])
+        }
+        self.assertIn(MASTER_DOCS_ID, folder_ids)
+        self.assertIn(PICS_ID, folder_ids)
+        self.assertIsNotNone(
+            find_file_entry(result.published_manifest, PICS_ID, "exported.png")
+        )
+
 
 class VaultImportRunnerVaultIdAssertTests(unittest.TestCase):
     """F-C14 polish — defensive layering on top of the wrap-AAD vault_id

@@ -124,6 +124,16 @@ class ImportVault(Protocol):
 
     def fetch_unified_manifest(self, relay, *, local_index=None) -> dict: ...
 
+    # Phase H step 7c crash-fix: bundle-only folders need their root
+    # pointer created before the per-folder shard publish can run.
+    def ensure_folder_pointers_exist(
+        self, relay, *,
+        pointers: list[dict],
+        author_device_id: str,
+        created_at: str | None = None,
+        local_index=None,
+    ) -> dict: ...
+
 
 class ImportRelay(Protocol):
     def batch_head_chunks(
@@ -370,14 +380,51 @@ def _publish_merge_via_sharded(
 
     Each folder in ``merged_manifest`` that has any entries lands as
     its own shard publish (one CAS unit). Folders the merge left
-    empty are skipped. The merged folder-set is assumed to already
-    exist in the active vault root — adding brand-new folder
-    pointers is a separate ``vault.add_remote_folder`` flow (the
-    bundle preview UI exposes it). Returns a synthesized unified
-    manifest assembled from the post-publish sharded state.
+    empty are skipped. Bundle-only folders (those whose pointer isn't
+    in the active vault root yet — typical when importing a backup
+    into an empty vault) are pre-flighted via
+    ``vault.ensure_folder_pointers_exist`` before the per-folder
+    publish loop runs; without that pre-flight,
+    ``_publish_folder_merge_with_retry`` would raise ``ValueError``
+    on the first such folder after some others had already published,
+    leaving the import partially applied. Returns a synthesized
+    unified manifest assembled from the post-publish sharded state.
     """
     merged_n = normalize_manifest_plaintext(merged_manifest)
     timestamp = str(merged_n.get("created_at") or "")
+
+    # Pre-flight: collect any folder pointer the merge added that
+    # isn't in the active root yet, and publish them in one root mutation
+    # (idempotent under CAS retry per ``ensure_folder_pointers_exist``).
+    active_root = vault.fetch_root_manifest(relay, local_index=local_index)
+    existing_folder_ids = {
+        str(p.get("remote_folder_id", ""))
+        for p in (active_root.get("remote_folders") or [])
+        if isinstance(p, dict)
+    }
+    bundle_only_pointers: list[dict[str, Any]] = []
+    for folder in merged_n.get("remote_folders", []) or []:
+        if not isinstance(folder, dict):
+            continue
+        folder_id = str(folder.get("remote_folder_id", ""))
+        if not folder_id or folder_id in existing_folder_ids:
+            continue
+        # Strip the merge's `entries` field — the pointer lives in the
+        # root; entries live in the shard published below.
+        pointer = {k: v for k, v in folder.items() if k != "entries"}
+        bundle_only_pointers.append(pointer)
+    if bundle_only_pointers:
+        log.info(
+            "vault.import.create_missing_folder_pointers count=%d",
+            len(bundle_only_pointers),
+        )
+        vault.ensure_folder_pointers_exist(
+            relay,
+            pointers=bundle_only_pointers,
+            author_device_id=author_device_id,
+            created_at=timestamp or None,
+            local_index=local_index,
+        )
 
     # Iterate folders in the merge. For each, run a per-folder publish
     # with CAS retry — gather entries from the merge as the candidate

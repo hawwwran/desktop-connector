@@ -447,6 +447,7 @@ relay log (filenames are local-only).
 | `vault.import.cancelled_pre_publish` | desktop | info | `vault`, `chunks_done` | F-U03 — import cancelled after chunks but before merge publish |
 | `vault.import.cas_exhausted` | desktop | warning | `vault`, `folder`, `retries` | Phase H — per-folder import merge-publish retry budget exhausted; raised the CAS error to caller |
 | `vault.import.cas_retry` | desktop | info | `attempt`, `folder`, `shard_conflict`, `root_conflict` | Phase H — per-folder import merge shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
+| `vault.import.create_missing_folder_pointers` | desktop | info | `count` | Phase H — import pre-flighted N bundle-only folder pointers (not yet in the active root) before the per-folder shard publish loop |
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
 | `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
 | `vault.manifest.rollback_detected` | desktop | warning | `vault_id`, `served`, `floor` | §3.7 trust anchor — relay served an AEAD-verified revision strictly less than the persisted per-device floor; manifest not auto-applied, `VaultManifestRollbackError` raised |

@@ -101,6 +101,59 @@ class RemoteFoldersMixin:
             local_index=local_index,
         )
 
+    def ensure_folder_pointers_exist(
+        self,
+        relay: RelayProtocol,
+        *,
+        pointers: list[dict],
+        author_device_id: str,
+        created_at: str | None = None,
+        local_index=None,
+    ) -> dict:
+        """Append any pointers whose ``remote_folder_id`` is missing from
+        the active root; idempotent for pointers already present.
+
+        Used by the vault import flow: ``merge_import_into`` may produce
+        bundle-only folders (no pointer in the active root yet), and the
+        per-folder shard publish requires the pointer to exist first.
+        ``ensure_folder_pointers_exist`` runs once before the per-folder
+        publish loop with the full set of merged folders; under
+        concurrent imports the CAS-conflict path re-reads the root and
+        re-checks which pointers still need adding (so a racing peer's
+        partial creation is naturally absorbed).
+
+        Returns a synthesized unified manifest (no shards walked).
+        """
+        if not pointers:
+            return self.fetch_unified_manifest(relay, local_index=local_index)
+        timestamp = created_at or _now_rfc3339()
+
+        def mutate(root: dict) -> dict:
+            out = normalize_root_manifest_plaintext(root)
+            existing_ids = {
+                str(p.get("remote_folder_id", ""))
+                for p in out["remote_folders"]
+                if isinstance(p, dict)
+            }
+            additions = [
+                copy.deepcopy(ptr)
+                for ptr in pointers
+                if isinstance(ptr, dict)
+                and str(ptr.get("remote_folder_id", "")) not in existing_ids
+            ]
+            if not additions:
+                return out
+            out["remote_folders"] = list(out["remote_folders"]) + additions
+            return out
+
+        return self._mutate_root_and_publish(
+            relay,
+            mutate=mutate,
+            author_device_id=author_device_id,
+            timestamp=timestamp,
+            local_index=local_index,
+        )
+
     def update_remote_folder_settings(
         self,
         relay: RelayProtocol,
