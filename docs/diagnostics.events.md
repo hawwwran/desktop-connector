@@ -414,6 +414,7 @@ relay log (filenames are local-only).
 | `vault.browser.sync_status_tick_failed` | desktop | warning | exception traceback | Ambient sync-status banner refresh tick raised; banner stays on the prior value, next tick retries |
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
 | `vault.delete.cas_exhausted` | desktop | warning | `vault`, `retries` | F-D25 — delete retry budget exhausted; raised the CAS error to caller |
+| `vault.delete.cas_retry` | desktop | info | `attempt`, `folder`, `shard_conflict`, `root_conflict` | Phase H — delete/restore shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
 | `vault.delete.completed` | desktop | info | `vault`, `revision`, `remote_folder_id`, `path`/`path_prefix`, `tombstoned` (folder bulk) | F-510 — soft-delete or folder-clear published; Activity-tab "Deleted" anchor |
 | `vault.download.cache_validation_unavailable` | desktop | info | `vault`, `chunk` | F-D10 — relay batch HEAD didn't return size or hash for this chunk; cache treated as miss to avoid blind-trust on bytes that AEAD alone can't size-check |
 | `vault.download.cancelled` | desktop | info | `vault`, `path`, `chunks_done`, `total` | F-U03 — chunk-level cancel mid-download |

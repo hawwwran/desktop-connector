@@ -75,6 +75,9 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
                 deleted_at="2026-04-01T10:00:00.000Z",  # > 30 days ago
             )
+            # Step 5: ``delete_file`` is sharded; mirror to legacy so
+            # the (still-legacy) eviction publish sees the tombstone.
+            mirror_legacy_from_sharded(vault, relay)
             chunks_before = set(relay.chunks)
             self.assertGreater(len(chunks_before), 0)
 
@@ -119,6 +122,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
                 deleted_at="2026-05-01T10:00:00.000Z",
             )
+            mirror_legacy_from_sharded(vault, relay)
             result = eviction_pass(
                 vault=vault, relay=relay, manifest=after_delete,
                 author_device_id=AUTHOR,
@@ -163,6 +167,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                     remote_folder_id=DOCS_ID, remote_path=path,
                     author_device_id=AUTHOR, deleted_at=deleted_at,
                 )
+                mirror_legacy_from_sharded(vault, relay)
 
             current = _decrypt_current_manifest(vault, relay)
             # Set a target larger than what stage 1 can free.

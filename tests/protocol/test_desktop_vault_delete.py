@@ -256,6 +256,12 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
                     author_device_id=AUTHOR,
                     deleted_at="2026-05-04T18:00:00.000Z",
                 )
+                # Step 5: delete is sharded; mirror to legacy so the
+                # ``current_revision`` count reflects the delete as one
+                # legacy revision (matches the bootstrap + upload + delete
+                # = 3 expectation). Removed in step 7 alongside the legacy
+                # mirror itself.
+                mirror_legacy_from_sharded(vault, relay)
             finally:
                 vault.close()
         joined = "\n".join(cm.output)

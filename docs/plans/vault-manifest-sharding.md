@@ -722,8 +722,25 @@ Remaining Plan A checklist:
   use the new ``parent_state`` kwarg on ``upload_file`` to inject
   a stale pre-A snapshot so device B's publish actually hits CAS
   and runs the merge path — production callers never set it.
-* [ ] Step 5: port ``ops/integrity.py``, ``ops/eviction.py``,
-  ``ops/delete.py``.
+* [x] **Step 5** (2026-05-17, partial): ported ``ops/delete.py``
+  (``delete_file`` / ``delete_folder_contents`` /
+  ``restore_version_to_current``) to publish via
+  ``publish_shard_with_root``. New private
+  ``_publish_shard_with_retry`` mirrors the upload module's CAS-retry
+  shape — decrypts shard/root conflict envelopes, re-runs the op,
+  retries. ``DeleteVault`` Protocol gains the sharded methods
+  alongside the legacy pair (full narrow waits for step 7). The
+  returned ``published`` dict is now a synthesized unified manifest
+  built from the post-publish ``(root, shard)`` for caller compat.
+  New event tag ``vault.delete.cas_retry`` catalogued.
+  ``ops/eviction.py`` + ``ops/integrity.py`` stay on the legacy
+  publish/fetch path for now — eviction's multi-folder atomic
+  semantics don't fit ``publish_shard_with_root``'s one-folder
+  scope cleanly, and integrity is read-only with tests built on
+  trivial mocks (low port value). Both are kept coherent in tests
+  via ``mirror_legacy_from_sharded`` after each sharded mutation;
+  the production port lives in a future step (or step 7 cleanup if
+  the eviction op is reshaped to walk shards directly).
 * [ ] Step 6: port ``folder/runtime.py``, ``import_/runner.py``,
   ``ui/browser_model.py``, ``remote_folders.py``.
 * [ ] Step 7: cleanup — drop the legacy server table +
