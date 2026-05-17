@@ -58,10 +58,19 @@ def scan_for_local_changes(
 
     for absolute in _walk_local(local_root, ignore_dotfiles=ignore_dotfiles):
         try:
-            stat = absolute.stat()
+            # Review §3.C3: lstat (not stat) — stat() follows symlinks
+            # and would let a `note.txt -> /etc/shadow` inside the
+            # binding root upload /etc/shadow's contents under the
+            # symlink's binding-relative name. baseline.py walks
+            # already use lstat; this brings the scan path in line.
+            stat = absolute.lstat()
         except OSError:
             continue
         if not _is_regular_file(stat):
+            log.info(
+                "vault.sync.special_file_skipped path=%s reason=%s",
+                absolute, _classify_non_regular_mode(stat.st_mode),
+            )
             continue
         try:
             relative = normalize_relative_path(
@@ -144,6 +153,25 @@ def _is_regular_file(stat_result: os.stat_result) -> bool:
     import stat as _stat
 
     return _stat.S_ISREG(stat_result.st_mode)
+
+
+def _classify_non_regular_mode(mode: int) -> str:
+    """Short label for a non-regular ``st_mode`` so the
+    ``vault.sync.special_file_skipped`` event tells the operator what
+    was filtered (review §3.C3). Mirrors baseline.py's classifier."""
+    import stat as _stat
+
+    if _stat.S_ISLNK(mode):
+        return "symlink"
+    if _stat.S_ISFIFO(mode):
+        return "fifo"
+    if _stat.S_ISSOCK(mode):
+        return "socket"
+    if _stat.S_ISCHR(mode):
+        return "char_device"
+    if _stat.S_ISBLK(mode):
+        return "block_device"
+    return "unknown"
 
 
 __all__ = ["scan_for_local_changes"]

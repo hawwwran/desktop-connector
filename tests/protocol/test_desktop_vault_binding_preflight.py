@@ -147,6 +147,29 @@ class PreflightCountingTests(unittest.TestCase):
         self.assertEqual(summary.current_files, 0)
         self.assertEqual(summary.deleted_files, 0)
 
+    def test_symlinks_are_not_counted_as_files(self) -> None:
+        """Review §3.C3: a symlink dropped into the binding root must
+        not show up in the preflight counts. Pre-fix, ``path.stat()``
+        followed the link and we counted the target's size, inflating
+        the bind plan and previewing material we should never read.
+        """
+        target = self.tmpdir / "Documents"
+        target.mkdir(parents=True)
+        (target / "real.txt").write_bytes(b"x" * 64)
+        # Create a symlink that resolves to a regular file outside the
+        # binding root — the security-relevant scenario.
+        outside = self.tmpdir / "outside"
+        outside.write_bytes(b"y" * 1024)
+        os.symlink(outside, target / "link.txt")
+
+        manifest = _manifest_with([])
+        summary = compute_preflight(
+            manifest=manifest, remote_folder_id=DOCS_ID, local_root=target,
+        )
+        # Only the real file counts — the symlink is filtered.
+        self.assertEqual(summary.local_existing_files, 1)
+        self.assertEqual(summary.local_existing_bytes, 64)
+
 
 class PreflightTextTests(unittest.TestCase):
     def test_renders_d15_layout_with_tombstone_line(self) -> None:

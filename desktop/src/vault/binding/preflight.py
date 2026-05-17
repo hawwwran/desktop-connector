@@ -15,13 +15,18 @@ initial sync. Plan: ``docs/plans/vault-large-folder-perf.md``.
 
 from __future__ import annotations
 
+import logging
 import os
+import stat as _stat
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..ui.bytes_format import format_bytes_binary as _format_bytes
+
+
+log = logging.getLogger(__name__)
 
 
 # Phase 1 estimator (re-fit 2026-05-16 after Phase 2 SO-2 + SO-3
@@ -210,8 +215,20 @@ def compute_preflight(
         local_path_writable = os.access(local_root, os.W_OK)
         for path in _walk_local(local_root, ignore_local_dotfiles):
             try:
-                stat = path.stat()
+                # Review §3.C3: lstat (not stat) — counting a symlink
+                # as a regular file would (a) inflate the projected
+                # upload size and (b) accept material that scan.py
+                # would then upload via the symlink target. Skip
+                # anything that isn't a regular file with a
+                # ``special_file_skipped`` breadcrumb.
+                stat = path.lstat()
             except OSError:
+                continue
+            if not _stat.S_ISREG(stat.st_mode):
+                log.info(
+                    "vault.sync.special_file_skipped path=%s reason=%s",
+                    path, _classify_non_regular_mode(stat.st_mode),
+                )
                 continue
             local_existing_files += 1
             local_existing_bytes += int(stat.st_size)
@@ -314,6 +331,23 @@ def _walk_local(root: Path, ignore_dotfiles: bool) -> Iterable[Path]:
             if ignore_dotfiles and name.startswith("."):
                 continue
             yield Path(dirpath) / name
+
+
+def _classify_non_regular_mode(mode: int) -> str:
+    """Short label for non-regular ``st_mode`` so the
+    ``vault.sync.special_file_skipped`` log line tells the operator
+    what was filtered (review §3.C3). Mirrors scan.py/baseline.py."""
+    if _stat.S_ISLNK(mode):
+        return "symlink"
+    if _stat.S_ISFIFO(mode):
+        return "fifo"
+    if _stat.S_ISSOCK(mode):
+        return "socket"
+    if _stat.S_ISCHR(mode):
+        return "char_device"
+    if _stat.S_ISBLK(mode):
+        return "block_device"
+    return "unknown"
 
 
 __all__ = [

@@ -1,9 +1,14 @@
-"""Review §3.C2 — watcher runtime ransomware-trip cancellation.
+"""Review §3.C2 / §3.C3 — watcher runtime + scan-level safety regressions.
 
-Asserts ``VaultWatcherRuntime._on_tripped`` routes the pause through
-the shared :class:`BindingCancellationRegistry` so an in-flight backup-
-only / two-way cycle observes the bail signal at its next checkpoint
-instead of bleeding tombstones to completion.
+Covers two distinct findings against the binding sync engine:
+
+- §3.C2: ``VaultWatcherRuntime._on_tripped`` routes the pause through
+  the shared :class:`BindingCancellationRegistry` so an in-flight
+  backup-only / two-way cycle observes the bail signal at its next
+  checkpoint instead of bleeding tombstones to completion.
+- §3.C3: ``scan.scan_for_local_changes`` lstat's the leaf (rather
+  than stat-following symlinks) and does not enqueue an upload op
+  for a symlink pointing at material outside the binding root.
 """
 
 from __future__ import annotations
@@ -122,6 +127,56 @@ class WatcherRuntimeCancellationTests(unittest.TestCase):
             cancel_event.is_set(),
             "follow-up trip on already-paused binding must not re-cancel",
         )
+
+
+class ScanSymlinkSafetyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_scan_symlink_test_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.index = VaultLocalIndex(self.tmpdir / "config")
+        self.store = VaultBindingsStore(self.index.db_path)
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_scan_skips_symlinks_does_not_enqueue_upload(self) -> None:
+        """Review §3.C3: a symlink dropped into the binding root must
+        NOT be enqueued for upload. Pre-fix the symlink's target
+        contents were uploaded under the symlink's binding-relative
+        name — an exfiltration vector via a Documents-bound vault.
+        """
+        from src.vault.binding.scan import scan_for_local_changes
+
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        self.store.update_binding_state(
+            binding.binding_id, state="bound", sync_mode="backup-only",
+        )
+        bound = self.store.get_binding(binding.binding_id)
+
+        # Drop a real file (must be enqueued) and a symlink to outside
+        # the binding root (must be skipped + log a special_file_skipped
+        # event).
+        (self.local_root / "real.txt").write_bytes(b"x" * 32)
+        outside = self.tmpdir / "outside_secret"
+        outside.write_bytes(b"sensitive")
+        os.symlink(outside, self.local_root / "link.txt")
+
+        enqueued = scan_for_local_changes(store=self.store, binding=bound)
+        self.assertEqual(enqueued, 1, "only the real file should be enqueued")
+
+        ops = self.store.list_pending_ops(bound.binding_id)
+        op_paths = sorted(o.relative_path for o in ops)
+        self.assertEqual(op_paths, ["real.txt"])
 
 
 class _BindingStub:
