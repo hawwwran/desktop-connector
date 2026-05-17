@@ -92,6 +92,69 @@ class RollbackBannerTextTests(unittest.TestCase):
         self.assertIn("export", text)
 
 
+class FetchRootFloorOrderingTests(unittest.TestCase):
+    """Review §2.H1: ``fetch_root_manifest`` must run the floor check
+    BEFORE clobbering ``_root_envelope`` / ``_root_revision`` /
+    ``_manifest_ciphertext`` / ``_manifest_revision``. Otherwise a
+    relay-served rollback raises but the in-memory cache is already
+    overwritten with the stale state, so subsequent reads see the
+    rolled-back values until the next successful fetch.
+    """
+
+    def setUp(self) -> None:
+        from src.vault import Vault
+        from src.vault.crypto import DefaultVaultCrypto
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.index = VaultLocalIndex(self._tmp.name)
+        # Seed a floor at revision 5 so anything below it is a rollback.
+        self.index.bump_manifest_revision_floor("ABCD2345WXYZ", 5)
+        # Construct a minimal Vault and pre-populate the cache as if a
+        # successful fetch had previously landed at rev 5.
+        self.good_envelope = b"\x01envelope-at-rev-5"
+        self.good_revision = 5
+        self.vault = Vault(
+            vault_id="ABCD2345WXYZ",
+            master_key=b"\x00" * 32,
+            recovery_secret=None,
+            vault_access_secret="vault-secret",
+            header_revision=1,
+            manifest_revision=self.good_revision,
+            manifest_ciphertext=self.good_envelope,
+            crypto=DefaultVaultCrypto,
+        )
+        # Snapshot the cache (set by the constructor) for the assert.
+        self.vault._root_envelope = self.good_envelope
+        self.vault._root_revision = self.good_revision
+
+    def test_floor_check_fires_before_cache_write(self) -> None:
+        from src.vault.relay_errors import VaultManifestRollbackError
+
+        # Stub relay returns a rolled-back root (rev 2 < floor 5).
+        rolled_back_envelope = b"\x01rolled-back-envelope"
+        class _RollbackRelay:
+            def get_root(self, vault_id, vault_access_secret):
+                return {"root_ciphertext": rolled_back_envelope}
+
+        # Stub decrypt to return a rev-2 root so the floor check trips.
+        def fake_decrypt(env_bytes):
+            self.assertEqual(env_bytes, rolled_back_envelope)
+            return {"root_revision": 2, "remote_folders": []}
+
+        self.vault.decrypt_root_envelope = fake_decrypt
+
+        with self.assertRaises(VaultManifestRollbackError):
+            self.vault.fetch_root_manifest(_RollbackRelay(), local_index=self.index)
+
+        # Cache MUST still hold the last-good rev-5 state — not the
+        # rolled-back rev-2 envelope.
+        self.assertEqual(self.vault._root_envelope, self.good_envelope,
+                         "rolled-back envelope clobbered the cache")
+        self.assertEqual(self.vault._root_revision, self.good_revision)
+        self.assertEqual(self.vault._manifest_ciphertext, self.good_envelope)
+        self.assertEqual(self.vault._manifest_revision, self.good_revision)
+
+
 class ManifestRevisionFloorPersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()

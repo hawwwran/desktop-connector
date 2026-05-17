@@ -536,6 +536,15 @@ class Vault(RemoteFoldersMixin):
             raise ValueError("relay returned an invalid root ciphertext")
         envelope_bytes = bytes(envelope)
         root = self.decrypt_root_envelope(envelope_bytes)
+        # Review §2.H1: floor check MUST run before the four cache
+        # writes below. If the relay served a rollback the floor check
+        # raises VaultRootRolledBackError — but pre-fix the cache was
+        # already clobbered with the stale state, so subsequent reads
+        # would see the rolled-back values until the next successful
+        # fetch. Spec §3.7 / relay_errors.py:120 require the cache to
+        # stay at the last-good revision in this case.
+        if local_index is not None:
+            self._verify_root_floor_or_raise(root, local_index)
         self._root_envelope = envelope_bytes
         self._root_revision = int(root["root_revision"])
         # The manifest_ciphertext slot historically held the legacy
@@ -545,8 +554,6 @@ class Vault(RemoteFoldersMixin):
         # check against the rollback floor.
         self._manifest_ciphertext = envelope_bytes
         self._manifest_revision = self._root_revision
-        if local_index is not None:
-            self._verify_root_floor_or_raise(root, local_index)
         return root
 
     def decrypt_root_envelope(self, envelope_bytes: bytes) -> dict:
