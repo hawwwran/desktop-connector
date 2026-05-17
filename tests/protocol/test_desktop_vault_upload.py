@@ -1525,6 +1525,11 @@ class FakeUploadRelay:
         if not hasattr(self, "gc_plans"):
             self.gc_plans = {}
         safe = [c for c in candidate_chunk_ids if c in self.chunks]
+        # Phase H step 7d crash-recovery: candidates whose chunks no
+        # longer exist server-side land in ``already_deleted_chunk_ids``
+        # so the client can clean stale shard entries without re-running
+        # ``gc_execute``.
+        already_deleted = [c for c in candidate_chunk_ids if c not in self.chunks]
         self.gc_plans[plan_id] = {
             "manifest_revision": manifest_revision,
             "safe_to_delete": safe,
@@ -1533,6 +1538,7 @@ class FakeUploadRelay:
             "plan_id": plan_id,
             "safe_to_delete": list(safe),
             "still_referenced": [],
+            "already_deleted_chunk_ids": list(already_deleted),
             "expires_at": "2099-01-01T00:00:00.000Z",
         }
 

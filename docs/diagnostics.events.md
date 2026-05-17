@@ -430,6 +430,7 @@ relay log (filenames are local-only).
 | `vault.eviction.cas_exhausted` | desktop | warning | `vault`, `folder`, `retries` | F-D25 — eviction retry budget exhausted on one folder's shard publish; raised the CAS error to caller |
 | `vault.eviction.cas_retry` | desktop | info | `attempt`, `folder`, `shard_conflict`, `root_conflict` | Phase H — per-folder eviction shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
 | `vault.eviction.no_more_candidates` | desktop | info | `vault_id` | Quota pressure ran out of evictable old versions |
+| `vault.eviction.shard_cleanup_only` | desktop | info | `event`, `stale_chunk_refs`, `paths` | Crash-recovery — server reported `safe_to_delete=[]` but `already_deleted_chunk_ids` for stale shard entries; ran shard cleanup without re-running `gc_execute` |
 | `vault.eviction.tombstone_purged_early` | desktop | info | `vault_id`, `path` | Tombstone purged before retention horizon under quota pressure |
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal) |
 | `vault.eviction.version_purged` | desktop | info | `vault_id`, `path`, `version_id` | Old version evicted to free space |

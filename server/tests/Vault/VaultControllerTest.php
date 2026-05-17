@@ -937,7 +937,34 @@ final class VaultControllerTest extends TestCase
         self::assertSame(200, $res['status']);
         self::assertContains($cid, $res['json']['data']['safe_to_delete']);
         self::assertSame([], $res['json']['data']['still_referenced']);
+        self::assertSame([], $res['json']['data']['already_deleted_chunk_ids']);
         self::assertNotEmpty($res['json']['data']['plan_id']);
+    }
+
+    public function test_gcPlan_returns_already_deleted_for_missing_chunks(): void
+    {
+        // Eviction crash-recovery: a prior run called gc_execute (chunks
+        // deleted server-side) but crashed before publishing the shard
+        // cleanup. The next run asks gc_plan about the same candidates
+        // — the server reports them as already_deleted so the client
+        // can clean stale shard entries without re-running gc_execute.
+        $missing = 'ch_v1_aaaaaaaaaaaaaaaaaaaaalry';
+        $active = 'ch_v1_bbbbbbbbbbbbbbbbbbbbbbbb';
+        $this->uploadChunk($active, 'still-here');
+
+        $res = $this->invoke(fn() => VaultController::gcPlan(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                'root_revision'       => 1,
+                'encrypted_gc_auth'   => 'opaque',
+                'candidate_chunk_ids' => [$missing, $active],
+            ])
+        ));
+
+        self::assertSame(200, $res['status']);
+        self::assertContains($active, $res['json']['data']['safe_to_delete']);
+        self::assertContains($missing, $res['json']['data']['already_deleted_chunk_ids']);
+        self::assertNotContains($missing, $res['json']['data']['safe_to_delete']);
     }
 
     public function test_gcPlan_400_on_unknown_root_revision(): void

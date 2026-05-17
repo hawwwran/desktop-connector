@@ -1258,11 +1258,24 @@ class VaultController
         // against per-manifest reference indexes is T6/T7+ — for now any
         // chunk in vault_chunks (state=active) is "safe to delete" as far
         // as the relay can tell. No still_referenced entries returned.
+        //
+        // ``already_deleted_chunk_ids`` lists candidates that ``batchHead``
+        // didn't find at all (the chunk row is gone). The client uses this
+        // to clean stale shard entries after a partial-stage crash: a
+        // prior eviction ran ``gc_execute`` (chunks deleted) but crashed
+        // before publishing the shard mutations; the next run finds the
+        // same expired-tombstone entries, asks ``gc_plan`` about their
+        // chunks, gets back an empty ``safe_to_delete`` (chunks already
+        // gone) plus a non-empty ``already_deleted_chunk_ids``, and runs
+        // shard-cleanup-only without re-running ``gc_execute``.
         $chunksRepo = new VaultChunksRepository($db);
         $batch = $chunksRepo->batchHead($vaultId, $candidateIds);
         $safe = [];
+        $alreadyDeleted = [];
         foreach ($batch as $cid => $info) {
-            if ($info !== null && $info['state'] === VaultChunksRepository::STATE_ACTIVE) {
+            if ($info === null) {
+                $alreadyDeleted[] = $cid;
+            } elseif ($info['state'] === VaultChunksRepository::STATE_ACTIVE) {
                 $safe[] = $cid;
             }
         }
@@ -1287,10 +1300,11 @@ class VaultController
         Router::json([
             'ok' => true,
             'data' => [
-                'plan_id'          => $jobId,
-                'safe_to_delete'   => $safe,
-                'still_referenced' => [],
-                'expires_at'       => self::ts($expiresAt),
+                'plan_id'                  => $jobId,
+                'safe_to_delete'           => $safe,
+                'still_referenced'         => [],
+                'already_deleted_chunk_ids' => $alreadyDeleted,
+                'expires_at'               => self::ts($expiresAt),
             ],
         ], 200);
     }

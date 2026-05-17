@@ -261,6 +261,70 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertFalse(entry["deleted"])
         self.assertGreater(len(relay.chunks), 0)
 
+    def test_eviction_recovers_after_partial_mid_stage_crash(self) -> None:
+        """Phase H step 7d crash-recovery: a prior eviction ran
+        ``gc_execute`` (chunks deleted server-side) but crashed before
+        publishing the shard cleanup. The next run sees
+        ``safe_to_delete=[]`` but ``already_deleted_chunk_ids`` non-empty
+        for the stale tombstone entries, skips ``gc_execute``, and runs
+        shard cleanup to drop the entries.
+        """
+        local = self.tmpdir / "stranded.txt"
+        local.write_bytes(b"content that will be stranded after crash")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay(manifest=manifest)
+        relay.current_revision = int(manifest.get("parent_revision", 0))
+        vault = _vault()
+        try:
+            vault.publish_manifest(relay, manifest)
+            seed_sharded_state_from_manifest(vault, relay, manifest)
+            uploaded = upload_file(
+                vault=vault, relay=relay, manifest=manifest, local_path=local,
+                remote_folder_id=DOCS_ID, remote_path="stranded.txt",
+                author_device_id=AUTHOR,
+            )
+            after_delete = delete_file(
+                vault=vault, relay=relay, manifest=uploaded.manifest,
+                remote_folder_id=DOCS_ID, remote_path="stranded.txt",
+                author_device_id=AUTHOR,
+                deleted_at="2026-04-01T10:00:00.000Z",  # > 30 days ago
+            )
+
+            # Simulate the prior crash: a previous eviction ran
+            # ``gc_execute`` (chunks gone server-side) but crashed before
+            # the shard publish, so the tombstone entry is still in the
+            # shard pointing at deleted chunks.
+            chunks_before = set(relay.chunks)
+            self.assertGreater(len(chunks_before), 0)
+            for cid in chunks_before:
+                relay.chunks.pop(cid, None)
+
+            # Count gc_execute invocations to confirm the recovery path
+            # doesn't re-run it.
+            original_gc_execute = relay.gc_execute
+            gc_execute_call_count = [0]
+
+            def counting_gc_execute(*args, **kwargs):
+                gc_execute_call_count[0] += 1
+                return original_gc_execute(*args, **kwargs)
+
+            relay.gc_execute = counting_gc_execute  # type: ignore[method-assign]
+
+            result = eviction_pass(
+                vault=vault, relay=relay, manifest=after_delete,
+                author_device_id=AUTHOR,
+                target_bytes_to_free=0,
+                now_iso="2026-05-04T12:00:00.000Z",
+            )
+        finally:
+            vault.close()
+
+        # Shard cleanup ran without re-running gc_execute.
+        self.assertEqual(gc_execute_call_count[0], 0)
+        # Manifest no longer references the stranded entry.
+        self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "stranded.txt"))
+
 
 def _vault() -> Vault:
     return Vault(

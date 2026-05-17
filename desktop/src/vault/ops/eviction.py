@@ -30,7 +30,6 @@ catalog stays in one place.
 
 from __future__ import annotations
 
-import copy
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,7 +37,6 @@ from typing import Any, Callable, Protocol
 
 from ..binding.lifecycle import SyncCancelledError
 from ..manifest import (
-    assemble_unified_manifest,
     compute_recoverable_until,
     normalize_root_manifest_plaintext,
     normalize_shard_plaintext,
@@ -48,7 +46,6 @@ from ..relay_errors import VaultCASConflictError
 from ..upload.folder_state import (
     FolderState,
     fetch_folder_state,
-    find_root_folder_pointer,
 )
 
 
@@ -319,23 +316,37 @@ def _run_stage(
         candidate_chunk_ids=list(batch.chunk_ids),
     )
     safe_to_delete = list(plan.get("safe_to_delete") or [])
-    if not safe_to_delete:
+    # Phase H step 7d crash-recovery: ``already_deleted_chunk_ids`` is the
+    # server's "chunks you asked about don't exist anymore" signal — used
+    # when a prior eviction ran ``gc_execute`` but crashed before
+    # publishing the shard cleanup. The current run's per-folder mutation
+    # uses ``purged = safe_to_delete ∪ already_deleted`` so stale shard
+    # entries pointing at deleted chunks are cleaned without re-running
+    # ``gc_execute``.
+    already_deleted = list(plan.get("already_deleted_chunk_ids") or [])
+    if not safe_to_delete and not already_deleted:
         return None, manifest
 
-    plan_id = str(plan.get("plan_id") or "")
-    execute_result = relay.gc_execute(
-        vault.vault_id,
-        vault.vault_access_secret,
-        plan_id=plan_id,
-    )
-    bytes_freed = int(execute_result.get("freed_ciphertext_bytes") or 0)
-    deleted_count = int(execute_result.get("deleted_count") or 0)
-    if bytes_freed == 0 and batch.chunk_sizes:
-        bytes_freed = sum(batch.chunk_sizes.get(c, 0) for c in safe_to_delete)
-    if deleted_count == 0:
-        deleted_count = len(safe_to_delete)
+    cleanup_only = not safe_to_delete and bool(already_deleted)
 
-    purged = set(safe_to_delete)
+    if cleanup_only:
+        bytes_freed = 0
+        deleted_count = 0
+    else:
+        plan_id = str(plan.get("plan_id") or "")
+        execute_result = relay.gc_execute(
+            vault.vault_id,
+            vault.vault_access_secret,
+            plan_id=plan_id,
+        )
+        bytes_freed = int(execute_result.get("freed_ciphertext_bytes") or 0)
+        deleted_count = int(execute_result.get("deleted_count") or 0)
+        if bytes_freed == 0 and batch.chunk_sizes:
+            bytes_freed = sum(batch.chunk_sizes.get(c, 0) for c in safe_to_delete)
+        if deleted_count == 0:
+            deleted_count = len(safe_to_delete)
+
+    purged = set(safe_to_delete) | set(already_deleted)
 
     # Phase H step 7d: per affected folder, fetch state + apply mutation +
     # publish_shard_with_root. Stage atomicity downgrades from vault-wide
@@ -355,13 +366,19 @@ def _run_stage(
     # caller's next stage_fn sees the post-purge view.
     post_manifest = vault.fetch_unified_manifest(relay, local_index=local_index)
 
-    log.info(
-        "%s freed_bytes=%d freed_chunks=%d paths=%d",
-        event,
-        bytes_freed,
-        deleted_count,
-        len(batch.affected_paths),
-    )
+    if cleanup_only:
+        log.info(
+            "vault.eviction.shard_cleanup_only event=%s stale_chunk_refs=%d paths=%d",
+            event, len(already_deleted), len(batch.affected_paths),
+        )
+    else:
+        log.info(
+            "%s freed_bytes=%d freed_chunks=%d paths=%d",
+            event,
+            bytes_freed,
+            deleted_count,
+            len(batch.affected_paths),
+        )
 
     return (
         EvictionStageResult(
