@@ -181,17 +181,31 @@ class VaultShardHashMismatchError(RuntimeError):
 
 
 class VaultCASConflictError(VaultRelayError):
-    """Server rejected a manifest publish because the CAS revision moved (HTTP 409).
+    """Server rejected a publish because the CAS revision moved (HTTP 409).
 
-    Per §A1, the server's 409 body returns ``current_revision``,
-    ``current_manifest_hash``, ``current_manifest_ciphertext`` (base64)
-    and ``current_manifest_size`` so the client can run §D4 merge in a
-    single round-trip without a follow-up GET.
+    Covers three Phase-B-and-later conflict shapes plus the legacy
+    single-manifest shape (still emitted by the Phase D ``put_manifest``
+    compat shim).
+
+    Phase B/D shapes (after sharding):
+
+      * ``vault_root_conflict``       — ``current_root_*`` fields.
+      * ``vault_shard_conflict``      — ``current_shard_*`` fields +
+                                        ``remote_folder_id``.
+      * ``vault_shard_root_conflict`` — both sets of fields (atomic
+                                        publish, both sides drifted).
+
+    Legacy single-manifest shape:
+
+      * ``vault_manifest_conflict`` — ``current_revision`` +
+        ``current_manifest_*`` fields. Used during the Phase H transition
+        only.
     """
 
     def __init__(self, error: dict[str, Any]) -> None:
         super().__init__(error, status_code=409)
         details = self.details
+        # Legacy single-manifest payload (Phase H removal target).
         self.current_revision = details.get("current_revision")
         self.current_manifest_hash = str(details.get("current_manifest_hash") or "")
         self.current_manifest_ciphertext_b64 = str(
@@ -201,11 +215,51 @@ class VaultCASConflictError(VaultRelayError):
             self.current_manifest_size = int(details.get("current_manifest_size") or 0)
         except (TypeError, ValueError):
             self.current_manifest_size = 0
+        # Phase B sharded payloads. Either set may be absent; callers
+        # check the matching ciphertext field to know which.
+        self.current_root_revision = details.get("current_root_revision")
+        self.current_root_hash = str(details.get("current_root_hash") or "")
+        self.current_root_ciphertext_b64 = str(
+            details.get("current_root_ciphertext") or ""
+        )
+        self.current_shard_revision = details.get("current_shard_revision")
+        self.current_shard_hash = str(details.get("current_shard_hash") or "")
+        self.current_shard_ciphertext_b64 = str(
+            details.get("current_shard_ciphertext") or ""
+        )
+        self.remote_folder_id = str(details.get("remote_folder_id") or "")
 
     def current_manifest_ciphertext_bytes(self) -> bytes:
-        """Decoded server-head manifest envelope, ready for ``decrypt_manifest``."""
+        """Decoded server-head manifest envelope (legacy shape only).
+
+        Empty bytes when the conflict was a sharded one. Callers in the
+        sharded path use :meth:`current_shard_ciphertext_bytes` /
+        :meth:`current_root_ciphertext_bytes`.
+        """
         import base64
 
         if not self.current_manifest_ciphertext_b64:
             return b""
         return base64.b64decode(self.current_manifest_ciphertext_b64)
+
+    def current_shard_ciphertext_bytes(self) -> bytes:
+        """Decoded server-head shard envelope, ready for
+        :meth:`Vault.decrypt_shard_envelope`. Empty bytes when the
+        server didn't include a shard payload (root-only conflict).
+        """
+        import base64
+
+        if not self.current_shard_ciphertext_b64:
+            return b""
+        return base64.b64decode(self.current_shard_ciphertext_b64)
+
+    def current_root_ciphertext_bytes(self) -> bytes:
+        """Decoded server-head root envelope, ready for
+        :meth:`Vault.decrypt_root_envelope`. Empty bytes when the
+        server didn't include a root payload (shard-only conflict).
+        """
+        import base64
+
+        if not self.current_root_ciphertext_b64:
+            return b""
+        return base64.b64decode(self.current_root_ciphertext_b64)

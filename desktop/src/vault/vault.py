@@ -532,8 +532,9 @@ class Vault(RemoteFoldersMixin):
         if not isinstance(envelope, (bytes, bytearray)):
             raise ValueError("relay returned an invalid root ciphertext")
         envelope_bytes = bytes(envelope)
+        root = self.decrypt_root_envelope(envelope_bytes)
         self._root_envelope = envelope_bytes
-        self._root_revision = int(resp.get("root_revision", 0))
+        self._root_revision = int(root["root_revision"])
         # The manifest_ciphertext slot historically held the legacy
         # vault-wide manifest envelope. After Phase D the root is the
         # authoritative top-level envelope; keep the alias populated so
@@ -541,23 +542,43 @@ class Vault(RemoteFoldersMixin):
         # check against the rollback floor.
         self._manifest_ciphertext = envelope_bytes
         self._manifest_revision = self._root_revision
-
-        plaintext = aead_decrypt(
-            envelope_bytes[85:],  # skip the 85-byte plaintext header
-            derive_subkey("dc-vault-v1/root", bytes(self._master_key)),
-            envelope_bytes[61:85],   # nonce position
-            build_root_aad(
-                vault_id=self._vault_id,
-                root_revision=self._root_revision,
-                parent_root_revision=int.from_bytes(envelope_bytes[21:29], "big"),
-                author_device_id=envelope_bytes[29:61].decode("ascii"),
-            ),
-        )
-        root = json.loads(plaintext.decode("utf-8"))
-        root = normalize_root_manifest_plaintext(root)
         if local_index is not None:
             self._verify_root_floor_or_raise(root, local_index)
         return root
+
+    def decrypt_root_envelope(self, envelope_bytes: bytes) -> dict:
+        """Decrypt a root envelope's bytes to its plaintext dict.
+
+        Standalone path used by CAS conflict handlers that receive the
+        server-current root envelope inline in a 409 response (so a
+        re-fetch round-trip is avoided). Does NOT touch
+        ``_root_envelope`` / ``_root_revision`` — that's the caller's
+        choice (most CAS retries don't want the side effect).
+        """
+        if self._closed:
+            raise ValueError("vault is closed")
+        if len(envelope_bytes) < 85 + 16:
+            raise ValueError("root envelope too short")
+        if envelope_bytes[0] != 1:
+            raise ValueError(
+                f"vault_format_version_unsupported: root format_version={envelope_bytes[0]}"
+            )
+        revision = int.from_bytes(envelope_bytes[13:21], "big")
+        parent_revision = int.from_bytes(envelope_bytes[21:29], "big")
+        author_device_id = envelope_bytes[29:61].decode("ascii")
+        plaintext = aead_decrypt(
+            envelope_bytes[85:],
+            derive_subkey("dc-vault-v1/root", bytes(self._master_key)),
+            envelope_bytes[61:85],
+            build_root_aad(
+                vault_id=self._vault_id,
+                root_revision=revision,
+                parent_root_revision=parent_revision,
+                author_device_id=author_device_id,
+            ),
+        )
+        root = json.loads(plaintext.decode("utf-8"))
+        return normalize_root_manifest_plaintext(root)
 
     def publish_root_manifest(
         self,
@@ -641,8 +662,33 @@ class Vault(RemoteFoldersMixin):
                     expected_shard_hash=expected_shard_hash,
                     actual_shard_hash=actual,
                 )
-        shard_revision = int(resp.get("shard_revision", 0))
-        parent_shard_revision = int(resp.get("parent_shard_revision", 0))
+        return self.decrypt_shard_envelope(envelope_bytes, remote_folder_id)
+
+    def decrypt_shard_envelope(self, envelope_bytes: bytes, remote_folder_id: str) -> dict:
+        """Decrypt a shard envelope's bytes to its plaintext dict.
+
+        Standalone path used by CAS conflict handlers that receive the
+        server-current shard envelope inline in a 409 response. The
+        caller already knows ``remote_folder_id`` (it's in the
+        conflict payload + needed for AAD); the revision pair is
+        recovered from the envelope's deterministic prefix.
+        """
+        if self._closed:
+            raise ValueError("vault is closed")
+        if len(envelope_bytes) < 115 + 16:
+            raise ValueError("shard envelope too short")
+        if envelope_bytes[0] != 1:
+            raise ValueError(
+                f"vault_format_version_unsupported: shard format_version={envelope_bytes[0]}"
+            )
+        envelope_rf_id = envelope_bytes[13:43].decode("ascii")
+        if envelope_rf_id != remote_folder_id:
+            raise ValueError(
+                f"shard envelope remote_folder_id {envelope_rf_id!r} "
+                f"does not match expected {remote_folder_id!r}"
+            )
+        shard_revision = int.from_bytes(envelope_bytes[43:51], "big")
+        parent_shard_revision = int.from_bytes(envelope_bytes[51:59], "big")
         plaintext = aead_decrypt(
             envelope_bytes[115:],
             derive_subkey("dc-vault-v1/shard", bytes(self._master_key)),

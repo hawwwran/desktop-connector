@@ -1162,6 +1162,20 @@ class FakeUploadRelay:
         self.current_envelope: bytes = b""
         self.current_hash: str = ""
         self._quota_remaining = quota_after_n_chunks
+        # Phase H sharded surface (root + per-folder shards). The
+        # legacy manifest state above is kept separate so existing
+        # tests stay green; sync tests that need the sharded surface
+        # seed it explicitly via the publish_root_manifest /
+        # publish_shard_with_root path (mirrors FakeShardedRelay).
+        self.root_envelope: bytes = b""
+        self.root_revision: int = 0
+        self.root_hash: str = ""
+        self.shards: dict[str, dict] = {}   # folder_id → {envelope, revision, hash}
+        self.published_shards: list[dict] = []
+        self.published_roots: list[dict] = []
+        self.shard_with_root_puts = 0
+        self.root_gets = 0
+        self.shard_gets: dict[str, int] = {}
 
     # --- chunk relay ---------------------------------------------------
     def batch_head_chunks(self, vault_id, vault_access_secret, chunk_ids):
@@ -1282,6 +1296,245 @@ class FakeUploadRelay:
         self.current_envelope = bytes(manifest_ciphertext)
         self.current_hash = manifest_hash
         return {"new_revision": new_revision}
+
+    # --- sharded surface (Phase H) -------------------------------------
+    def get_root(self, vault_id, vault_access_secret):
+        self.root_gets += 1
+        return {
+            "root_revision": self.root_revision,
+            "parent_root_revision": max(0, self.root_revision - 1),
+            "root_hash": self.root_hash,
+            "root_ciphertext": self.root_envelope,
+            "root_size": len(self.root_envelope),
+        }
+
+    def put_root(
+        self, vault_id, vault_access_secret, *,
+        expected_current_root_revision, new_root_revision,
+        parent_root_revision, root_hash, root_ciphertext,
+    ):
+        if int(expected_current_root_revision) != self.root_revision:
+            import base64
+            raise VaultCASConflictError({
+                "code": "vault_root_conflict",
+                "message": "fake root CAS conflict",
+                "details": {
+                    "current_root_revision": self.root_revision,
+                    "current_root_hash": self.root_hash,
+                    "current_root_ciphertext":
+                        base64.b64encode(self.root_envelope).decode("ascii"),
+                    "current_root_size": len(self.root_envelope),
+                },
+            })
+        self.root_revision = int(new_root_revision)
+        self.root_envelope = bytes(root_ciphertext)
+        self.root_hash = root_hash
+        self.published_roots.append({
+            "new_root_revision": new_root_revision,
+            "root_hash": root_hash,
+        })
+        return {"root_revision": new_root_revision, "root_hash": root_hash}
+
+    def get_shard(self, vault_id, vault_access_secret, remote_folder_id):
+        self.shard_gets[remote_folder_id] = self.shard_gets.get(remote_folder_id, 0) + 1
+        head = self.shards.get(remote_folder_id)
+        if head is None:
+            from src.vault.relay_errors import VaultNotFoundError
+            raise VaultNotFoundError(f"shard {remote_folder_id} not found")
+        return {
+            "remote_folder_id": remote_folder_id,
+            "shard_revision": head["revision"],
+            "parent_shard_revision": max(0, head["revision"] - 1),
+            "shard_hash": head["hash"],
+            "shard_ciphertext": head["envelope"],
+            "shard_size": len(head["envelope"]),
+        }
+
+    def put_shard(
+        self, vault_id, vault_access_secret, remote_folder_id, *,
+        expected_current_shard_revision, new_shard_revision,
+        parent_shard_revision, shard_hash, shard_ciphertext,
+    ):
+        current = self.shards.get(remote_folder_id)
+        current_rev = current["revision"] if current else 0
+        if int(expected_current_shard_revision) != current_rev:
+            import base64
+            raise VaultCASConflictError({
+                "code": "vault_shard_conflict",
+                "message": "fake shard CAS conflict",
+                "details": {
+                    "remote_folder_id": remote_folder_id,
+                    "current_shard_revision": current_rev,
+                    "current_shard_hash": current["hash"] if current else "",
+                    "current_shard_ciphertext":
+                        base64.b64encode(current["envelope"] if current else b"").decode("ascii"),
+                    "current_shard_size": len(current["envelope"]) if current else 0,
+                },
+            })
+        self.shards[remote_folder_id] = {
+            "envelope": bytes(shard_ciphertext),
+            "revision": int(new_shard_revision),
+            "hash": shard_hash,
+        }
+        self.published_shards.append({
+            "remote_folder_id": remote_folder_id,
+            "new_shard_revision": new_shard_revision,
+            "shard_hash": shard_hash,
+        })
+        return {"shard_revision": new_shard_revision, "shard_hash": shard_hash}
+
+    def put_shard_with_root(
+        self, vault_id, vault_access_secret, remote_folder_id, *,
+        shard, root,
+    ):
+        self.shard_with_root_puts += 1
+        import base64
+        current = self.shards.get(remote_folder_id)
+        current_shard_rev = current["revision"] if current else 0
+        shard_stale = int(shard["expected_current_shard_revision"]) != current_shard_rev
+        root_stale = int(root["expected_current_root_revision"]) != self.root_revision
+        if shard_stale and root_stale:
+            raise VaultCASConflictError({
+                "code": "vault_shard_root_conflict",
+                "message": "fake atomic CAS conflict (both)",
+                "details": {
+                    "remote_folder_id": remote_folder_id,
+                    "current_shard_revision": current_shard_rev,
+                    "current_shard_hash": current["hash"] if current else "",
+                    "current_shard_ciphertext":
+                        base64.b64encode(current["envelope"] if current else b"").decode("ascii"),
+                    "current_shard_size": len(current["envelope"]) if current else 0,
+                    "current_root_revision": self.root_revision,
+                    "current_root_hash": self.root_hash,
+                    "current_root_ciphertext":
+                        base64.b64encode(self.root_envelope).decode("ascii"),
+                    "current_root_size": len(self.root_envelope),
+                },
+            })
+        if shard_stale:
+            raise VaultCASConflictError({
+                "code": "vault_shard_conflict",
+                "message": "fake atomic CAS conflict (shard)",
+                "details": {
+                    "remote_folder_id": remote_folder_id,
+                    "current_shard_revision": current_shard_rev,
+                    "current_shard_hash": current["hash"] if current else "",
+                    "current_shard_ciphertext":
+                        base64.b64encode(current["envelope"] if current else b"").decode("ascii"),
+                    "current_shard_size": len(current["envelope"]) if current else 0,
+                },
+            })
+        if root_stale:
+            raise VaultCASConflictError({
+                "code": "vault_root_conflict",
+                "message": "fake atomic CAS conflict (root)",
+                "details": {
+                    "current_root_revision": self.root_revision,
+                    "current_root_hash": self.root_hash,
+                    "current_root_ciphertext":
+                        base64.b64encode(self.root_envelope).decode("ascii"),
+                    "current_root_size": len(self.root_envelope),
+                },
+            })
+        # Commit both atomically.
+        self.shards[remote_folder_id] = {
+            "envelope": bytes(shard["shard_ciphertext"]),
+            "revision": int(shard["new_shard_revision"]),
+            "hash": shard["shard_hash"],
+        }
+        self.root_revision = int(root["new_root_revision"])
+        self.root_envelope = bytes(root["root_ciphertext"])
+        self.root_hash = root["root_hash"]
+        self.published_shards.append({
+            "remote_folder_id": remote_folder_id,
+            "new_shard_revision": shard["new_shard_revision"],
+            "shard_hash": shard["shard_hash"],
+        })
+        self.published_roots.append({
+            "new_root_revision": root["new_root_revision"],
+            "root_hash": root["root_hash"],
+        })
+        return {
+            "shard_revision": shard["new_shard_revision"],
+            "shard_hash": shard["shard_hash"],
+            "root_revision": root["new_root_revision"],
+            "root_hash": root["root_hash"],
+        }
+
+
+def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
+    """Mirror a legacy unified manifest into FakeUploadRelay's sharded
+    surface so the Phase-H-ported sync engine can fetch a root + shard
+    pair instead of the legacy manifest.
+
+    Bumps the root chain by one publish per folder so each folder's
+    pointer carries its actual shard_hash (auto-patched by
+    publish_shard_with_root). The legacy ``vault.publish_manifest``
+    path is what sync tests historically used to seed state; this
+    helper is the missing second-half-of-publish that the Phase H
+    sync engine needs.
+
+    Re-runnable: calling it after each mutation keeps the sharded
+    view aligned with the legacy ``relay.current_manifest`` view.
+    """
+    from src.vault.manifest import (
+        make_folder_shard,
+        make_root_folder_pointer,
+        make_root_manifest,
+    )
+
+    folders = list(manifest.get("remote_folders", []) or [])
+    created_at = str(manifest.get("created_at", ""))
+    author = str(manifest.get("author_device_id", ""))
+    vault_id = str(manifest.get("vault_id", "")) or vault.vault_id
+
+    pointers = []
+    for folder in folders:
+        rf_id = str(folder["remote_folder_id"])
+        head = relay.shards.get(rf_id, {})
+        pointers.append(make_root_folder_pointer(
+            remote_folder_id=rf_id,
+            display_name_enc=str(folder.get("display_name_enc", "")),
+            created_at=str(folder.get("created_at", created_at)),
+            created_by_device_id=str(folder.get("created_by_device_id", author)),
+            retention_policy=folder.get("retention_policy"),
+            ignore_patterns=list(folder.get("ignore_patterns", []) or []),
+            state=str(folder.get("state", "active")),
+            shard_revision=int(head.get("revision", 0)),
+            shard_hash=str(head.get("hash", "")),
+        ))
+
+    next_root_revision = int(relay.root_revision) + 1
+    root = make_root_manifest(
+        vault_id=vault_id,
+        root_revision=next_root_revision,
+        parent_root_revision=int(relay.root_revision),
+        created_at=created_at, author_device_id=author,
+        remote_folders=pointers,
+    )
+    vault.publish_root_manifest(relay, root)
+
+    for folder in folders:
+        rf_id = str(folder["remote_folder_id"])
+        current_shard_revision = int(relay.shards.get(rf_id, {}).get("revision", 0))
+        shard = make_folder_shard(
+            vault_id=vault_id,
+            remote_folder_id=rf_id,
+            shard_revision=current_shard_revision + 1,
+            parent_shard_revision=current_shard_revision,
+            created_at=created_at,
+            author_device_id=author,
+            entries=list(folder.get("entries", []) or []),
+        )
+        # publish_shard_with_root requires a fresh root revision; bump
+        # whatever the relay currently has so the CAS passes.
+        current_root = vault.fetch_root_manifest(relay)
+        next_root = dict(current_root)
+        next_root["root_revision"] = int(current_root["root_revision"]) + 1
+        next_root["parent_root_revision"] = int(current_root["root_revision"])
+        next_root["created_at"] = created_at
+        next_root["author_device_id"] = author
+        vault.publish_shard_with_root(relay, rf_id, shard, next_root)
 
 
 class CrashingRelay(FakeUploadRelay):
