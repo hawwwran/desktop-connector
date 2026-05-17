@@ -31,3 +31,4 @@ Continuing autonomously into the High section.
 
 - 2026-05-17 — fixed §2.H1 (commit dbd11a9): hoist root-fetch floor check before the four cache writes so a rolled-back relay can't clobber the last-good cache.
 - 2026-05-17 — fixed §3.H1 (commit e26cf1b): observe_with_detector records the event before forwarding; trip-causing event no longer leaks into the pending-ops queue.
+- 2026-05-17 — fixed §1.H2 (commit 88802d3): getChunk applies isUserVisibleChunkState filter; GC-window race window closed.

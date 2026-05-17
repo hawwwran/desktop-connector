@@ -115,8 +115,11 @@ Spec `docs/protocol/vault-v1.md` §10 mandates 10/min auth attempts and 5/hour c
 
 **Fix:** add a `vault_auth_attempts` SQLite UPSERT keyed `(device_id, vault_id)`, next to the existing `ping_rate` table (same atomic-UPSERT pattern).
 
-#### §1.H2 — `getChunk` bypasses chunk state — GC-window blobs are served if file still exists
+#### ~~§1.H2~~ — `getChunk` bypasses chunk state — GC-window blobs are served if file still exists
+**Fix landed:** 88802d3 2026-05-17
 **File:** `server/src/Controllers/VaultController.php:907-932`
+
+**Approach:** Apply `isUserVisibleChunkState` filter in `getChunk` so the row's state must be `active` or `retained` to serve content. Matches headChunk + batchHead behavior.
 
 ```php
 $row = $chunksRepo->get($vaultId, $chunkId);
