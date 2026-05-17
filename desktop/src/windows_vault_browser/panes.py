@@ -19,6 +19,16 @@ from ..vault.ui.time_format import format_local
 from ..windows_common import _format_bytes
 
 
+def _open_local_path(local_path: str) -> None:
+    """Open ``local_path`` in the system file manager via gio."""
+    from pathlib import Path
+    from gi.repository import Gio
+    try:
+        Gio.AppInfo.launch_default_for_uri(Path(local_path).as_uri(), None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class PanesMixin:
     """Tree pane + center file list + right-hand detail pane."""
 
@@ -446,6 +456,110 @@ class PanesMixin:
 
         return menu_btn
 
+    def _append_remote_folder_details(self, current_path: str) -> bool:
+        """Render the Folders-tab folder detail widget (sizes + Local
+        binding) into the right pane when ``current_path`` resolves to
+        a top-level remote folder.
+
+        Returns True when the widget was appended (caller skips the
+        legacy "Current folder" hint), False otherwise.
+        """
+        assert self.detail_box is not None
+        manifest = self.state.manifest
+        if not manifest:
+            return False
+        top_segment = current_path.split("/", 1)[0]
+        if not top_segment:
+            return False
+
+        from ..vault.folder.ui_state import folder_rows_from_cache
+        from ..vault.state.usage import calculate_vault_usage
+        from ..vault_folders.details import append_folder_details
+
+        target_folder: dict | None = None
+        for folder in manifest.get("remote_folders", []) or []:
+            if not isinstance(folder, dict):
+                continue
+            if str(folder.get("state", "active")) != "active":
+                continue
+            if str(folder.get("display_name_enc") or "") == top_segment:
+                target_folder = folder
+                break
+        if target_folder is None:
+            return False
+        remote_folder_id = str(target_folder.get("remote_folder_id") or "")
+        if not remote_folder_id:
+            return False
+
+        # Stats come from the in-memory manifest the browser already
+        # holds, so we don't re-fetch.
+        usage = calculate_vault_usage(manifest).by_folder
+        folder_rows = folder_rows_from_cache(
+            [target_folder], usage_by_folder=usage,
+        )
+        if not folder_rows:
+            return False
+        folder_row = folder_rows[0]
+
+        self.detail_box.append(Gtk.Label(
+            label=folder_row["name"], xalign=0, css_classes=["title-3"],
+        ))
+
+        ctx = self._build_folders_ctx(remote_folder_id, manifest)
+        append_folder_details(
+            self.detail_box, ctx,
+            remote_folder_id=remote_folder_id, folder_row=folder_row,
+        )
+        return True
+
+    def _build_folders_ctx(self, remote_folder_id: str, manifest: dict):
+        """Construct a ``FoldersContext`` shim for the shared detail +
+        action helpers.
+
+        Reuses the same dataclass the Folders tab populates — the
+        binding-row actions (sync now / pause / resume / disconnect)
+        and the connect-local dialog all read from this shape, so a
+        shim lets the browser piggyback on the exact same code paths
+        without copy-pasting them.
+        """
+        from ..vault.binding.lifecycle import BindingCancellationRegistry
+        from ..vault.folder.runtime import VaultRuntime
+        from ..vault_folders.context import FoldersContext
+
+        vault_id = self._resolve_vault_id() or ""
+
+        # Cached lazily — folder selections within a single browser
+        # session can share the same VaultRuntime + cancellation
+        # registry, so an in-flight sync stays trackable as the user
+        # clicks around.
+        cached = getattr(self, "_folders_ctx_cache", None)
+        if cached is None or cached.vault_id != vault_id:
+            runtime = VaultRuntime(
+                config_dir=self.config_dir,
+                config=self.config,
+                vault_id=vault_id,
+                local_index=self.local_index,
+            )
+            cached = FoldersContext(
+                app=self._app,
+                parent_window=self.win,
+                config_dir=self.config_dir,
+                config=self.config,
+                vault_id=vault_id,
+                local_index=self.local_index,
+                runtime=runtime,
+                cancellation_registry=BindingCancellationRegistry(),
+            )
+            cached.set_sidebar_status = lambda msg, kind="dim-label": self._set_status(msg, kind)
+            cached.set_content_status = lambda msg, kind="dim-label": self._set_status(msg, kind)
+            cached.refresh_all = lambda *_a, **_kw: self._refresh_manifest_async()
+            cached.open_browse_local = _open_local_path
+            self._folders_ctx_cache = cached  # type: ignore[attr-defined]
+
+        cached.selection_state["folder_id"] = remote_folder_id
+        cached.folder_rows_by_id = {remote_folder_id: None}
+        return cached
+
     def _render_detail(self, file_row: dict | None) -> None:
         if self.detail_box is None:
             return
@@ -460,12 +574,14 @@ class PanesMixin:
         self._versions_heading_label = None
 
         if not file_row:
-            self.detail_box.append(Gtk.Label(
-                label="Details", xalign=0, css_classes=["title-3"],
-            ))
             current_path = str(self.state.path)
             if self.download_btn is not None:
                 self.download_btn.set_sensitive(bool(current_path))
+            if current_path and self._append_remote_folder_details(current_path):
+                return
+            self.detail_box.append(Gtk.Label(
+                label="Details", xalign=0, css_classes=["title-3"],
+            ))
             if current_path:
                 self.detail_box.append(Gtk.Label(
                     label="Current folder",

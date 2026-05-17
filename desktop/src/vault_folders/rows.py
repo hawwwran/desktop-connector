@@ -21,7 +21,6 @@ from .buttons import _make_overflow_button
 from .context import FoldersContext
 from .data import list_bindings_for_folder, list_folders
 from .dialog_configure_folder import open_configure_folder_dialog
-from .dialog_connect_local import open_connect_local_dialog
 
 
 def _build_binding_row(ctx: FoldersContext, row: dict) -> Gtk.Widget:
@@ -250,6 +249,8 @@ def _build_empty_state() -> Gtk.Widget:
 
 def render_detail(ctx: FoldersContext) -> None:
     from .tab import clear_box  # local import — avoids cycle at module load
+    from .details import append_folder_details
+
     clear_box(ctx.content_box)
     rfid = ctx.selection_state["folder_id"]
     folder_row = ctx.folder_rows_by_id.get(rfid) if rfid else None
@@ -260,87 +261,11 @@ def render_detail(ctx: FoldersContext) -> None:
         ctx.content_box.append(ctx.content_status)
         return
 
-    name = folder_row["name"]
-    ctx.content_page.set_title(name)
-
-    # F-LT11: stat tiles instead of a one-line caption-sized
-    # "Status · Current · Stored · History" string. Each pair sits
-    # in a Gtk.FlowBox child so a narrow window wraps the trailing
-    # tiles onto a second / third row instead of squashing all four
-    # into unreadable column widths. No card chrome — the values
-    # are content-level information, not a separate object.
-    stats_flow = Gtk.FlowBox(
-        selection_mode=Gtk.SelectionMode.NONE,
-        homogeneous=True,
-        min_children_per_line=1,
-        max_children_per_line=3,
-        column_spacing=24,
-        row_spacing=12,
+    ctx.content_page.set_title(folder_row["name"])
+    append_folder_details(
+        ctx.content_box, ctx,
+        remote_folder_id=rfid, folder_row=folder_row,
     )
-    # Status tile dropped: every remote folder is currently
-    # "active" (no soft-delete / archive flow yet) so the column
-    # was always identical and just stole space. Re-introduce it
-    # alongside the state-machine work when those values can vary.
-    for caption, value in (
-        ("Current size", folder_row["current"]),
-        ("Remote stored", folder_row["stored"]),
-        ("History", folder_row["history"]),
-    ):
-        tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        caption_label = Gtk.Label(
-            label=caption, xalign=0,
-            css_classes=["dim-label", "caption"],
-        )
-        value_label = Gtk.Label(
-            label=value, xalign=0,
-            css_classes=["title-4"],
-        )
-        value_label.set_ellipsize(Pango.EllipsizeMode.END)
-        tile.append(caption_label)
-        tile.append(value_label)
-        stats_flow.append(tile)
-    ctx.content_box.append(stats_flow)
-
-    # Binding section (singular — only one binding per remote folder
-    # is allowed in practice). When no binding exists yet, the
-    # primary call-to-action is "Connect with local folder" and it
-    # belongs right under the heading; once a binding exists the
-    # action is meaningless (the user already bound this folder)
-    # so we hide it instead of leaving a dead button around.
-    bindings_heading = Gtk.Label(
-        label="Local binding", xalign=0,
-        css_classes=["title-3"], margin_top=10,
-    )
-    ctx.content_box.append(bindings_heading)
-
-    bindings = list_bindings_for_folder(ctx, rfid)
-    if not bindings:
-        connect_btn = Gtk.Button(
-            label="Connect with local folder",
-            css_classes=["pill", "suggested-action"],
-            halign=Gtk.Align.START,
-            margin_top=4,
-        )
-        connect_btn.set_tooltip_text(
-            "Bind this remote folder to a local path. Default sync "
-            "mode is Backup only (uploads local changes; remote "
-            "changes never come down).",
-        )
-        connect_btn.connect(
-            "clicked",
-            lambda _b: open_connect_local_dialog(ctx, remote_folder_id=rfid),
-        )
-        ctx.content_box.append(connect_btn)
-    else:
-        bindings_listbox = Gtk.ListBox(
-            selection_mode=Gtk.SelectionMode.NONE,
-            css_classes=["boxed-list"],
-        )
-        bindings_listbox.set_size_request(150, -1)
-        for row in bindings:
-            bindings_listbox.append(_build_binding_row(ctx, row))
-        ctx.content_box.append(bindings_listbox)
-
     ctx.content_box.append(ctx.content_status)
 
 

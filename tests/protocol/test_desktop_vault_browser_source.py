@@ -135,6 +135,23 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_browser_window_shares_folder_details_with_settings(self) -> None:
+        """The folder detail pane (sizes + Local binding section) is
+        the same widget the Folders tab in Vault Settings paints —
+        ``append_folder_details`` lives in ``vault_folders.details``
+        and both surfaces call it. Source-pinned to catch a future
+        regression that copy-pastes the widget back into the browser.
+        """
+        source = _read_browser_source()
+        for needle in (
+            'from ..vault_folders.details import append_folder_details',
+            'append_folder_details(',
+            '_append_remote_folder_details',
+            '_build_folders_ctx',
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, source)
+
     def test_browser_window_wires_add_remote_folder(self) -> None:
         """A fresh empty vault must offer "Create remote folder…" from
         the sidebar's root-row hamburger (and the top-bar overflow menu)
