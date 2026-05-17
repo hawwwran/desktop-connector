@@ -26,3 +26,7 @@ All 17 Criticals processed on 2026-05-17.
 - **One-line per doubt:** see `docs/plans/review-doubts.md` for §3.C1 (purge_secret follow-up), §5.C1 (migration wizard scoping), §5.C2 (QR-join wait-for-v1.1 confirmation).
 
 Continuing autonomously into the High section.
+
+## High section — in progress
+
+- 2026-05-17 — fixed §2.H1 (commit dbd11a9): hoist root-fetch floor check before the four cache writes so a rolled-back relay can't clobber the last-good cache.

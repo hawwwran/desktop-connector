@@ -217,8 +217,11 @@ The byte-level module is **well-built**: explicit length assertions on every AAD
 
 ### High
 
-#### §2.H1 — Manifest revision floor: cached state overwritten *before* rollback check fires
+#### ~~§2.H1~~ — Manifest revision floor: cached state overwritten *before* rollback check fires
+**Fix landed:** dbd11a9 2026-05-17
 **File:** `desktop/src/vault/vault.py:538-549`
+
+**Approach:** Hoist `_verify_root_floor_or_raise` above the four cache writes so a rollback raises before any state mutation. Matches the legacy decrypt_manifest path's ordering.
 
 ```python
 root = self.decrypt_root_envelope(envelope_bytes)
