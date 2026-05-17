@@ -33,6 +33,7 @@ from ..crypto import (
 from ..manifest import (
     add_or_append_file_version,
     find_file_entry,
+    find_file_entry_in_shard,
     generate_file_entry_id,
     generate_file_version_id,
     merge_with_remote_head,
@@ -355,7 +356,7 @@ def prepare_upload_for_batch(
     *,
     vault: UploadVault,
     relay: UploadRelay,
-    manifest: dict[str, Any],
+    shard: dict[str, Any],
     local_path: Path,
     remote_folder_id: str,
     remote_path: str,
@@ -384,7 +385,7 @@ def prepare_upload_for_batch(
     batch publish.
 
     Skipped-identical short circuit: when the file's keyed fingerprint
-    already matches the latest live version in ``manifest``, returns
+    already matches the latest live version in ``shard``, returns
     ``PreparedUpload(skipped_identical=True, ...)`` without touching
     the relay. The caller stamps the local-entry row and drops the
     pending-op without growing the batch.
@@ -396,7 +397,7 @@ def prepare_upload_for_batch(
     _validate_local_for_upload(local_path)
 
     normalized_remote_path = normalize_manifest_path(remote_path)
-    existing_entry = find_file_entry(manifest, remote_folder_id, normalized_remote_path)
+    existing_entry = find_file_entry_in_shard(shard, normalized_remote_path)
     has_existing = existing_entry is not None and not bool(existing_entry.get("deleted"))
 
     plaintext_sha256, total_logical_size = _hash_file(local_path)

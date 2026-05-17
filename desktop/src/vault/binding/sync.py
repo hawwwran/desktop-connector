@@ -680,11 +680,23 @@ def _prepare_upload_for_batch(
             ),
         )
 
+    # Phase H step 1: prepare_upload_for_batch now takes a shard
+    # (per-folder file entries) instead of the unified manifest.
+    # Synthesize one from the unified manifest the legacy fetch
+    # returned. When sync.py's full port lands (next commit), the
+    # cycle will fetch the shard directly and skip this synthesis.
+    _folder_entries: list[Any] = []
+    for _folder in manifest.get("remote_folders", []) or []:
+        if isinstance(_folder, dict) and _folder.get("remote_folder_id") == binding.remote_folder_id:
+            _folder_entries = list(_folder.get("entries", []) or [])
+            break
+    _shard_view = {"entries": _folder_entries}
+
     try:
         prepared = prepare_upload_for_batch(
             vault=vault,
             relay=relay,
-            manifest=manifest,
+            shard=_shard_view,
             local_path=absolute,
             remote_folder_id=binding.remote_folder_id,
             remote_path=relative_path,

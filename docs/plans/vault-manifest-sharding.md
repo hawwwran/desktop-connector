@@ -555,10 +555,12 @@ Kotlin implementation has a north star.
 
 ---
 
-## Status
+## Status: Infrastructure done, production port in progress
 
-**Done 2026-05-17** on ``tresor-vault``. Eight commits land the
-phases A through H end-to-end:
+**Infrastructure done 2026-05-17** on ``tresor-vault``. Eight
+commits land the phases A through H end-to-end as infrastructure
+(wire surface, server schema, client crypto, helpers, acceptance
+tests, migration script, docs):
 
 * ``204b0cd`` — Phase A: wire spec + test vectors. Replaced the
   single ``manifest_v1.json`` with ``root_v1.json`` +
@@ -619,3 +621,51 @@ suite gate is fully green via the compat path. Plan-§H's
 ``grep -r "fetch_unified_manifest"`` returning no hits is the
 follow-up commit's responsibility; same for the
 ``publish_manifest`` removal.
+
+### Plan A: production port
+
+Post-infrastructure commits on ``tresor-vault`` setting up the
+mechanical port, then doing it one production source file at a
+time. Each commit leaves the suite green (Python 1564 + PHP
+260).
+
+* ``24bee55`` — fix §10.C shard hash chain end-to-end (review-
+  driven follow-up; landed before the port began).
+* ``bbdabf1`` — prep infrastructure for the port:
+  ``Vault.decrypt_root_envelope`` / ``decrypt_shard_envelope``,
+  ``VaultCASConflictError`` shard/root accessors,
+  ``FakeUploadRelay``'s sharded surface, and
+  ``seed_sharded_state_from_manifest``.
+* ``2bb5e6e`` — option 2a: restored the legacy server endpoints
+  + production ``VaultHttpRelay.get_manifest`` /
+  ``put_manifest`` + reverted ``Vault.create_new`` to legacy
+  manifest, so the new desktop installs cleanly against the new
+  server while the production port is in flight.
+
+Remaining Plan A checklist:
+
+* [ ] **Step 1 (this commit):** port ``prepare_upload_for_batch``
+  in ``desktop/src/vault/upload/single_file.py`` to take a
+  per-folder ``shard`` instead of the unified manifest. Sole
+  caller ``binding/sync.py:_prepare_upload_for_batch`` adapts
+  with a 4-line shard-synthesis shim that disappears in step 2.
+* [ ] Step 2: port ``binding/sync.py`` (resume from
+  ``git stash@{0}``, simpler now without the
+  ``assemble_unified_manifest`` glue).
+* [ ] Step 3: port ``binding/twoway.py``.
+* [ ] Step 4: port ``upload/single_file.py``'s ``upload_file`` +
+  ``_publish_with_cas_retry``, ``upload/folder.py``,
+  ``upload/resume.py``. Rename ``UploadResult.manifest`` →
+  ``.root`` + ``.shard``. Narrow the ``UploadVault`` Protocol.
+* [ ] Step 5: port ``ops/integrity.py``, ``ops/eviction.py``,
+  ``ops/delete.py``.
+* [ ] Step 6: port ``folder/runtime.py``, ``import_/runner.py``,
+  ``ui/browser_model.py``, ``remote_folders.py``.
+* [ ] Step 7: cleanup — drop the legacy server table +
+  endpoints + ``VaultHttpRelay.get_manifest`` /
+  ``put_manifest`` + ``Vault.fetch_manifest`` /
+  ``publish_manifest`` shims + ``assemble_unified_manifest`` +
+  ``fetch_unified_manifest`` + legacy ``make_manifest`` +
+  ``temp/migrate_vault_to_shards.py`` + ``manifest_v1.json``
+  fixture. Flip ``Vault.create_new`` back to writing a root
+  envelope.
