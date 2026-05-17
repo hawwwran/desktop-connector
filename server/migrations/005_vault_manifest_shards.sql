@@ -1,8 +1,13 @@
--- Desktop Connector: Manifest sharding (Phase B)
+-- Desktop Connector: Manifest sharding (Phase B + Phase H transition)
 --
--- Replaces the single per-vault `vault_manifests` history with two
--- per-folder envelope kinds:
+-- Adds the sharded envelope kinds alongside the legacy
+-- ``vault_manifests`` table. During the Phase H transition window
+-- both surfaces exist on the server; the desktop's production code
+-- still publishes via the legacy single-manifest path. The final
+-- Phase H cleanup commit will drop ``vault_manifests`` once every
+-- caller is on the sharded path.
 --
+-- Sharded tables (added by this migration):
 --   * `vault_root_manifests` — vault-wide metadata + folder pointer list
 --     (one row per root_revision; immutable chain).
 --   * `vault_folder_shards`  — per-folder file entries (one row per
@@ -11,24 +16,15 @@
 --     (mirrors the role `vaults.current_manifest_revision` plays for the
 --     legacy single-manifest case, but keyed per-folder).
 --
--- vault_v1 has never shipped (per docs/plans/vault-manifest-sharding.md
--- operating constraints), so we drop the legacy table in place rather
--- than maintaining a compatibility shim. The developer's dev twin is
--- the only existing vault and re-runs the suite-start setup which wipes
--- `server/data/connector.db`.
+-- This file is documentation; the executor is ``Database::migrate``,
+-- which runs the schema inline against the same shape. See that
+-- method for the live DDL that's actually executed.
 --
--- Migration is forward-only — `Database::migrate` runs each file once;
--- there is no down-path here. Operationally the user has agreed to
--- accept data loss on their dev twin.
---
--- Wire surface: docs/protocol/vault-v1.md §6.4–§6.8
+-- Wire surface: docs/protocol/vault-v1.md §6.4–§6.8 (sharded) +
+--   §6.6 manifest endpoint (legacy compat).
 -- Byte formats: docs/protocol/vault-v1-formats.md §10.A–§10.C
-
--- 1. Drop the legacy single-manifest history. No DROP COLUMN in older
---    SQLite so the legacy `vaults.current_manifest_revision` +
---    `current_manifest_hash` columns survive on disk; new code reads
---    only the freshly added `current_root_*` columns (next step).
-DROP TABLE IF EXISTS vault_manifests;
+-- (Phase H transition note: ``vault_manifests`` is intentionally
+-- NOT dropped here. The legacy compat path uses it.)
 
 -- 2. The vault head pointer migrates from `current_manifest_*` to
 --    `current_root_*`. SQLite can't rename columns transactionally on

@@ -174,7 +174,17 @@ class VaultDisconnectSourceTests(unittest.TestCase):
             'self._conn.request("POST", "/api/vaults", json=payload)',
             '"vault_access_token_hash": base64.b64encode(vault_access_token_hash).decode("ascii")',
             '"encrypted_header": base64.b64encode(encrypted_header).decode("ascii")',
-            '"initial_root_ciphertext": base64.b64encode(initial_root_ciphertext).decode("ascii")',
+        ):
+            self.assertIn(text, runtime_source, msg=f"missing: {text!r}")
+        # Phase H transition: both create-vault body shapes must be
+        # wired into the production relay (legacy single-manifest +
+        # sharded root). Whichever the caller picks ends up in the POST.
+        # The runtime uses conditional ``payload[…] = …`` assignments
+        # rather than a single dict literal so both names appear by
+        # bracket form.
+        for text in (
+            'payload["initial_root_ciphertext"] = base64.b64encode(',
+            'payload["initial_manifest_ciphertext"] = base64.b64encode(',
         ):
             self.assertIn(text, runtime_source, msg=f"missing: {text!r}")
         self.assertNotIn("_BarebonesRelay", runtime_source)

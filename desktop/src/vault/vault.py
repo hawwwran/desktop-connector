@@ -304,36 +304,40 @@ class Vault(RemoteFoldersMixin):
         )
         header_hash = hashlib.sha256(header_envelope).hexdigest()
 
-        # Genesis root manifest — empty folder pointer list, no op-log
-        # entries yet. The vault's first shards land later, one per
-        # remote folder add (see `vault_folders/runtime.py`).
+        # Genesis manifest — empty folder list, no op-log entries
+        # yet. Phase H transition: the production code paths still use
+        # the legacy single-manifest shape, so we publish a legacy
+        # manifest envelope on create. Once the Phase H mechanical port
+        # flips every caller to the sharded surface, this will switch
+        # back to a root envelope (the sharded code in ``vault.py``
+        # already supports both via the dual decrypt path).
         author_device_id = "0" * 32  # caller plugs in a real device id later
-        root_plaintext = canonical_root_json(make_root_manifest(
+        manifest_plaintext = canonical_manifest_json(make_manifest(
             vault_id=vault_id,
-            root_revision=1,
-            parent_root_revision=0,
+            revision=1,
+            parent_revision=0,
             created_at=_now_rfc3339(),
             author_device_id=author_device_id,
             remote_folders=[],
             operation_log_tail=[],
             archived_op_segments=[],
         ))
-        root_subkey = derive_subkey("dc-vault-v1/root", master_key)
-        root_nonce = secrets.token_bytes(24)
-        root_aad = build_root_aad(
-            vault_id=vault_id, root_revision=1, parent_root_revision=0,
+        manifest_subkey = derive_subkey("dc-vault-v1/manifest", master_key)
+        manifest_nonce = secrets.token_bytes(24)
+        manifest_aad = build_manifest_aad(
+            vault_id=vault_id, revision=1, parent_revision=0,
             author_device_id=author_device_id,
         )
-        root_ciphertext = aead_encrypt(
-            root_plaintext, root_subkey, root_nonce, root_aad,
+        manifest_ciphertext = aead_encrypt(
+            manifest_plaintext, manifest_subkey, manifest_nonce, manifest_aad,
         )
-        root_envelope = build_root_envelope(
-            vault_id=vault_id, root_revision=1, parent_root_revision=0,
+        manifest_envelope = build_manifest_envelope(
+            vault_id=vault_id, revision=1, parent_revision=0,
             author_device_id=author_device_id,
-            nonce=root_nonce,
-            aead_ciphertext_and_tag=root_ciphertext,
+            nonce=manifest_nonce,
+            aead_ciphertext_and_tag=manifest_ciphertext,
         )
-        root_hash = hashlib.sha256(root_envelope).hexdigest()
+        manifest_hash = hashlib.sha256(manifest_envelope).hexdigest()
 
         log.info("vault.prepare.ok vault_id=%s", vault_id[:8] + "…")
         instance = cls(
@@ -343,7 +347,7 @@ class Vault(RemoteFoldersMixin):
             vault_access_secret=vault_access_secret,
             header_revision=1,
             manifest_revision=1,
-            manifest_ciphertext=root_envelope,
+            manifest_ciphertext=manifest_envelope,
             crypto=crypto,
             recovery_envelope_meta={
                 "envelope_id": recovery_envelope_id,
@@ -356,15 +360,15 @@ class Vault(RemoteFoldersMixin):
         )
         # Publish payload is held on the instance so a later
         # publish_initial() retry uses byte-identical bundles. Cleared
-        # after a successful POST. Field names mirror the new wire
-        # contract (``initial_root_*``).
+        # after a successful POST. Field names mirror the legacy wire
+        # contract (``initial_manifest_*``).
         instance._pending_publish = {
             "vault_id": vault_id,
             "vault_access_token_hash": token_hash,
             "encrypted_header": header_envelope,
             "header_hash": header_hash,
-            "initial_root_ciphertext": root_envelope,
-            "initial_root_hash": root_hash,
+            "initial_manifest_ciphertext": manifest_envelope,
+            "initial_manifest_hash": manifest_hash,
         }
         return instance
 

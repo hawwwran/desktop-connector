@@ -31,6 +31,10 @@ class VaultController
     public const MAX_CHUNK_BYTES    = 9 * 1024 * 1024;
     public const MAX_ROOT_BYTES     = 4 * 1024 * 1024;
     public const MAX_SHARD_BYTES    = 16 * 1024 * 1024;
+    // Legacy single-manifest ceiling — retained for the Phase H
+    // legacy-compat path (``putManifest`` / ``getManifest``). Same
+    // 16 MiB envelope budget that the unsharded vault_v1 shipped with.
+    public const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
     public const MAX_HEADER_BYTES   = 64 * 1024;
     public const SUPPORTED_FORMAT_VERSION = 1;
 
@@ -135,9 +139,27 @@ class VaultController
         self::guardEnvelopeSize('header', strlen($encHeader), self::MAX_HEADER_BYTES);
         $headerHash = self::vaultRequireNonEmptyString($body, 'header_hash');
 
-        $rootCipher = self::decodeBase64Field($body, 'initial_root_ciphertext');
-        self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
-        $rootHash = self::vaultRequireNonEmptyString($body, 'initial_root_hash');
+        // Phase H transition window: accept either the Phase B
+        // ``initial_root_*`` shape (writes the new sharded chain only)
+        // OR the legacy ``initial_manifest_*`` shape (writes the legacy
+        // single-manifest chain only). Production clients still send
+        // the legacy shape until the Phase H mechanical port flips
+        // them; the sharded shape is reachable only through tests +
+        // the future sync engine port.
+        $hasRoot = isset($body['initial_root_ciphertext']);
+        $hasManifest = isset($body['initial_manifest_ciphertext']);
+        if (!$hasRoot && !$hasManifest) {
+            throw new VaultInvalidRequestError(
+                'initial_root_ciphertext or initial_manifest_ciphertext is required',
+                'initial_root_ciphertext'
+            );
+        }
+        if ($hasRoot && $hasManifest) {
+            throw new VaultInvalidRequestError(
+                'initial_root_ciphertext and initial_manifest_ciphertext are mutually exclusive',
+                'initial_root_ciphertext'
+            );
+        }
 
         // F-S11: persist the recovery-derived purge_token_hash so the
         // T14 hard-purge path can authenticate `purge_secret`. Optional
@@ -147,19 +169,43 @@ class VaultController
             $purgeTokenHash = self::decodeBase64Field($body, 'purge_token_hash', 32);
         }
 
-        // T9.3 — relay-to-relay migration bootstraps the target at the
-        // source's revision so root envelope AAD (which carries
-        // root_revision/parent_root_revision) round-trips verbatim.
-        // Defaults to 1 for the standard create path.
-        $initialRootRevision = isset($body['initial_root_revision'])
-            ? self::vaultRequireInt($body, 'initial_root_revision') : 1;
         $initialHeaderRevision = isset($body['initial_header_revision'])
             ? self::vaultRequireInt($body, 'initial_header_revision') : 1;
-        if ($initialRootRevision < 1 || $initialHeaderRevision < 1) {
+        if ($initialHeaderRevision < 1) {
             throw new VaultInvalidRequestError(
-                'initial_*_revision must be >= 1',
-                'initial_root_revision'
+                'initial_header_revision must be >= 1',
+                'initial_header_revision'
             );
+        }
+
+        if ($hasRoot) {
+            $rootCipher = self::decodeBase64Field($body, 'initial_root_ciphertext');
+            self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
+            $rootHash = self::vaultRequireNonEmptyString($body, 'initial_root_hash');
+            $initialRootRevision = isset($body['initial_root_revision'])
+                ? self::vaultRequireInt($body, 'initial_root_revision') : 1;
+            if ($initialRootRevision < 1) {
+                throw new VaultInvalidRequestError(
+                    'initial_root_revision must be >= 1',
+                    'initial_root_revision'
+                );
+            }
+            $initialManifestRevision = $initialRootRevision;
+            $initialManifestHash = $rootHash;
+        } else {
+            $manifestCipher = self::decodeBase64Field($body, 'initial_manifest_ciphertext');
+            self::guardEnvelopeSize('manifest', strlen($manifestCipher), self::MAX_MANIFEST_BYTES);
+            $manifestHash = self::vaultRequireNonEmptyString($body, 'initial_manifest_hash');
+            $initialManifestRevision = isset($body['initial_manifest_revision'])
+                ? self::vaultRequireInt($body, 'initial_manifest_revision') : 1;
+            if ($initialManifestRevision < 1) {
+                throw new VaultInvalidRequestError(
+                    'initial_manifest_revision must be >= 1',
+                    'initial_manifest_revision'
+                );
+            }
+            $initialRootRevision = $initialManifestRevision;
+            $initialManifestHash = $manifestHash;
         }
 
         $vaultsRepo = new VaultsRepository($db);
@@ -169,21 +215,35 @@ class VaultController
 
         $now = time();
         $vaultsRepo->create(
-            $vaultId, $tokenHash, $encHeader, $headerHash, $rootHash, $now,
-            $initialHeaderRevision, $initialRootRevision, $purgeTokenHash,
+            $vaultId, $tokenHash, $encHeader, $headerHash, $initialManifestHash, $now,
+            $initialHeaderRevision, $initialManifestRevision, $purgeTokenHash,
         );
 
-        $rootRepo = new VaultRootManifestsRepository($db);
-        $rootRepo->create(
-            $vaultId,
-            $initialRootRevision,
-            $initialRootRevision - 1,
-            $rootHash,
-            $rootCipher,
-            strlen($rootCipher),
-            $deviceId,
-            $now
-        );
+        if ($hasRoot) {
+            $rootRepo = new VaultRootManifestsRepository($db);
+            $rootRepo->create(
+                $vaultId,
+                $initialRootRevision,
+                $initialRootRevision - 1,
+                $rootHash,
+                $rootCipher,
+                strlen($rootCipher),
+                $deviceId,
+                $now
+            );
+        } else {
+            $manifestsRepo = new VaultManifestsRepository($db);
+            $manifestsRepo->create(
+                $vaultId,
+                $initialManifestRevision,
+                $initialManifestRevision - 1,
+                $manifestHash,
+                $manifestCipher,
+                strlen($manifestCipher),
+                $deviceId,
+                $now
+            );
+        }
 
         // §D11: the creating device is the genesis admin. Insert the grant
         // here so subsequent role-gated writes from this device pass without
@@ -208,12 +268,17 @@ class VaultController
             ? (int) ($persistedVault['quota_ciphertext_bytes'] ?? 0)
             : 0;
 
+        // Legacy clients still consume ``manifest_revision``; new
+        // clients use ``root_revision``. Both surface so the create
+        // response remains drop-in compatible during the Phase H
+        // transition.
         Router::json([
             'ok' => true,
             'data' => [
                 'vault_id'               => self::dashedVaultId($vaultId),
                 'header_revision'        => $initialHeaderRevision,
                 'root_revision'          => $initialRootRevision,
+                'manifest_revision'      => $initialManifestRevision,
                 'quota_ciphertext_bytes' => $quotaBytes,
                 'used_ciphertext_bytes'  => 0,
                 'created_at'             => self::ts($now),
@@ -766,6 +831,160 @@ class VaultController
             );
         }
         return $raw;
+    }
+
+    // ===================================================================
+    //  Legacy compat: GET/PUT /api/vaults/{vault_id}/manifest
+    //    (Phase H transition — restored after Phase B's outright removal.
+    //    Production desktop callers still use these until the mechanical
+    //    port to ``getRoot`` / ``putShardWithRoot`` lands. Both surfaces
+    //    coexist; the legacy one will be deleted in the final cleanup.)
+    // ===================================================================
+
+    public static function getManifest(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+
+        $manifestsRepo = new VaultManifestsRepository($db);
+        $current = $manifestsRepo->getCurrent($vaultId);
+        if ($current === null) {
+            // Vault exists but never had a legacy manifest published
+            // (e.g. created via the sharded ``create`` path). The
+            // legacy compat path can't synthesize one because the
+            // root + shard envelopes are AEAD-sealed under different
+            // subkeys. Surface as not-found so the client falls back
+            // / surfaces a clear error.
+            throw new VaultNotFoundError($vaultId);
+        }
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'revision'            => (int)$current['revision'],
+                'parent_revision'     => (int)$current['parent_revision'],
+                'manifest_hash'       => (string)$current['manifest_hash'],
+                'manifest_ciphertext' => base64_encode((string)$current['manifest_ciphertext']),
+                'manifest_size'       => (int)$current['manifest_size'],
+            ],
+        ], 200);
+    }
+
+    public static function getManifestRevision(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $revisionRaw = (string) ($ctx->params['revision'] ?? '');
+        if ($revisionRaw === '' || !ctype_digit($revisionRaw)) {
+            throw new VaultInvalidRequestError(
+                'revision must be a non-negative integer', 'revision',
+            );
+        }
+        $revision = (int) $revisionRaw;
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+
+        $manifestsRepo = new VaultManifestsRepository($db);
+        $row = $manifestsRepo->getByRevision($vaultId, $revision);
+        if ($row === null) {
+            throw new VaultNotFoundError("manifest revision {$revision} for {$vaultId}");
+        }
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'revision'            => (int) $row['revision'],
+                'parent_revision'     => (int) $row['parent_revision'],
+                'manifest_hash'       => (string) $row['manifest_hash'],
+                'manifest_ciphertext' => base64_encode((string) $row['manifest_ciphertext']),
+                'manifest_size'       => (int) $row['manifest_size'],
+            ],
+        ], 200);
+    }
+
+    public static function putManifest(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+        VaultAuthService::requireRole($db, $vaultId, (string)($ctx->deviceId ?? ""), 'browse-upload');
+        self::guardReadOnly($vault);
+
+        $body = $ctx->jsonBody();
+        $expected     = self::vaultRequireInt($body, 'expected_current_revision');
+        $newRev       = self::vaultRequireInt($body, 'new_revision');
+        $parentRev    = self::vaultRequireInt($body, 'parent_revision');
+        $manifestHash = self::vaultRequireNonEmptyString($body, 'manifest_hash');
+        $manifestCipher = self::decodeBase64Field($body, 'manifest_ciphertext');
+        self::guardEnvelopeSize('manifest', strlen($manifestCipher), self::MAX_MANIFEST_BYTES);
+
+        if ($parentRev !== $expected) {
+            throw new VaultInvalidRequestError(
+                'parent_revision must equal expected_current_revision',
+                'parent_revision'
+            );
+        }
+        if ($newRev !== $expected + 1) {
+            throw new VaultInvalidRequestError(
+                'new_revision must be expected_current_revision + 1',
+                'new_revision'
+            );
+        }
+
+        $manifestsRepo = new VaultManifestsRepository($db);
+        $authorDeviceId = (string)($ctx->deviceId ?? '');
+
+        try {
+            $envManifest = VaultCrypto::parseManifestEnvelopeHeader($manifestCipher);
+        } catch (InvalidArgumentException $e) {
+            throw new VaultInvalidRequestError($e->getMessage(), 'manifest_ciphertext');
+        }
+        self::guardFormatVersion('manifest', (int) $envManifest['format_version']);
+        if ($envManifest['vault_id'] !== $vaultId) {
+            throw new VaultManifestTamperedError(
+                'manifest envelope vault_id does not match path vault_id',
+            );
+        }
+        if ($envManifest['revision'] !== $newRev) {
+            throw new VaultManifestTamperedError(
+                'manifest envelope revision does not match new_revision',
+            );
+        }
+        if ($envManifest['parent_revision'] !== $parentRev) {
+            throw new VaultManifestTamperedError(
+                'manifest envelope parent_revision does not match body parent_revision',
+            );
+        }
+        if ($authorDeviceId !== '' && $envManifest['author_device_id'] !== $authorDeviceId) {
+            throw new VaultManifestTamperedError(
+                'manifest envelope author_device_id does not match X-Device-ID',
+            );
+        }
+
+        $now = time();
+        $conflict = $manifestsRepo->tryCAS(
+            $vaultId,
+            $expected,
+            $newRev,
+            $manifestHash,
+            $manifestCipher,
+            strlen($manifestCipher),
+            $authorDeviceId,
+            $now
+        );
+        if ($conflict !== null) {
+            throw new VaultManifestConflictError([
+                'current_revision'             => (int)$conflict['current_revision'],
+                'expected_revision'            => $expected,
+                'current_manifest_hash'        => (string)$conflict['current_manifest_hash'],
+                'current_manifest_ciphertext'  => base64_encode((string)$conflict['current_manifest_ciphertext']),
+                'current_manifest_size'        => (int)$conflict['current_manifest_size'],
+            ]);
+        }
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'revision'      => $newRev,
+                'manifest_hash' => $manifestHash,
+            ],
+        ], 200);
     }
 
     // ===================================================================

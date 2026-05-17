@@ -206,12 +206,16 @@ class Database
             $vaultColumns[$row['name']] = true;
         }
         // Finalize the PRAGMA cursor before any DDL runs — leaving
-        // it open holds a read lock that fights the migration's
-        // ``DROP TABLE`` statement and emits a "database table is
-        // locked" warning under PHPUnit's strict-warning mode.
+        // it open holds a read lock that fights subsequent DDL and
+        // emits a "database table is locked" warning under PHPUnit's
+        // strict-warning mode.
         $info->finalize();
 
-        $this->db->exec('DROP TABLE IF EXISTS vault_manifests');
+        // Phase H transition: the legacy ``vault_manifests`` table is
+        // retained alongside the sharded tables so production callers
+        // can keep publishing legacy single-manifest revisions until
+        // the mechanical port flips them. The final Phase H cleanup
+        // commit will drop this table.
         if (!isset($vaultColumns['current_root_revision'])) {
             $this->db->exec(
                 "ALTER TABLE vaults ADD COLUMN current_root_revision INTEGER NOT NULL DEFAULT 1"
