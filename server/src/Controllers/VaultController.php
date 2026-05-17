@@ -1393,41 +1393,63 @@ class VaultController
         $intentsRepo = new VaultMigrationIntentsRepository($db);
         $now = time();
 
-        // Generate a fresh token; if the intent already exists we keep
-        // the *existing* token rather than rotating, which is what makes
-        // the endpoint idempotent for retried POST /start calls.
-        $token = self::generateMigrationToken();
-        $tokenHashRaw = hash('sha256', $token, true);
-
-        $result = $intentsRepo->recordIntent(
-            $vaultId, $tokenHashRaw, $target, $deviceId, $now,
-        );
-        $record = $result['record'];
-
-        if (!$result['created']) {
-            // Pre-existing intent. Reject if the caller asked for a
-            // different target — §H2 says a vault can only migrate to
-            // one place at a time. Reuse-with-same-target returns
-            // metadata only; the original token is *not* re-leaked
-            // (the caller already received it on the first /start).
-            if ((string)$record['target_relay_url'] !== $target) {
+        // Review §1.C3: avoid generating + discarding a token on the
+        // retry path. Inspect the intent first; only mint a token when
+        // we're either creating a fresh row OR rotating for a recovery
+        // retry from the same initiating device. A cross-target retry
+        // still 409s; a different-device retry returns metadata-only
+        // (token null) so it can't silently rotate someone else's
+        // bearer.
+        $existing = $intentsRepo->getIntent($vaultId);
+        if ($existing !== null) {
+            if ((string)$existing['target_relay_url'] !== $target) {
                 throw new VaultMigrationInProgressError(
                     'started',
-                    (string)$record['target_relay_url'],
+                    (string)$existing['target_relay_url'],
                 );
             }
+            if ((string)$existing['initiating_device'] === $deviceId) {
+                // Same-device retry — rotate the stored hash and hand
+                // back a fresh token so a dropped 201 from the original
+                // /start doesn't permanently strand the migration. The
+                // previously-issued token (if any) is invalidated.
+                $token = self::generateMigrationToken();
+                $tokenHashRaw = hash('sha256', $token, true);
+                $intentsRepo->rotateTokenHash($vaultId, $tokenHashRaw);
+                Router::json([
+                    'ok' => true,
+                    'data' => [
+                        'vault_id'         => self::dashedVaultId($vaultId),
+                        'target_relay_url' => (string)$existing['target_relay_url'],
+                        'started_at'       => self::ts((int)$existing['started_at']),
+                        'token'            => $token,
+                        'token_returned'   => true,
+                    ],
+                ], 200);
+                return;
+            }
+            // Different initiating device on retry: metadata-only so a
+            // co-admin can observe but can't steal the bearer.
             Router::json([
                 'ok' => true,
                 'data' => [
                     'vault_id'         => self::dashedVaultId($vaultId),
-                    'target_relay_url' => (string)$record['target_relay_url'],
-                    'started_at'       => self::ts((int)$record['started_at']),
-                    'token'            => null,         // not re-emitted; idempotent
+                    'target_relay_url' => (string)$existing['target_relay_url'],
+                    'started_at'       => self::ts((int)$existing['started_at']),
+                    'token'            => null,
                     'token_returned'   => false,
                 ],
             ], 200);
             return;
         }
+
+        // Fresh intent.
+        $token = self::generateMigrationToken();
+        $tokenHashRaw = hash('sha256', $token, true);
+        $result = $intentsRepo->recordIntent(
+            $vaultId, $tokenHashRaw, $target, $deviceId, $now,
+        );
+        $record = $result['record'];
 
         Router::json([
             'ok' => true,

@@ -1346,7 +1346,7 @@ final class VaultControllerTest extends TestCase
     //  F-T04 — migration endpoints: idempotency + commit semantics
     // ===================================================================
 
-    public function test_migrationStart_idempotent_returns_existing_token(): void
+    public function test_migrationStart_same_device_retry_rotates_token(): void
     {
         $target = 'https://target.example.test';
 
@@ -1361,9 +1361,82 @@ final class VaultControllerTest extends TestCase
         self::assertTrue($first['json']['data']['token_returned']);
         self::assertNotEmpty($first['json']['data']['token']);
 
-        // Second call with the same target: 200 + token_returned=false.
-        // The original token is NOT re-emitted (it lives in the
-        // initiating device's keyring after first /start).
+        // Review §1.C3: a same-device retry recovers from a lost 201.
+        // Status 200, token_returned=true with a freshly minted token,
+        // started_at preserved. The previously-issued token is now
+        // invalidated (only its hash is stored on the server).
+        $second = $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        self::assertSame(200, $second['status']);
+        self::assertTrue($second['json']['data']['token_returned']);
+        self::assertNotEmpty($second['json']['data']['token']);
+        self::assertNotSame(
+            $first['json']['data']['token'],
+            $second['json']['data']['token'],
+            'lost-token recovery must hand back a fresh bearer',
+        );
+        self::assertSame(
+            $first['json']['data']['started_at'],
+            $second['json']['data']['started_at'],
+            'started_at must be preserved across retried /start calls',
+        );
+
+        // Server now holds the hash of the second token. We can verify
+        // by inspecting the persisted hash.
+        $intent = (new VaultMigrationIntentsRepository($this->db))->getIntent(self::VAULT_ID);
+        self::assertNotNull($intent);
+        self::assertSame(
+            hash('sha256', $second['json']['data']['token'], false),
+            bin2hex((string)$intent['token_hash']),
+        );
+    }
+
+    /**
+     * Review §1.C3: a different admin device retrying /migration/start
+     * observes the existing intent (metadata only) but must not get the
+     * bearer token — that would silently transfer authorization away
+     * from the originator. Same-target retries return token=null.
+     */
+    public function test_migrationStart_other_device_retry_returns_no_token(): void
+    {
+        $target = 'https://target.example.test';
+
+        $first = $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        self::assertSame(201, $first['status']);
+        self::assertNotEmpty($first['json']['data']['token']);
+
+        // Register a second admin device + auth as it.
+        $secondDeviceId = 'd9e8c7b6a5f4e3d2c1b0a9f8e7d6c5b4';
+        $secondToken    = 'second-device-bearer';
+        (new DeviceRepository($this->db))->insertDevice(
+            $secondDeviceId,
+            base64_encode(random_bytes(32)),
+            $secondToken,
+            'desktop',
+            self::NOW
+        );
+        (new VaultDeviceGrantsRepository($this->db))->insertGrant(
+            'gr_v1_secondadmin00000000aabb',
+            self::VAULT_ID,
+            $secondDeviceId,
+            'Second Admin Desktop',
+            'admin',
+            self::DEVICE_ID,
+            'recovery',
+            self::NOW,
+        );
+        $_SERVER['HTTP_X_DEVICE_ID']   = $secondDeviceId;
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $secondToken;
+
         $second = $this->invoke(fn() => VaultController::migrationStart(
             $this->db, $this->jctx(
                 'POST', ['vault_id' => self::VAULT_ID],
@@ -1376,7 +1449,6 @@ final class VaultControllerTest extends TestCase
         self::assertSame(
             $first['json']['data']['started_at'],
             $second['json']['data']['started_at'],
-            'started_at must be preserved across retried /start calls',
         );
     }
 

@@ -112,4 +112,25 @@ class VaultMigrationIntentsRepository
         );
         return $this->db->changes() === 1;
     }
+
+    /**
+     * Replace the stored token_hash for an already-recorded intent (review
+     * §1.C3). Used when the original /migration/start's 201 response was
+     * lost and the initiating device retries: the controller gates this
+     * on initiating_device == caller so a different admin device can't
+     * silently steal the migration's bearer token.
+     */
+    public function rotateTokenHash(string $vaultId, string $newTokenHashBinary): bool
+    {
+        $this->db->execute(
+            'UPDATE vault_migration_intents
+                SET token_hash = :token_hash
+              WHERE vault_id = :id',
+            [
+                ':token_hash' => new Blob($newTokenHashBinary),
+                ':id'         => $vaultId,
+            ]
+        );
+        return $this->db->changes() === 1;
+    }
 }
