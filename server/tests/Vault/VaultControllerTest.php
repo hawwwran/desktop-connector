@@ -1131,6 +1131,32 @@ final class VaultControllerTest extends TestCase
     }
 
     /**
+     * Review §6.C5: getHeader must return ``caller_role`` so the
+     * desktop can disable admin-only buttons (Schedule purge) when
+     * the calling device isn't admin. /device-grants is admin-gated
+     * so a sync-only device can't discover its own role through that
+     * endpoint; getHeader is the natural carrier.
+     */
+    public function test_getHeader_includes_caller_role_for_admin(): void
+    {
+        $res = $this->invoke(fn() => VaultController::getHeader(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID])
+        ));
+        self::assertSame(200, $res['status']);
+        self::assertSame('admin', $res['json']['data']['caller_role']);
+    }
+
+    public function test_getHeader_caller_role_reflects_demoted_role(): void
+    {
+        $this->demoteCaller('sync');
+        $res = $this->invoke(fn() => VaultController::getHeader(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID])
+        ));
+        self::assertSame(200, $res['status']);
+        self::assertSame('sync', $res['json']['data']['caller_role']);
+    }
+
+    /**
      * Review §3.C1: gcPlan with purpose='forced_eviction' must require
      * role=admin (the call is a hard-purge plan for eviction stages
      * 2/3). A sync-only device is forbidden from creating such a

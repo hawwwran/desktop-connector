@@ -235,6 +235,22 @@ class VaultController
         $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
         $vault = VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
 
+        // Review §6.C5: surface the caller's role so the desktop can
+        // disable the Schedule-purge button (and any other admin-only
+        // op) when the device isn't admin. /device-grants is itself
+        // admin-gated so a sync-only device cannot discover its role
+        // through that endpoint; getHeader is callable by every
+        // granted role, making it the natural carrier for the field.
+        $callerDevice = (string)($ctx->deviceId ?? '');
+        $callerRole = null;
+        if ($callerDevice !== '') {
+            $grants = new VaultDeviceGrantsRepository($db);
+            $grant = $grants->getByDevice($vaultId, $callerDevice);
+            if ($grant !== null && $grant['revoked_at'] === null) {
+                $callerRole = (string)$grant['role'];
+            }
+        }
+
         Router::json([
             'ok' => true,
             'data' => [
@@ -245,6 +261,7 @@ class VaultController
                 'quota_ciphertext_bytes' => (int)$vault['quota_ciphertext_bytes'],
                 'used_ciphertext_bytes'  => (int)$vault['used_ciphertext_bytes'],
                 'migrated_to'            => $vault['migrated_to'] !== null ? (string)$vault['migrated_to'] : null,
+                'caller_role'            => $callerRole,
             ],
         ], 200);
     }

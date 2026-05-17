@@ -52,6 +52,13 @@ BROWSER_DELETE = (
     / "windows_vault_browser"
     / "delete_restore.py"
 )
+TAB_DANGER = (
+    Path(REPO_ROOT)
+    / "desktop"
+    / "src"
+    / "windows_vault"
+    / "tab_danger.py"
+)
 
 
 class UiOffloadSmokeTests(unittest.TestCase):
@@ -127,6 +134,35 @@ class UiOffloadSmokeTests(unittest.TestCase):
         self.assertIn(
             'set_response_enabled("delete", False)', confirm_body,
             "the Delete response must start disabled (typed-confirm gate)",
+        )
+
+    def test_schedule_purge_checks_admin_role(self) -> None:
+        """§6.C5: ``on_schedule_purge`` must check the device's role
+        via the relay before opening the schedule dialog. Pre-fix the
+        button only gated on typed-confirm + fresh-unlock — anyone
+        with the recovery passphrase could schedule a destructive
+        purge regardless of role."""
+        source = TAB_DANGER.read_text()
+        handler_body = _slice_function(source, "def on_schedule_purge(")
+        # Fresh-unlock first.
+        self.assertIn(
+            "require_fresh_unlock_or_prompt", handler_body,
+            "on_schedule_purge must still gate on fresh-unlock",
+        )
+        # Then a worker that consults caller_role from the relay's
+        # GET /header response.
+        self.assertIn(
+            "threading.Thread", handler_body,
+            "on_schedule_purge must check role on a worker (avoid blocking the GTK main loop)",
+        )
+        self.assertIn(
+            "caller_role", handler_body,
+            "on_schedule_purge must read caller_role from the relay response",
+        )
+        # The dialog opens only when role == admin.
+        self.assertIn(
+            "!= \"admin\"", handler_body,
+            "on_schedule_purge must compare role against 'admin' before opening the dialog",
         )
 
     def test_onboard_retry_publish_uses_worker_thread(self) -> None:

@@ -465,14 +465,74 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
             )
             return
 
-        def proceed() -> None:
-            _open_schedule_purge_dialog(hours)
+        def after_fresh_unlock() -> None:
+            # Review §6.C5: hard-purge requires role=admin per the
+            # docs/vault-architecture.md §13 destructive-action ledger.
+            # The relay enforces this on /gc/execute, but we surface
+            # the gate at scheduling time too — otherwise a non-admin
+            # device with the recovery passphrase can write a local
+            # purge_state.json that the user thinks is armed but that
+            # the relay will reject at execution. Fetch caller_role
+            # asynchronously to avoid blocking the GTK main loop.
+            _set_danger_status("Checking device role…", "dim-label")
+            purge_btn.set_sensitive(False)
+
+            def role_worker() -> None:
+                role: str | None = None
+                err: Exception | None = None
+                try:
+                    from ..vault.binding.runtime import create_vault_relay
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    # The grant store holds vault_access_secret per
+                    # vault; reuse via open_local_vault_from_grant.
+                    from ..vault.binding.runtime import (
+                        open_local_vault_from_grant,
+                    )
+                    vault = open_local_vault_from_grant(
+                        config_dir, config, vault_id_undashed,
+                    )
+                    try:
+                        header_resp = relay.get_header(
+                            vault.vault_id, vault.vault_access_secret,
+                        )
+                        raw_role = header_resp.get("caller_role")
+                        role = str(raw_role) if raw_role else None
+                    finally:
+                        vault.close()
+                except Exception as exc:  # noqa: BLE001
+                    err = exc
+
+                def settle() -> bool:
+                    purge_btn.set_sensitive(True)
+                    if err is not None:
+                        _set_danger_status(
+                            f"Could not verify device role: {humanize(err)}",
+                            "error",
+                        )
+                        return False
+                    if role != "admin":
+                        _set_danger_status(
+                            "Hard purge requires the admin device. This "
+                            f"device's role is {role!r}. Use the admin "
+                            "device that created the vault to schedule "
+                            "a purge.",
+                            "error",
+                        )
+                        return False
+                    _set_danger_status("", "dim-label")
+                    _open_schedule_purge_dialog(hours)
+                    return False
+
+                GLib.idle_add(settle)
+
+            threading.Thread(target=role_worker, daemon=True).start()
 
         require_fresh_unlock_or_prompt(
             win,
             config=config,
             operation_label=f"schedule hard purge ({hours}h delay)",
-            on_success=proceed,
+            on_success=after_fresh_unlock,
         )
 
     def _open_schedule_purge_dialog(hours: int) -> None:
