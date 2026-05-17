@@ -141,17 +141,28 @@ class VaultWatcherRuntime:
             kind,
             now: float | None = None,
         ) -> None:
-            wrapped_observe(relative_path, kind=kind, now=now)
+            # Review §3.H1: record the event in the detector FIRST, then
+            # decide whether to forward to wrapped_observe. The pre-fix
+            # ordering enqueued the delete/upload op BEFORE the detector
+            # had a chance to trip, so the 200th malicious delete (or
+            # any straw-that-breaks-the-camel's-back event) made it
+            # into the pending-ops queue and was published as a
+            # tombstone before pause_binding could stop the cycle.
             detector_kind = _to_detector_kind(kind)
-            if detector_kind is None:
-                return
-            verdict = detector.record(
-                kind=detector_kind,
-                path=relative_path,
-                now=now if now is not None else time.time(),
-            )
-            if verdict.tripped:
-                self._on_tripped(binding.binding_id)
+            verdict = None
+            if detector_kind is not None:
+                verdict = detector.record(
+                    kind=detector_kind,
+                    path=relative_path,
+                    now=now if now is not None else time.time(),
+                )
+                if verdict.tripped:
+                    self._on_tripped(binding.binding_id)
+                    # Do NOT forward — this event would have been the
+                    # one that pushed us past the threshold; letting
+                    # it into the queue defeats the trip.
+                    return
+            wrapped_observe(relative_path, kind=kind, now=now)
 
         coordinator.observe = observe_with_detector  # type: ignore[assignment]
         handle = start_watchdog_observer(coordinator)

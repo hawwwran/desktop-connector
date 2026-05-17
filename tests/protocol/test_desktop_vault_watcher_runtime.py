@@ -179,6 +179,74 @@ class ScanSymlinkSafetyTests(unittest.TestCase):
         self.assertEqual(op_paths, ["real.txt"])
 
 
+class DetectorTripOrderingTests(unittest.TestCase):
+    """Review §3.H1: the observe_with_detector wrapper must record
+    the event in the detector BEFORE forwarding to wrapped_observe.
+    The trip-causing event itself must NOT make it into the
+    pending-ops queue — otherwise the 200th malicious delete lands as
+    a published tombstone before pause_binding can stop the cycle.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="vault_watcher_order_test_"))
+        self._saved_xdg = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = str(self.tmpdir / "xdg_cache")
+        self.index = VaultLocalIndex(self.tmpdir / "config")
+        self.store = VaultBindingsStore(self.index.db_path)
+        self.local_root = self.tmpdir / "binding"
+        self.local_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        if self._saved_xdg is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = self._saved_xdg
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_observe_records_detector_before_wrapped_observe(self) -> None:
+        """Source-level check on the order in
+        runtime_watchers.observe_with_detector — pre-fix this called
+        wrapped_observe(...) FIRST (enqueuing the trip-event into the
+        pending-ops queue), THEN ran detector.record. Post-fix the
+        order is reversed and the trip-event is skipped via early
+        return."""
+        from pathlib import Path as _P
+        sys.path.insert(0, os.path.dirname(__file__))
+        from _paths import REPO_ROOT  # noqa: E402
+
+        source = (
+            _P(REPO_ROOT)
+            / "desktop"
+            / "src"
+            / "vault"
+            / "binding"
+            / "runtime_watchers.py"
+        ).read_text()
+        idx_record = source.find("detector.record(")
+        idx_wrapped = source.find("wrapped_observe(relative_path, kind=kind, now=now)")
+        self.assertGreater(idx_record, 0, "detector.record not found")
+        self.assertGreater(idx_wrapped, 0, "wrapped_observe call not found")
+        self.assertLess(
+            idx_record, idx_wrapped,
+            "detector.record must run BEFORE wrapped_observe — pre-fix "
+            "ordering let the trip-causing event into the pending-ops "
+            "queue as a tombstone before pause_binding could stop it.",
+        )
+        # The trip path must early-return so the trip event isn't
+        # forwarded.
+        between = source[idx_record:idx_wrapped]
+        self.assertIn(
+            "verdict.tripped", between,
+            "verdict.tripped check must sit between detector.record "
+            "and wrapped_observe",
+        )
+        self.assertIn(
+            "return", between,
+            "trip path must early-return — otherwise wrapped_observe "
+            "still enqueues the trip-causing event",
+        )
+
+
 class _BindingStub:
     """Minimal stand-in for ``_BindingRuntime`` — _on_tripped only
     reads .paused_for_ransomware and never invokes the coordinator
