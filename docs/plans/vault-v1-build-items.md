@@ -73,7 +73,9 @@ After commit: the desktop's config-dir `relay_url` flips to target; banner acros
 
 ---
 
-## §5.C2 — QR-join + grant approval UI
+## §5.C2 — QR-join + grant approval UI *(landed 2026-05-18)*
+
+**Status:** landed. Admin in-process modal: `desktop/src/windows_vault/grant_device_dialog.py` (opened from the Devices tab's "Grant a new device…" button). Claimant subprocess: `desktop/src/windows_vault_join.py` (invokable as `vault-join`, surfaced via tray's new "Add this device to a vault…" entry when no local vault exists). Typed client + raw HTTP methods: `desktop/src/vault/grant/join_client.py` + new methods on `VaultHttpRelay`. Paste-URL flow only; webcam QR scanning is the documented v1.x follow-up. Tests: `tests/protocol/test_desktop_vault_join_{client,flow_source}.py`. Diagnostics: 11 new `vault.grant.*` events.
 
 **Decision** *(2026-05-18)*: build the QR-assisted device-grant UI for v1. **Reverses the prior memory note** `project_vault_multi_device_story.md` which classified this as v1.x.
 

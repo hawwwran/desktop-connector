@@ -45,12 +45,16 @@ Locked-copy + admin-gate + 30 s poll wiring pinned by `tests/protocol/test_deskt
 
 ---
 
-### 3. §5.C2 — QR-join + grant approval UI *(design landed 2026-05-18)*
+### 3. ~~§5.C2 — QR-join + grant approval UI~~ *(landed 2026-05-18)*
 
-**Why this slot:** wire protocol is shipped end-to-end — claimant/admin UI is the gap. Depends on §6.H2 being available, because granting without revoke is dangerous. Reverses the prior memory note that classified this as v1.x deferral.
+**Status:** landed. Both ends of the QR-grant flow now have GTK surfaces:
 
-**Status:** scoped — implementation pending. **Plan:** [`vault-v1-build-items.md#§5.C2`](vault-v1-build-items.md#5c2--qr-join--grant-approval-ui).
-**Decision:** build for v1. QR-grant becomes the primary v1 device-add path; recovery kit stays as secondary recovery surface. Sized 3–4 days.
+- **Admin (in-process modal):** `desktop/src/windows_vault/grant_device_dialog.py` — "Grant a new device…" button at the top of the Devices tab opens a wizard dialog that mints an ephemeral X25519 keypair + POST `createJoinRequest`, renders the join URL as a QR code + plaintext entry, polls `getJoinRequest` every 2 s until `state="claimed"`, shows the 6-digit verification code derived locally from the X25519 shared secret, lets the operator pick a role (`read-only`/`browse-upload`/`sync`/`admin`), wraps a `GrantPayload` via `wrap_grant_for_claimant`, posts `approveJoinRequest`. Cancel triggers best-effort DELETE so abandoned rows don't sit in the per-vault 5-pending budget.
+- **Claimant (new subprocess):** `desktop/src/windows_vault_join.py` invokable as `python3 -m src.windows vault-join`, surfaced via the tray submenu's new "Add this device to a vault…" entry (visible when `vault_active=True` and no local vault exists). Paste-URL flow only — webcam scanning deferred to v1.x with `pyzbar` + Wayland portal plumbing. Steps: paste URL → `parse_join_url` + expiry check → fresh X25519 keypair → `claim_join_request` → show verification code + poll for `state="approved"` → AEAD-unwrap via `unwrap_grant_for_claimant` with `expected_vault_id` + `expected_claimant_device_id` pins → persist `VaultGrant` + `config.vault.last_known_id`.
+- **Typed client:** `desktop/src/vault/grant/join_client.py` parses raw HTTP into `JoinRequest` dataclass + maps server status codes to `JoinRequestNotFoundError` (404 + `vault_join_request_state`), `JoinRequestStateError` (409 same code), `JoinRequestRateLimitedError` (429 — F-S08 5-pending cap), `JoinRequestAuthError` (401/403). New methods `create_join_request` / `get_join_request` / `claim_join_request` / `approve_join_request` / `reject_join_request` on `VaultHttpRelay`.
+- **Diagnostics:** 11 new `vault.grant.*` events cataloged covering both flows' audit anchors + transient/terminal failure modes.
+
+Closes the v1 multi-device gap; QR-grant is now the primary device-add path, recovery kit stays as secondary recovery surface. Pinned by `tests/protocol/test_desktop_vault_join_{client,flow_source}.py`.
 
 ---
 
@@ -236,21 +240,21 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 
 | Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
 |---|---|---|---|---|---|
-| Criticals | 17 | 15 | 2 (§5.C1, §5.C2) | 0 | 0 |
+| Criticals | 17 | 16 | 1 (§5.C1) | 0 | 0 |
 | Highs | 37 | 33 | 3 (§5.H2, §5.H3, §6.H3) | 1 (§6.H1) | 0 |
 | Mediums | 35 | 31 | 3 (§4.M1, §5.M2, §5.M6) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **83** | **8** | **2** | **20** |
+| **Total** | **113** | **84** | **7** | **2** | **20** |
 
-§5.M2 and §5.M6 are subordinate fixes bundled into the §5.C1 migration wizard build — counted once at the bucket level for visibility, but they share the parent's implementation path. §3.C1 + §6.H2 fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy` + entry 2 above).
+§5.M2 and §5.M6 are subordinate fixes bundled into the §5.C1 migration wizard build — counted once at the bucket level for visibility, but they share the parent's implementation path. §3.C1 + §6.H2 + §5.C2 fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy` + entries 2 and 3 above).
 
-### Breakdown of the 30 not-fully-fixed-by-code items
+### Breakdown of the 29 not-fully-fixed-by-code items
 
-- **8 design-landed-pending-implementation** (§1 above): 2 Criticals (§5.C1, §5.C2), 3 Highs (§5.H2, §5.H3, §6.H3), 3 Mediums (§4.M1, §5.M2, §5.M6). Each carries a plan-doc link. Implementation work is what's left.
+- **7 design-landed-pending-implementation** (§1 above): 1 Critical (§5.C1), 3 Highs (§5.H2, §5.H3, §6.H3), 3 Mediums (§4.M1, §5.M2, §5.M6). Each carries a plan-doc link. Implementation work is what's left.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **30 entries are not-yet-fully-fixed-by-code** — 8 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **28 are open work** (8 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **29 entries are not-yet-fully-fixed-by-code** — 7 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **27 are open work** (7 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

@@ -88,6 +88,7 @@ def vault_submenu_entries(
     Tokens:
         "create_vault"   → "Create vault…" — launches the wizard
         "import_vault"   → "Import vault…" — launches the wizard
+        "join_vault"     → "Add this device to a vault…" — QR-grant claimant flow (§5.C2)
         "open_vault"     → "Open Vault…"
         "sync_now"       → "Sync now" — kicks the in-process autosync loop
         "import"         → "Import…" — launches the import wizard
@@ -103,7 +104,7 @@ def vault_submenu_entries(
     if not toggle_active:
         return []
     if not vault_exists:
-        return ["create_vault", "import_vault"]
+        return ["create_vault", "import_vault", "join_vault"]
     return ["open_vault", "sync_now", "import", "settings"]
 
 

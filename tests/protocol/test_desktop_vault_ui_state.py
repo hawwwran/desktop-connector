@@ -78,9 +78,12 @@ class VaultSubmenuTests(unittest.TestCase):
                 )
 
     def test_submenu_shows_wizard_entries_when_no_vault(self) -> None:
+        # §5.C2: ``join_vault`` joins the no-local-vault branch so a
+        # fresh device can claim an existing vault via the QR-grant
+        # flow without having to first run a passphrase wizard.
         self.assertTrue(should_show_vault_submenu(True))
         entries = vault_submenu_entries(toggle_active=True, vault_exists=False)
-        self.assertEqual(entries, ["create_vault", "import_vault"])
+        self.assertEqual(entries, ["create_vault", "import_vault", "join_vault"])
 
     def test_submenu_shows_operating_entries_when_vault_exists(self) -> None:
         # Review §6.H3: "export" entry removed — the data layer ships,

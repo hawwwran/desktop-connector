@@ -54,6 +54,7 @@ from ..vault.grant.client import (
 from ..vault.ops.clear import confirm_vault_clear_text_matches
 from ._main_context import MainContext
 from .fresh_unlock_prompt import require_fresh_unlock_or_prompt
+from .grant_device_dialog import build_grant_device_dialog
 
 
 log = logging.getLogger(__name__)
@@ -106,9 +107,33 @@ def build_devices_tab(ctx: MainContext, win) -> "Gtk.Box":
         elif kind == "success":
             status_label.add_css_class("success")
 
+    action_row = Gtk.Box(
+        orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+    )
+    action_row.set_halign(Gtk.Align.START)
     refresh_btn = Gtk.Button(label="Refresh", css_classes=["pill"])
-    refresh_btn.set_halign(Gtk.Align.START)
-    container.append(refresh_btn)
+    action_row.append(refresh_btn)
+    grant_btn = Gtk.Button(
+        label="Grant a new device…",
+        css_classes=["pill", "suggested-action"],
+    )
+    action_row.append(grant_btn)
+    container.append(action_row)
+
+    def on_grant_clicked(_b) -> None:
+        if not vault_id_undashed:
+            _set_status("No vault is connected on this machine.", "error")
+            return
+        build_grant_device_dialog(
+            win,
+            config=config,
+            config_dir=config_dir,
+            vault_id_undashed=vault_id_undashed,
+            vault_id_dashed=vault_id_dashed_fn(),
+            on_grant_landed=lambda: _refresh_list(silent=True),
+        )
+
+    grant_btn.connect("clicked", on_grant_clicked)
 
     rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
     container.append(rows_box)

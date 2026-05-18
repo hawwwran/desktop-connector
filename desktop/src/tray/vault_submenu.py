@@ -90,6 +90,11 @@ class VaultSubmenuMixin:
                 visible=lambda _: self._vault_submenu_entry_visible("import_vault"),
             ),
             pystray.MenuItem(
+                "Add this device to a vault…",
+                self._spawn_vault_join,
+                visible=lambda _: self._vault_submenu_entry_visible("join_vault"),
+            ),
+            pystray.MenuItem(
                 "Open Vault…",
                 self._spawn_vault_browser,
                 visible=lambda _: self._vault_submenu_entry_visible("open_vault"),
@@ -129,6 +134,9 @@ class VaultSubmenuMixin:
 
     def _spawn_vault_browser(self, *_) -> None:
         self._open_gtk4_window("vault-browser")
+
+    def _spawn_vault_join(self, *_) -> None:
+        self._open_gtk4_window("vault-join")
 
     def _vault_sync_now(self, *_) -> None:
         """Tray "Sync now" — kick the in-process autosync loop.

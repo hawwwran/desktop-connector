@@ -447,7 +447,18 @@ relay log (filenames are local-only).
 | `vault.fresh_unlock.verified` | desktop | info | `operation` | F-LT11 — user re-typed the recovery passphrase and Argon2id verified it; stamp set for §3.9/§3.11 destructive-op gate |
 | `vault.fresh_unlock.verify_failed` | desktop | info | `operation`, `reason` | F-LT11 — passphrase or kit mismatch on the mini-prompt; gate stays closed, user can retry |
 | `vault.gc.unlink_failed` | server | warning | `plan`, `path` | F-S12 — gcExecute couldn't remove a chunk file |
+| `vault.grant.approved` | desktop | info | `role`, `claimant` (12 hex) | §5.C2 — admin approved a QR-join request; wrapped grant posted to relay. Audit anchor mirroring the server-side row insert |
+| `vault.grant.claim_sent` | desktop | info | `join_request_id` (truncated) | §5.C2 — claimant device POSTed `claim` on a join-request; verification code now visible on both sides |
 | `vault.grant.created` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant flow logs through this surface (F-510) |
+| `vault.grant.delete_failed` | desktop | warning | `jr` (truncated) | §5.C2 — best-effort DELETE on join-request cancel failed; the row will drain via its 15-min TTL instead |
+| `vault.grant.dialog_error` | desktop | warning | `message` | §5.C2 — admin "Grant a new device" dialog hit a terminal error pre-approve (relay unreachable, vault closed, …); the dialog surfaces the message and the operator can retry |
+| `vault.grant.join_request_created` | desktop | info | `jr` (truncated) | §5.C2 — admin minted a fresh join-request via `createJoinRequest`; QR + URL now rendered on screen |
+| `vault.grant.poll_error` | desktop | warning | `error` | §5.C2 — transient error during the claim / approval polling loop; subsequent ticks keep retrying |
+| `vault.grant.qr_render_failed` | desktop | warning | _exception_ | §5.C2 — `qrcode` PIL render raised; dialog degrades to URL-only mode |
+| `vault.grant.rejected` | desktop | info | `jr` (truncated), optional `via` (`cancel`) | §5.C2 — admin rejected the join-request explicitly or via wizard cancel; relay row deleted (or best-effort delete fired) |
+| `vault.grant.save_failed` | desktop | warning | _exception_ | §5.C2 — claimant unwrapped the grant but couldn't persist it to the local keyring/file store; operator surfaced an inline error |
+| `vault.grant.unwrap_failed` | desktop | warning | `error` | §5.C2 — claimant's AEAD unwrap of the wrapped vault grant failed. AAD mismatch, malformed envelope, or X25519 derivation mismatch — security-significant since this can indicate a tampered approval payload |
+| `vault.grant.unwrap_succeeded` | desktop | info | `vault` (dashed, truncated), `role` | §5.C2 — claimant decrypted the wrapped grant; vault is now unlocked on this device with the granted role |
 | `vault.import.cancelled` | desktop | info | `vault`, `chunks_done`, `total` | F-U03 — import cancelled mid-chunk-upload |
 | `vault.import.cancelled_pre_publish` | desktop | info | `vault`, `chunks_done` | F-U03 — import cancelled after chunks but before merge publish |
 | `vault.import.cas_exhausted` | desktop | warning | `vault`, `folder`, `retries` | Phase H — per-folder import merge-publish retry budget exhausted; raised the CAS error to caller |

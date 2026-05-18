@@ -656,6 +656,166 @@ class VaultHttpRelay:
             status_code=resp.status_code,
         )
 
+    # ---- §5.C2 join-request surface ---------------------------------
+
+    def create_join_request(
+        self, vault_id: str, vault_access_secret: str,
+        *, ephemeral_admin_pubkey: bytes,
+    ):
+        """POST /api/vaults/{id}/join-requests — admin-only.
+
+        Mints a join_request_id on the relay; the admin then renders the
+        ``vault://`` join URL plus the 6-digit verification code derived
+        from the shared X25519 secret once the claimant lands.
+        """
+        from ..relay_errors import VaultRelayError
+
+        if not isinstance(ephemeral_admin_pubkey, (bytes, bytearray)) or len(ephemeral_admin_pubkey) != 32:
+            raise RuntimeError("ephemeral_admin_pubkey must be 32 bytes")
+        payload = {
+            "ephemeral_admin_pubkey": base64.b64encode(bytes(ephemeral_admin_pubkey)).decode("ascii"),
+        }
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/join-requests",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=payload,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while creating a join-request.")
+        if resp.status_code != 201:
+            raise VaultRelayError(
+                self._extract_error(resp), status_code=resp.status_code,
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid join-request response.") from exc
+
+    def get_join_request(
+        self, vault_id: str, req_id: str,
+        *, vault_access_secret: str | None = None,
+    ):
+        """GET /api/vaults/{id}/join-requests/{req_id}.
+
+        Vault auth required when the caller is the admin polling for a
+        claim. The claimant device polls without a vault header —
+        device auth alone is enough because the server treats the
+        ``claimant_device_id`` already recorded on the row as the
+        per-claim authority for fetching the wrapped grant.
+        """
+        from ..relay_errors import VaultRelayError
+
+        headers: dict[str, str] = {}
+        if vault_access_secret:
+            headers["X-Vault-Authorization"] = f"Bearer {vault_access_secret}"
+        resp = self._conn.request(
+            "GET",
+            f"/api/vaults/{vault_id}/join-requests/{req_id}",
+            headers=headers,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while polling the join-request.")
+        if resp.status_code != 200:
+            raise VaultRelayError(
+                self._extract_error(resp), status_code=resp.status_code,
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid join-request poll response.") from exc
+
+    def claim_join_request(
+        self, vault_id: str, req_id: str,
+        *, claimant_pubkey: bytes, device_name: str,
+    ):
+        """POST /api/vaults/{id}/join-requests/{req_id}/claim.
+
+        Claimant-side. Posts the claimant's fresh X25519 pubkey + a
+        human-readable device name (rendered in the admin's approval
+        dialog). Device auth only; no vault header yet — the claimant
+        has no access secret until approval lands.
+        """
+        from ..relay_errors import VaultRelayError
+
+        if not isinstance(claimant_pubkey, (bytes, bytearray)) or len(claimant_pubkey) != 32:
+            raise RuntimeError("claimant_pubkey must be 32 bytes")
+        payload = {
+            "claimant_pubkey": base64.b64encode(bytes(claimant_pubkey)).decode("ascii"),
+            "device_name": str(device_name or ""),
+        }
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/join-requests/{req_id}/claim",
+            json=payload,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while claiming the join-request.")
+        if resp.status_code != 200:
+            raise VaultRelayError(
+                self._extract_error(resp), status_code=resp.status_code,
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid claim response.") from exc
+
+    def approve_join_request(
+        self, vault_id: str, vault_access_secret: str, req_id: str,
+        *, approved_role: str, wrapped_vault_grant: bytes,
+    ):
+        """POST /api/vaults/{id}/join-requests/{req_id}/approve — admin-only.
+
+        Carries the AEAD-wrapped vault material (master key + access
+        secret + role) for the claimant. Server stores the wrapped
+        envelope so the claimant's poll can fetch it on the next tick.
+        """
+        from ..relay_errors import VaultRelayError
+
+        payload = {
+            "approved_role": str(approved_role),
+            "wrapped_vault_grant": base64.b64encode(bytes(wrapped_vault_grant)).decode("ascii"),
+        }
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/join-requests/{req_id}/approve",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=payload,
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while approving the join-request.")
+        if resp.status_code != 200:
+            raise VaultRelayError(
+                self._extract_error(resp), status_code=resp.status_code,
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid approve response.") from exc
+
+    def reject_join_request(
+        self, vault_id: str, vault_access_secret: str, req_id: str,
+    ) -> None:
+        """DELETE /api/vaults/{id}/join-requests/{req_id} — admin-only.
+
+        Idempotent on already-rejected (returns 204). Used by the
+        admin dialog when the operator clicks "Reject" or closes the
+        wizard before approval lands.
+        """
+        from ..relay_errors import VaultRelayError
+
+        resp = self._conn.request(
+            "DELETE",
+            f"/api/vaults/{vault_id}/join-requests/{req_id}",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
+        if resp is None:
+            raise RuntimeError("Could not reach the relay while rejecting the join-request.")
+        if resp.status_code not in (200, 204):
+            raise VaultRelayError(
+                self._extract_error(resp), status_code=resp.status_code,
+            )
+
     # ---- §6.H2 device-grants surface --------------------------------
 
     def list_device_grants(self, vault_id: str, vault_access_secret: str):
