@@ -63,8 +63,46 @@ class _FakeVault:
     def __init__(self, manifest):
         self._manifest = manifest
 
-    def fetch_unified_manifest(self, relay, *, local_index=None):
-        return self._manifest
+    def fetch_root_manifest(self, relay, *, local_index=None):
+        # Synthesize a sharded root pointer-set with non-empty
+        # ``shard_hash`` so ``_safe_fetch_manifest`` fetches each shard
+        # (otherwise the integrity walk would see entries: []).
+        return {
+            "vault_id": self._manifest["vault_id"],
+            "root_revision": int(self._manifest["revision"]),
+            "parent_root_revision": int(self._manifest["parent_revision"]),
+            "created_at": "2026-05-04T12:00:00.000Z",
+            "author_device_id": "a" * 32,
+            "manifest_format_version": 1,
+            "operation_log_tail": [],
+            "archived_op_segments": [],
+            "remote_folders": [
+                {
+                    "remote_folder_id": folder["remote_folder_id"],
+                    "display_name_enc": folder.get("display_name_enc", "Documents"),
+                    "created_at": folder.get("created_at", "2026-05-04T12:00:00.000Z"),
+                    "created_by_device_id": folder.get("created_by_device_id", "a" * 32),
+                    "state": folder.get("state", "active"),
+                    "retention_policy": folder.get("retention_policy", {}),
+                    "ignore_patterns": folder.get("ignore_patterns", []),
+                    "shard_hash": "deadbeef",  # opaque — fake just needs it non-empty
+                    "shard_revision": 1,
+                }
+                for folder in self._manifest.get("remote_folders", [])
+            ],
+        }
+
+    def fetch_folder_shard(self, relay, remote_folder_id, *, expected_shard_hash=None):
+        for folder in self._manifest.get("remote_folders", []):
+            if folder.get("remote_folder_id") == remote_folder_id:
+                return {
+                    "vault_id": self._manifest["vault_id"],
+                    "remote_folder_id": remote_folder_id,
+                    "shard_revision": 1,
+                    "parent_shard_revision": 0,
+                    "entries": list(folder.get("entries", [])),
+                }
+        raise KeyError(f"shard {remote_folder_id!r} not in fake state")
 
 
 class _FakeRelay:
@@ -118,9 +156,11 @@ class QuickCheckTests(unittest.TestCase):
             vault_id: str = VAULT_ID
             master_key = None
             vault_access_secret = None
-            def fetch_unified_manifest(self, *_args, **_kwargs):
+            def fetch_root_manifest(self, *_args, **_kwargs):
                 self.fetched = True
-                return {}
+                return {"remote_folders": []}
+            def fetch_folder_shard(self, *_args, **_kwargs):
+                return {"entries": []}
         vault = _Locked()
         relay = _FakeRelay()
         report = run_quick_check(vault=vault, relay=relay)

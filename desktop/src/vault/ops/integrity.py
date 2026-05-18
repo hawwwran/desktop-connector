@@ -61,11 +61,16 @@ class IntegrityVault(Protocol):
     @property
     def vault_access_secret(self) -> str | None: ...
 
-    # Phase H step 7e: integrity reads through the sharded
-    # ``fetch_unified_manifest`` compat wrapper (root + per-folder
-    # shards, assembled). Step 7f removes the wrapper and integrity
-    # walks shards directly.
-    def fetch_unified_manifest(self, relay, *, local_index=None) -> dict[str, Any]: ...
+    # Phase H step 7f: integrity walks the sharded surface directly —
+    # ``_safe_fetch_manifest`` reads root + each folder's shard and
+    # assembles a unified view inline (so the existing chunk/version
+    # walks keep working against the assembled dict).
+    def fetch_root_manifest(self, relay, *, local_index=None) -> dict[str, Any]: ...
+
+    def fetch_folder_shard(
+        self, relay, remote_folder_id: str, *,
+        expected_shard_hash: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class IntegrityRelay(Protocol):
@@ -317,8 +322,31 @@ def run_full_check(
 def _safe_fetch_manifest(
     vault: IntegrityVault, relay: IntegrityRelay, report: IntegrityReport,
 ) -> dict[str, Any] | None:
+    """Read the root + each folder's shard and assemble the unified view.
+
+    The chunk/version walks below operate on the legacy unified shape;
+    keeping the assembly local to integrity means we never depend on
+    ``Vault.fetch_unified_manifest`` from this module. Per-folder shard
+    hashes from the root pointer are passed as ``expected_shard_hash``
+    so the §10.C rollback check still fires on a tampering relay.
+    """
+    from ..manifest import assemble_unified_manifest
     try:
-        return vault.fetch_unified_manifest(relay)
+        root = vault.fetch_root_manifest(relay)
+        shards_by_id: dict[str, dict[str, Any]] = {}
+        for pointer in root.get("remote_folders", []) or []:
+            if not isinstance(pointer, dict):
+                continue
+            rf_id = str(pointer.get("remote_folder_id", ""))
+            expected_hash = str(pointer.get("shard_hash", ""))
+            if not rf_id or expected_hash == "":
+                # A freshly-added folder with no shard yet — ``get_shard``
+                # would 404; the assembled view shows ``entries: []``.
+                continue
+            shards_by_id[rf_id] = vault.fetch_folder_shard(
+                relay, rf_id, expected_shard_hash=expected_hash,
+            )
+        return assemble_unified_manifest(root, shards_by_id)
     except Exception as exc:  # noqa: BLE001
         report.add(IntegrityIssue(
             kind="manifest_fetch_failed",
