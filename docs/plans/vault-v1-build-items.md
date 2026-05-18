@@ -255,7 +255,11 @@ Single page, card-per-row layout. Each row:
 
 ---
 
-## §5.H2 — Per-folder import conflict resolution
+## §5.H2 — Per-folder import conflict resolution *(landed 2026-05-18)*
+
+**Status:** landed. New "conflicts" page inserted between Preview and Progress in `desktop/src/windows_vault_import.py`. The preview-load worker calls `find_conflict_batches` against the active manifest vs bundle manifest and stashes the result; `on_import` routes through the conflict page when non-empty, otherwise jumps straight to the existing fresh-unlock + progress path. Each conflict batch renders as a card with three radio modes (rename default / overwrite / skip), an "Apply to remaining" button that fills in *still-undecided* folders only, and Continue gated on every folder having a pick. The previously hard-coded `ImportMergeResolution(per_folder={})` at `run_import` is replaced with `dict(state["resolution"] or {})`. Back returns to Preview without clearing picks — the renderer pre-checks the radio for any folder already in resolution.
+
+Tests: `tests/protocol/test_desktop_vault_import_conflicts_source.py`. No new diagnostic events — the conflict-resolution UX is part of the import flow whose existing `vault.import.*` events cover the merge boundary.
 
 **Decision** *(2026-05-18)*: build the per-folder conflict page for v1. Closes the spec §17 gap; library `find_conflict_batches` already exists.
 

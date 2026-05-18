@@ -86,12 +86,9 @@ Tracked as a separate v1.x follow-up.
 
 ---
 
-### 7. §5.H2 — Per-folder import conflict resolution UI *(design landed 2026-05-18)*
+### 7. ~~§5.H2 — Per-folder import conflict resolution UI~~ *(landed 2026-05-18)*
 
-**Why this slot:** UX polish for the existing import wizard. Today's rename-only default is data-safe — the failure mode is "user can't pick overwrite or skip per folder," not "data corruption." `find_conflict_batches` library is ready; only the wizard page is missing. Spec §17 compliance is the goal.
-
-**Status:** scoped — implementation pending. **Plan:** [`vault-v1-build-items.md#§5.H2`](vault-v1-build-items.md#5h2--per-folder-import-conflict-resolution).
-**Decision:** build the per-folder conflict page for v1. Closes the spec §17 gap. Sized ~1 day.
+**Status:** landed. New "conflicts" page inserted between Preview and Progress in `desktop/src/windows_vault_import.py` — only shown when `find_conflict_batches` returns non-empty. Card-per-folder layout with three radio modes (rename / overwrite / skip — spec §17 contract), an "Apply to remaining" affordance that only fills undecided folders, and Continue gated on every folder having a pick. Hard-coded `ImportMergeResolution(per_folder={})` replaced by `dict(state["resolution"] or {})` threaded into `run_import`. Tests: `tests/protocol/test_desktop_vault_import_conflicts_source.py`.
 
 ---
 
@@ -242,20 +239,20 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 | Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
 |---|---|---|---|---|---|
 | Criticals | 17 | 17 | 0 | 0 | 0 |
-| Highs | 37 | 35 | 1 (§5.H2) | 1 (§6.H1) | 0 |
+| Highs | 37 | 36 | 0 | 1 (§6.H1) | 0 |
 | Mediums | 35 | 32 | 2 (§4.M1, §5.M2) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **88** | **3** | **2** | **20** |
+| **Total** | **113** | **89** | **2** | **2** | **20** |
 
-§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §5.H3 + §6.H2 + §6.H3 all fully landed on 2026-05-18.
+§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §5.H2 + §5.H3 + §6.H2 + §6.H3 all fully landed on 2026-05-18 — every Critical + every High is now closed.
 
-### Breakdown of the 25 not-fully-fixed-by-code items
+### Breakdown of the 24 not-fully-fixed-by-code items
 
-- **3 design-landed-pending-implementation** (§1 above): 1 High (§5.H2), 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
+- **2 design-landed-pending-implementation** (§1 above): 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **25 entries are not-yet-fully-fixed-by-code** — 3 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **23 are open work** (3 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **24 entries are not-yet-fully-fixed-by-code** — 2 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **22 are open work** (2 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

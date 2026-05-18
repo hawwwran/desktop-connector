@@ -33,7 +33,11 @@ from .vault.state.local_index import VaultLocalIndex
 from .vault.error_messages import humanize
 from .vault.export.bundle import ExportError
 from .vault.export.reminder import normalize_cadence
-from .vault.import_.bundle import ImportMergeResolution
+from .vault.import_.bundle import (
+    FolderConflictBatch,
+    ImportMergeResolution,
+    find_conflict_batches,
+)
 from .vault.binding.runtime import create_vault_relay, open_local_vault_from_grant
 from .windows_common import _make_app
 from .windows_vault.fresh_unlock_prompt import require_fresh_unlock_or_prompt
@@ -64,6 +68,16 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
         "bundle_manifest": None,
         "active_manifest": None,
         "result": None,
+        # §5.H2: per-folder conflict resolution state.
+        #   "conflicts": list[FolderConflictBatch] computed during
+        #     preview load. Empty list when no conflicts — the
+        #     wizard skips the conflicts page and goes straight to
+        #     fresh-unlock + progress.
+        #   "resolution": dict[folder_id → "rename"|"overwrite"|"skip"]
+        #     filled in on the conflicts page; threaded into
+        #     ``ImportMergeResolution`` at run_import time.
+        "conflicts": [],
+        "resolution": {},
     }
 
     def local_vault_id() -> str:
@@ -162,7 +176,54 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
         preview_box.append(preview_actions)
         stack.add_named(preview_box, "preview")
 
-        # ---- Page 3: progress -----------------------------------------
+        # ---- Page 3: per-folder conflict resolution (§5.H2) ---------
+        #
+        # Inserted between Preview and Progress. Only shown if
+        # ``find_conflict_batches`` returned a non-empty list for the
+        # bundle vs the active vault; otherwise ``on_import`` skips
+        # straight to fresh-unlock + progress.
+        #
+        # Layout: one card per ``FolderConflictBatch``. Each card has
+        # the folder display name, the conflict count, three radio
+        # buttons (Rename — default, conservative; Overwrite; Skip)
+        # and an "Apply to remaining" link that copies the chosen
+        # mode into every still-undecided folder below. Continue
+        # stays disabled until every folder has a pick.
+        conflicts_box = _vbox(margin=24, spacing=12)
+        conflicts_box.append(Gtk.Label(
+            label="Choose how to resolve name conflicts",
+            xalign=0, css_classes=["title-2"],
+        ))
+        conflicts_box.append(Gtk.Label(
+            label=(
+                "These folders have file names that are live on both "
+                "sides. Pick a resolution per folder. Bundle versions "
+                "are always preserved as history — Skip and Overwrite "
+                "only differ in which side keeps the current head."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        conflicts_scroller = Gtk.ScrolledWindow()
+        conflicts_scroller.set_vexpand(True)
+        conflicts_scroller.set_min_content_height(280)
+        conflicts_list = _vbox(spacing=10)
+        conflicts_scroller.set_child(conflicts_list)
+        conflicts_box.append(conflicts_scroller)
+
+        conflicts_actions = _hbox(spacing=8)
+        conflicts_actions.set_halign(Gtk.Align.END)
+        conflicts_back_btn = Gtk.Button(label="Back", css_classes=["pill"])
+        conflicts_continue_btn = Gtk.Button(
+            label="Continue",
+            css_classes=["pill", "suggested-action"],
+        )
+        conflicts_continue_btn.set_sensitive(False)
+        conflicts_actions.append(conflicts_back_btn)
+        conflicts_actions.append(conflicts_continue_btn)
+        conflicts_box.append(conflicts_actions)
+        stack.add_named(conflicts_box, "conflicts")
+
+        # ---- Page 4: progress -----------------------------------------
         progress_box = _vbox(margin=24, spacing=14)
         progress_box.append(Gtk.Label(
             label="Importing…",
@@ -331,6 +392,18 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                     state["bundle_manifest"] = bundle_manifest
                     state["preview"] = preview
                     state["active_manifest"] = active_manifest
+                    # §5.H2: surface per-folder conflict batches so the
+                    # post-Preview page can ask for a per-folder mode
+                    # before run_import. Empty list = bundle has no
+                    # live-vs-live collisions; wizard skips the page.
+                    if active_manifest is not None:
+                        state["conflicts"] = find_conflict_batches(
+                            active_manifest=active_manifest,
+                            bundle_manifest=bundle_manifest,
+                        )
+                    else:
+                        state["conflicts"] = []
+                    state["resolution"] = {}
                     _render_preview(preview_grid, preview)
                     if preview.fingerprint_status == "different_vault":
                         preview_status.set_label(
@@ -348,12 +421,160 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
             threading.Thread(target=worker, daemon=True).start()
 
         def on_import(_btn) -> None:
+            # §5.H2: route through the conflict-resolution page when
+            # the bundle has live-vs-live name collisions. The page's
+            # Continue button calls ``_after_conflict_resolution``
+            # which re-runs the fresh-unlock gate before the actual
+            # import worker fires.
+            if state.get("conflicts"):
+                _render_conflicts_page()
+                go_to("conflicts")
+                return
             require_fresh_unlock_or_prompt(
                 win,
                 config=config,
                 operation_label="merge bundle into active vault",
                 on_success=_start_import,
             )
+
+        def _render_conflicts_page() -> None:
+            """Rebuild the per-folder card list from ``state['conflicts']``.
+
+            Called each time the page is presented; each card carries
+            three radio CheckButtons (grouped) bound to the same
+            ``state['resolution'][folder_id]`` slot. The "Apply to
+            remaining" button copies the chosen mode into every
+            still-undecided folder below.
+            """
+            child = conflicts_list.get_first_child()
+            while child is not None:
+                nxt = child.get_next_sibling()
+                conflicts_list.remove(child)
+                child = nxt
+
+            batches: list[FolderConflictBatch] = list(state.get("conflicts") or [])
+            radio_groups: dict[str, dict[str, Gtk.CheckButton]] = {}
+
+            def _refresh_continue() -> None:
+                conflicts_continue_btn.set_sensitive(
+                    all(b.remote_folder_id in state["resolution"] for b in batches)
+                )
+
+            for idx, batch in enumerate(batches):
+                card = _vbox(margin=10, spacing=6)
+                card.add_css_class("card")
+                title = batch.display_name or batch.remote_folder_id[:12]
+                card.append(Gtk.Label(
+                    label=title, xalign=0, css_classes=["heading"],
+                ))
+                card.append(Gtk.Label(
+                    label=(
+                        f"{len(batch.conflicting_paths)} conflicting file "
+                        f"name{'s' if len(batch.conflicting_paths) != 1 else ''}."
+                    ),
+                    xalign=0, wrap=True, css_classes=["dim-label"],
+                ))
+
+                radios: dict[str, Gtk.CheckButton] = {}
+                first: Gtk.CheckButton | None = None
+                for mode, label, hint in (
+                    ("rename",
+                     "Rename (default — keep both)",
+                     "Bundle file lands at '<path> (conflict imported …)'; "
+                     "active head untouched."),
+                    ("overwrite",
+                     "Overwrite — bundle wins",
+                     "Bundle version becomes the new current head; active "
+                     "version preserved as history."),
+                    ("skip",
+                     "Skip — active wins (entire folder)",
+                     "Active head stays current; bundle versions archived "
+                     "as history. Whole folder is skipped from new-head "
+                     "writes per spec §17."),
+                ):
+                    btn = Gtk.CheckButton(label=label)
+                    btn.update_property(
+                        [Gtk.AccessibleProperty.LABEL],
+                        [f"{title} — {label}"],
+                    )
+                    if first is None:
+                        first = btn
+                    else:
+                        btn.set_group(first)
+                    radios[mode] = btn
+                    card.append(btn)
+                    card.append(Gtk.Label(
+                        label=hint, xalign=0, wrap=True,
+                        css_classes=["dim-label"],
+                    ))
+
+                def _on_toggled(_button, *, folder_id=batch.remote_folder_id,
+                                radio_map=radios) -> None:
+                    for mode_token, candidate in radio_map.items():
+                        if candidate.get_active():
+                            state["resolution"][folder_id] = mode_token
+                            break
+                    _refresh_continue()
+
+                for btn in radios.values():
+                    btn.connect("toggled", _on_toggled)
+
+                # Pre-fill any prior pick (e.g. user clicked Back and
+                # returned to this page) so the radio reflects state.
+                pre_pick = state["resolution"].get(batch.remote_folder_id)
+                if pre_pick is not None and pre_pick in radios:
+                    radios[pre_pick].set_active(True)
+
+                apply_remaining = Gtk.Button(
+                    label="Apply this choice to remaining folders",
+                    css_classes=["pill"],
+                )
+                apply_remaining.set_halign(Gtk.Align.START)
+
+                def _on_apply_remaining(_b, *, idx=idx, folder_id=batch.remote_folder_id,
+                                        radio_map=radios) -> None:
+                    chosen: str | None = None
+                    for mode_token, candidate in radio_map.items():
+                        if candidate.get_active():
+                            chosen = mode_token
+                            break
+                    if chosen is None:
+                        return
+                    for later in batches[idx + 1:]:
+                        if later.remote_folder_id in state["resolution"]:
+                            # Don't overwrite an explicit pick the
+                            # operator already made — only fill in
+                            # the still-blank ones below.
+                            continue
+                        state["resolution"][later.remote_folder_id] = chosen
+                        later_radios = radio_groups.get(later.remote_folder_id)
+                        if later_radios and chosen in later_radios:
+                            later_radios[chosen].set_active(True)
+                    _refresh_continue()
+
+                apply_remaining.connect("clicked", _on_apply_remaining)
+                card.append(apply_remaining)
+                radio_groups[batch.remote_folder_id] = radios
+                conflicts_list.append(card)
+
+            _refresh_continue()
+
+        def _after_conflict_resolution() -> None:
+            require_fresh_unlock_or_prompt(
+                win,
+                config=config,
+                operation_label="merge bundle into active vault",
+                on_success=_start_import,
+            )
+
+        def _on_conflicts_back(_btn) -> None:
+            go_to("preview")
+
+        def _on_conflicts_continue(_btn) -> None:
+            _after_conflict_resolution()
+
+        conflicts_back_btn.connect("clicked", _on_conflicts_back)
+        conflicts_continue_btn.connect("clicked", _on_conflicts_continue)
 
         def _start_import() -> None:
             import_btn.set_sensitive(False)
@@ -408,12 +629,18 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                             state.get("active_genesis_fingerprint")
                             or _safe_genesis_fingerprint(vault, relay)
                         )
+                        # §5.H2: thread the per-folder picks from the
+                        # conflict-resolution page. Empty dict =
+                        # there were no conflicts, fall back to the
+                        # spec-§D9 default (rename, conservative).
                         result = run_import(
                             vault=vault, relay=relay,
                             bundle_path=state["bundle_path"],
                             passphrase=state["passphrase"],
                             active_manifest=active_manifest,
-                            resolution=ImportMergeResolution(per_folder={}),
+                            resolution=ImportMergeResolution(
+                                per_folder=dict(state.get("resolution") or {}),
+                            ),
                             author_device_id=device_id,
                             active_genesis_fingerprint=active_fp_run,
                             bundle_genesis_fingerprint=_safe_bundle_genesis_fingerprint(
