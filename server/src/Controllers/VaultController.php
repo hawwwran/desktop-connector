@@ -136,6 +136,16 @@ class VaultController
                 $field
             );
         }
+        // Review §1.M6 — reject empty-payload base64 when no expected
+        // length is set. ``"=="`` is valid RFC4648 input but decodes to
+        // zero bytes, which has no place as a vault envelope / wrapped
+        // grant / encrypted blob.
+        if ($expectedLength === null && strlen($raw) === 0) {
+            throw new VaultInvalidRequestError(
+                "{$field} must decode to at least 1 byte",
+                $field
+            );
+        }
         return $raw;
     }
 

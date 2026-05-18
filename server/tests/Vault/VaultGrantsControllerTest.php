@@ -253,6 +253,37 @@ final class VaultGrantsControllerTest extends TestCase
     }
 
     /**
+     * Review §1.M6 — defense-in-depth: both ``decodeBase64Field``
+     * helpers (``VaultController`` + ``VaultGrantsController``) MUST
+     * explicitly reject zero-byte payloads when no expected length is
+     * set. PHP's ``base64_decode(..., true)`` strict mode already
+     * rejects pure-padding strings like ``"=="`` transitively, but
+     * relying on transitive correctness is fragile — a future swap
+     * to non-strict mode (e.g. for compatibility) would silently
+     * widen the surface to "empty wrapped grant ⇒ claimant unwraps
+     * nothing". Source-pin the explicit guard so the regression is
+     * caught at refactor time.
+     */
+    public function test_decodeBase64Field_helpers_explicit_empty_guard(): void
+    {
+        $controllerFile = file_get_contents(
+            __DIR__ . '/../../src/Controllers/VaultController.php',
+        );
+        $grantsFile = file_get_contents(
+            __DIR__ . '/../../src/Controllers/VaultGrantsController.php',
+        );
+        $marker = "strlen(\$raw) === 0";
+        self::assertStringContainsString(
+            $marker, $controllerFile,
+            'VaultController::decodeBase64Field must explicitly reject zero-byte payloads',
+        );
+        self::assertStringContainsString(
+            $marker, $grantsFile,
+            'VaultGrantsController::decodeBase64Field must explicitly reject zero-byte payloads',
+        );
+    }
+
+    /**
      * Review §1.M5 — when the vault row disappears mid-rotation (or any
      * other reason the UPDATE affects zero rows), the controller must
      * NOT return 200 with a stale "rotated_at" timestamp. Pre-fix

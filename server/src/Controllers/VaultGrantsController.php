@@ -70,6 +70,16 @@ class VaultGrantsController
                 $field
             );
         }
+        // Review §1.M6 — reject empty-payload base64 when no expected
+        // length is set. Pre-fix ``"=="`` survived as zero bytes, so an
+        // approver could store an empty ``wrapped_vault_grant`` and the
+        // claimant would receive nothing to unwrap.
+        if ($expectedLength === null && strlen($raw) === 0) {
+            throw new VaultInvalidRequestError(
+                "{$field} must decode to at least 1 byte",
+                $field
+            );
+        }
         return $raw;
     }
 
