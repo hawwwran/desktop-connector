@@ -76,3 +76,24 @@ Continuing autonomously into the High section.
 - 2026-05-17 — fixed §7.H5 (commit 421f5be): PHP getHeader-after-commit test drives /start → /verify → /commit and asserts migrated_to surfaces on GET /header (the discovery signal propagate_relay_migration consumes).
 
 §7 Highs complete (5 of 5: H1, H2, H3, H4, H5).
+
+## Milestone: All actionable Highs landed
+
+§1.H1-H6, §2.H1-H3, §3.H1-H9, §4.H1-H5, §6.H3-H5, §7.H1-H5 all fixed.
+Remaining open Highs are all *skipped (new feature build)* with explicit scoping in `review-doubts.md`:
+- §5.H2 per-folder import conflict resolution UI
+- §5.H3 access-secret rotation client trigger
+- §6.H2 Revoke-device UI (Devices tab placeholder)
+§6.H1 has a partial fix (notification on due purges) with the auto-execute design tracked in `review-doubts.md`.
+
+Continuing into the Medium section.
+
+## Medium section — in progress
+
+- 2026-05-17 — fixed §1.M1 (commit 15ee4ca): vaultRequireHex64 validates header_hash/root_hash/shard_hash as ^[a-f0-9]{64}$ across all 6 write sites; 400 vault_invalid_request with field attribution.
+- 2026-05-17 — fixed §1.M2 (commit 2e466fe): all 6 AAD builders now assert canonical 12-byte vault_id; the four previously-unguarded ones (chunk, header, recovery, device_grant) now match buildRootAad / buildShardAad.
+- 2026-05-17 — fixed §1.M3 (commit 10fce54): gcExecute requireRole(sync) hoisted before plan lookup; read-only callers get uniform 403 without leaking plan state.
+- 2026-05-17 — fixed §1.M4 (commit 2ccafd4): Router catches \Throwable and emits typed 500 vault_internal_error; full trace logged via new apierror.uncaught_throwable event.
+- 2026-05-17 — fixed §1.M5 (commit d91ea3a): rotateAccessSecret wrapped in BEGIN IMMEDIATE/COMMIT; rotation+audit either both land or neither does; missing vault row → 404.
+- 2026-05-17 — fixed §1.M6 (commit 6e5df0c): decodeBase64Field explicit strlen($raw)===0 guard in both controllers (defense-in-depth; strict-mode already covers practical attack).
+- 2026-05-17 — fixed §1.M7 (commit 86a7087): migrationVerifySource explicit migrated_to state guard so post-commit /verify never stamps a fresh verified_at.

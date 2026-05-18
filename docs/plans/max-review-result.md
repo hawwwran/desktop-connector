@@ -178,30 +178,51 @@ After `COMMIT` lands and the disk write fails, two writes (`deleteRow` + `incUse
 
 ### Medium
 
-#### §1.M1 — Hash fields (`header_hash`, `root_hash`, `shard_hash`) not validated as `^[a-f0-9]{64}$`
+#### ~~§1.M1~~ — Hash fields (`header_hash`, `root_hash`, `shard_hash`) not validated as `^[a-f0-9]{64}$`
+**Fix landed:** 15ee4ca 2026-05-17
 **File:** `VaultController.php` (multiple sites: 136, 273, 396, 494, 585, 1029)
 
 `vaultRequireNonEmptyString` accepts any non-empty string. A client could store `"banana"` as a `shard_hash`. The §10.C reader check would catch it on decrypt, but the relay returns `current_root_hash: "banana"` in 409 payloads.
 
-#### §1.M2 — Server-side AAD builders inconsistent on `strlen(canonical) === 12` assertion
+**Approach:** New private static `vaultRequireHex64` validates `^[a-f0-9]{64}$` and emits 400 `vault_invalid_request` with field attribution. Applied across all six write sites.
+
+#### ~~§1.M2~~ — Server-side AAD builders inconsistent on `strlen(canonical) === 12` assertion
+**Fix landed:** 2e466fe 2026-05-17
 **File:** `server/src/Crypto/VaultCrypto.php`
 
 `buildRootAad` (340) and `buildShardAad` (387) assert canonical 12-byte vault_id length. `buildChunkAad`, `buildHeaderAad`, `buildRecoveryAad`, `buildDeviceGrantAad` do NOT. Python asserts in *every* builder. Future controller that forgets `normalizeVaultId` silently produces a wrong-length AAD that still passes AEAD on this device but breaks cross-runtime parity.
 
-#### §1.M3 — `gcExecute` role check sequenced after state inspection — minor info leak
+**Approach:** Added the same `strlen(canonical) === 12` assertion in the four missing builders. Four new `test_build*Aad_rejects_malformed_vault_id` pins in `VaultCryptoInvariantsTest.php`.
+
+#### ~~§1.M3~~ — `gcExecute` role check sequenced after state inspection — minor info leak
+**Fix landed:** 10fce54 2026-05-17
 **File:** `VaultController.php:1118-1184`. `getById($planId)` and state checks run before `requireRole(sync)`. A `read-only` caller can probe plan IDs and learn state from error codes. Low impact (random IDs, 2^120 entropy). Move role check to top of method.
 
-#### §1.M4 — Router catches only `ApiError` — uncaught `\Throwable` leaks PHP error envelope
+**Approach:** Hoisted `requireRole(sync)` to the top of `gcExecute` (before plan lookup). Below-sync callers get a uniform 403 before any state inspection. KIND_SCHEDULED_PURGE / KIND_FORCED_EVICTION still escalate to admin afterward; the duplicate inner `else { requireRole(sync) }` is removed.
+
+#### ~~§1.M4~~ — Router catches only `ApiError` — uncaught `\Throwable` leaks PHP error envelope
+**Fix landed:** 2ccafd4 2026-05-17
 **File:** `server/src/Router.php:140`. Deploy doc doesn't mandate `display_errors=Off`. Add `catch (\Throwable $e)` arm; log + emit `503 vault_storage_unavailable` or `500 vault_internal_error` with no details.
 
-#### §1.M5 — `recordRotation` audit-row INSERT non-atomic with `rotateAccessTokenHash`
+**Approach:** Added `catch (\Throwable $e)` arm below the existing `ApiError` branch. Full trace logged via new `apierror.uncaught_throwable` event server-side; wire envelope is `500 vault_internal_error` with no details. Two new RouterErrorHandlingTest pins: uncaught Throwable → typed envelope (private message not leaked); thrown ApiError still flows through ErrorResponder unchanged.
+
+#### ~~§1.M5~~ — `recordRotation` audit-row INSERT non-atomic with `rotateAccessTokenHash`
+**Fix landed:** d91ea3a 2026-05-17
 **File:** `VaultGrantsController.php:541-548`. Crash between leaves rotation done but no audit row. Wrap in IMMEDIATE tx. Also: `rotateAccessTokenHash` doesn't return its result to the controller — if `changes() !== 1` (e.g. vault disappeared mid-request), controller still returns success.
 
-#### §1.M6 — `decodeBase64Field` accepts `"=="` when length not constrained
+**Approach:** Wrapped the rotate+record pair in BEGIN IMMEDIATE/COMMIT with ROLLBACK on any throw. ``rotateAccessTokenHash``'s ``bool`` return is now asserted — a false (vault row missing) raises ``VaultNotFoundError`` which unwinds the transaction.
+
+#### ~~§1.M6~~ — `decodeBase64Field` accepts `"=="` when length not constrained
+**Fix landed:** 6e5df0c 2026-05-17
 **Files:** `VaultController.php:106`, `VaultGrantsController.php:60`. Un-length-checked sites accept empty-payload base64. An approver could store an empty wrapped grant; claimant unwraps nothing.
 
-#### §1.M7 — `migrationVerifySource` unconditionally stamps `verified_at` even when vault is `migrated_to`
+**Approach:** Defense-in-depth — PHP's strict-mode `base64_decode` already rejects pure-padding `"=="` transitively, but explicit `strlen($raw) === 0` guard added to both helpers so a future non-strict refactor doesn't silently widen the surface. Source-pin test asserts both helpers contain the marker.
+
+#### ~~§1.M7~~ — `migrationVerifySource` unconditionally stamps `verified_at` even when vault is `migrated_to`
+**Fix landed:** 86a7087 2026-05-17
 **File:** `VaultController.php:1404`. Behaviour relies on `COALESCE` keeping original timestamp — subtle, would benefit from an explicit `state` guard.
+
+**Approach:** Added explicit `$alreadyCommitted = $vault['migrated_to'] !== null` guard before `markVerified`. Pre-fix the COALESCE preserved any prior timestamp; the invariant "verified_at is only ever stamped pre-commit" is now readable in one place. Test simulates the pathological state (verified_at scrubbed post-commit) and asserts /verify-source doesn't re-stamp.
 
 ### Low
 
