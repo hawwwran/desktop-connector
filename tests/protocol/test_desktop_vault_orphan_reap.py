@@ -23,8 +23,10 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
-    make_manifest,
-    make_remote_folder,
+    assemble_unified_manifest,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
 )
 from src.vault.ops.eviction import (  # noqa: E402
     OrphanReapResult,
@@ -242,22 +244,31 @@ def _vault() -> Vault:
 
 
 def _empty_manifest() -> dict:
-    return make_manifest(
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=1,
-        parent_revision=0,
+        root_revision=1,
+        parent_root_revision=0,
         created_at="2026-05-04T12:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             )
         ],
     )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID,
+        remote_folder_id=DOCS_ID,
+        shard_revision=1,
+        parent_shard_revision=0,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=[],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
 
 
 if __name__ == "__main__":
