@@ -1497,6 +1497,29 @@ class VaultController
                 }
             } else {
                 VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'sync');
+                // Review §1.H5: a sync-role caller may only cancel
+                // jobs THEY requested (or be admin). Pre-fix any
+                // sync-role device could cancel another admin's
+                // open sync_plan, eventually exhausting the quota by
+                // forcing repeated re-plans. The
+                // ``requested_by_device_id`` column was already
+                // recorded; this is the consult that was missing.
+                $ownerDevice = (string)($row['requested_by_device_id'] ?? '');
+                if (
+                    $ownerDevice !== ''
+                    && $ownerDevice !== $callerDevice
+                ) {
+                    try {
+                        VaultAuthService::requireRole(
+                            $db, $vaultId, $callerDevice, 'admin',
+                        );
+                    } catch (VaultAccessDeniedError $e) {
+                        throw new VaultAccessDeniedError(
+                            'cancelling another device\'s gc plan requires role=admin',
+                            requiredRole: 'admin',
+                        );
+                    }
+                }
             }
             $jobsRepo->markCancelled((string)$id, $now);
         }

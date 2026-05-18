@@ -1490,6 +1490,62 @@ final class VaultControllerTest extends TestCase
         self::assertSame(VaultGcJobsRepository::STATE_CANCELLED, $row['state']);
     }
 
+    /**
+     * Review §1.H5: a sync-role device must not be able to cancel
+     * another device's gc plan. Pre-fix the cancel ignored
+     * ``requested_by_device_id`` entirely — a compromised paired
+     * device could disrupt the legitimate admin's GC, eventually
+     * exhausting quota.
+     */
+    public function test_gcCancel_forbids_cross_author_sync_caller(): void
+    {
+        // Plan as the seeded admin device.
+        $planRes = $this->invoke(fn() => VaultController::gcPlan(
+            $this->db, $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                'root_revision'       => 1,
+                'encrypted_gc_auth'   => 'x',
+                'candidate_chunk_ids' => [],
+            ])
+        ));
+        $planId = $planRes['json']['data']['plan_id'];
+
+        // Demote to a sync role on the SAME device — still owner so
+        // we have to switch caller to break the ownership check.
+        // Easier: register a second device + grant it sync role.
+        $secondDeviceId = '0102030405060708090a0b0c0d0e0f10';
+        $secondToken = 'second-sync-token';
+        (new DeviceRepository($this->db))->insertDevice(
+            $secondDeviceId,
+            base64_encode(random_bytes(32)),
+            $secondToken,
+            'desktop',
+            self::NOW
+        );
+        (new VaultDeviceGrantsRepository($this->db))->insertGrant(
+            'gr_v1_secondsync000000000000aa',
+            self::VAULT_ID,
+            $secondDeviceId,
+            'Second Sync Desktop',
+            'sync',
+            self::DEVICE_ID,
+            'recovery',
+            self::NOW,
+        );
+        $_SERVER['HTTP_X_DEVICE_ID']   = $secondDeviceId;
+        $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer ' . $secondToken;
+
+        try {
+            VaultController::gcCancel(
+                $this->db,
+                $this->jctx('POST', ['vault_id' => self::VAULT_ID], ['plan_id' => $planId])
+            );
+            self::fail('expected VaultAccessDeniedError');
+        } catch (VaultAccessDeniedError $e) {
+            self::assertSame(403, $e->status);
+            self::assertSame('admin', $e->details['required_role']);
+        }
+    }
+
     public function test_gcCancel_idempotent_for_unknown_plan(): void
     {
         $res = $this->invoke(fn() => VaultController::gcCancel(
