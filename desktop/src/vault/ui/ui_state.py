@@ -97,7 +97,7 @@ def vault_submenu_entries(
     notification telling the user to open Vault Settings → Recovery
     → Export…, but no such launcher exists. The data-layer
     ``write_export_bundle`` is shipped; the GTK launcher is logged
-    in ``review-doubts.md`` for explicit scoping rather than living
+    in ``docs/plans/unfinished.md`` for explicit scoping rather than living
     as theatre in the tray.
     """
     if not toggle_active:

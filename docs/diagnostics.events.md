@@ -469,7 +469,7 @@ relay log (filenames are local-only).
 | `vault.publish.ok` | desktop | info | `vault_id`, `revision` | Manifest CAS-published successfully |
 | `vault.purge.cancelled` | desktop | info | `vault`, `job_id` | User cancelled before fire |
 | `vault.purge.cleared_all_on_toggle_off` | desktop | info | `count` | T14.5 toggle-OFF wiped pending purges |
-| `vault.purge.due_awaiting_user` | desktop | warning | `vault`, `job_id`, `scheduled_for` | Review §6.H1 — tray autosync detected a scheduled hard-purge whose `scheduled_for_epoch` has elapsed; emits a system notification so the user knows to reopen Vault Settings → Danger zone to complete it (auto-execution would require purge_secret persistence, tracked separately in review-doubts.md) |
+| `vault.purge.due_awaiting_user` | desktop | warning | `vault`, `job_id`, `scheduled_for` | Review §6.H1 — tray autosync detected a scheduled hard-purge whose `scheduled_for_epoch` has elapsed; emits a system notification so the user knows to reopen Vault Settings → Danger zone to complete it (auto-execution would require purge_secret persistence, tracked separately in docs/plans/unfinished.md) |
 | `vault.purge.executed` | desktop | info | `vault`, `job_id` | T14.4 hard-purge fired and cleaned local state |
 | `vault.purge.notify_failed` | desktop | error | `vault`, exception traceback | Review §6.H1 — the system notification raised while announcing a due purge; logged so operators can spot a silent UX-failure path |
 | `vault.purge.scheduled` | desktop | info | `vault`, `job_id`, `scope`, `scheduled_for` | T14.3 hard-purge queued |

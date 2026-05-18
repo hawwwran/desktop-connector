@@ -392,7 +392,7 @@ class VaultSubmenuMixin:
             # was a dialog promise with NO executor — list_due_purges
             # had zero callers. The full automated flow would need
             # purge_secret persisted at schedule time (out of scope —
-            # tracked in review-doubts.md). What we wire today: detect
+            # tracked in docs/plans/unfinished.md). What we wire today: detect
             # the due record, log the event, and surface a notification
             # so the user knows to reopen Vault Settings → Danger to
             # complete the purge. That converts the silent-no-fire bug
