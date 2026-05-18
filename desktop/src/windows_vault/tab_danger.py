@@ -166,11 +166,20 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
         def proceed() -> None:
             _open_clear_folder_dialog(display_name, folder_id)
 
+        def cancelled() -> None:
+            # Review §6.H5: surface explicit feedback when the user
+            # cancels the fresh-unlock prompt. Pre-fix the button just
+            # re-enabled with no status text and the user could
+            # reasonably think the destructive action had proceeded
+            # silently.
+            _set_danger_status("Clear folder cancelled.", "dim-label")
+
         require_fresh_unlock_or_prompt(
             win,
             config=config,
             operation_label=f"clear folder {display_name!r}",
             on_success=proceed,
+            on_cancel=cancelled,
         )
 
     def _open_clear_folder_dialog(display_name: str, folder_id: str) -> None:
@@ -290,11 +299,16 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
         def proceed() -> None:
             _open_clear_vault_dialog()
 
+        def cancelled() -> None:
+            # Review §6.H5: explicit cancel feedback (see clear-folder).
+            _set_danger_status("Clear whole vault cancelled.", "dim-label")
+
         require_fresh_unlock_or_prompt(
             win,
             config=config,
             operation_label="clear whole vault",
             on_success=proceed,
+            on_cancel=cancelled,
         )
 
     def _open_clear_vault_dialog() -> None:
@@ -528,11 +542,16 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
 
             threading.Thread(target=role_worker, daemon=True).start()
 
+        def cancelled() -> None:
+            # Review §6.H5: explicit cancel feedback (see clear-folder).
+            _set_danger_status("Schedule hard purge cancelled.", "dim-label")
+
         require_fresh_unlock_or_prompt(
             win,
             config=config,
             operation_label=f"schedule hard purge ({hours}h delay)",
             on_success=after_fresh_unlock,
+            on_cancel=cancelled,
         )
 
     def _open_schedule_purge_dialog(hours: int) -> None:

@@ -104,6 +104,34 @@ class DangerZoneRowsPresentTests(unittest.TestCase):
             "handler entry in tab_danger.py",
         )
 
+    def test_destructive_handlers_pass_on_cancel(self) -> None:
+        """Review §6.H5: each ``require_fresh_unlock_or_prompt`` call
+        in the Danger tab must pass an ``on_cancel`` handler that
+        writes explicit feedback to the danger status label. Pre-fix
+        a cancelled fresh-unlock silently re-enabled the destructive
+        button and the user could reasonably think the action had
+        proceeded.
+
+        Source-pinned because the cancellation path can only be
+        exercised end-to-end with a live AT-SPI driver; the substring
+        gate catches regressions during refactors without needing one.
+        """
+        tab_danger_text = (PKG_DIR / "tab_danger.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(
+            tab_danger_text.count("on_cancel="), 3,
+            "Review §6.H5: each of the three destructive handlers in "
+            "tab_danger.py (clear-folder, clear-vault, schedule-purge) "
+            "must pass on_cancel so the status label says "
+            "'… cancelled.' when the user backs out of fresh-unlock.",
+        )
+        # Each cancelled() local writes to the status label so the
+        # user sees what happened rather than a silent re-enable.
+        self.assertGreaterEqual(
+            tab_danger_text.count("cancelled."), 3,
+            "Review §6.H5: cancel feedback strings must reach "
+            "_set_danger_status so the user sees explicit cancellation.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
