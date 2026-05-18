@@ -568,6 +568,7 @@ relay log (filenames are local-only).
 | `vault.sync.twoway_cancelled_between_phases` | desktop | info | `binding` | F-Y08 — two-way bailed between Phase A and Phase B |
 | `vault.sync.twoway_cancelled_pre_iteration` | desktop | info | `binding` | F-Y08 — two-way bailed before starting a new iteration |
 | `vault.sync.twoway_conflict_move_failed` | desktop | warning | `binding`, `src`, `dst`, `error` | Couldn't rename local copy aside before download |
+| `vault.sync.twoway_conflict_naming_exhausted` | desktop | warning | `binding`, `path`, `error` | Review §3.M2 — `_unique_conflict_path` exhausted both numeric + token retries; the op is marked failed (no overwrite) and the cycle continues with the remaining ops |
 | `vault.sync.twoway_download_failed` | desktop | warning | `binding`, `path`, `error` | Two-way remote-upsert phase couldn't fetch file |
 | `vault.sync.twoway_folder_no_display_name` | desktop | warning | `binding`, `folder` | Two-way phase aborted; manifest folder lacked display name |
 | `vault.sync.twoway_local_entry_demoted_to_extra` | desktop | info | `binding`, `path`, `prior_revision` | F-Y20 — manifest no longer carries this path but the local file still exists; demoted the local-entries row to last_synced_revision=0 + cleared fingerprint so the watcher treats it as a fresh upload candidate |

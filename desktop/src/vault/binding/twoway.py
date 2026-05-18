@@ -700,13 +700,32 @@ def _apply_remote_upsert(
                 binding.binding_id, relative,
             )
         if local_modified:
-            conflict_relative = _unique_conflict_path(
-                # F-Y29: callers always pass binding.local_path; the
-                # earlier `target.parent.parent if False else …` was
-                # leftover dead code.
-                local_root=Path(binding.local_path),
-                relative_path=relative, device_name=device_name,
-            )
+            # Review §3.M2 — catch ``_unique_conflict_path``'s
+            # exhaust-RuntimeError as a typed per-op failure so the
+            # cycle survives instead of bubbling out. Pre-fix the
+            # RuntimeError propagated unchecked, taking the whole
+            # ``run_two_way_cycle`` down with it; the single problem
+            # path now becomes a ``failed`` outcome and the cycle
+            # continues with the remaining ops.
+            try:
+                conflict_relative = _unique_conflict_path(
+                    # F-Y29: callers always pass binding.local_path; the
+                    # earlier `target.parent.parent if False else …` was
+                    # leftover dead code.
+                    local_root=Path(binding.local_path),
+                    relative_path=relative, device_name=device_name,
+                )
+            except RuntimeError as exc:
+                log.warning(
+                    "vault.sync.twoway_conflict_naming_exhausted "
+                    "binding=%s path=%s error=%s",
+                    binding.binding_id, relative, exc,
+                )
+                return SyncOpOutcome(
+                    op_id=0, op_type="remote-upsert",
+                    relative_path=relative, status="failed",
+                    error=f"conflict_naming_exhausted: {exc}",
+                )
             conflict_target = Path(binding.local_path) / conflict_relative
             conflict_target.parent.mkdir(parents=True, exist_ok=True)
             try:

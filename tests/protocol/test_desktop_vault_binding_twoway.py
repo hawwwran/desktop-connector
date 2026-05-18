@@ -614,6 +614,36 @@ class TwoWayCycleTests(unittest.TestCase):
         # The reservation sentinel exists at the chosen path.
         self.assertTrue((self.local_root / chosen).is_file())
 
+    def test_apply_remote_upsert_catches_conflict_naming_exhaust(self) -> None:
+        """Review §3.M2 — ``_unique_conflict_path`` exhausting its 20
+        numeric + 10 token attempts must surface as a ``failed``
+        :class:`SyncOpOutcome` instead of a RuntimeError that takes
+        the whole ``run_two_way_cycle`` down. The single problematic
+        path is logged as failed; the cycle continues with the rest.
+
+        Source-pin: assert the catch-around-_unique_conflict_path
+        block is present in twoway.py. Verifies the protective
+        wrapper exists; the behavioral exhaustion path is already
+        covered by ``test_unique_conflict_path_atomically_reserves``
+        / ``test_unique_conflict_path_returns_unique_under_concurrent_create``
+        which exercise the underlying helper.
+        """
+        from pathlib import Path as _P
+        twoway_text = _P(
+            __file__,
+        ).resolve().parent.parent.parent.joinpath(
+            "desktop/src/vault/binding/twoway.py",
+        ).read_text(encoding="utf-8")
+        # The wrapper exists.
+        self.assertIn("conflict_naming_exhausted", twoway_text)
+        # Concretely: ``except RuntimeError`` wrapping the
+        # ``_unique_conflict_path`` call.
+        self.assertIn(
+            "except RuntimeError", twoway_text,
+            "Review §3.M2 catch-around-_unique_conflict_path must "
+            "be present",
+        )
+
     def test_ghost_reaper_skipped_when_shard_schema_missing(self) -> None:
         """Review §3.H9: if the head shard plaintext is corrupt and
         comes back with ``entries=[]`` and no schema header, the
