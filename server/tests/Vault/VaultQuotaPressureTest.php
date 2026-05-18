@@ -189,12 +189,80 @@ final class VaultQuotaPressureTest extends TestCase
         } catch (VaultQuotaExceededError $e) {
             self::assertSame(507, $e->status);
             self::assertSame('vault_quota_exceeded', $e->errorCode);
+            // Review §7.M4 — byte-precise pins on the response details
+            // shape. Pre-fix the test asserted only ``assertFalse``
+            // on ``eviction_available``, which would also pass for
+            // ``null`` or ``0``. Pinning ``assertSame(false, ...)``
+            // catches a refactor that accidentally swaps the type.
+            // Same for the numeric keys.
             self::assertSame(self::TEST_QUOTA, $e->details['quota_bytes']);
-            self::assertFalse($e->details['eviction_available']);
+            self::assertSame(self::TEST_QUOTA, $e->details['used_bytes']);
+            self::assertSame(
+                false, $e->details['eviction_available'],
+                'eviction_available must be strict-false (not null/0); '
+                . 'the relay reports false because it cannot compute '
+                . 'evictability without manifest-walking (blind-relay '
+                . 'invariant). When server-side evictability hints '
+                . 'land in a future spec rev, this assertion will '
+                . 'tighten to track the new contract.'
+            );
+            // The error response shape pins the §"Error codes" envelope
+            // so a client that depends on these keys won't be silently
+            // broken by a controller refactor.
+            self::assertArrayHasKey('used_bytes', $e->details);
+            self::assertArrayHasKey('quota_bytes', $e->details);
+            self::assertArrayHasKey('eviction_available', $e->details);
         }
 
         $h = $this->readHeader();
         self::assertSame(self::TEST_QUOTA, $h['used']);
+    }
+
+    /**
+     * Review §7.M3 — server-clock authority. The relay never accepts
+     * a client-supplied timestamp into a stored row; all DB writes
+     * stamp ``time()`` from the controller's view. A client trying
+     * to back-date or future-date a server-stored event (created_at,
+     * scheduled_for, expires_at, soft_deleted_at, etc.) can't —
+     * because no controller method reads those fields from the
+     * request body. Source-pinned so a refactor that added a
+     * ``$body['created_at']`` lookup would be caught here.
+     *
+     * The closest existing fields the client influences are inside
+     * encrypted manifests (header_revision, root_revision, …) which
+     * are AAD-bound at the desktop and the server only stores the
+     * envelope. The blind-relay invariant covers those.
+     */
+    public function test_server_clock_authority_for_stored_timestamps(): void
+    {
+        $controllers_dir = __DIR__ . '/../../src/Controllers';
+        $forbidden_patterns = [
+            // Each of these would read a client timestamp into a
+            // server-stored row. The grep finds the *literal* pattern;
+            // if a controller renames the field in the body to e.g.
+            // ``client_now`` the test won't catch it, but the broader
+            // review process picks that up.
+            '$body[\'created_at\']',
+            '$body["created_at"]',
+            '$body[\'deleted_at\']',
+            '$body["deleted_at"]',
+            '$body[\'soft_deleted_at\']',
+            '$body[\'expires_at\']',
+            '$body[\'scheduled_for\']',
+        ];
+        foreach (glob($controllers_dir . '/*.php') as $controller) {
+            $text = file_get_contents($controller);
+            foreach ($forbidden_patterns as $pattern) {
+                self::assertStringNotContainsString(
+                    $pattern, $text,
+                    "Server-clock authority §7.M3 — controller "
+                    . basename($controller) . " reads a client-supplied "
+                    . "timestamp ({$pattern}). All server-stored timestamps "
+                    . "must come from ``time()`` inside the controller, "
+                    . "not from the request body."
+                );
+            }
+        }
     }
 
     public function test_idempotent_reupload_does_not_double_count(): void

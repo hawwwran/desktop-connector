@@ -203,13 +203,32 @@ class VaultRuntimeOpenSerializedTests(unittest.TestCase):
                 gate.wait(timeout=0.5)
                 in_scope.append(f"{label}-out")
 
+        # Review §7.M2 — pre-fix this test used ``time.sleep(0.05)`` as
+        # a synchronization barrier. Slow CI machines could trip the
+        # 50ms window. Replaced with explicit poll-on-state — wait for
+        # ``in_scope`` to actually contain "A" before launching t2. The
+        # max-1-second cap is well above any plausible thread start
+        # latency.
+        def _wait_for_state(predicate, *, label: str, timeout_s: float = 1.0) -> None:
+            deadline = time.monotonic() + timeout_s
+            while not predicate():
+                if time.monotonic() > deadline:
+                    raise AssertionError(
+                        f"timed out waiting for {label}: "
+                        f"in_scope={in_scope}",
+                    )
+                time.sleep(0.005)
+
         t1 = threading.Thread(target=worker, args=("A",), daemon=True)
         t1.start()
-        # Give t1 time to enter the lock.
-        time.sleep(0.05)
+        # Wait for t1 to enter the lock.
+        _wait_for_state(lambda: "A" in in_scope, label="A enters lock")
         t2 = threading.Thread(target=worker, args=("B",), daemon=True)
         t2.start()
-        time.sleep(0.05)
+        # t2 is blocked on the lock. Give it a moment to reach
+        # ``_open_serialized``; the lock keeps it from progressing past
+        # the ``in_scope.append`` so the snapshot below remains ["A"].
+        time.sleep(0.01)
         # Only A is inside; B is blocked on the lock.
         self.assertEqual(in_scope, ["A"])
         gate.set()

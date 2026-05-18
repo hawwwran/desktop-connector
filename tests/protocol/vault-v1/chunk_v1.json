@@ -42,6 +42,27 @@
     }
   },
   {
+    "name": "chunk-v1-aad-chunk-index-flipped",
+    "description": "Review §7.M5 — per-field AAD tamper coverage. Same inputs as chunk-v1-small (chunk_index=0) but the decrypt path is fed an AAD computed with chunk_index=1. The AAD-includes-chunk-index property is the entire integrity guarantee against chunk-reorder attacks; an attacker who swapped chunks 0 and 1 in the on-disk layout would still fail tag verification because the AAD bound the original index. Pre-fix the test vectors covered generic envelope-byte-xor but not the per-field-flip shape.",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "vault_id": "ABCD2345WXYZ",
+      "remote_folder_id": "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+      "file_id": "fe_v1_bbbbbbbbbbbbbbbbbbbbbbbb",
+      "file_version_id": "fv_v1_cccccccccccccccccccccccc",
+      "chunk_index": 0,
+      "chunk_plaintext_size": 1024,
+      "nonce": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7",
+      "chunk_plaintext": "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eA=="
+    },
+    "tamper": {
+      "aad_override": "64632d7661756c742d6368756e6b2d763141424344323334355758595a72665f76315f61616161616161616161616161616161616161616161616166655f76315f62626262626262626262626262626262626262626262626266765f76315f63636363636363636363636363636363636363636363636300000000000000010000000000000400"
+    },
+    "expected": {
+      "expected_error": "vault_chunk_tampered"
+    }
+  },
+  {
     "name": "chunk-v1-tampered-ciphertext",
     "description": "Same inputs as small case, but envelope byte at offset 24 (start of AEAD ciphertext, just past the 24-byte nonce) XOR'd with 0x01. Decryption must fail.",
     "inputs": {

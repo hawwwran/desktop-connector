@@ -626,6 +626,8 @@ class VaultV1VectorsTests(unittest.TestCase):
         "shard-v1-format-version-bumped",
     })
     EXPECTED_CHUNK_V1_CASES = frozenset({
+        # Review §7.M5 — per-field AAD-tamper vector for chunk_index.
+        "chunk-v1-aad-chunk-index-flipped",
         "chunk-v1-small",
         "chunk-v1-medium",
         "chunk-v1-tampered-ciphertext",

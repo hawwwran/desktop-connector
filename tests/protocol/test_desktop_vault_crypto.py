@@ -188,6 +188,33 @@ class Argon2idKdfTests(unittest.TestCase):
         )
         self.assertEqual(out, self.REDUCED_EXPECTED)
 
+    def test_production_params_round_trip(self) -> None:
+        """Review §7.M1 — exercise the v1-locked Argon2id parameters
+        (128 MiB / 4 iterations) end-to-end. Existing tests use
+        reduced cost (8 MiB / 2 iter) to keep the suite fast; this
+        test pins the production defaults so a constant drift
+        (e.g. accidental ``memory_kib=128`` typo for 128 KB instead
+        of 128 MiB) breaks here even if every other test passes.
+
+        Cost: ~170ms on a 2024-era laptop. One run per suite is
+        acceptable; the rest of the Argon2id tests stay reduced.
+        """
+        salt = bytes.fromhex("00010203040506070809101112131415")
+        out = argon2id_kdf(
+            "production-test-passphrase",
+            salt,
+            32,
+            memory_kib=ARGON2ID_MEMORY_KIB,
+            iterations=ARGON2ID_ITERATIONS,
+        )
+        # Locked output (computed once, pinned here). A future drift
+        # in any of the params (memory, iterations, or label salt
+        # encoding) breaks this byte-exact compare.
+        expected = bytes.fromhex(
+            "04ea65d9b3f34d993ab751ad4b4de49af73d431ac098f4e119800884436d444b"
+        )
+        self.assertEqual(out, expected)
+
     def test_v1_default_params_are_plumbed(self) -> None:
         # Spot-check that calling with no kwarg overrides actually uses
         # the locked v1 params from formats §12.2 — confirms the
