@@ -114,8 +114,16 @@ def resume_upload(
             # re-PUT (the else branch), which is the only branch where
             # plaintext mismatch would actually matter — the relay
             # already has the old bytes for the seek-skip case.
+            # Review §4.H5: seek the chunk's STORED plaintext_size,
+            # not session.chunk_size. The last chunk is short by
+            # construction (file_size mod chunk_size); seeking by
+            # the configured chunk_size overshoots past EOF, which
+            # currently raises (no silent corruption) but blocks
+            # legitimate last-chunk resume on every file whose size
+            # isn't a multiple of CHUNK_SIZE.
+            plaintext_size = int(record.get("plaintext_size", session.chunk_size))
             if already_done and head_present:
-                fh.seek(int(session.chunk_size), os.SEEK_CUR)
+                fh.seek(plaintext_size, os.SEEK_CUR)
                 chunks_skipped += 1
             elif already_done or head_present:
                 # Mixed signal — relay says yes but session says no, or
@@ -126,12 +134,12 @@ def resume_upload(
                 # branch above. The plaintext is otherwise unused —
                 # re-deriving chunk_id here would trip on
                 # legitimately-changed-but-already-published files.
-                fh.seek(int(session.chunk_size), os.SEEK_CUR)
+                fh.seek(plaintext_size, os.SEEK_CUR)
                 chunks_skipped += 1
                 session.chunks[index]["done"] = True
                 save_session(session, cache_dir)
             else:
-                plaintext = fh.read(int(session.chunk_size))
+                plaintext = fh.read(plaintext_size)
                 # Re-encrypt deterministically so the envelope bytes match
                 # whatever was stored before (or what would have been). The
                 # T6.1 chunk_id derivation already binds plaintext + version

@@ -186,6 +186,37 @@ def _file_grant_loader(config_dir: Path, vault_id: str = VAULT_ID):
 
 
 class PendingPublishMarkerTests(unittest.TestCase):
+    def test_complete_pending_publish_seeks_by_plaintext_size(self) -> None:
+        """Review §4.H5: the upload-resume's seek-past-completed-chunk
+        path used ``int(session.chunk_size)`` — fine for full chunks
+        but overshoots EOF on the last chunk of any file whose size
+        isn't a multiple of CHUNK_SIZE. Currently raises (no silent
+        corruption) but blocks legitimate last-chunk resume. The fix
+        uses the record's stored ``plaintext_size``.
+
+        Source-level pin: if a future refactor reverts the constant
+        to ``session.chunk_size`` this test fails."""
+        from pathlib import Path as _P
+        from tests.protocol._paths import REPO_ROOT
+        source = (
+            _P(REPO_ROOT)
+            / "desktop"
+            / "src"
+            / "vault"
+            / "upload"
+            / "resume.py"
+        ).read_text()
+        # The seek/read path reads the per-record plaintext_size.
+        self.assertIn(
+            'plaintext_size = int(record.get("plaintext_size"', source,
+            "resume seek/read must consult per-record plaintext_size",
+        )
+        # And does NOT seek by session.chunk_size in the skip branch.
+        self.assertNotIn(
+            'fh.seek(int(session.chunk_size), os.SEEK_CUR)', source,
+            "resume seek must not use session.chunk_size (overshoots last chunk)",
+        )
+
     def test_set_then_read_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(Path(tmp))
