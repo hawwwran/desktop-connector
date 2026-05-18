@@ -74,6 +74,36 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-18 — Rotation crash-recovery via plaintext-secret marker file
+
+**Status:** landed (commit ``f352dbe``).
+
+**Context.** The §5.H3 access-secret rotation wizard has a narrow but real bricking window: between ``POST /api/vaults/{id}/access-secret/rotate`` returning 200 (relay now holds the new secret) and ``store.save(new_grant)`` succeeding (local keyring updated), a SIGKILL / OOM / GTK crash leaves the relay accepting only the new secret while the keyring still holds the old. For a single-device user with no peer device available to re-grant via §5.C2, every subsequent vault op returns 401 — the vault is unrecoverable from that device. The pre-rotation kit carries the OLD ``vault_access_secret`` so it can't unbrick either.
+
+**Decision.** Persist a marker file ``<config_dir>/vault_rotation_in_progress_<vault_id>.json`` containing the new secret in plaintext, mode 0600, written via ``atomic_write_file`` BEFORE the relay POST. Cleared after ``store.save`` returns. On wizard relaunch a dedicated recovery page probes the relay with the cached secret:
+
+- HTTP 200 → relay still accepts the old secret → rotation never committed → discard marker.
+- HTTP 401 → relay has the new secret → save marker's ``new_secret`` into the keyring → discard marker.
+- Network error → preserve marker; offer Retry button.
+
+**Threat model.** The marker introduces a new at-rest secret class on disk. Mitigation: ``mode 0o600`` matches the recovery-kit file's mode, anchoring on the same threat model — physical custody by the user, no protection against a co-resident process running as the same uid. The keyring backend (libsecret) already protects the same secret post-recovery; the marker just extends the exposure window from "process lifetime" to "until next wizard launch." A passive disk-image attacker (backup, snapshot) gets the secret iff the snapshot happened during the bricking window, which is bounded by the user noticing the issue + re-running the wizard. Acceptable for v1.
+
+**What we deliberately did NOT do.** No passphrase-encrypted marker — the recovery path needs to read the marker on a device that has no fresh passphrase to derive a wrap key against (it just crashed mid-rotation; the previously-verified passphrase is gone from memory). Asking the user for the passphrase before the recovery probe doubles the UX burden for a recovery step that already requires the user's attention. No atomic-swap protocol on the relay side — the server doesn't know which device's rotation is in flight, and a "swap two secrets" handshake would expand the API surface beyond what one rare failure mode justifies.
+
+**Anchor.** ``desktop/src/vault/grant/rotation_recovery.py`` owns the marker shape + probe. Wizard integration: ``desktop/src/windows_vault_rotate.py`` (recovery page + worker). Diagnostics: ``vault.rotate.marker_*`` and ``vault.rotate.probe_*`` event family in ``docs/diagnostics.events.md``.
+
+### 2026-05-18 — Multi-device device-add path: QR-grant primary, recovery kit secondary
+
+**Status:** landed.
+
+**Context.** Before the 2026-05-18 design pass the multi-device story for vault recovery was kit-shuffle only: each new device needed the recovery kit file + the passphrase. QR-grant primitives (``vault/grant/qr.py``, ``vault/grant/wrap.py``, server ``/join-requests`` + ``/device-grants``) shipped end-to-end but had zero UI callers; capability ``vault_grant_qr_v1`` was advertised but unreachable. A memory note classified the UI build as a v1.x deferral.
+
+**Decision.** Reverse the deferral. v1 ships QR-grant as the primary "add another device" path (§5.C2 admin dialog + claimant subprocess); the recovery kit stays as the secondary recovery surface for "lost every device, restore from kit" scenarios. The reversal is anchored by the simultaneous §6.H2 (Devices tab + revoke) build: a vault that can grant device access must also be able to revoke it, and a vault that can revoke must offer a grant path the operator actually uses. Shipping v1 with §6.H2 (revoke) but no §5.C2 (grant) would leave the protocol primitives sitting unused while users rely on the kit shuffle — coherent only with both shipping together.
+
+**What we deliberately did NOT do.** No webcam QR scanning in v1 — the ``vault://`` URL paste path covers the same UX without the Wayland portal + GStreamer dependency. Deferred to v1.x. No mid-session role downgrade UI — the admin picks the role at approval time and revocation is the only post-approval lever. No multi-claimant batching — F-S13's CAS-on-pending caps one approved claim per join-request.
+
+**Anchor.** Admin in-process dialog ``desktop/src/windows_vault/grant_device_dialog.py`` + Devices tab "Grant a new device…" button; claimant subprocess ``desktop/src/windows_vault_join.py`` + tray submenu's "Add this device to a vault…" entry (visible when no local vault exists). Typed client ``desktop/src/vault/grant/join_client.py``. Memory note ``project_vault_multi_device_story.md`` records the user-facing rule "QR-grant is the primary multi-device path; kit is the fallback for total-loss recovery."
+
 ### 2026-05-18 — Shard envelope author check relaxed at expected=0; root path stays strict
 
 **Status:** landed (commit ``b048d86``).
