@@ -257,13 +257,26 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                     vault = open_local_vault_from_grant(config_dir, config, vault_id)
                     try:
                         active_manifest = vault.fetch_unified_manifest(relay, local_index=local_index)
+                        # Review §5.H1: pull the active vault's
+                        # genesis_fingerprint from its decrypted
+                        # header so decide_import_action runs the
+                        # cryptographic identity gate, not just the
+                        # vault_id match. Pre-fix this was hard-
+                        # coded to None and the gate short-circuited
+                        # on vault_id alone — an attacker who could
+                        # forge a vault_id collision bypassed the
+                        # whole anchor.
+                        active_fp = _safe_genesis_fingerprint(vault, relay)
+                        state["active_genesis_fingerprint"] = active_fp
                         contents, bundle_manifest, preview = open_bundle_for_preview(
                             vault=vault,
                             bundle_path=state["bundle_path"],
                             passphrase=state["passphrase"],
                             active_manifest=active_manifest,
-                            active_genesis_fingerprint=None,
-                            bundle_genesis_fingerprint=None,
+                            active_genesis_fingerprint=active_fp,
+                            bundle_genesis_fingerprint=_safe_bundle_genesis_fingerprint(
+                                state["bundle_path"], state["passphrase"], vault.vault_id,
+                            ),
                             chunks_already_on_relay=0,  # filled at run-time
                         )
                     finally:
@@ -356,6 +369,17 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                     try:
                         active_manifest = vault.fetch_unified_manifest(relay, local_index=local_index)
                         device_id = str(getattr(config, "device_id", "") or "0" * 32)
+                        # Review §5.H1: thread both genesis_fingerprint
+                        # values into run_import so the identity gate
+                        # runs end-to-end. open_bundle_for_preview
+                        # already enforced the §D9 refuse on
+                        # different-vault bundles — this is the
+                        # belt-and-braces second check at the actual
+                        # merge boundary.
+                        active_fp_run = (
+                            state.get("active_genesis_fingerprint")
+                            or _safe_genesis_fingerprint(vault, relay)
+                        )
                         result = run_import(
                             vault=vault, relay=relay,
                             bundle_path=state["bundle_path"],
@@ -363,6 +387,10 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                             active_manifest=active_manifest,
                             resolution=ImportMergeResolution(per_folder={}),
                             author_device_id=device_id,
+                            active_genesis_fingerprint=active_fp_run,
+                            bundle_genesis_fingerprint=_safe_bundle_genesis_fingerprint(
+                                state["bundle_path"], state["passphrase"], vault.vault_id,
+                            ),
                             progress=report,
                             local_index=local_index,
                             should_continue=lambda: not cancel_event.is_set(),
@@ -443,6 +471,43 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
 
     app.connect("activate", on_activate)
     app.run(None)
+
+
+def _safe_genesis_fingerprint(vault, relay) -> str | None:
+    """Best-effort read of the active vault's genesis_fingerprint
+    from its decrypted header. Returns ``None`` on any failure so
+    the wizard's identity gate falls back to vault_id-only matching
+    (the pre-§5.H1 behaviour). Review §5.H1: this is the helper that
+    plugs the previously-hard-coded ``None`` from the import flow."""
+    try:
+        header = vault.fetch_header_plaintext(relay)
+    except Exception:  # noqa: BLE001
+        return None
+    fp = header.get("genesis_fingerprint")
+    if not fp:
+        return None
+    return str(fp).strip().lower() or None
+
+
+def _safe_bundle_genesis_fingerprint(
+    bundle_path: Path, passphrase: str, vault_id: str,
+) -> str | None:
+    """Best-effort read of the bundle's header.genesis_fingerprint
+    (review §5.H1). Returns ``None`` for legacy bundles that
+    predate the field."""
+    try:
+        from .vault.export.bundle import read_export_bundle
+        contents = read_export_bundle(
+            bundle_path=Path(bundle_path),
+            passphrase=passphrase,
+            vault_id=vault_id,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    fp = getattr(contents.header, "genesis_fingerprint", None)
+    if not fp:
+        return None
+    return str(fp).strip().lower() or None
 
 
 def _vbox(*, margin: int = 0, spacing: int = 6) -> Gtk.Box:

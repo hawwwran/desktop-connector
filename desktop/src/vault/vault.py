@@ -519,6 +519,40 @@ class Vault(RemoteFoldersMixin):
 
     # ---------------------------------------------------------------- manifest helpers
 
+    def fetch_header_plaintext(self, relay: RelayProtocol) -> dict:
+        """Fetch + decrypt the current header envelope and return the
+        plaintext dict (review §5.H1).
+
+        Used by the import wizard to read ``genesis_fingerprint`` —
+        the cryptographic anchor for the §D9 identity gate. The
+        wizard's pre-fix path passed ``active_genesis_fingerprint=None``
+        because no helper exposed the decrypted header, which made
+        ``decide_import_action`` short-circuit on vault_id alone.
+        """
+        if self._closed or self._master_key is None:
+            raise ValueError("vault is closed")
+        resp = relay.get_header(self._vault_id, self._vault_access_secret)
+        envelope = resp.get("encrypted_header")
+        if not isinstance(envelope, (bytes, bytearray)):
+            raise ValueError("relay returned an invalid header ciphertext")
+        envelope_bytes = bytes(envelope)
+        # Envelope shape: format_version(1) | vault_id(12) | rev(8)
+        # | nonce(24) | ciphertext_and_tag(N). Mirrors Vault.open's
+        # inline parse so the two paths stay byte-aligned.
+        if len(envelope_bytes) < 1 + 12 + 8 + 24 + 16:
+            raise ValueError("header envelope too short")
+        if envelope_bytes[0] != 1:
+            raise ValueError(
+                f"vault_format_version_unsupported: header format_version={envelope_bytes[0]}"
+            )
+        header_revision = int.from_bytes(envelope_bytes[13:21], "big")
+        nonce = envelope_bytes[21:21 + 24]
+        header_ct = envelope_bytes[21 + 24:]
+        header_subkey = derive_subkey("dc-vault-v1/header", bytes(self._master_key))
+        header_aad = build_header_aad(self._vault_id, header_revision)
+        plaintext = aead_decrypt(header_ct, header_subkey, nonce, header_aad)
+        return json.loads(plaintext.decode("utf-8"))
+
     def fetch_root_manifest(self, relay: RelayProtocol, *, local_index=None) -> dict:
         """Fetch + decrypt the current root manifest envelope.
 

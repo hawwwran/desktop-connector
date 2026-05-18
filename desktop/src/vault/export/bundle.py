@@ -105,6 +105,11 @@ class BundleHeaderInfo:
     exported_at: str
     manifest_revision: int
     format_version: int
+    # Review §5.H1: the cryptographic anchor for the §D9 identity
+    # check. None when reading a legacy bundle that predates the
+    # field — callers fall back to vault_id-only matching in that
+    # case.
+    genesis_fingerprint: str | None = None
 
 
 @dataclass
@@ -151,6 +156,7 @@ def write_export_bundle(
     argon_iterations: int = ARGON_DEFAULT_ITERATIONS,
     argon_parallelism: int = ARGON_DEFAULT_PARALLELISM,
     progress: Callable[[ExportProgress], None] | None = None,
+    genesis_fingerprint: str | None = None,
 ) -> ExportResult:
     """Stream-write a vault export bundle to disk.
 
@@ -235,14 +241,24 @@ def write_export_bundle(
                 bytes_written += RECORD_LEN_BYTES + len(on_disk)
                 record_index += 1
 
-            # Header record.
-            header_payload = json.dumps({
+            # Header record. Review §5.H1: embed the active vault's
+            # genesis_fingerprint so the import-side §D9 identity
+            # check has a cryptographic anchor (not just vault_id).
+            # Older bundles without this field still import as before
+            # (decide_import_action short-circuits when either side
+            # is None); newer bundles get the real check.
+            header_dict: dict[str, Any] = {
                 "schema": EXPORT_BUNDLE_SCHEMA,
                 "vault_id": vault.vault_id,
                 "exported_at": timestamp,
                 "manifest_revision": int(manifest_plaintext.get("revision", 0)),
                 "format_version": EXPORT_FORMAT_VERSION,
-            }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            }
+            if genesis_fingerprint:
+                header_dict["genesis_fingerprint"] = str(genesis_fingerprint)
+            header_payload = json.dumps(
+                header_dict, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
             write_record(RECORD_TYPE_HEADER, header_payload)
             _report(progress, "header", record_index, bytes_written)
 
@@ -408,11 +424,13 @@ def read_export_bundle(
                 obj = json.loads(inner.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ExportError("vault_export_tampered", "header record is not JSON") from exc
+            raw_fp = obj.get("genesis_fingerprint")
             bundle_header = BundleHeaderInfo(
                 vault_id=str(obj.get("vault_id", "")),
                 exported_at=str(obj.get("exported_at", "")),
                 manifest_revision=int(obj.get("manifest_revision", 0)),
                 format_version=int(obj.get("format_version", 0)),
+                genesis_fingerprint=(str(raw_fp) if raw_fp else None),
             )
         elif record_type == RECORD_TYPE_MANIFEST:
             manifest_envelope = bytes(inner)

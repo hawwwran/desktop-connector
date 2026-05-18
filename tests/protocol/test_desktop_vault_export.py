@@ -114,6 +114,67 @@ class VaultExportWriterTests(unittest.TestCase):
         for cid, envelope in contents.chunks.items():
             self.assertEqual(envelope, relay.chunks[cid])
 
+    def test_export_round_trips_genesis_fingerprint(self) -> None:
+        """Review §5.H1: ``write_export_bundle`` accepts an optional
+        ``genesis_fingerprint`` kwarg and persists it in the bundle's
+        RECORD_TYPE_HEADER plaintext. ``read_export_bundle`` returns
+        it on ``BundleHeaderInfo.genesis_fingerprint``. The import
+        wizard's §D9 identity gate needs this anchor — without it
+        the gate short-circuits on vault_id alone (the §5.H1 bug)."""
+        fp = "0123456789abcdef" * 4
+        manifest, relay = self._populated_relay({"x.txt": b"y"})
+        manifest_envelope = _build_legacy_manifest_envelope(manifest)
+        bundle_path = self.tmpdir / "fp.dcvault"
+        vault = self._vault()
+        try:
+            write_export_bundle(
+                vault=vault, relay=relay,
+                manifest_envelope=manifest_envelope,
+                manifest_plaintext=manifest,
+                output_path=bundle_path,
+                passphrase=PASSPHRASE,
+                argon_memory_kib=ARGON_MEMORY_KIB,
+                argon_iterations=ARGON_ITERATIONS,
+                genesis_fingerprint=fp,
+            )
+        finally:
+            vault.close()
+        contents = read_export_bundle(
+            bundle_path=bundle_path,
+            passphrase=PASSPHRASE,
+            vault_id=VAULT_ID,
+        )
+        self.assertEqual(contents.header.genesis_fingerprint, fp)
+
+    def test_export_without_genesis_fingerprint_reads_as_none(self) -> None:
+        """Review §5.H1: omitting the kwarg keeps the bundle byte-
+        compatible with older readers — the field is simply absent
+        from the JSON header, and the reader's default for
+        ``BundleHeaderInfo.genesis_fingerprint`` is ``None``. The
+        import path then falls back to vault_id-only matching."""
+        manifest, relay = self._populated_relay({"x.txt": b"y"})
+        manifest_envelope = _build_legacy_manifest_envelope(manifest)
+        bundle_path = self.tmpdir / "no-fp.dcvault"
+        vault = self._vault()
+        try:
+            write_export_bundle(
+                vault=vault, relay=relay,
+                manifest_envelope=manifest_envelope,
+                manifest_plaintext=manifest,
+                output_path=bundle_path,
+                passphrase=PASSPHRASE,
+                argon_memory_kib=ARGON_MEMORY_KIB,
+                argon_iterations=ARGON_ITERATIONS,
+            )
+        finally:
+            vault.close()
+        contents = read_export_bundle(
+            bundle_path=bundle_path,
+            passphrase=PASSPHRASE,
+            vault_id=VAULT_ID,
+        )
+        self.assertIsNone(contents.header.genesis_fingerprint)
+
     def test_export_killed_mid_write_leaves_no_partial_bundle(self) -> None:
         """§A10 acceptance shape: a death mid-write leaves nothing in
         the destination. A retry produces a complete file from the same
