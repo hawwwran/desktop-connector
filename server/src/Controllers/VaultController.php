@@ -1391,7 +1391,7 @@ class VaultController
         // requires role=admin too, but does NOT yet enforce
         // purge_secret (the desktop's 507-quota flow has no passphrase
         // prompt yet; that's tracked as the spec-conformance follow-up
-        // in docs/plans/review-doubts.md §3.C1).
+        // in temp/finished-plans/review-doubts.md §3.C1).
         if ($job['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE) {
             try {
                 VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
