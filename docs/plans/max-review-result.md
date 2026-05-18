@@ -503,11 +503,17 @@ Reads root once, iterates folders. Concurrent device adding a folder mid-clear �
 
 **Approach:** Replaced the single up-front fetch with a `for pass_index in range(8)` loop that re-fetches root each pass, walks only folders not in a `seen_folders` set, and exits early once a pass yields no new folders. 8-pass defensive cap emits `vault.vault.clear_pass_cap_hit` (added to diagnostics catalog) so an operator can spot a malicious device racing the clear with folder creates. Audit event now reports both `total_tombstoned` and `folders`.
 
-#### §4.H4 — Mid-stage eviction crash recovery silently bumps revisions for cleanup-only work
+#### ~~§4.H4~~ — Mid-stage eviction crash recovery silently bumps revisions for cleanup-only work
+**Fix landed:** caa220e 2026-05-17
 **File:** `desktop/src/vault/ops/eviction.py:330-391`. Cleanup-only branch returns `bytes_freed=0`; stage 1 re-fires looking for *more* freedom, eventually falls through to stage 4 (`no_more_candidates`). Also logs `vault.eviction.shard_cleanup_only` which isn't in the diagnostics catalog.
 
-#### §4.H5 — Resume's seek-past-chunk uses `chunk_size`, not stored `plaintext_size`
+**Approach:** Cleanup-only stage 1 now emits a cascade-to-force warning; the missing `vault.eviction.shard_cleanup_only` event added to diagnostics catalog so the audit trail is complete.
+
+#### ~~§4.H5~~ — Resume's seek-past-chunk uses `chunk_size`, not stored `plaintext_size`
+**Fix landed:** 64a3e78 2026-05-17
 **File:** `desktop/src/vault/upload/resume.py:118, 129`. Overshoots on last-chunk recovery. Currently raises (not silent corruption), but should use `int(record["plaintext_size"])`.
+
+**Approach:** Seek now uses `int(record["plaintext_size"])` from the per-record dict (not `session.chunk_size`). Last-chunk recovery on non-multiple-of-CHUNK_SIZE files works correctly.
 
 ### Medium
 
@@ -718,12 +724,13 @@ A v1 vault that can grant device access but cannot revoke it has no defence agai
 
 **Approach:** `Gtk.PasswordEntry` with peek-icon (obscured by default); 30 s clipboard auto-clear with 1 s countdown via `GLib.timeout_add`; clipboard-manager warning appended to the tip text.
 
-#### §6.H5 — Cancel handlers don't honour `on_cancel` contract in Danger flows
+#### ~~§6.H5~~ — Cancel handlers don't honour `on_cancel` contract in Danger flows
+**Fix landed:** cd76131 2026-05-17
 **File:** `desktop/src/windows_vault/fresh_unlock_prompt.py:199-254`
 
 `tab_danger.py` callsites (lines 166-174, 289-298, 454-476) only pass `on_success`. A cancelled fresh-unlock prompt silently no-ops; user sees the destructive button re-enable with no status feedback — they may think they did clear it.
 
-**Fix:** pass an `on_cancel` from each Danger callsite that resets the status label ("Operation cancelled.").
+**Approach:** Each destructive callsite now passes `on_cancel=cancelled` where `cancelled` writes "<op> cancelled." to the danger status label via `_set_danger_status`. Source-pin test asserts ≥3 `on_cancel=` mentions + ≥3 `cancelled.` feedback strings in `tab_danger.py`.
 
 ### Medium
 
