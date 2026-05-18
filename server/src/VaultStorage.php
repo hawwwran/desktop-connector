@@ -38,6 +38,18 @@ class VaultStorage
      * Ensure the parent directory of an absolute path exists. Used before
      * writing a chunk file. Idempotent: returns silently if the directory
      * already exists.
+     *
+     * Review §1.L3 — directories are created 0700 so only the
+     * web-server user can list / read them. This is the right default
+     * for mod_php / a single-pool PHP-FPM deployment (one uid serves
+     * every request). On a shared-host PHP-FPM with **multiple pools
+     * sharing the same documentroot**, each pool runs as its own uid,
+     * and 0700 makes chunks written by pool A unreachable from pool B.
+     * That layout is rare for first-party Desktop Connector relays
+     * (each operator runs their own pool) but if you do share pools,
+     * deploy the storage tree on a path that's pre-created with the
+     * right group permissions before the relay tries to write, or
+     * adjust the umask on the FPM pool to widen the bits.
      */
     public static function ensureDir(string $absolutePath): void
     {

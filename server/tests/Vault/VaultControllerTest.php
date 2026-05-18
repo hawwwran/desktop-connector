@@ -2072,6 +2072,42 @@ final class VaultControllerTest extends TestCase
         self::assertSame(201, $res['status']);
     }
 
+    /**
+     * Review §1.L2: by default ``migrationStart`` refuses loopback /
+     * RFC 1918 / link-local hosts in the target URL so a malicious or
+     * misconfigured admin can't redirect the paired-fleet at an
+     * internal service. Operators who actually need a local URL (dev
+     * rigs) opt in via ``migrationAllowPrivateUrls`` in
+     * ``server/data/config.json``.
+     */
+    public function test_migrationStart_rejects_private_url_by_default(): void
+    {
+        $cases = [
+            'http://localhost/path',
+            'http://test.localhost',
+            'http://127.0.0.1:4441',
+            'http://10.0.0.1',
+            'http://172.16.0.1',
+            'http://192.168.1.1',
+            'http://169.254.169.254',  // AWS / cloud link-local — defense in depth.
+            'http://[::1]/path',
+            'http://[fc00::1]/path',
+        ];
+        foreach ($cases as $url) {
+            try {
+                VaultController::migrationStart(
+                    $this->db, $this->jctx(
+                        'POST', ['vault_id' => self::VAULT_ID],
+                        ['target_relay_url' => $url],
+                    ),
+                );
+                self::fail("expected rejection for {$url}");
+            } catch (VaultInvalidRequestError $e) {
+                self::assertSame('target_relay_url', $e->details['field']);
+            }
+        }
+    }
+
     public function test_migrationStart_different_target_409(): void
     {
         $this->invoke(fn() => VaultController::migrationStart(

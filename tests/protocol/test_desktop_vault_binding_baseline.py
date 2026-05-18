@@ -216,6 +216,94 @@ class VaultBaselineTests(unittest.TestCase):
         self.assertEqual(entries["local-only.txt"].content_fingerprint, "")
         self.assertEqual(result.extra_files, ["local-only.txt"])
 
+    def test_dotfiles_skipped_by_default_matches_scan_and_preflight(self) -> None:
+        """Review §3.L2: ``run_initial_baseline`` honours ``ignore_dotfiles``
+        with the same default as ``scan._walk_local`` /
+        ``preflight._walk_local`` (both default ``True``). Without this
+        the baseline would materialize hidden files that the rest of
+        the sync engine silently skips, surfacing as a
+        ``vault_local_entries`` row with no matching manifest entry."""
+        relay, manifest = self._seed_remote({"keep.txt": b"keep me"})
+        # Pre-place one dotfile and one regular file before baseline.
+        (self.local_root / ".hidden").write_bytes(b"should be ignored")
+        (self.local_root / "visible.txt").write_bytes(b"should be tracked")
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        vault = _vault()
+        try:
+            result = run_initial_baseline(
+                vault=vault, relay=relay, manifest=manifest,
+                store=self.store, binding=binding,
+            )
+        finally:
+            vault.close()
+
+        # The dotfile is not tracked in vault_local_entries (consistent
+        # with scan/preflight's default skip).
+        relative_paths = {
+            e.relative_path
+            for e in self.store.list_local_entries(binding.binding_id)
+        }
+        self.assertNotIn(".hidden", relative_paths)
+        self.assertIn("visible.txt", relative_paths)
+        self.assertNotIn(".hidden", result.extra_files)
+        self.assertIn("visible.txt", result.extra_files)
+        # The dotfile is still on disk (we don't delete) — just untracked.
+        self.assertTrue((self.local_root / ".hidden").exists())
+
+    def test_case_distinct_paths_materialize_as_separate_files_on_linux(self) -> None:
+        """Review §7.L2: pins the Linux-case-sensitive contract — a
+        remote manifest carrying ``A.txt`` and ``a.txt`` as distinct
+        entries materializes both files locally on a case-sensitive
+        filesystem (ext4, btrfs, xfs). The two ``vault_local_entries``
+        rows that result are byte-distinct.
+
+        **Known limitation, not tested here:** on a case-insensitive
+        mount (NFS exported from macOS / Windows, exFAT, ciopfs) the
+        second materialize would overwrite the first because the
+        target paths collide. The sync engine does not detect this
+        before baseline; users syncing to such mounts must avoid
+        case-only-distinct names. A future fix would either
+        (a) refuse the baseline at preflight if the local FS reports
+        case-insensitive (via a small probe write), or (b) auto-rename
+        the later entry per §D4 row 1. Both are tracked as v1.x work.
+        """
+        relay, manifest = self._seed_remote({
+            "Recipes.txt": b"upper case",
+            "recipes.txt": b"lower case",
+        })
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        vault = _vault()
+        try:
+            run_initial_baseline(
+                vault=vault, relay=relay, manifest=manifest,
+                store=self.store, binding=binding,
+            )
+        finally:
+            vault.close()
+
+        self.assertEqual(
+            (self.local_root / "Recipes.txt").read_bytes(),
+            b"upper case",
+        )
+        self.assertEqual(
+            (self.local_root / "recipes.txt").read_bytes(),
+            b"lower case",
+        )
+        relative_paths = {
+            e.relative_path
+            for e in self.store.list_local_entries(binding.binding_id)
+        }
+        self.assertIn("Recipes.txt", relative_paths)
+        self.assertIn("recipes.txt", relative_paths)
+
     def test_tombstones_skipped_during_baseline(self) -> None:
         """§D15: tombstones never produce local file deletions before
         the binding's initial baseline is captured."""

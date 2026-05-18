@@ -88,6 +88,7 @@ def run_initial_baseline(
     binding: VaultBinding,
     chunk_cache_dir: Path | None = None,
     progress: Callable[[BaselineProgress], None] | None = None,
+    ignore_dotfiles: bool = True,
 ) -> BaselineResult:
     """Materialize the binding's remote folder into ``binding.local_path``.
 
@@ -186,7 +187,7 @@ def run_initial_baseline(
     # miss on NFD↔NFC drift.
     extras: list[str] = []
     downloaded_set = set(downloaded)
-    for absolute in _walk_local(local_root):
+    for absolute in _walk_local(local_root, ignore_dotfiles=ignore_dotfiles):
         relative = normalize_relative_path(
             absolute.relative_to(local_root).as_posix()
         )
@@ -276,7 +277,7 @@ def _latest_version(entry: dict[str, Any]) -> dict[str, Any] | None:
     return versions[-1] if versions else None
 
 
-def _walk_local(root: Path) -> Iterable[Path]:
+def _walk_local(root: Path, *, ignore_dotfiles: bool = True) -> Iterable[Path]:
     """Yield regular files under ``root``.
 
     F-Y17: ``upload_file`` (the single-file path) lstat-rejects
@@ -294,9 +295,20 @@ def _walk_local(root: Path) -> Iterable[Path]:
 
     ``os.walk(followlinks=False)`` is the default — we don't recurse
     *through* a symlinked subdirectory either.
+
+    Review §3.L2: ``ignore_dotfiles`` matches ``scan._walk_local`` /
+    ``preflight._walk_local``'s default so the three walkers agree on
+    "is `.foo` part of the binding". Without the parameter the
+    baseline would materialize hidden files that preflight + scan
+    silently skip, which surfaced as a ``vault_local_entries`` row
+    with no corresponding manifest entry on the very first sync.
     """
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        if ignore_dotfiles:
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for name in filenames:
+            if ignore_dotfiles and name.startswith("."):
+                continue
             absolute = Path(dirpath) / name
             try:
                 st = os.lstat(absolute)

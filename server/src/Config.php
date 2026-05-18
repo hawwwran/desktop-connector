@@ -24,6 +24,17 @@ class Config
         // always returns negotiated_mode=classic so the entire fleet
         // falls back to store-then-forward without a code change.
         'streamingEnabled' => true,
+        // Review §1.L2: ``migrationStart`` / ``migrationCommit`` persist
+        // the target relay URL into the vaults table and re-expose it
+        // through GET /header to every paired device. The default
+        // policy rejects loopback, private (RFC 1918), and link-local
+        // hosts so an admin can't redirect the fleet at an internal
+        // service. Operators running test rigs that legitimately need
+        // local URLs (a paired desktop hitting ``http://127.0.0.1:4441``
+        // during development) flip this to true. The toggle is *not*
+        // wired through any UI on purpose — it's a deliberate
+        // deployment-time choice.
+        'migrationAllowPrivateUrls' => false,
     ];
 
     /** @var array<string,mixed>|null — memoised per-request to avoid
@@ -62,6 +73,26 @@ class Config
             return $raw !== 0;
         }
         return (bool)self::DEFAULTS['streamingEnabled'];
+    }
+
+    /** Review §1.L2: whether ``migrationStart`` / ``migrationCommit``
+     *  accept private / loopback / link-local hosts in the target
+     *  relay URL. Default false. Tolerant of non-bool values for
+     *  hand-edited config (same shape as ``streamingEnabled``). */
+    public static function migrationAllowPrivateUrls(): bool
+    {
+        $raw = self::get('migrationAllowPrivateUrls');
+        if (is_bool($raw)) {
+            return $raw;
+        }
+        if (is_string($raw)) {
+            $v = strtolower(trim($raw));
+            return in_array($v, ['1', 'true', 'yes', 'on'], true);
+        }
+        if (is_int($raw)) {
+            return $raw !== 0;
+        }
+        return (bool)self::DEFAULTS['migrationAllowPrivateUrls'];
     }
 
     public static function all(): array

@@ -1113,6 +1113,14 @@ def _publish_batch_with_cas_retry(
                 bool(shard_envelope), bool(root_envelope),
             )
             _log_batch_cas_steamrolls(batch=batch, server_shard=new_shard)
+            # Review §2.L2: linear 50 ms × attempt backoff between
+            # retries so a hot vault under 10-device write storms
+            # doesn't spin a single device at full speed against the
+            # publish endpoint until the retry budget exhausts. Caps
+            # at ~(50 × CAS_MAX_RETRIES) ms total worst case, which is
+            # well under any user-perceptible delay.
+            import time as _time
+            _time.sleep(0.05 * (attempt + 1))
             current_state = _BindingFolderState(root=new_root, shard=new_shard)
             pointer = _find_root_folder_pointer(new_root, remote_folder_id)
             folder_retention = (

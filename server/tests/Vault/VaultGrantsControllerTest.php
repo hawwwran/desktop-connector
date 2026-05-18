@@ -412,6 +412,70 @@ final class VaultGrantsControllerTest extends TestCase
         );
     }
 
+    public function test_two_distinct_claimants_one_join_request_yields_200_and_409(): void
+    {
+        // Review §7.L1: F-S13's serialization story — two different
+        // devices race against the same join-request id, each with its
+        // own ephemeral pubkey. The repository's CAS-on-state-pending
+        // update means exactly one ``UPDATE … WHERE state='pending'``
+        // hits one row; the second device sees ``state='claimed'`` and
+        // hits the 409 path. PHPUnit doesn't actually thread the two
+        // calls — but the SQLite UPDATE+changes() invariant is the same
+        // shape as the real concurrent case.
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+        $resp = $this->invoke(fn() => VaultGrantsController::createJoinRequest(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                'ephemeral_admin_pubkey' => base64_encode(random_bytes(32)),
+            ])),
+        ));
+        $jrId = $resp['json']['data']['join_request_id'];
+
+        // Second registered device, distinct from CLAIMANT_DEVICE, with
+        // its own token. Mirrors a real second-device-on-the-network.
+        $secondClaimant = 'd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1';
+        $secondToken = 'second-claimant-bearer-token';
+        $devs = new DeviceRepository($this->db);
+        $devs->insertDevice($secondClaimant, base64_encode(random_bytes(32)),
+            $secondToken, 'desktop', self::NOW);
+
+        // First device claims with its own pubkey.
+        $this->setAuth(self::CLAIMANT_DEVICE, self::CLAIMANT_TOKEN);
+        $firstResp = $this->invoke(fn() => VaultGrantsController::claim(
+            $this->db,
+            $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                json_encode([
+                    'claimant_pubkey' => base64_encode(random_bytes(32)),
+                    'device_name' => 'First',
+                ])),
+        ));
+        self::assertSame(200, $firstResp['status']);
+
+        // Second device tries to claim the same join-request with a
+        // distinct pubkey — must 409 because the row is no longer
+        // pending and same-claimant idempotency requires byte-equal
+        // (device_id, pubkey, device_name).
+        $this->setAuth($secondClaimant, $secondToken);
+        $this->expectVaultError(
+            fn() => VaultGrantsController::claim(
+                $this->db,
+                $this->ctx('POST', ['vault_id' => self::VAULT_ID, 'req_id' => $jrId],
+                    json_encode([
+                        'claimant_pubkey' => base64_encode(random_bytes(32)),
+                        'device_name' => 'Second',
+                    ])),
+            ),
+            'vault_join_request_state', 409,
+        );
+
+        // The row's claimant_device_id is the first device's id —
+        // confirming who actually won the race.
+        $repo = new VaultJoinRequestsRepository($this->db);
+        $row = $repo->get($jrId);
+        self::assertSame('claimed', (string)$row['state']);
+        self::assertSame(self::CLAIMANT_DEVICE, (string)$row['claimant_device_id']);
+    }
+
     public function test_claim_repeat_from_different_pubkey_still_409(): void
     {
         // F-S13 negative: only the same pubkey + device qualifies as a

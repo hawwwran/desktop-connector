@@ -661,7 +661,15 @@ def _resolve_latest_version_id(versions: list[dict[str, Any]]) -> str:
 
 
 def _imported_rename(path: str, existing_paths: set[str]) -> str:
-    """`<stem> (imported)` then `(imported N)` if the rename collides."""
+    """`<stem> (imported)` then `(imported N)` if the rename collides.
+
+    Review §2.L3 — the loop tops out at N=10_000 because the search
+    space is bounded (a folder with that many `(imported N)` siblings
+    of one file is well past the point where automatic renaming is
+    the right answer). Hitting the cap surfaces ``RuntimeError`` rather
+    than silently overwriting; the import wizard catches it and
+    surfaces it to the user.
+    """
     parts = path.split("/")
     leaf = parts[-1]
     parent = "/".join(parts[:-1])

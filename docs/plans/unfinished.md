@@ -205,18 +205,18 @@ Three resolution paths:
 The reviewer explicitly classified the rest of the Low section as acceptable-for-v1 or operator-deployment caveats. Listed here so they're not lost; not actively tracked as blockers.
 
 ### §1 (server) — operator caveats
-- **§1.L2** — `migrationCommit` URL parser accepts private IPs / localhost. *Operator-config option; worth optional blocking-by-default with override.* `server/src/Controllers/VaultController.php:1465-1477`
-- **§1.L3** — `VaultStorage::ensureDir` chmod 0700 inaccessible to other request pools on shared-host PHP-FPM. *Deployment caveat for shared hosting.* `server/src/VaultStorage.php:45`
+- ~~**§1.L2**~~ — *(landed)* `guardMigrationTargetRelayUrl` rejects loopback / RFC 1918 / link-local hosts by default; operators opt in via `migrationAllowPrivateUrls` in `server/data/config.json`.
+- ~~**§1.L3**~~ — *(landed as docstring)* shared-host PHP-FPM caveat captured in `VaultStorage::ensureDir`.
 
 ### §2 (desktop crypto / sync engine) — polish
-- **§2.L2** — CAS retry loop has no overall livelock cap beyond `CAS_MAX_RETRIES`. *Under 10-device write storms a single device could exhaust budget per-folder forever. Log-volume sanity; suggested 50–100 ms × attempt backoff.* `desktop/src/vault/binding/sync.py:1058`
-- **§2.L3** — `_imported_rename` caps at 10 000 collisions with `RuntimeError`. *Acceptable sanity bound; flagged for awareness.* `desktop/src/vault/manifest.py:861-866`
+- ~~**§2.L2**~~ — *(landed)* 50 ms × attempt backoff between CAS retries in `binding/sync.py`.
+- ~~**§2.L3**~~ — *(landed as docstring)* `_imported_rename`'s 10_000 cap explained alongside the limit.
 
 ### §3 (sync engine internals)
-- **§3.L1** — `BatchedUploadStub` orphans reaped only on disconnect, not pause. `desktop/src/vault/binding/lifecycle.py:319-341`
-- **§3.L2** — Ignore-dotfiles flag inconsistent across `scan.py` / `preflight.py` / `baseline.py`.
+- ~~**§3.L1**~~ — *(landed as docstring)* documented that pause deliberately preserves stubs; only disconnect orphans them.
+- ~~**§3.L2**~~ — *(landed)* `baseline._walk_local` honours `ignore_dotfiles=True` to match `scan` / `preflight`; covered by `test_dotfiles_skipped_by_default_matches_scan_and_preflight`.
 - **§3.L3** — Conflict-path random token is 32 bits; spec-compliant. *Reviewer noted as acceptable.*
-- **§3.L4** — `MAX_OP_ATTEMPTS=10` ops sit in the queue forever; no permanent-failure UI surface.
+- **§3.L4** — `MAX_OP_ATTEMPTS=10` ops sit in the queue forever; no permanent-failure UI surface. *Needs UI scoping (banner + per-op detail row + queue inspector); skipped autonomously.*
 
 ### §6 (desktop UI) — reviewer marked verified-clean
 All eight §6 Lows below are pure verified-clean acknowledgements — listed for completeness, not action items:
@@ -232,11 +232,13 @@ All eight §6 Lows below are pure verified-clean acknowledgements — listed for
 (§6.L9 is a "correction" note that wasn't a real issue — listed in the archive for completeness only.)
 
 ### §7 (test polish)
-- **§7.L1** — QR claim race lower bound. *No test with two parallel claims with different pubkeys verifying exactly one 200 + one 409.*
-- **§7.L2** — Case-insensitive local mount collision (`A.txt` vs `a.txt`) untested. *Linux primary; cross-mount filesystems (NFS, exFAT) still relevant.*
-- **§7.L3** — Negative-vector README schema undocumented. *Add `tamper`, `envelope_byte_xor`, `aad_override`, `wrapped_key_byte_xor`, `decrypt_passphrase_override` to `tests/protocol/vault-v1/README.md`.*
+- ~~**§7.L1**~~ — *(landed)* `test_two_distinct_claimants_one_join_request_yields_200_and_409` pins the F-S13 CAS-on-pending shape with two distinct claimant devices + pubkeys.
+- ~~**§7.L2**~~ — *(landed)* `test_case_distinct_paths_materialize_as_separate_files_on_linux` pins the case-sensitive contract; the case-insensitive-mount limitation is documented in the test body.
+- ~~**§7.L3**~~ — *(landed)* negative-case `tamper` block schema documented in `tests/protocol/vault-v1/README.md`.
 
-**Count: 20 entries unfixed** (2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7). The **11 actionable polish-tier entries** are §1.L2–L3, §2.L2–L3, §3.L1–L4, §7.L1–L3.
+**Status of the actionable polish-tier entries:** 9 of 11 landed in this session (§1.L2, §1.L3, §2.L2, §2.L3, §3.L1, §3.L2, §7.L1, §7.L2, §7.L3). The two still-open: §3.L3 (reviewer-marked acceptable) and §3.L4 (needs UI scoping — banner + queue inspector for permanently-failed ops).
+
+The 10 verified-clean / correction entries (§6.L1–L9) require no action.
 
 ---
 

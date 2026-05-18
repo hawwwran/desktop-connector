@@ -212,6 +212,15 @@ def pause_binding(
         "vault.sync.binding_paused binding=%s sync_mode=%s pending_ops=%d",
         binding_id, paused.sync_mode, pending,
     )
+    # Review §3.L1: BatchedUploadStub artefacts are NOT reaped on
+    # pause. The pending-ops queue is preserved (§A12) so each
+    # ``(vault_id, remote_path, fingerprint)`` stub is still the
+    # correct dedupe anchor for the same op when resume hits. Stubs
+    # whose fingerprint went stale during the pause window
+    # (``upload`` op for a file the user kept editing) self-clean on
+    # the next prep cycle via the stale-fingerprint reap in
+    # ``find_matching_stub``. Disconnect, which drops the queue, is
+    # the only path that genuinely orphans stubs and does the reap.
     return PauseResult(binding=paused, pending_ops_preserved=pending)
 
 

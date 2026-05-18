@@ -1114,6 +1114,57 @@ class VaultController
                 'target_relay_url',
             );
         }
+        if (!Config::migrationAllowPrivateUrls()) {
+            $host = parse_url($target, PHP_URL_HOST);
+            if (!is_string($host) || $host === '') {
+                throw new VaultInvalidRequestError(
+                    'target_relay_url must include a host',
+                    'target_relay_url',
+                );
+            }
+            self::rejectPrivateOrLoopbackHost($host);
+        }
+    }
+
+    /**
+     * Review §1.L2: refuse loopback / RFC 1918 private / link-local /
+     * unique-local hosts so an admin can't push the paired fleet at an
+     * internal service. The check covers both literal IPs (``127.0.0.1``,
+     * ``192.168.x.x``, ``::1``, ``fc00::/7``) and DNS names that
+     * unambiguously resolve to a loopback alias (``localhost``,
+     * ``*.localhost``). Operators who legitimately need to migrate
+     * across local URLs (dev rigs) opt in via
+     * ``migrationAllowPrivateUrls: true`` in ``server/data/config.json``.
+     */
+    private static function rejectPrivateOrLoopbackHost(string $host): void
+    {
+        $normalized = strtolower(trim($host, "[]"));
+        if ($normalized === 'localhost' || str_ends_with($normalized, '.localhost')) {
+            throw new VaultInvalidRequestError(
+                'target_relay_url points at a loopback host; set migrationAllowPrivateUrls=true to allow local URLs',
+                'target_relay_url',
+            );
+        }
+        if (filter_var(
+            $normalized,
+            FILTER_VALIDATE_IP,
+            FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE,
+        ) !== false) {
+            // Public IP literal — allowed.
+            return;
+        }
+        if (filter_var($normalized, FILTER_VALIDATE_IP) !== false) {
+            // Literal IP that failed the public filter — private / reserved.
+            throw new VaultInvalidRequestError(
+                'target_relay_url points at a private / loopback / link-local IP; set migrationAllowPrivateUrls=true to allow local URLs',
+                'target_relay_url',
+            );
+        }
+        // DNS name that isn't a special-case loopback alias — accept.
+        // We deliberately don't resolve here; DNS resolution at config
+        // time is fragile (split horizons, TTL changes) and the
+        // architectural answer to a malicious admin who controls DNS is
+        // perimeter trust, not the relay's URL filter.
     }
 
     /** Whether a chunk's lifecycle state is visible to user-facing queries. */

@@ -45,6 +45,19 @@ Each file is a JSON array of cases. Each case:
 
 Negative cases use `expected.expected_error: "vault_..."` (a code from the T0 error table) instead of byte outputs.
 
+### Negative-case `tamper` block
+
+A negative vector may carry a `tamper` object inside `inputs` that tells the cross-runtime harness *how* to corrupt an otherwise-valid envelope before decrypt. Multiple keys can appear in the same `tamper` object; the harness applies them all before the AEAD step so a single vector can exercise compound failure shapes.
+
+| Field | Type | Effect on decrypt input |
+|---|---|---|
+| `envelope_byte_xor` | `{ offset: int, mask: "<hex>" }` | XOR `mask` (one byte) into the envelope ciphertext at `offset` so the AEAD tag check fails. Use this for "one-byte-flip rejected" tests. |
+| `wrapped_key_byte_xor` | `{ offset: int, mask: "<hex>" }` | Same shape, but applied to the export-bundle wrapped-key blob — exercises the "wrapped key tampered" path independently from the body ciphertext. |
+| `aad_override` | `"<hex>"` | Replace the AAD that the decrypter normally derives from envelope-prefix fields with this literal blob, so the AEAD bind-check fails. Use for "AAD field rebind rejected" / cross-envelope-type substitution tests. |
+| `decrypt_passphrase_override` | `"<utf-8 string>"` | For export-bundle / recovery-envelope vectors only: the harness derives the unwrap key from this passphrase instead of the one in `inputs.passphrase`, so the wrapped-key AEAD fails with the expected `vault_recovery_passphrase_wrong` / `vault_export_passphrase_wrong` code. |
+
+Vectors that don't tamper omit the `tamper` field entirely. A vector with `tamper` set MUST also specify `expected.expected_error` — the harness asserts the decrypt fails with that code rather than producing plaintext.
+
 ## Running
 
 ```bash
