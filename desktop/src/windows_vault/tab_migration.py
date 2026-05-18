@@ -1,7 +1,10 @@
-"""Migration tab — switch back to previous relay (T9.6).
+"""Migration tab — launch wizard + switch-back surface.
 
-Extracted from ``windows_vault.py`` (lines ~988–1092).
-"""
+The full multi-page wizard lives in :mod:`windows_vault_migration`;
+this tab is the entry point + the post-commit switch-back UI."""
+
+import subprocess
+import sys
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -14,6 +17,7 @@ from ._main_context import MainContext
 
 def build_migration_tab(ctx: MainContext, win) -> "Gtk.Box":
     config = ctx.config
+    config_dir = ctx.config_dir
 
     from ..vault.migration.propagation import can_switch_back
 
@@ -27,10 +31,10 @@ def build_migration_tab(ctx: MainContext, win) -> "Gtk.Box":
     ))
     migration_tab.append(Gtk.Label(
         label=(
-            "Move this vault to a different relay. The full migration "
-            "wizard arrives in a later phase; here you can see the "
-            "current relay URL and switch back to the previous relay "
-            "within 7 days of a commit."
+            "Move this vault to a different relay. The migration wizard "
+            "walks through preflight, copy, verify, and commit; within "
+            "7 days of a commit you can switch back to the previous "
+            "relay from this tab."
         ),
         xalign=0, wrap=True, css_classes=["dim-label"],
     ))
@@ -57,10 +61,23 @@ def build_migration_tab(ctx: MainContext, win) -> "Gtk.Box":
     )
     migrate_btn.set_halign(Gtk.Align.START)
     migrate_btn.set_tooltip_text(
-        "Full migration wizard lands in a later phase; "
-        "the engine is ready (run_migration in vault_migration_runner)."
+        "Open the migration wizard: target URL → preflight → copy → "
+        "verify → commit."
     )
-    migrate_btn.set_sensitive(False)
+
+    def on_migrate_clicked(_b) -> None:
+        # The wizard is its own subprocess so the long-running engine
+        # work doesn't block the Settings GTK loop. Same shape as
+        # ``vault-onboard`` / ``vault-import``.
+        subprocess.Popen(
+            [
+                sys.executable, "-m", "src.windows", "vault-migration",
+                f"--config-dir={config_dir}",
+            ],
+            close_fds=True,
+        )
+
+    migrate_btn.connect("clicked", on_migrate_clicked)
     migration_tab.append(switch_back_btn)
     migration_tab.append(migrate_btn)
 

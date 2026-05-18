@@ -136,6 +136,33 @@ class MigrationProgress:
 
 
 @dataclass
+class MigrationInventory:
+    """Read-only snapshot of what a migration would copy.
+
+    Surfaced by the wizard's "Confirm" page so the operator sees a
+    concrete chunk count + cumulative bytes total before they trigger
+    the destructive migrationStart call (which marks the source's
+    manifest sealed-pointing-at-target). No relay state is mutated to
+    produce this.
+    """
+
+    chunk_count: int
+    ciphertext_bytes_total: int
+    remote_folder_count: int
+    shard_revisions: dict[str, int]  # folder_id → shard_revision
+
+    @property
+    def has_edited_shards(self) -> bool:
+        """Any folder shard at revision > 1.
+
+        Migrating an edited vault hits the §5.M2 genesis-insert
+        idempotency gap — the wizard surfaces this so the operator
+        sees the limitation before they start.
+        """
+        return any(rev > 1 for rev in self.shard_revisions.values())
+
+
+@dataclass
 class MigrationVerifyOutcome:
     matches: bool
     # subset of {"root_hash", "shard_hash:<rf_id>", "chunk_count",
@@ -341,6 +368,87 @@ def run_migration(
         chunks_skipped=skipped,
         bytes_copied=bytes_copied,
         verify=verify,
+    )
+
+
+def migration_preflight(
+    *,
+    vault: MigrationVault,
+    source_relay: MigrationRelay,
+) -> MigrationInventory:
+    """Snapshot the source vault's chunk inventory without writing.
+
+    Walks the source's root manifest + every published shard via the
+    same logic ``_bootstrap_target_and_inventory`` uses for the real
+    copy phase, except no target writes happen and no
+    ``migration_start`` is POSTed. Safe to call before the wizard's
+    "Continue" button locks in.
+
+    Returns a :class:`MigrationInventory` carrying chunk count,
+    cumulative ciphertext bytes, folder count, and per-folder shard
+    revisions (so the wizard can surface the §5.M2 limitation when
+    any shard's revision is > 1).
+    """
+    source_root = source_relay.get_root(vault.vault_id, vault.vault_access_secret)
+    root_envelope = source_root["root_ciphertext"]
+    if isinstance(root_envelope, (bytearray, memoryview)):
+        root_envelope = bytes(root_envelope)
+    root_plaintext = vault.decrypt_root_envelope(root_envelope)
+
+    chunk_count = 0
+    bytes_total = 0
+    seen: set[str] = set()
+    folder_count = 0
+    shard_revisions: dict[str, int] = {}
+
+    for pointer in root_plaintext.get("remote_folders") or []:
+        if not isinstance(pointer, dict):
+            continue
+        rf_id = str(pointer.get("remote_folder_id") or "")
+        if not rf_id:
+            continue
+        folder_count += 1
+        pointer_shard_rev = int(pointer.get("shard_revision") or 0)
+        shard_revisions[rf_id] = pointer_shard_rev
+        if pointer_shard_rev <= 0:
+            continue
+        try:
+            source_shard = source_relay.get_shard(
+                vault.vault_id, vault.vault_access_secret, rf_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from ..relay_errors import VaultNotFoundError
+            if isinstance(exc, VaultNotFoundError):
+                continue
+            raise
+        shard_envelope = source_shard["shard_ciphertext"]
+        if isinstance(shard_envelope, (bytearray, memoryview)):
+            shard_envelope = bytes(shard_envelope)
+        shard_plaintext = vault.decrypt_shard_envelope(shard_envelope, rf_id)
+        for entry in shard_plaintext.get("entries", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            for version in entry.get("versions", []) or []:
+                if not isinstance(version, dict):
+                    continue
+                for chunk in version.get("chunks", []) or []:
+                    if not isinstance(chunk, dict):
+                        continue
+                    cid = str(chunk.get("chunk_id") or "")
+                    if not cid or cid in seen:
+                        continue
+                    seen.add(cid)
+                    chunk_count += 1
+                    try:
+                        bytes_total += int(chunk.get("ciphertext_size") or 0)
+                    except (TypeError, ValueError):
+                        continue
+
+    return MigrationInventory(
+        chunk_count=chunk_count,
+        ciphertext_bytes_total=bytes_total,
+        remote_folder_count=folder_count,
+        shard_revisions=shard_revisions,
     )
 
 
@@ -891,8 +999,11 @@ def _now_rfc3339() -> str:
 
 __all__ = [
     "DEFAULT_VERIFY_SAMPLE_SIZE",
+    "MigrationInventory",
     "MigrationProgress",
     "MigrationRunResult",
     "MigrationVerifyOutcome",
+    "migration_preflight",
+    "rollback_verified_migration",
     "run_migration",
 ]

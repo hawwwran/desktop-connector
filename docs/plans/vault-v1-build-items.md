@@ -16,7 +16,14 @@ Index of build items below:
 
 ---
 
-## §5.C1 — Migration wizard
+## §5.C1 — Migration wizard *(landed 2026-05-18)*
+
+**Status:** landed. Multi-page subprocess `desktop/src/windows_vault_migration.py` (invokable as `python3 -m src.windows vault-migration`); spawned from `windows_vault/tab_migration.py`'s "Migrate to another relay…" button (no longer disabled). Pages: setup (target URL + test connection) → confirm (chunk count + bytes total from new `migration_preflight` helper) → progress (real-time `MigrationProgress` callback on copy + verify) → done (switch-back banner copy) plus an error page for verify mismatches. The engine's `run_migration` drives all transitions; the wizard just marshals callbacks back to the GTK main loop and persists the post-commit `previous_relay_url` + `vault_previous_relay_expires_at` into config so the existing Migration-tab switch-back surface keeps working.
+
+**Bundled fixes:**
+
+- ~~**§5.M6** — `previous_relay_url` stale carry~~ *(landed)*. Added `clear_previous_relay()` helper in `desktop/src/vault/migration/state.py`; the wizard calls it at the start of every fresh start/verify/commit cycle so A → B → C records `previous = B` rather than the stale A. Regression-pinned by `test_a_to_b_to_c_records_previous_b_not_a`.
+- **§5.M2** — shard genesis-insert for rev > 1. **Not landed**; surfaced to the operator instead. The new `MigrationInventory.has_edited_shards` flag fires when any folder's `shard_revision > 1`, and the wizard's Confirm page shows an explicit warning that the resume path may hit the idempotency gap. Fresh-vault migrations work end-to-end; edited-vault migrations work on the first attempt but fail on partial-completion resume. Full fix is a separate task — see `unfinished.md` §5.M2.
 
 **Decision** *(2026-05-18)*: build the full multi-page wizard for v1. Inline subordinate fixes for §5.M2 (shard genesis-insert for rev > 1) and §5.M6 (`previous_relay_url` stale carry).
 

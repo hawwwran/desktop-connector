@@ -137,6 +137,33 @@ def clear_state(config_dir: Path) -> None:
         return
 
 
+def clear_previous_relay(record: MigrationRecord) -> MigrationRecord:
+    """Return ``record`` with ``previous_relay_url`` reset to ``None``.
+
+    Review §5.M6: the ``transition(to="committed")`` writer only stamps
+    ``previous_relay_url`` when the field is empty, but the record-copy
+    inside :func:`transition` always carries the prior value forward.
+    Without this helper, the second migration in an A → B → C sequence
+    keeps ``previous_relay_url = A`` even after committing to C,
+    leaving the "Switch back" surface pointing at the wrong relay.
+
+    The migration wizard calls this at the start of every fresh
+    start/verify/commit cycle so the persisted record reflects the
+    immediately-preceding source.
+    """
+    return MigrationRecord(
+        vault_id=record.vault_id,
+        state=record.state,
+        source_relay_url=record.source_relay_url,
+        target_relay_url=record.target_relay_url,
+        started_at=record.started_at,
+        verified_at=record.verified_at,
+        committed_at=record.committed_at,
+        previous_relay_url=None,
+        migration_token=record.migration_token,
+    )
+
+
 def transition(
     record: MigrationRecord,
     *,

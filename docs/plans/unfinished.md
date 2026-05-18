@@ -58,12 +58,19 @@ Closes the v1 multi-device gap; QR-grant is now the primary device-add path, rec
 
 ---
 
-### 4. §5.C1 — Migration wizard UI *(design landed 2026-05-18)*
+### 4. ~~§5.C1 — Migration wizard UI~~ *(landed 2026-05-18)*
 
-**Why this slot:** Critical-bucket missing capability — engine is fully ready, wizard is the only gap. No in-app way to migrate vaults across relays today. Bundles subordinate fixes for §5.M2 + §5.M6.
+**Status:** landed. Multi-page subprocess `desktop/src/windows_vault_migration.py` (`vault-migration`) walks setup → confirm → progress → done; the engine's `run_migration` drives transitions, the wizard marshals callbacks + persists `previous_relay_url` post-commit. Migration-tab placeholder button now spawns the wizard. **§5.M6 fix bundled** via `clear_previous_relay()` in `vault/migration/state.py`. **§5.M2 NOT bundled** — the idempotency gap for `shard_revision > 1` resume paths is surfaced via `MigrationInventory.has_edited_shards` instead; the wizard warns operators before destructive commit. Full §5.M2 fix tracked as its own follow-up — see §5.M2 entry below.
 
-**Status:** scoped — implementation pending. **Plan:** [`vault-v1-build-items.md#§5.C1`](vault-v1-build-items.md#5c1--migration-wizard).
-**Decision:** build the full multi-page wizard for v1; bundles subordinate fixes for §5.M2 + §5.M6. Sized 3–5 days.
+Tests: `tests/protocol/test_desktop_vault_migration_{preflight,wizard_source}.py`. Diagnostic: `vault.migration.commit_callback` added.
+
+### 4b. §5.M2 — Migration runner shard genesis-insert for rev > 1 *(separated from §5.C1, still open)*
+
+**Status:** still pending. The bundled-into-§5.C1 framing turned out to be heavier than a one-commit fix: server's `putShard` enforces `parent_shard_revision == new_shard_revision - 1`, so resuming a partially-completed migration on a folder where the source's `shard_revision > 1` and the target already accepted some shards needs either server-side relaxation OR client-side synthesized envelopes walking the chain from rev 1.
+
+Workaround landed alongside §5.C1: the migration wizard's preflight surfaces `has_edited_shards=True` and warns the operator before they commit. Fresh-vault migrations (shard_revision == 1) work end-to-end without the fix.
+
+Tracked as a separate v1.x follow-up.
 
 ---
 
@@ -240,21 +247,21 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 
 | Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
 |---|---|---|---|---|---|
-| Criticals | 17 | 16 | 1 (§5.C1) | 0 | 0 |
+| Criticals | 17 | 17 | 0 | 0 | 0 |
 | Highs | 37 | 33 | 3 (§5.H2, §5.H3, §6.H3) | 1 (§6.H1) | 0 |
-| Mediums | 35 | 31 | 3 (§4.M1, §5.M2, §5.M6) | 1 (§5.M3) | 0 |
+| Mediums | 35 | 32 | 2 (§4.M1, §5.M2) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **84** | **7** | **2** | **20** |
+| **Total** | **113** | **86** | **5** | **2** | **20** |
 
-§5.M2 and §5.M6 are subordinate fixes bundled into the §5.C1 migration wizard build — counted once at the bucket level for visibility, but they share the parent's implementation path. §3.C1 + §6.H2 + §5.C2 fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy` + entries 2 and 3 above).
+§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §6.H2 all fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy` + entries 1–4 above).
 
-### Breakdown of the 29 not-fully-fixed-by-code items
+### Breakdown of the 27 not-fully-fixed-by-code items
 
-- **7 design-landed-pending-implementation** (§1 above): 1 Critical (§5.C1), 3 Highs (§5.H2, §5.H3, §6.H3), 3 Mediums (§4.M1, §5.M2, §5.M6). Each carries a plan-doc link. Implementation work is what's left.
+- **5 design-landed-pending-implementation** (§1 above): 3 Highs (§5.H2, §5.H3, §6.H3), 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **29 entries are not-yet-fully-fixed-by-code** — 7 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **27 are open work** (7 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **27 entries are not-yet-fully-fixed-by-code** — 5 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **25 are open work** (5 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

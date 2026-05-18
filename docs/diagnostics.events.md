@@ -467,6 +467,7 @@ relay log (filenames are local-only).
 | `vault.import.refused` | desktop | warning | `vault_id`, `reason` | Import refused (different vault, tampered, wrong passphrase) |
 | `vault.integrity.list_revisions_unavailable` | desktop | info | `vault`, `error` | T17.3 — relay didn't expose per-revision listing; head-only |
 | `vault.manifest.rollback_detected` | desktop | warning | `vault_id`, `served`, `floor` | §3.7 trust anchor — relay served an AEAD-verified revision strictly less than the persisted per-device floor; manifest not auto-applied, `VaultManifestRollbackError` raised |
+| `vault.migration.commit_callback` | desktop | info | `vault`, `target` | §5.C1 — wizard's ``on_committed`` callback fired; about to flip ``config.server_url`` + record ``previous_relay_url`` for the 7-day switch-back window |
 | `vault.migration.committed` | desktop | info | `vault`, `source`, `target` | F-510 — relay migration commit landed; Activity-tab "Relay migration committed" anchor |
 | `vault.migration.committed_callback_failed` | desktop | warning | `vault`, `target`, `error` | F-C15 — caller's ``on_committed`` persistence callback raised; state file kept at ``committed`` so the next run retries the callback before clearing |
 | `vault.migration.committed_source_aligned` | desktop | debug | `vault`, `target` | F-C09 — pre-clear audit: source still reports the same target as we committed to |
