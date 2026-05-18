@@ -178,7 +178,9 @@ Single subprocess (`windows_vault_export.py`):
 
 ---
 
-## §6.H2 — Devices tab + revoke-device UI
+## §6.H2 — Devices tab + revoke-device UI *(landed 2026-05-18)*
+
+**Status:** landed. Code anchors: `desktop/src/vault/grant/client.py`, `desktop/src/windows_vault/tab_devices.py`, `desktop/src/vault/binding/runtime.py` (`list_device_grants` + `revoke_device_grant` methods on `VaultHttpRelay`), `desktop/src/windows_vault/main_window.py` (placeholder loop trimmed). Tests: `tests/protocol/test_desktop_vault_devices_{client,tab_source}.py`. Diagnostic: `vault.device.revoked`.
 
 **Decision** *(2026-05-18)*: build the full Devices tab (list grants + revoke) for v1.
 

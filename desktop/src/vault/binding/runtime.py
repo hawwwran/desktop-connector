@@ -656,6 +656,73 @@ class VaultHttpRelay:
             status_code=resp.status_code,
         )
 
+    # ---- §6.H2 device-grants surface --------------------------------
+
+    def list_device_grants(self, vault_id: str, vault_access_secret: str):
+        """GET /api/vaults/{id}/device-grants — admin-only.
+
+        Returns the raw response ``data`` dict
+        (``{vault_id, grants: [...]}``). Per-grant shape matches
+        ``server/src/Controllers/VaultGrantsController::listDeviceGrants``.
+        Callers in ``vault/grant/client.py`` parse this into typed
+        :class:`DeviceGrant` dataclasses.
+        """
+        from ..relay_errors import VaultRelayError
+
+        resp = self._conn.request(
+            "GET",
+            f"/api/vaults/{vault_id}/device-grants",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
+        if resp is None:
+            raise RuntimeError(
+                "Could not reach the relay while listing vault device grants.",
+            )
+        if resp.status_code != 200:
+            raise VaultRelayError(
+                self._extract_error(resp),
+                status_code=resp.status_code,
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError(
+                "Relay returned an invalid device-grants list response.",
+            ) from exc
+
+    def revoke_device_grant(
+        self, vault_id: str, vault_access_secret: str, target_device_id: str,
+    ):
+        """DELETE /api/vaults/{id}/device-grants/{device_id} — admin-only.
+
+        Idempotent: a second call against an already-revoked grant
+        returns ``{already_revoked: true}``. Self-revoke is rejected
+        server-side with HTTP 400 ``vault_invalid_request``. Callers in
+        ``vault/grant/client.py`` translate the typed error shapes.
+        """
+        from ..relay_errors import VaultRelayError
+
+        resp = self._conn.request(
+            "DELETE",
+            f"/api/vaults/{vault_id}/device-grants/{target_device_id}",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+        )
+        if resp is None:
+            raise RuntimeError(
+                "Could not reach the relay while revoking the device grant.",
+            )
+        if resp.status_code != 200:
+            raise VaultRelayError(
+                self._extract_error(resp),
+                status_code=resp.status_code,
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError(
+                "Relay returned an invalid device-grant revoke response.",
+            ) from exc
+
     @staticmethod
     def _extract_error(resp) -> dict:
         try:

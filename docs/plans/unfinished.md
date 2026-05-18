@@ -37,12 +37,11 @@ A separate "smallest-first" implementation order lives in [`vault-v1-build-items
 
 ---
 
-### 2. §6.H2 — Devices tab + revoke-device UI *(design landed 2026-05-18)*
+### 2. ~~§6.H2 — Devices tab + revoke-device UI~~ *(landed 2026-05-18)*
 
-**Why this slot:** lost-laptop scenario has zero in-app recourse today. The server endpoints are shipped and tested — only the desktop UI is missing. Originally called "the heaviest v1 gap" by the review. Must land before §5.C2 (QR-grant) because exposing grant without revoke is worse than no grant.
+**Status:** landed. The placeholder Devices tab in `desktop/src/windows_vault/main_window.py` is replaced by `tab_devices.py` — card-per-row layout listing every grant from `GET /api/vaults/{id}/device-grants`, with Revoke gated behind fresh-unlock → admin-role check (via `relay.get_header().caller_role`) → typed-confirm dialog with the §14 locked copy ("Revoking this device prevents future Vault access. It cannot erase data already copied to that device."). Typed client in `desktop/src/vault/grant/client.py` parses responses into `DeviceGrant` / `RevokeResult` dataclasses and maps server errors (HTTP 400 self-revoke → `CannotRevokeSelfError`; 404 → `DeviceGrantNotFoundError`; 401/403 → `DeviceGrantsAuthError`). Diagnostic event `vault.device.revoked` cataloged. Tab polls every 30 s while visible, clears the timer on unmap. Closes the v1 lost-laptop gap.
 
-**Status:** scoped — implementation pending. **Plan:** [`vault-v1-build-items.md#§6.H2`](vault-v1-build-items.md#6h2--devices-tab--revoke-device-ui).
-**Decision:** build the full Devices tab (list grants + revoke + locked spec §3.3 copy) for v1. Closes the v1 lost-laptop gap. Sized 2–3 days.
+Locked-copy + admin-gate + 30 s poll wiring pinned by `tests/protocol/test_desktop_vault_devices_tab_source.py`; client error mapping pinned by `tests/protocol/test_desktop_vault_devices_client.py`.
 
 ---
 
@@ -238,20 +237,20 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 | Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
 |---|---|---|---|---|---|
 | Criticals | 17 | 15 | 2 (§5.C1, §5.C2) | 0 | 0 |
-| Highs | 37 | 32 | 4 (§5.H2, §5.H3, §6.H2, §6.H3) | 1 (§6.H1) | 0 |
+| Highs | 37 | 33 | 3 (§5.H2, §5.H3, §6.H3) | 1 (§6.H1) | 0 |
 | Mediums | 35 | 31 | 3 (§4.M1, §5.M2, §5.M6) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **82** | **9** | **2** | **20** |
+| **Total** | **113** | **83** | **8** | **2** | **20** |
 
-§5.M2 and §5.M6 are subordinate fixes bundled into the §5.C1 migration wizard build — counted once at the bucket level for visibility, but they share the parent's implementation path. §3.C1 fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy`).
+§5.M2 and §5.M6 are subordinate fixes bundled into the §5.C1 migration wizard build — counted once at the bucket level for visibility, but they share the parent's implementation path. §3.C1 + §6.H2 fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy` + entry 2 above).
 
-### Breakdown of the 31 not-fully-fixed-by-code items
+### Breakdown of the 30 not-fully-fixed-by-code items
 
-- **9 design-landed-pending-implementation** (§1 above): 2 Criticals (§5.C1, §5.C2), 4 Highs (§5.H2, §5.H3, §6.H2, §6.H3), 3 Mediums (§4.M1, §5.M2, §5.M6). Each carries a plan-doc link. Implementation work is what's left.
+- **8 design-landed-pending-implementation** (§1 above): 2 Criticals (§5.C1, §5.C2), 3 Highs (§5.H2, §5.H3, §6.H3), 3 Mediums (§4.M1, §5.M2, §5.M6). Each carries a plan-doc link. Implementation work is what's left.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **31 entries are not-yet-fully-fixed-by-code** — 9 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **29 are open work** (9 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **30 entries are not-yet-fully-fixed-by-code** — 8 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **28 are open work** (8 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

@@ -24,6 +24,7 @@ from ._main_context import MainContext
 from .rollback_banner import build_rollback_banner
 from .tab_activity import build_activity_tab
 from .tab_danger import build_danger_tab
+from .tab_devices import build_devices_tab
 from .tab_maintenance import build_maintenance_tab
 from .tab_migration import build_migration_tab
 from .tab_recovery import build_recovery_tab
@@ -36,9 +37,9 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
     Body: a left-hand vertical sidebar (``Gtk.StackSidebar``) over a
     ``Gtk.Stack`` with one page per section — Recovery, Folders,
     Devices, Security, Sync safety, Storage, Activity, Maintenance,
-    Migration, Danger zone. Recovery / Folders / Activity / Maintenance
-    / Migration / Danger zone are real; Devices / Security / Sync
-    safety / Storage are deliberate placeholders awaiting later
+    Migration, Danger zone. Recovery / Folders / Devices / Activity /
+    Maintenance / Migration / Danger zone are real; Security /
+    Sync safety / Storage are deliberate placeholders awaiting later
     development.
 
     ``vault_id_override`` (F-U14): optional 12-char canonical vault id
@@ -184,10 +185,13 @@ def show_vault_main(config_dir: Path, vault_id_override: str | None = None):
             vault_id=vault_id_undashed,
         ))
 
+        # §6.H2: real Devices tab — list device grants + revoke.
+        add_tab("devices", "Devices", build_devices_tab(ctx, win))
+
         # Other tabs are empty placeholders for later phases.
-        # (Activity + Maintenance get real implementations below — F-501.)
+        # (Activity + Maintenance get real implementations below — F-501;
+        # Devices landed above per §6.H2.)
         for name, title in [
-            ("devices", "Devices"),
             ("security", "Security"),
             ("sync_safety", "Sync safety"),
             ("storage", "Storage"),
