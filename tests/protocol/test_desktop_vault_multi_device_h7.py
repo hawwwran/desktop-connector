@@ -66,7 +66,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -198,7 +198,13 @@ class MultiDeviceH7Tests(unittest.TestCase):
         self.relay = FakeUploadRelay()
         bootstrap = _make_vault()
         try:
-            seed_sharded_state_from_manifest(bootstrap, self.relay, manifest)
+            seed_sharded_state(
+                bootstrap, self.relay,
+                vault_id=manifest["vault_id"],
+                remote_folders=manifest["remote_folders"],
+                created_at=manifest["created_at"],
+                author_device_id=manifest["author_device_id"],
+            )
         finally:
             bootstrap.close()
         self.start_revision = int(manifest["revision"])
@@ -295,18 +301,26 @@ class MultiDeviceH7Tests(unittest.TestCase):
         seed_local.write_bytes(b"shared")
         bootstrap = _make_vault()
         try:
-            # ``upload_file`` is sharded (step 4) — no legacy mirror
-            # needed before it. ``seed_sharded_state_from_manifest``
-            # after the upload keeps the relay's sharded surface
-            # coherent with the result manifest for downstream
-            # legacy-side reads.
+            # ``upload_file`` is sharded — no legacy mirror needed
+            # before it. ``seed_sharded_state`` after the upload keeps
+            # the relay's sharded surface coherent with the result
+            # state for downstream observers.
             res = upload_file(
                 vault=bootstrap, relay=self.relay, manifest=self._decrypt_head(),
                 local_path=seed_local, remote_folder_id=DOCS_ID,
                 remote_path="shared.txt", author_device_id=AUTHOR,
             )
-            seed_sharded_state_from_manifest(bootstrap, self.relay, assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard}))
-            seeded_revision = int(assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})["revision"])
+            _unified = assemble_unified_manifest(
+                res.root, {res.remote_folder_id: res.shard},
+            )
+            seed_sharded_state(
+                bootstrap, self.relay,
+                vault_id=_unified["vault_id"],
+                remote_folders=_unified["remote_folders"],
+                created_at=_unified["created_at"],
+                author_device_id=_unified["author_device_id"],
+            )
+            seeded_revision = int(_unified["revision"])
         finally:
             bootstrap.close()
 

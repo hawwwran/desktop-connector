@@ -405,7 +405,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            seed_sharded_state_from_manifest,
+            seed_sharded_state,
         )
 
         # Use the master-key-bound test vault id so encrypt/decrypt match.
@@ -470,7 +470,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         relay_a = FakeUploadRelay()
         vault = make_vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay_a, empty)
+            seed_sharded_state(
+                vault, relay_a,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             local_a = self.tmpdir / "exported.txt"
             local_a.write_bytes(b"exported content for the import flow")
             uploaded = upload_file(
@@ -502,7 +508,13 @@ class VaultImportRunnerTests(unittest.TestCase):
             # the merged-shard publish lands. Reset counters after the
             # seed so the assertion below counts only run_import's
             # publishes.
-            seed_sharded_state_from_manifest(vault, relay_b, empty)
+            seed_sharded_state(
+                vault, relay_b,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             relay_b.published_shards = []
             relay_b.published_roots = []
             result = run_import(
@@ -547,7 +559,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            seed_sharded_state_from_manifest,
+            seed_sharded_state,
         )
 
         VAULT_ACCESS_SECRET = "vault-secret"
@@ -574,7 +586,13 @@ class VaultImportRunnerTests(unittest.TestCase):
             manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
         )
         try:
-            seed_sharded_state_from_manifest(vault, relay, empty)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay,
@@ -625,7 +643,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            seed_sharded_state_from_manifest,
+            seed_sharded_state,
         )
 
         VAULT_ACCESS_SECRET = "vault-secret"
@@ -685,7 +703,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         relay_a = FakeUploadRelay()
         vault = make_vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay_a, empty)
+            seed_sharded_state(
+                vault, relay_a,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             local_a = self.tmpdir / "exported.txt"
             local_a.write_bytes(b"exported bytes for the preview")
             uploaded = upload_file(
@@ -738,7 +762,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         relay_b = FakeUploadRelay()
         vault = make_vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay_b, empty)
+            seed_sharded_state(
+                vault, relay_b,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             _contents, _manifest, preview_empty = open_bundle_for_preview(
                 vault=vault,
                 relay=relay_b,
@@ -774,7 +804,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            seed_sharded_state_from_manifest,
+            seed_sharded_state,
         )
 
         VAULT_ACCESS_SECRET = "vault-secret"
@@ -834,7 +864,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         export_relay = FakeUploadRelay()
         vault = make_vault()
         try:
-            seed_sharded_state_from_manifest(vault, export_relay, empty)
+            seed_sharded_state(
+                vault, export_relay,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             local = self.tmpdir / "exported.txt"
             local.write_bytes(b"some bytes")
             uploaded = upload_file(
@@ -859,7 +895,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         recording_relay = FakeUploadRelay()
         vault = make_vault()
         try:
-            seed_sharded_state_from_manifest(vault, recording_relay, empty)
+            seed_sharded_state(
+                vault, recording_relay,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             # Reset counters after the seed so we only see preview activity.
             put_calls_before = list(recording_relay.put_calls)
             published_shards_before = list(recording_relay.published_shards)
@@ -918,7 +960,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
         from tests.protocol.test_desktop_vault_upload import (
             FakeUploadRelay,
-            seed_sharded_state_from_manifest,
+            seed_sharded_state,
         )
 
         PICS_ID = "rf_v1_bbbbbbbbbbbbbbbbbbbbbbbb"
@@ -988,7 +1030,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         relay_a = FakeUploadRelay()
         vault = make_vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay_a, manifest_a)
+            seed_sharded_state(
+                vault, relay_a,
+                vault_id=manifest_a['vault_id'],
+                remote_folders=manifest_a['remote_folders'],
+                created_at=manifest_a['created_at'],
+                author_device_id=manifest_a['author_device_id'],
+            )
             local_pic = self.tmpdir / "exported.png"
             local_pic.write_bytes(b"\x89PNG\r\n\x1a\n" + b"a" * 100)
             uploaded = upload_file(
@@ -1027,7 +1075,13 @@ class VaultImportRunnerTests(unittest.TestCase):
         relay_b = FakeUploadRelay()
         vault = make_vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay_b, manifest_b_initial)
+            seed_sharded_state(
+                vault, relay_b,
+                vault_id=manifest_b_initial['vault_id'],
+                remote_folders=manifest_b_initial['remote_folders'],
+                created_at=manifest_b_initial['created_at'],
+                author_device_id=manifest_b_initial['author_device_id'],
+            )
             relay_b.published_shards = []
             relay_b.published_roots = []
             result = run_import(

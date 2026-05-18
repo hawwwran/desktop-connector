@@ -60,7 +60,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -107,7 +107,13 @@ class _BatchTestBase(unittest.TestCase):
         relay = BatchProbeRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         # Discard the setup publish so the per-test counters start clean.

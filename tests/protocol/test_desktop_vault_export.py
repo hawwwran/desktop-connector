@@ -40,7 +40,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -485,7 +485,13 @@ def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, 
     relay = FakeUploadRelay()
     vault = _vault()
     try:
-        seed_sharded_state_from_manifest(vault, relay, manifest)
+        seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         current_manifest = manifest
         for relative, content in files.items():
             local = tmpdir / relative.replace("/", "_")

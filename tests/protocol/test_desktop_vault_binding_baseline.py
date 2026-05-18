@@ -38,7 +38,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -82,7 +82,13 @@ class VaultBaselineTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             current = manifest
             for path, content in files.items():
                 local = self.tmpdir / "src_" / path.replace("/", "_")
@@ -104,7 +110,13 @@ class VaultBaselineTests(unittest.TestCase):
                 )
                 current["revision"] = int(current["revision"]) + 1
                 current["parent_revision"] = current["revision"] - 1
-                seed_sharded_state_from_manifest(vault, relay, current)
+                seed_sharded_state(
+                vault, relay,
+                vault_id=current['vault_id'],
+                remote_folders=current['remote_folders'],
+                created_at=current['created_at'],
+                author_device_id=current['author_device_id'],
+            )
         finally:
             vault.close()
         observer = _vault()

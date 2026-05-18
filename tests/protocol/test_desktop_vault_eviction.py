@@ -34,7 +34,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -60,7 +60,13 @@ class VaultEvictionPassTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="old.txt",
@@ -101,7 +107,13 @@ class VaultEvictionPassTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="fresh.txt",
@@ -135,7 +147,13 @@ class VaultEvictionPassTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             for path, deleted_at in [
                 ("expired.txt", "2026-04-01T10:00:00.000Z"),
                 ("fresh.txt", "2026-05-03T10:00:00.000Z"),
@@ -182,7 +200,13 @@ class VaultEvictionPassTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             v1 = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="doc.txt",
@@ -228,7 +252,13 @@ class VaultEvictionPassTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="untouchable.txt",
@@ -266,7 +296,13 @@ class VaultEvictionPassTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=manifest, local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="stranded.txt",
@@ -323,7 +359,13 @@ class VaultEvictionPassTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             for path, deleted_at in [
                 ("expired.txt", "2026-04-01T10:00:00.000Z"),
                 ("fresh.txt", "2026-05-03T10:00:00.000Z"),

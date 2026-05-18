@@ -36,7 +36,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -127,7 +127,13 @@ class TwoWayCycleTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         return relay, manifest
@@ -176,7 +182,13 @@ class TwoWayCycleTests(unittest.TestCase):
         next_manifest["author_device_id"] = AUTHOR
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, next_manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=next_manifest['vault_id'],
+                remote_folders=next_manifest['remote_folders'],
+                created_at=next_manifest['created_at'],
+                author_device_id=next_manifest['author_device_id'],
+            )
         finally:
             vault.close()
         return next_manifest
@@ -959,7 +971,13 @@ class TwoWayFetchManifestPerOpTests(unittest.TestCase):
         relay = _CountingTwoWayRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         # Discard setup-time get_root calls so the assertions count
@@ -1068,7 +1086,13 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         relay = _TwoWayBatchProbeRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         relay.publish_attempt_count = 0

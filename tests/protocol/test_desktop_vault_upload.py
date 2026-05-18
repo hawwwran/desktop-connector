@@ -87,7 +87,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -136,7 +142,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         try:
             from src.vault.upload import upload_folder
 
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -174,7 +186,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -217,7 +235,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -272,7 +296,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay(quota_after_n_chunks=1)
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -306,7 +336,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -383,7 +419,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -492,7 +534,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         cache_dir = self.tmpdir / "resume_cache"
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -572,7 +620,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         cache_dir = self.tmpdir / "resume_cache"
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -653,7 +707,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         cache_dir = self.tmpdir / "resume_cache"
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -753,7 +813,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         ):
             vault = _vault()
             try:
-                seed_sharded_state_from_manifest(vault, relay, manifest)
+                seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
                 relay.published_shards = []
                 relay.published_roots = []
                 upload_file(
@@ -787,7 +853,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         vault = _vault()
         progress: list = []
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -908,7 +980,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -944,7 +1022,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -978,7 +1062,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -1032,7 +1122,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -1073,7 +1169,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -1113,7 +1215,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         seed_vault = _vault()
         try:
-            seed_sharded_state_from_manifest(seed_vault, relay, manifest)
+            seed_sharded_state(
+                seed_vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -1198,7 +1306,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         seed_vault = _vault()
         try:
-            seed_sharded_state_from_manifest(seed_vault, relay, manifest)
+            seed_sharded_state(
+                seed_vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -1267,7 +1381,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         vault_a = _vault()
         vault_b = _vault()
         try:
-            seed_sharded_state_from_manifest(vault_a, relay, manifest)
+            seed_sharded_state(
+                vault_a, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -1314,7 +1434,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
@@ -1364,7 +1490,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = FakeUploadRelay()
         seed_vault = _vault()
         try:
-            seed_sharded_state_from_manifest(seed_vault, relay, manifest)
+            seed_sharded_state(
+                seed_vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             relay.published_shards = []
             relay.published_roots = []
             _seed = upload_folder(
@@ -1455,7 +1587,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         vault_a = _vault()
         vault_b = _vault()
         try:
-            seed_sharded_state_from_manifest(vault_a, relay, manifest)
+            seed_sharded_state(
+                vault_a, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             relay.published_shards = []
             relay.published_roots = []
             from src.vault.upload.folder_state import fetch_folder_state
@@ -1539,7 +1677,13 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         relay = ConflictInjectingRelay()
         seed_vault = _vault()
         try:
-            seed_sharded_state_from_manifest(seed_vault, relay, manifest)
+            seed_sharded_state(
+                seed_vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
             relay.published_shards = []
             relay.published_roots = []
             seed_res = upload_file(
@@ -1716,9 +1860,8 @@ class FakeUploadRelay:
         self.batch_head_calls: list[list[str]] = []
         self._quota_remaining = quota_after_n_chunks
         # Phase H sharded surface (root + per-folder shards). Seed via
-        # :func:`seed_sharded_state_from_manifest` from a unified
-        # manifest dict, or call publish_root_manifest /
-        # publish_shard_with_root directly.
+        # :func:`seed_sharded_state` from per-folder dicts, or call
+        # publish_root_manifest / publish_shard_with_root directly.
         self.root_envelope: bytes = b""
         self.root_revision: int = 0
         self.root_hash: str = ""
@@ -1983,20 +2126,32 @@ class FakeUploadRelay:
         }
 
 
-def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
-    """Seed a FakeUploadRelay's sharded state from a unified manifest.
+def seed_sharded_state(
+    vault, relay, *,
+    vault_id: str,
+    remote_folders: list,
+    created_at: str,
+    author_device_id: str,
+) -> None:
+    """Seed a FakeUploadRelay's sharded state from per-folder dicts.
 
-    Translates a unified manifest dict (the ergonomic shape callers
-    build with ``make_manifest`` / ``make_remote_folder``) into the
-    sequence of ``publish_root_manifest`` + ``publish_shard_with_root``
-    calls that mirror what a fresh vault would emit after each folder
-    was added and populated. Bumps the root chain by one publish per
+    ``remote_folders`` is a list of folder dicts (shape matches
+    ``make_remote_folder()``'s output — id, display_name_enc, entries,
+    optional retention/ignore_patterns/state). Emits the sequence of
+    ``publish_root_manifest`` + ``publish_shard_with_root`` calls that
+    mirror what a fresh vault would publish after each folder was
+    added and populated. Bumps the root chain by one publish per
     folder so each folder's pointer carries its actual shard_hash
     (auto-patched by publish_shard_with_root).
 
-    Re-runnable: a subsequent call diffs the manifest against the
-    relay's current shards and prunes any shards for folders the new
-    manifest no longer mentions.
+    Re-runnable: a subsequent call diffs the new folder set against
+    the relay's current shards and prunes any shards for folders the
+    new set no longer mentions.
+
+    Phase H step 7f: replaces the legacy
+    ``seed_sharded_state_from_manifest(vault, relay, manifest)`` shape;
+    test fixtures no longer build a unified manifest just to feed it
+    into the seed helper.
     """
     from src.vault.manifest import (
         make_folder_shard,
@@ -2004,15 +2159,10 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
         make_root_manifest,
     )
 
-    folders = list(manifest.get("remote_folders", []) or [])
-    created_at = str(manifest.get("created_at", ""))
-    author = str(manifest.get("author_device_id", ""))
-    vault_id = str(manifest.get("vault_id", "")) or vault.vault_id
+    folders = list(remote_folders or [])
+    vault_id = vault_id or vault.vault_id
 
-    # Prune any shards for folders the manifest no longer includes
-    # (e.g., a prior seed staged folder X and a subsequent reseed
-    # removes it). Without this, ``relay.shards`` keeps a stale entry
-    # that's not in the new root — silently inconsistent.
+    # Prune any shards for folders the new set no longer includes.
     manifest_folder_ids = {str(f.get("remote_folder_id", "")) for f in folders}
     for stale_id in list(relay.shards.keys()):
         if stale_id not in manifest_folder_ids:
@@ -2026,7 +2176,7 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
             remote_folder_id=rf_id,
             display_name_enc=str(folder.get("display_name_enc", "")),
             created_at=str(folder.get("created_at", created_at)),
-            created_by_device_id=str(folder.get("created_by_device_id", author)),
+            created_by_device_id=str(folder.get("created_by_device_id", author_device_id)),
             retention_policy=folder.get("retention_policy"),
             ignore_patterns=list(folder.get("ignore_patterns", []) or []),
             state=str(folder.get("state", "active")),
@@ -2039,7 +2189,7 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
         vault_id=vault_id,
         root_revision=next_root_revision,
         parent_root_revision=int(relay.root_revision),
-        created_at=created_at, author_device_id=author,
+        created_at=created_at, author_device_id=author_device_id,
         remote_folders=pointers,
     )
     vault.publish_root_manifest(relay, root)
@@ -2053,7 +2203,7 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
             shard_revision=current_shard_revision + 1,
             parent_shard_revision=current_shard_revision,
             created_at=created_at,
-            author_device_id=author,
+            author_device_id=author_device_id,
             entries=list(folder.get("entries", []) or []),
         )
         # publish_shard_with_root requires a fresh root revision; bump
@@ -2063,7 +2213,7 @@ def seed_sharded_state_from_manifest(vault, relay, manifest: dict) -> None:
         next_root["root_revision"] = int(current_root["root_revision"]) + 1
         next_root["parent_root_revision"] = int(current_root["root_revision"])
         next_root["created_at"] = created_at
-        next_root["author_device_id"] = author
+        next_root["author_device_id"] = author_device_id
         vault.publish_shard_with_root(relay, rf_id, shard, next_root)
 
 

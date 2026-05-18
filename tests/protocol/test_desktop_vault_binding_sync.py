@@ -40,7 +40,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -89,7 +89,13 @@ class BackupOnlySyncTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         return relay, manifest
@@ -472,7 +478,13 @@ class FetchManifestPerOpTests(unittest.TestCase):
         relay = CountingRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         # Discard any get_root calls from setup so the assertions
@@ -691,7 +703,13 @@ class FlushAndSyncTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
 
@@ -757,7 +775,13 @@ class FlushAndSyncTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         binding = self.store.create_binding(
@@ -804,7 +828,13 @@ class FlushAndSyncTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, manifest)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
         finally:
             vault.close()
         binding = self.store.create_binding(

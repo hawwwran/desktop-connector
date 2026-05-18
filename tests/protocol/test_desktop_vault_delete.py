@@ -44,7 +44,7 @@ from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
 )
 from tests.protocol.test_desktop_vault_upload import (  # noqa: E402
     FakeUploadRelay,
-    seed_sharded_state_from_manifest,
+    seed_sharded_state,
 )
 
 
@@ -242,7 +242,13 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         import logging as _logging
         with self.assertLogs("src.vault.ops.delete", level="INFO") as cm:
             try:
-                seed_sharded_state_from_manifest(vault, relay, manifest)
+                seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
                 # Reset publish counters so the test counts only the
                 # upload + delete (not the seed's bootstrap publishes).
                 relay.published_shards = []
@@ -286,7 +292,13 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, empty)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             for sub in ("Invoices/2026/a.pdf", "Invoices/2026/b.pdf", "Photos/p.jpg"):
                 local = self.tmpdir / sub.replace("/", "_")
                 local.write_bytes(f"content for {sub}".encode("utf-8"))
@@ -322,7 +334,13 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, empty)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             for sub in ("Invoices/2026/a.pdf", "Invoices/2026/b.pdf", "Photos/p.jpg"):
                 local = self.tmpdir / sub.replace("/", "_")
                 local.write_bytes(f"content for {sub}".encode("utf-8"))
@@ -378,7 +396,13 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, empty)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             v1 = upload_file(
                 vault=vault, relay=relay, manifest=_empty_manifest(),
                 local_path=local, remote_folder_id=DOCS_ID,
@@ -432,7 +456,13 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         relay = FakeUploadRelay()
         vault = _vault()
         try:
-            seed_sharded_state_from_manifest(vault, relay, empty)
+            seed_sharded_state(
+                vault, relay,
+                vault_id=empty['vault_id'],
+                remote_folders=empty['remote_folders'],
+                created_at=empty['created_at'],
+                author_device_id=empty['author_device_id'],
+            )
             uploaded = upload_file(
                 vault=vault, relay=relay, manifest=_empty_manifest(),
                 local_path=local, remote_folder_id=DOCS_ID,
