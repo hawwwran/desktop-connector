@@ -32,3 +32,8 @@ Continuing autonomously into the High section.
 - 2026-05-17 — fixed §2.H1 (commit dbd11a9): hoist root-fetch floor check before the four cache writes so a rolled-back relay can't clobber the last-good cache.
 - 2026-05-17 — fixed §3.H1 (commit e26cf1b): observe_with_detector records the event before forwarding; trip-causing event no longer leaks into the pending-ops queue.
 - 2026-05-17 — fixed §1.H2 (commit 88802d3): getChunk applies isUserVisibleChunkState filter; GC-window race window closed.
+- 2026-05-17 — fixed §3.H2 (commit 7bf3df4): download_folder threads should_continue; Cancel button bails within ~1 chunk of work.
+- 2026-05-17 — fixed §3.H3 (commit 11f0e69): single-file downloads stream via atomic_write_chunks; peak RAM drops to ~1 chunk.
+- 2026-05-17 — fixed §3.H4 (commit c98e913): two-way tombstone declines unlink fallback when gio is missing; op marks trash_failed instead of silent permanent delete.
+- 2026-05-17 — fixed §3.H5 (commit 095523b): WatcherCoordinator now locks _pending/debouncer/gate across observer + tick threads.
+- 2026-05-17 — fixed §6.H4 (commit 45abecc): passphrase generator uses PasswordEntry + 30 s clipboard auto-clear + clipboard-manager tip.

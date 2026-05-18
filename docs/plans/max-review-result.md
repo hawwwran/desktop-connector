@@ -361,31 +361,29 @@ Exfiltration: attacker creates `~/Documents/note.txt -> /etc/shadow` in a Docume
 
 **Fix:** re-order — `detector.record` → check tripped → if tripped, do NOT call `wrapped_observe`. Or gate `coalesce_op` on the detector verdict.
 
-#### §3.H2 — `download_folder` is uncancellable; `_get_chunk_with_retry` can block 4 × 60 s × N chunks
+#### ~~§3.H2~~ — `download_folder` is uncancellable; `_get_chunk_with_retry` can block 4 × 60 s × N chunks
+**Fix landed:** 7bf3df4 2026-05-17
 **File:** `desktop/src/vault/download/folder.py:46-123`
 
-No `should_continue` parameter. A folder restore hitting a missing chunk burns `4 × 60 s × N` before returning. Single-file path threads cancellation; folder doesn't.
+**Approach:** Thread `should_continue` through `download_folder` and the per-chunk retry. New diagnostics event `vault.download.folder_cancelled`.
 
-#### §3.H3 — `download_latest_file` / `download_version` buffer entire plaintext in RAM
+#### ~~§3.H3~~ — `download_latest_file` / `download_version` buffer entire plaintext in RAM
+**Fix landed:** 11f0e69 2026-05-17
 **File:** `desktop/src/vault/download/single_file.py:97, 135, 147, 209, 245, 259`
 
-`plaintext_parts: list[bytes]` accumulates every decrypted chunk; `data = b"".join(plaintext_parts)` peaks at `~2× file size`. For the 2 GiB per-file cap → ~4 GiB. Baseline restore of a multi-GB file OOMs the tray subprocess. Folder path streams correctly — single-file is asymmetrical.
+**Approach:** Generator-driven `atomic_write_chunks` in both single-file paths; peak RAM drops from `2 × file_size` to `~1 chunk`.
 
-**Fix:** stream chunks via `atomic_write_chunks` (already exists).
-
-#### §3.H4 — Two-way `trash_path` falls back to `unlink()` when `gio` missing → silent data loss
+#### ~~§3.H4~~ — Two-way `trash_path` falls back to `unlink()` when `gio` missing → silent data loss
+**Fix landed:** c98e913 2026-05-17
 **File:** `desktop/src/vault/binding/twoway.py:586`, `ops/trash.py:67-75`
 
-`allow_unlink_fallback=True` default. On minimal Linux installs, remote tombstones permanently unlink local files with no UI signal. `can_use_trash()` is consulted per-call, never at startup.
+**Approach:** Pass `allow_unlink_fallback=False` from twoway's tombstone branch. Missing `gio` now marks the op `trash_failed` (visible to the user) and leaves the file in place rather than silently unlinking it.
 
-**Fix:** detect at runtime start; pause binding with banner if unavailable. Or pass `allow_unlink_fallback=False`.
-
-#### §3.H5 — `WatcherCoordinator._pending` and `_debouncer._last_seen` unlocked between watchdog and tick threads
+#### ~~§3.H5~~ — `WatcherCoordinator._pending` and `_debouncer._last_seen` unlocked between watchdog and tick threads
+**Fix landed:** 095523b 2026-05-17
 **File:** `desktop/src/vault/binding/filesystem_watcher.py:191`
 
-Two threads mutate the same dicts. Compound RMW (`existing = self._pending.get(path); existing.last_event_at = now_t`) races against tick's `_pending.pop`. Worst case: tick enqueues and pops; observe resets `existing.enqueued = False` on the same `_PendingPath` — gate reopens on a path the sync cycle is mid-publishing.
-
-**Fix:** `threading.Lock` around `_pending` access.
+**Approach:** Single coarse `threading.Lock` on `WatcherCoordinator` covers all four mutable dicts (pending, debouncer, gate, snapshots). 8-thread × 200-iter smoke test asserts no deadlock + no exception during concurrent observe/tick.
 
 #### §3.H6 — Preflight uses stale manifest snapshot; baseline fetches fresh — diff staleness window
 **File:** `desktop/src/vault_folders/dialog_connect_local.py:89` → `folder/runtime.py:241`
@@ -667,12 +665,11 @@ A v1 vault that can grant device access but cannot revoke it has no defence agai
 
 **Fix:** wire them up or remove the menu entries.
 
-#### §6.H4 — Passphrase generator window leaks the passphrase
+#### ~~§6.H4~~ — Passphrase generator window leaks the passphrase
+**Fix landed:** 45abecc 2026-05-17
 **File:** `desktop/src/windows_vault/passphrase_generator.py:65-87`
 
-(a) Rendered in a non-password `Gtk.Entry` — visible to screen-readers/screenshots; no peek/reveal toggle. (b) Copy writes plaintext to the system clipboard with no auto-clear timer and no warning about clipboard managers. (c) 720×320 window is conspicuous.
-
-**Fix:** `Gtk.PasswordEntry` with peek-icon. 30 s clipboard auto-clear timer with countdown. Clipboard-manager tip.
+**Approach:** `Gtk.PasswordEntry` with peek-icon (obscured by default); 30 s clipboard auto-clear with 1 s countdown via `GLib.timeout_add`; clipboard-manager warning appended to the tip text.
 
 #### §6.H5 — Cancel handlers don't honour `on_cancel` contract in Danger flows
 **File:** `desktop/src/windows_vault/fresh_unlock_prompt.py:199-254`
