@@ -426,6 +426,16 @@ def prepare_upload_for_batch(
     ``PreparedUpload(skipped_identical=True, ...)`` without touching
     the relay. The caller stamps the local-entry row and drops the
     pending-op without growing the batch.
+
+    Review §3.M4 — *read-at-prep, not at-enqueue.* The watcher coalesces
+    every event on a single path into one pending-op via
+    ``coalesce_op``; the actual ``_hash_file`` + ``_build_chunk_plan``
+    reads happen here, at prep time, after the stability gate (3 s
+    local / 10 s network) has settled the file. The bytes uploaded
+    therefore reflect the file's state at batch-fire time, not the
+    state at the moment of the first watcher event in a burst — this
+    is **last-write-wins by design**, not a race. A 200-event burst
+    on one file produces exactly one upload with the final bytes.
     """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
