@@ -190,6 +190,24 @@ def eviction_pass(
         stages.append(stage_1)
         bytes_freed += stage_1.bytes_freed
         chunks_freed += stage_1.chunks_freed
+        # Review §4.H4: when stage 1 finishes cleanup-only (the
+        # shard had stale references but no expired tombstones to
+        # actually evict), surface that to the operator BEFORE we
+        # cascade into stage 2's destructive forced-eviction. The
+        # user clicked "Free X bytes" — they should know the
+        # housekeeping pass freed nothing and we're about to
+        # destroy unexpired tombstones to make space.
+        if (
+            stage_1.bytes_freed == 0
+            and stage_1.chunks_freed == 0
+            and target_bytes_to_free > 0
+        ):
+            log.warning(
+                "vault.eviction.cleanup_only_cascade_to_force "
+                "target=%d freed_bytes=0 — stage_1 was cleanup-only, "
+                "escalating to forced-eviction stage 2 (destructive)",
+                target_bytes_to_free,
+            )
 
     if target_bytes_to_free > 0 and bytes_freed >= target_bytes_to_free:
         return EvictionResult(

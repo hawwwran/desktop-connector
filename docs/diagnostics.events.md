@@ -431,6 +431,7 @@ relay log (filenames are local-only).
 | `vault.eviction.cancelled` | desktop | info | `vault`, `before_stage`, `freed_bytes` | F-U03 — between-stage cancel; coherent state preserved |
 | `vault.eviction.cas_exhausted` | desktop | warning | `vault`, `folder`, `retries` | F-D25 — eviction retry budget exhausted on one folder's shard publish; raised the CAS error to caller |
 | `vault.eviction.cas_retry` | desktop | info | `attempt`, `folder`, `shard_conflict`, `root_conflict` | Phase H — per-folder eviction shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
+| `vault.eviction.cleanup_only_cascade_to_force` | desktop | warning | `target` | Review §4.H4 — stage 1 ran cleanup-only (shard had stale references but no expired tombstones); the eviction is now escalating to stage 2's destructive forced-eviction because the user asked for `target_bytes_to_free > 0`. Surfacing the cascade so operators can correlate it with "I asked to free space and unexpired tombstones got purged" reports |
 | `vault.eviction.no_more_candidates` | desktop | info | `vault_id` | Quota pressure ran out of evictable old versions |
 | `vault.eviction.shard_cleanup_only` | desktop | info | `event`, `stale_chunk_refs`, `paths` | Crash-recovery — server reported `safe_to_delete=[]` but `already_deleted_chunk_ids` for stale shard entries; ran shard cleanup without re-running `gc_execute` |
 | `vault.eviction.tombstone_purged_early` | desktop | info | `vault_id`, `path` | Tombstone purged before retention horizon under quota pressure |
