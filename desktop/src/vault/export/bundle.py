@@ -60,6 +60,12 @@ ARGON_DEFAULT_MEMORY_KIB = 131_072  # 128 MiB
 ARGON_DEFAULT_ITERATIONS = 4
 ARGON_DEFAULT_PARALLELISM = 1
 
+# Review §5.M5 — bottom-of-the-stack floor for export passphrases.
+# Below this the Argon2id derivation alone is brittle against offline
+# guessing. The wizard UI picks a higher bar; this is just the safety
+# net against a power-user supplying ``"x"`` directly.
+EXPORT_PASSPHRASE_MIN_LEN = 8
+
 OUTER_HEADER_BYTES = 57
 WRAPPED_KEY_BYTES = 48  # 32-byte export_file_key + 16-byte Poly1305 tag
 RECORD_LEN_BYTES = 4
@@ -170,6 +176,21 @@ def write_export_bundle(
     """
     if vault.vault_access_secret is None:
         raise ValueError("vault is closed")
+
+    # Review §5.M5 — refuse exporting under a trivially-weak passphrase.
+    # The export wrap key is Argon2id-derived from the passphrase; a
+    # one-character secret reduces the recovery cost to a single
+    # Argon2id evaluation per guess (still memory-hard, but well within
+    # offline brute-force reach for short passphrases). The floor here
+    # is intentionally permissive — it's not an entropy meter, just a
+    # tripwire against the worst-case ``"x"``. The UI restricts the
+    # picker to a higher bar separately.
+    if not isinstance(passphrase, str) or len(passphrase) < EXPORT_PASSPHRASE_MIN_LEN:
+        raise ExportError(
+            "vault_export_passphrase_too_short",
+            f"export passphrase must be at least {EXPORT_PASSPHRASE_MIN_LEN} "
+            f"characters; got {len(passphrase) if isinstance(passphrase, str) else 0}",
+        )
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -631,6 +652,7 @@ __all__ = [
     "ExportResult",
     "EXPORT_BUNDLE_SCHEMA",
     "EXPORT_FORMAT_VERSION",
+    "EXPORT_PASSPHRASE_MIN_LEN",
     "RECORD_TYPE_CHUNK",
     "RECORD_TYPE_FOOTER",
     "RECORD_TYPE_HEADER",

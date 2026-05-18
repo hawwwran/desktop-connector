@@ -207,7 +207,27 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
 
         # ---------------------------------------------------------------
 
+        def _wipe_passphrase() -> None:
+            """Review §5.M1 — best-effort passphrase wipe.
+
+            Python ``str`` is immutable, so the bytes can't be zeroed
+            in-place; the heap allocation stays until GC collects it.
+            But we can drop our explicit references immediately so the
+            string isn't pinned by the wizard's ``state`` dict for the
+            rest of the window's lifetime. The entry widget's buffer
+            is also cleared so the visible field doesn't carry the
+            text past the operation.
+            """
+            state["passphrase"] = ""
+            state.pop("passphrase", None)
+            try:
+                passphrase_entry.set_text("")
+            except Exception:  # noqa: BLE001
+                # Wizard already torn down; nothing to clear.
+                pass
+
         def cancel(_btn=None) -> None:
+            _wipe_passphrase()
             win.close()
 
         def update_open_btn_sensitive() -> None:
@@ -408,6 +428,8 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                 except SyncCancelledError:
                     def cancelled() -> bool:
                         import_cancel_event["event"] = None
+                        # Review §5.M1 — drop the passphrase on cancel.
+                        _wipe_passphrase()
                         summary_title.set_label("Import cancelled")
                         summary_body.set_label(
                             "Import was cancelled before publish. Any chunks already "
@@ -423,6 +445,9 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
 
                     def fail() -> bool:
                         import_cancel_event["event"] = None
+                        # Review §5.M1 — drop the passphrase reference
+                        # now that the import flow is done.
+                        _wipe_passphrase()
                         summary_title.set_label("Import failed")
                         summary_body.set_label(error_message)
                         go_to("summary")
@@ -432,6 +457,8 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
 
                 def succeed() -> bool:
                     import_cancel_event["event"] = None
+                    # Review §5.M1 — same terminal cleanup on success.
+                    _wipe_passphrase()
                     state["result"] = result
                     if result.action == "refuse":
                         summary_title.set_label("Import refused")

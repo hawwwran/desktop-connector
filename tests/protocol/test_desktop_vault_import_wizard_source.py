@@ -49,6 +49,30 @@ class VaultImportWizardSourceTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, source)
 
+    def test_passphrase_best_effort_wipe_on_terminal_paths(self) -> None:
+        """Review §5.M1 — the wizard must drop its passphrase reference
+        on every terminal path (cancel, fail, succeed, cancelled).
+        Python ``str`` immutability rules out true zeroing; the
+        ``_wipe_passphrase`` helper drops the dict reference + clears
+        the visible entry buffer.
+
+        Source-pin: the helper exists, the cancel handler calls it,
+        and every async worker terminal handler (cancelled, fail,
+        succeed) does too. Behavioural coverage would require driving
+        the wizard via AT-SPI, which the rest of this file deliberately
+        avoids.
+        """
+        source = Path(REPO_ROOT, "desktop/src/windows_vault_import.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("_wipe_passphrase", source)
+        # At least four call sites: cancel() + cancelled() + fail() + succeed().
+        self.assertGreaterEqual(
+            source.count("_wipe_passphrase()"), 4,
+            "Review §5.M1: _wipe_passphrase must be invoked from "
+            "every terminal path (cancel, cancelled, fail, succeed)",
+        )
+
     def test_merge_commit_handler_gated_by_fresh_unlock(self) -> None:
         """F-LT11 — the import-merge commit handler must funnel through
         ``require_fresh_unlock_or_prompt`` before kicking off the

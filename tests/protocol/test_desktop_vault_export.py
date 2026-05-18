@@ -297,6 +297,38 @@ class VaultExportVerifierTests(unittest.TestCase):
             )
         self.assertIn(ctx.exception.code, ("vault_export_truncated", "vault_export_tampered"))
 
+    def test_export_refuses_short_passphrase(self) -> None:
+        """Review §5.M5 — bottom-of-the-stack passphrase floor. The
+        wizard restricts the picker UI; this is the safety net against
+        a power-user supplying ``"x"`` via the library API. Pre-fix
+        no length gate existed and Argon2id derivation would happily
+        produce a wrap key for a 1-character secret — well within
+        offline brute-force reach.
+        """
+        from src.vault.export.bundle import EXPORT_PASSPHRASE_MIN_LEN
+        bundle_path = self.tmpdir / "vault.dcvault"
+        manifest, relay = _populated_relay_with(self.tmpdir, {"x.txt": b"y"})
+        vault = _vault()
+        try:
+            with self.assertRaises(ExportError) as ctx:
+                write_export_bundle(
+                    vault=vault, relay=relay,
+                    manifest_envelope=_build_legacy_manifest_envelope(manifest),
+                    manifest_plaintext=manifest,
+                    output_path=bundle_path,
+                    passphrase="x",  # well below the floor
+                    argon_memory_kib=ARGON_MEMORY_KIB,
+                    argon_iterations=ARGON_ITERATIONS,
+                )
+            self.assertEqual(
+                ctx.exception.code, "vault_export_passphrase_too_short",
+            )
+            self.assertIn(str(EXPORT_PASSPHRASE_MIN_LEN), str(ctx.exception))
+        finally:
+            vault.close()
+        # No bundle created.
+        self.assertFalse(bundle_path.exists())
+
     def test_bad_outer_magic_rejected_immediately(self) -> None:
         bundle_path = self._build_bundle(b"correct magic only")
         raw = bytearray(bundle_path.read_bytes())
