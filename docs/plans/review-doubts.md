@@ -157,6 +157,46 @@ the whole import) as a minimal step before the per-folder UI.
 
 ---
 
+## §6.H2 — Revoke-device UI (entire Devices tab)
+
+Status: skipped-needs-design (new feature build)
+Date: 2026-05-17
+Verified against: `desktop/src/windows_vault/main_window.py:188-207`
+(four tabs — devices, security, sync_safety, storage — are literal
+"This panel is reserved for later development" placeholders);
+`server/src/Controllers/VaultGrantsController.php:420` ships
+`revokeDeviceGrant` + `listGrants` endpoints; `grep -r "Revoking
+this device" desktop/` returns empty.
+Doubt: The server endpoints (revoke + list active/revoked grants)
+are shipped and tested. The desktop side has zero library wrappers
+calling them, and the Devices tab is a placeholder. Building a real
+Revoke UI requires:
+  - A `list_device_grants` / `revoke_device_grant` client helper
+    (HTTP adapter + typed responses + retry/auth glue).
+  - GTK page listing active grants in a card-per-row layout with
+    a per-row Revoke button, "last seen", device_name attribution.
+  - Locked confirmation copy verbatim per §3.3: "Revoking this
+    device prevents future Vault access. It cannot erase data
+    already copied to that device." A locked-string source-pin
+    test so future copy edits don't regress the wording.
+  - Fresh-unlock + admin-role double-gate (existing pattern from
+    `tab_danger.py`).
+  - Reactive refresh of the row list after a successful revoke.
+A v1 vault that can grant device access but cannot revoke it has
+no defence against a lost paired desktop — this is the heaviest
+v1 gap of the §6 batch. Building the surface autonomously violates
+the per-issue protocol's "never build a new feature autonomously"
+rule (~500 LOC of GTK + HTTP + tests + brand styling).
+Action taken: nothing; the spec gap remains open.
+Need from user: decision on (a) build the Devices tab as a
+follow-up PR (sized ~2-3 days; mirrors the Folders tab's shape
+with the destructive-action gate pattern from tab_danger), or
+(b) ship v1 with revoke as a CLI helper / direct curl against
+the server endpoint and document the desktop-UI gap as a v1.x
+target.
+
+---
+
 ## §6.H3 (partial) — Tray Export entry removed pending wizard build
 
 Status: removed-needs-design (new feature build)

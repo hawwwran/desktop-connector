@@ -50,3 +50,21 @@ Continuing autonomously into the High section.
 - 2026-05-17 — fixed §3.H9 (commit 7b276bd): ghost-reaper refuses to demote when shard plaintext missing schema header; prevents self-DDoS.
 - 2026-05-17 — fixed §3.H7 (commit 7838450): _unique_conflict_path atomically reserves via O_CREAT|O_EXCL; TOCTOU between exists() and shutil.move closed.
 - 2026-05-17 — fixed §3.H6 (commit 638cf3d): VaultRuntime.run_initial_baseline refuses when fresh head ≠ preflight head; dialog re-prompts user.
+- 2026-05-17 — fixed §4.H5 (commit 64a3e78): upload resume seeks per-record plaintext_size, not session.chunk_size — last-chunk recovery on non-multiple files works.
+- 2026-05-17 — fixed §4.H4 (commit caa220e): eviction cleanup-only stage 1 emits cascade-to-force warning + diagnostics catalog entry added.
+- 2026-05-17 — fixed §4.H3 (commit 25470a3): clear_vault loops until root is stable; 8-pass cap + clear_pass_cap_hit warning catches abuse.
+- 2026-05-17 — fixed §4.H2 (commit a0859e3): resume _probe_relay_state decrypts the header and asserts genesis_fingerprint; new VaultIdentityMismatchError catches cross-relay vault_id collisions before adopt.
+- 2026-05-17 — fixed §4.H1 (commit 9aecb6d): upload pipeline unlinks session first + tombstone fallback; new reap_expired_sessions sweeps stale top-level JSON at vault open (14-day TTL).
+
+§4 Highs complete (5 of 5: H1, H2, H3, H4, H5).
+
+- 2026-05-17 — fixed §5.H4 (commit cbfe33f): open_bundle_for_preview gains optional relay kwarg + does batch_head_chunks inline; wizard threads the live relay so the preview's "chunks already on relay" count is real before commit.
+- 2026-05-17 — skipped §5.H2 + §5.H3 (logged to review-doubts.md): per-folder conflict resolution UI + access-secret rotation client trigger are new feature builds.
+
+§5 Highs: §5.H1 (d6a2b11), §5.H4 (cbfe33f) fixed; §5.H2 + §5.H3 logged as new-feature builds in review-doubts.md.
+
+- 2026-05-17 — fixed §6.H5 (commit cd76131): tab_danger destructive callsites pass on_cancel to fresh-unlock prompt; explicit cancel feedback in status label.
+- 2026-05-17 — fixed §6.H3 (commit b3d84ad): tray Sync-now does a real autosync kick; Export entry removed pending wizard build (logged to review-doubts.md).
+- 2026-05-17 — skipped §6.H2 (logged to review-doubts.md): Revoke-device UI is a new feature build (Devices tab placeholder + locked §3.3 wording + double-gate).
+
+§6 Highs: §6.H4 (45abecc), §6.H5 (cd76131), §6.H3 (b3d84ad) fixed; §6.H1 partial (0b836aa + review-doubts.md); §6.H2 logged as new-feature build.

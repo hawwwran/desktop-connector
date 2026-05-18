@@ -479,26 +479,29 @@ If the head shard is intermittently corrupt and returns `entries=[]`, every loca
 
 ### High
 
-#### §4.H1 — Upload session marked `complete` before disk unlink can leak permanent JSON files
+#### ~~§4.H1~~ — Upload session marked `complete` before disk unlink can leak permanent JSON files
+**Fix landed:** 9aecb6d 2026-05-17
 **File:** `desktop/src/vault/upload/single_file.py:346-348`, `vault/upload/session.py:119`
 
 `session.phase = "complete"; save_session(...); clear_session(...)`. Crash between → JSON file persists with `phase == "complete"`. `list_resumable_sessions` filters it (correct), but no TTL reaper for top-level session files.
 
-**Fix:** invert order (`clear_session` first, marker on failure), or add a top-level reaper.
+**Approach:** Both ends of the suggested fix at once: (1) inverted the order in `single_file.upload_file` — `clear_session` first, `save(complete)` fallback only if unlink raises; (2) added `reap_expired_sessions` mirroring `reap_expired_stubs` (14-day window, sweeps corrupt JSON + missing `created_at` too, ignores sub-dirs), wired into the same `runtime_watchers` boot site so both reapers run together. New events `vault.sync.session_ttl_reaped`, `vault.upload.session_clear_failed`, `vault.upload.session_tombstone_failed` catalogued.
 
-#### §4.H2 — Resume `complete_pending_publish` doesn't verify the relay vault is *yours*
+#### ~~§4.H2~~ — Resume `complete_pending_publish` doesn't verify the relay vault is *yours*
+**Fix landed:** a0859e3 2026-05-17
 **File:** `desktop/src/vault/resume.py:230-272`
 
 `_probe_relay_state` calls `relay.get_header(vault_id, vault_access_secret)`. No check that the existing relay row's `genesis_fingerprint` matches the master key the local grant decodes. Scenario: user runs wizard on relay A (orphan id created), repoints config to relay B where vault_id collides → resume writes new recovery envelope onto the unrelated vault under local master key. User sees recovery succeed; reality is double-corruption.
 
-**Fix:** decrypt fetched header first, verify genesis_fingerprint matches local master key. Mismatch → `vault_identity_mismatch` + offer Discard.
+**Approach:** `_probe_relay_state` now requires the `master_key` and decrypts the header envelope inline (mirrors `Vault.fetch_header_plaintext`). AEAD-tag failure (bytes encrypted under a stranger's master key) raises a new typed `VaultIdentityMismatchError`. Defense-in-depth: even on decrypt success the embedded `genesis_fingerprint` must equal `_genesis_fingerprint_hex(master_key)` — guards against future header-format changes that might decouple the AEAD key derivation from the genesis anchor. Typed error so GTK can route to "Discard" rather than the generic "Retry" prompt. Existing tests updated to seed real header envelopes via new `_build_real_header_envelope` helper.
 
-#### §4.H3 — `clear_vault` doesn't reload root after each per-folder publish
+#### ~~§4.H3~~ — `clear_vault` doesn't reload root after each per-folder publish
+**Fix landed:** 25470a3 2026-05-17
 **File:** `desktop/src/vault/ops/clear.py:99-121`
 
 Reads root once, iterates folders. Concurrent device adding a folder mid-clear → that folder isn't tombstoned. Audit event `vault.vault.cleared total_tombstoned=N` excludes it.
 
-**Fix:** re-fetch root before each iteration or loop until stable.
+**Approach:** Replaced the single up-front fetch with a `for pass_index in range(8)` loop that re-fetches root each pass, walks only folders not in a `seen_folders` set, and exits early once a pass yields no new folders. 8-pass defensive cap emits `vault.vault.clear_pass_cap_hit` (added to diagnostics catalog) so an operator can spot a malicious device racing the clear with folder creates. Audit event now reports both `total_tombstoned` and `folders`.
 
 #### §4.H4 — Mid-stage eviction crash recovery silently bumps revisions for cleanup-only work
 **File:** `desktop/src/vault/ops/eviction.py:330-391`. Cleanup-only branch returns `bytes_freed=0`; stage 1 re-fires looking for *more* freedom, eventually falls through to stage 4 (`no_more_candidates`). Also logs `vault.eviction.shard_cleanup_only` which isn't in the diagnostics catalog.
@@ -570,24 +573,27 @@ The documented invariant "vault_id AND genesis_fingerprint must both match for m
 
 **Fix:** thread the active vault's decrypted-header `genesis_fingerprint` into the wizard; persist it in the export bundle's `RECORD_TYPE_HEADER` plaintext; require both at the gate.
 
-#### §5.H2 — Per-folder import conflict resolution UI doesn't exist
+#### §5.H2 — Per-folder import conflict resolution UI doesn't exist — *skipped (new feature build)*
+**Status:** logged in `docs/plans/review-doubts.md` §5.H2 — library is ready (`find_conflict_batches`), but a new wizard page between Preview and Progress with N pickers + "Apply to remaining" buttons is ~300 LOC of new UI. Wizard defaults to `rename` (conservative, no data loss), so shipping behaviour stays safe.
 **File:** `desktop/src/windows_vault_import.py:36, 364`
 
 The wizard always passes `ImportMergeResolution(per_folder={})`. Module docstring admits "Conflict-resolution UI…is not yet wired here". Defaults to `rename` per `DEFAULT_CONFLICT_MODE` — conservative (no data loss). But the user **cannot pick** `overwrite` or `skip` per folder, contrary to spec §17's "per-folder conflict batches with 'Apply to remaining'".
 
 **Fix:** wire `find_conflict_batches` into a wizard page between Preview and Progress.
 
-#### §5.H3 — Access-secret rotation has no client trigger
+#### §5.H3 — Access-secret rotation has no client trigger — *skipped (new feature build)*
+**Status:** logged in `docs/plans/review-doubts.md` §5.H3 — library waits for callers; until rotation is wired, nothing breaks. Pre-emptive risk that requires a new tab UI + server endpoint + kit-regeneration prompt to address.
 **File:** `desktop/src/vault/grant/access_rotation.py:65-110`. Library ships `generate_new_secret`, `rotation_request_body`, reminders. No production caller invokes them. Tooltip in `tab_recovery.py:56` says "Recovery-material rotation is not implemented yet".
 
 When rotation lands, every existing recovery kit becomes silently undecryptable on the relay side (right master_key, wrong bearer). There is no kit-regeneration prompt; users will be stranded.
 
-#### §5.H4 — Bundle preview misleads on "chunks already on relay" — never updated
+#### ~~§5.H4~~ — Bundle preview misleads on "chunks already on relay" — never updated
+**Fix landed:** cbfe33f 2026-05-17
 **File:** `desktop/src/windows_vault_import.py:267, 485`
 
 Passes `chunks_already_on_relay=0` with comment "filled at run-time" — but the preview page shows it verbatim ("0 of N chunks already on this relay"). The real `batch_head_chunks` call happens inside `run_import` *after* the user clicks Import. User makes import decisions on bandwidth fantasy.
 
-**Fix:** call `batch_head_chunks` between Open Bundle and Preview render.
+**Approach:** Added optional `relay: ImportRelay | None = None` to `open_bundle_for_preview`. When provided, the function calls `batch_head_chunks` inline and overrides the (now-default-0) `chunks_already_on_relay` parameter. Wizard wires the live relay; preview page now shows real numbers before commit. Round-trip test exports a bundle to relay A and verifies preview against A reports the full count, while preview against empty relay B reports zero.
 
 ### Medium
 
@@ -686,7 +692,8 @@ Material UI lie. The dialog asserts a server-side time fuse; the implementation 
 
 **Fix:** wire tray autosync loop to call `gc/execute` for due purges + amend dialog copy. Or push the schedule to the relay so it fires server-side.
 
-#### §6.H2 — No Revoke-device UI — Devices tab is a placeholder
+#### §6.H2 — No Revoke-device UI — Devices tab is a placeholder — *skipped (new feature build)*
+**Status:** logged in `docs/plans/review-doubts.md` §6.H2 — server endpoints ship; desktop needs Devices tab + locked §3.3 wording + fresh-unlock-and-admin double-gate (~500 LOC new GTK + HTTP).
 **File:** `desktop/src/windows_vault/main_window.py:188-207`
 
 Devices, Security, Sync safety, Storage tabs are literal placeholder Boxes ("This panel is reserved for later development"). Spec at `vault-architecture.md:1010` mandates "Revoke device grant — Alert confirm with §14-locked wording".
@@ -697,12 +704,13 @@ A v1 vault that can grant device access but cannot revoke it has no defence agai
 
 **Fix:** build a minimal Devices tab listing active grants with a per-row "Revoke…" button. Use the locked wording verbatim. Gate behind fresh-unlock + admin role.
 
-#### §6.H3 — Tray submenu "Sync now" and "Export…" are decorative
+#### ~~§6.H3~~ — Tray submenu "Sync now" and "Export…" are decorative
+**Fix landed:** b3d84ad 2026-05-17
 **File:** `desktop/src/tray/vault_submenu.py:138-157, 339-356`
 
 `_vault_sync_now_stub` and `_vault_export_stub` fire a notification saying "this isn't wired yet — open Vault Settings". Memory `feedback_no_fake_tests`: buttons that don't do their advertised work are theatre. An Export bundle is the recommended recovery path for the post-grant scenario (memory `project_vault_multi_device_story`); there's no UI for it at all.
 
-**Fix:** wire them up or remove the menu entries.
+**Approach:** Wired "Sync now" to `_ensure_vault_watcher_runtime()` + `_vault_autosync_kick.set()` — the in-process autosync loop now wakes immediately on click (idempotent, no-op if already running; on exception falls back to the old "check Vault Settings" notification). Removed the "Export…" entry from `vault_submenu_entries`; the wizard build is logged to `review-doubts.md` §6.H3 since it would be a full new GTK subprocess mirroring the import wizard. New events `vault.tray.sync_now.kicked` / `.kick_failed` replace the removed stub events.
 
 #### ~~§6.H4~~ — Passphrase generator window leaks the passphrase
 **Fix landed:** 45abecc 2026-05-17
