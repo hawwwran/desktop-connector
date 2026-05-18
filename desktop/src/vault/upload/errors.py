@@ -23,28 +23,54 @@ class UploadFileTooLargeError(RuntimeError):
 
 
 def describe_quota_exceeded(error: VaultQuotaExceededError) -> dict[str, Any]:
-    """Format a 507 ``vault_quota_exceeded`` for UI surfacing (T6.6).
+    """Format a 507 ``vault_quota_exceeded`` for UI routing.
 
-    Returns ``{eviction_available: bool, used_bytes, quota_bytes, percent,
-    heading, body, primary_action_label}``. The heading + body strings
-    come straight from §D2:
+    Returns ``{alarm: bool, eviction_available: bool, used_bytes,
+    quota_bytes, percent, heading, body, primary_action_label}``.
 
-    - Eviction-available variant offers to free space (the actual eviction
-      pass lands in T7 — for T6.6 the button just sets up the prompt).
-    - No-history variant is the §D2 step-4 terminal banner: sync stopped,
-      no automatic recovery, user must export or migrate.
+    Three outcomes, ordered by triage priority:
+
+    - **``alarm=True``** (``used > quota``): relay reports stored
+      bytes exceed the cap. Under normal operation the server denies
+      overflow at init, so observing this = the relay's quota shrank
+      below previously-stored bytes (or tampering). Caller suspends
+      uploads and prompts for passphrase before any destructive
+      cleanup. ADR ``2026-05-18 — Eviction policy``.
+    - **``eviction_available=True``** and ``alarm=False``: normal
+      "doesn't fit this upload" case. Caller runs the silent
+      auto-purge — no dialog, status text only — to free exactly
+      enough for the failing upload, then retries init.
+    - **``eviction_available=False``**: no destructive material left.
+      Terminal "vault full, no backup history remains" banner; user
+      must export or migrate.
+
+    Heading / body / primary_action_label are populated only for the
+    paths that surface a dialog or banner (alarm + no-history). The
+    silent auto-purge path uses them for diagnostics / status text
+    only.
     """
     used = max(0, int(error.used_bytes or 0))
     quota = max(0, int(error.quota_bytes or 0))
     percent = (used * 100) // quota if quota else 100
-    if error.eviction_available:
-        heading = "Vault is full — make space?"
+    alarm = quota > 0 and used > quota
+    eviction_available = bool(error.eviction_available)
+
+    if alarm:
+        heading = "Vault quota was reduced — approve cleanup"
+        body = (
+            f"The relay reports the vault is now over capacity "
+            f"(used {used} bytes, quota {quota} bytes). This can happen if "
+            "the relay quota was reduced. Type your passphrase to authorize a "
+            "one-time cleanup that brings stored data back under quota."
+        )
+        primary_action_label = "Approve cleanup"
+    elif eviction_available:
+        heading = "Vault is full — making space"
         body = (
             f"This vault is at {percent}% of its quota ({used} / {quota} bytes). "
-            "Old historical versions can be purged to make room for the new upload. "
-            "Eviction lands in T7; for now the upload pauses."
+            "Reclaiming space from the oldest historical versions to fit the upload."
         )
-        primary_action_label = "Make space"
+        primary_action_label = "Continue"
     else:
         heading = "Vault is full and no backup history remains."
         body = (
@@ -53,7 +79,8 @@ def describe_quota_exceeded(error: VaultQuotaExceededError) -> dict[str, Any]:
         )
         primary_action_label = "Open vault settings"
     return {
-        "eviction_available": bool(error.eviction_available),
+        "alarm": alarm,
+        "eviction_available": eviction_available,
         "used_bytes": used,
         "quota_bytes": quota,
         "percent": percent,

@@ -25,13 +25,29 @@ class VaultRelayError(RuntimeError):
 
 
 class VaultQuotaExceededError(VaultRelayError):
-    """Server reported ``vault_quota_exceeded`` (HTTP 507)."""
+    """Server reported ``vault_quota_exceeded`` (HTTP 507).
+
+    Production server emits ``used_bytes`` / ``quota_bytes`` in ``details``
+    (see ``server/src/Http/VaultApiError.php::VaultQuotaExceededError``).
+    The ``*_ciphertext_bytes`` aliases are accepted for fixture
+    backwards-compat; the alarm gate in
+    :func:`describe_quota_exceeded` depends on the values being read
+    correctly so the v1 quota-shrink detection path can fire.
+    """
 
     def __init__(self, error: dict[str, Any]) -> None:
         super().__init__(error, status_code=507)
         details = self.details
-        self.used_bytes = int(details.get("used_ciphertext_bytes") or 0)
-        self.quota_bytes = int(details.get("quota_ciphertext_bytes") or 0)
+        self.used_bytes = int(
+            details.get("used_bytes")
+            or details.get("used_ciphertext_bytes")
+            or 0
+        )
+        self.quota_bytes = int(
+            details.get("quota_bytes")
+            or details.get("quota_ciphertext_bytes")
+            or 0
+        )
         self.eviction_available = bool(details.get("eviction_available", False))
 
 

@@ -496,43 +496,91 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         )
 
     def test_describe_quota_exceeded_offers_eviction_when_history_available(self) -> None:
-        """T6.6 acceptance scenario A: full-with-history-available."""
+        """v1 silent auto-purge: ``used + size > quota`` and ``used <=
+        quota`` → no alarm, no terminal banner; caller runs the silent
+        destructive purge to fit the failing upload.
+        """
         err = VaultQuotaExceededError({
             "code": "vault_quota_exceeded",
             "message": "out of room",
             "details": {
-                "used_ciphertext_bytes": 950,
-                "quota_ciphertext_bytes": 1000,
+                "used_bytes": 950,
+                "quota_bytes": 1000,
                 "eviction_available": True,
             },
         })
         info = describe_quota_exceeded(err)
 
+        self.assertFalse(info["alarm"])
         self.assertTrue(info["eviction_available"])
         self.assertEqual(info["used_bytes"], 950)
         self.assertEqual(info["quota_bytes"], 1000)
         self.assertEqual(info["percent"], 95)
-        self.assertIn("make space", info["heading"].lower())
-        self.assertEqual(info["primary_action_label"], "Make space")
 
     def test_describe_quota_exceeded_terminal_when_no_history(self) -> None:
-        """T6.6 acceptance scenario B: full-with-no-history-remaining."""
+        """No history left → terminal "vault full" banner; user must
+        export or migrate.
+        """
         err = VaultQuotaExceededError({
             "code": "vault_quota_exceeded",
             "message": "out of room",
             "details": {
-                "used_ciphertext_bytes": 1000,
-                "quota_ciphertext_bytes": 1000,
+                "used_bytes": 1000,
+                "quota_bytes": 1000,
                 "eviction_available": False,
             },
         })
         info = describe_quota_exceeded(err)
 
+        self.assertFalse(info["alarm"])
         self.assertFalse(info["eviction_available"])
         self.assertEqual(info["percent"], 100)
         self.assertIn("no backup history", info["heading"].lower())
         self.assertIn("export", info["body"].lower())
         self.assertIn("migrate", info["body"].lower())
+
+    def test_describe_quota_exceeded_alarm_when_used_exceeds_quota(self) -> None:
+        """ADR 2026-05-18 — ``used > quota`` is the tamper / quota-shrink
+        signal. The router must surface ``alarm=True`` so the caller
+        suspends uploads and gates on the recovery passphrase before
+        running any destructive cleanup.
+        """
+        err = VaultQuotaExceededError({
+            "code": "vault_quota_exceeded",
+            "message": "over capacity",
+            "details": {
+                "used_bytes": 1200,
+                "quota_bytes": 1000,
+                "eviction_available": True,
+            },
+        })
+        info = describe_quota_exceeded(err)
+
+        self.assertTrue(info["alarm"])
+        self.assertEqual(info["used_bytes"], 1200)
+        self.assertEqual(info["quota_bytes"], 1000)
+        self.assertIn("quota was reduced", info["heading"].lower())
+        self.assertIn("passphrase", info["body"].lower())
+        self.assertEqual(info["primary_action_label"], "Approve cleanup")
+
+    def test_describe_quota_exceeded_accepts_legacy_ciphertext_keys(self) -> None:
+        """The 507 envelope-key reader accepts both the production
+        ``used_bytes`` / ``quota_bytes`` shape AND the legacy
+        ``*_ciphertext_bytes`` aliases (older fixtures / future
+        rename buffers).
+        """
+        err = VaultQuotaExceededError({
+            "code": "vault_quota_exceeded",
+            "message": "legacy fixture",
+            "details": {
+                "used_ciphertext_bytes": 800,
+                "quota_ciphertext_bytes": 1000,
+                "eviction_available": True,
+            },
+        })
+        info = describe_quota_exceeded(err)
+        self.assertEqual(info["used_bytes"], 800)
+        self.assertEqual(info["quota_bytes"], 1000)
 
     def test_upload_resume_after_simulated_crash_finishes_without_double_put(self) -> None:
         """T6.5 acceptance: kill mid-upload, restart, no chunk uploaded twice."""

@@ -1,8 +1,8 @@
 # Vault eviction v1 — age-ordered auto-purge with quota-shrink passphrase gate
 
-**Status:** decided 2026-05-18; supersedes the §3.C1 needs-design framing in [`unfinished.md`](unfinished.md). Implementation pending.
+**Status:** **landed 2026-05-18**. Supersedes the §3.C1 needs-design framing in [`unfinished.md`](unfinished.md). ADR entry: [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy: age-ordered auto-purge with quota-shrink passphrase gate`.
 
-**Code anchor:** `desktop/src/vault/ops/eviction.py`, `desktop/src/windows_vault_browser/quota.py`, `desktop/src/vault/relay_errors.py`, `docs/architecture-decisions.md`.
+**Code anchor:** `desktop/src/vault/ops/eviction.py` (single age-ordered iterator + `mode={auto,alarm}` parameter), `desktop/src/windows_vault_browser/quota.py` (three-path router: alarm / silent auto-purge / terminal), `desktop/src/vault/upload/errors.py` (`alarm` field in `describe_quota_exceeded` output), `desktop/src/vault/relay_errors.py` (reads both `used_bytes` + legacy `used_ciphertext_bytes`), `docs/architecture-decisions.md`.
 
 ## Decision
 

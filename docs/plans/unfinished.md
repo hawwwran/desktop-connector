@@ -15,11 +15,11 @@ Last reconciled on 2026-05-18.
 
 ## 1. Decided 2026-05-18 — implementation pending, ordered by priority
 
-All 12 entries from the original "needs-design" bucket have agreed designs as of the 2026-05-18 scoping pass. Six are substantial v1 builds with detailed plans in [`vault-v1-build-items.md`](vault-v1-build-items.md); one is the eviction algorithm in [`vault-eviction-v1.md`](vault-eviction-v1.md); two are documentation-only decisions captured as ADR entries; the remaining two (§5.M2, §5.M6) are subordinate fixes bundled into the §5.C1 migration wizard build.
+All 12 entries from the original "needs-design" bucket have agreed designs as of the 2026-05-18 scoping pass. Six are substantial v1 builds with detailed plans in [`vault-v1-build-items.md`](vault-v1-build-items.md); one is the eviction algorithm in [`vault-eviction-v1.md`](vault-eviction-v1.md) (**landed 2026-05-18** — see entry 1 below); two are documentation-only decisions captured as ADR entries; the remaining two (§5.M2, §5.M6) are subordinate fixes bundled into the §5.C1 migration wizard build.
 
 **Ordering criteria.** Entries below are sorted **by risk + dependency**, not by review section number, severity bucket, or implementation cost:
 
-- **Top of list (priorities 1–2)**: live production risk and the biggest v1 UX gap — ship these first.
+- **Top of list (priorities 1–2)**: production-risk closer (entry 1, now landed) and the biggest v1 UX gap — ship these first.
 - **Middle (3–7)**: missing-capability v1 builds. Internal dependencies pin the order (e.g. §6.H2 Devices tab must land before §5.C2 QR-grant ships, because granting devices without an in-app revoke path is worse than no grants).
 - **Lower middle (8)**: housekeeping that's bounded but visible.
 - **Tail (9–10)**: resolved-by-ADR decisions with no code work left.
@@ -29,16 +29,11 @@ A separate "smallest-first" implementation order lives in [`vault-v1-build-items
 
 ---
 
-### 1. §3.C1 — Eviction stages 2/3 hard-purge: `purge_secret` UI *(design decided 2026-05-18)*
+### 1. ~~§3.C1 — Eviction stages 2/3 hard-purge: `purge_secret` UI~~ *(landed 2026-05-18)*
 
-**Why this slot:** only entry that's an active production risk today. The current code auto-destroys recoverable data (unexpired tombstones, oldest versions) on every 507 — the admin-role gate landed in `f621dc1` limits *who* can trigger the destructive purge but does not bound *how much* gets destroyed. The new algorithm caps damage to one upload's worth and adds the quota-shrink passphrase gate.
+**Status:** landed. Stages 2 + 3 merged into a single age-ordered destructive iterator in `desktop/src/vault/ops/eviction.py`; the new alarm gate in `desktop/src/windows_vault_browser/quota.py` opens a passphrase prompt when the relay reports `used > quota`. Audit-log signal split: `vault.eviction.auto_purged_oldest` (silent auto-purge to fit an upload) vs `vault.eviction.alarm_purged_oldest` (post-shrink approved cleanup). Stage 1 housekeeping (`vault.eviction.tombstone_purged_expired`) unchanged.
 
-**Status:** design landed — implementation pending.
-**Plan doc:** [`vault-eviction-v1.md`](vault-eviction-v1.md) — full algorithm, threat model, UX comparison, code pointers, test coverage.
-
-**Summary:** stages 2 + 3 merge into a single age-ordered destructive purge that auto-runs when an upload won't fit (bounded to that upload's projected bytes). A new alarm condition fires the passphrase prompt when the relay reports `used > quota` — the unambiguous signature of a shrunk quota or relay tampering. The earlier `(a)/(b)` choice between "prompt every purge" and "accept admin-only" is superseded; v1 uses a context-sensitive gate instead.
-
-**Action taken:** admin-role gate landed in `f621dc1` (`KIND_FORCED_EVICTION` plan kind, `purpose='forced_eviction'` on `gc/plan` and `gc/execute`).
+**Plan doc:** [`vault-eviction-v1.md`](vault-eviction-v1.md) — algorithm + threat model + UX comparison + test coverage; commit references in [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy`. Admin-role gate (`KIND_FORCED_EVICTION`, `purpose='forced_eviction'`) stays exactly as it landed in `f621dc1`. The pre-existing `used_bytes` / `used_ciphertext_bytes` key-name mismatch in `VaultQuotaExceededError` was fixed to read both — the alarm gate depends on the values being read correctly.
 
 ---
 
@@ -242,21 +237,21 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 
 | Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
 |---|---|---|---|---|---|
-| Criticals | 17 | 14 | 3 (§3.C1, §5.C1, §5.C2) | 0 | 0 |
+| Criticals | 17 | 15 | 2 (§5.C1, §5.C2) | 0 | 0 |
 | Highs | 37 | 32 | 4 (§5.H2, §5.H3, §6.H2, §6.H3) | 1 (§6.H1) | 0 |
 | Mediums | 35 | 31 | 3 (§4.M1, §5.M2, §5.M6) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **81** | **10** | **2** | **20** |
+| **Total** | **113** | **82** | **9** | **2** | **20** |
 
-§5.M2 and §5.M6 are subordinate fixes bundled into the §5.C1 migration wizard build — counted once at the bucket level for visibility, but they share the parent's implementation path. §3.C1 retains its "partial-fixed" tag from the admin-role gate (`f621dc1`); the design landed on top sits in [`vault-eviction-v1.md`](vault-eviction-v1.md).
+§5.M2 and §5.M6 are subordinate fixes bundled into the §5.C1 migration wizard build — counted once at the bucket level for visibility, but they share the parent's implementation path. §3.C1 fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy`).
 
-### Breakdown of the 32 not-fully-fixed-by-code items
+### Breakdown of the 31 not-fully-fixed-by-code items
 
-- **10 design-landed-pending-implementation** (§1 above): 3 Criticals (§3.C1, §5.C1, §5.C2), 4 Highs (§5.H2, §5.H3, §6.H2, §6.H3), 3 Mediums (§4.M1, §5.M2, §5.M6). Each carries a plan-doc link. Implementation work is what's left.
+- **9 design-landed-pending-implementation** (§1 above): 2 Criticals (§5.C1, §5.C2), 4 Highs (§5.H2, §5.H3, §6.H2, §6.H3), 3 Mediums (§4.M1, §5.M2, §5.M6). Each carries a plan-doc link. Implementation work is what's left.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **32 entries are not-yet-fully-fixed-by-code** — 10 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **30 are open work** (10 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **31 entries are not-yet-fully-fixed-by-code** — 9 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **29 are open work** (9 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

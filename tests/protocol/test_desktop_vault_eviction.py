@@ -141,8 +141,9 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertTrue(entry["deleted"])
         self.assertGreater(len(relay.chunks), 0)
 
-    def test_force_purge_runs_stage2_when_target_unmet_after_stage1(self) -> None:
-        # Two tombstones: one expired (for stage 1), one fresh (forces stage 2).
+    def test_force_purge_runs_destructive_loop_when_target_unmet_after_stage1(self) -> None:
+        # Two tombstones: one expired (housekeeping picks it up), one
+        # fresh (destructive loop must drain it).
         manifest = _empty_manifest()
         relay = FakeUploadRelay()
         vault = _vault()
@@ -186,13 +187,13 @@ class VaultEvictionPassTests(unittest.TestCase):
 
         events = [stage.event for stage in result.stages]
         self.assertIn("vault.eviction.tombstone_purged_expired", events)
-        self.assertIn("vault.eviction.tombstone_purged_early", events)
+        self.assertIn("vault.eviction.auto_purged_oldest", events)
         # Both tombstones are gone from the manifest.
         self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "expired.txt"))
         self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "fresh.txt"))
 
-    def test_force_purge_runs_stage3_when_only_old_versions_remain(self) -> None:
-        """A multi-version live file → stage 3 evicts oldest version."""
+    def test_force_purge_walks_oldest_version_when_only_old_versions_remain(self) -> None:
+        """A multi-version live file → destructive loop evicts oldest version."""
         local = self.tmpdir / "doc.txt"
         local.write_bytes(b"v1 content")
 
@@ -233,7 +234,7 @@ class VaultEvictionPassTests(unittest.TestCase):
             vault.close()
 
         events = [stage.event for stage in result.stages]
-        self.assertIn("vault.eviction.version_purged", events)
+        self.assertIn("vault.eviction.auto_purged_oldest", events)
         # Live entry survives but only one version remains.
         entry = find_file_entry(result.manifest, DOCS_ID, "doc.txt")
         self.assertIsNotNone(entry)
@@ -350,10 +351,12 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "stranded.txt"))
 
     def test_stage_purposes_match_destructiveness(self) -> None:
-        """Review §3.C1: stage 1 sends purpose='sync'; stages 2/3 send
-        purpose='forced_eviction' so the relay can gate them at admin
-        role. Asserting on the recorded purposes ensures a refactor
-        can't silently relabel a hard-purge as housekeeping.
+        """ADR 2026-05-18: stage 1 sends purpose='sync'; the destructive
+        loop sends purpose='forced_eviction' so the relay gates it on
+        role=admin. Pinning the recorded purposes ensures a refactor
+        can't silently relabel a hard-purge as housekeeping (a
+        compromised sync-only device must not be able to wipe data
+        inside the 30-day grace window).
         """
         manifest = _empty_manifest()
         relay = FakeUploadRelay()
@@ -398,14 +401,244 @@ class VaultEvictionPassTests(unittest.TestCase):
         purposes = [plan["purpose"] for plan in relay.gc_plans.values()]
         # Stage 1 (expired tombstone) — sync.
         self.assertIn("sync", purposes)
-        # Stage 2 (unexpired tombstone, hard-purge) — forced_eviction.
+        # Destructive loop (unexpired tombstone / oldest version) — forced_eviction.
         self.assertIn("forced_eviction", purposes)
-        # Every plan in stages that the relay would gate on admin must
-        # carry the destructive label.
         sync_plans = [p for p in purposes if p == "sync"]
         forced_plans = [p for p in purposes if p == "forced_eviction"]
         self.assertGreaterEqual(len(sync_plans), 1)
         self.assertGreaterEqual(len(forced_plans), 1)
+
+    def test_auto_purge_drains_oldest_until_upload_fits(self) -> None:
+        """v1 ADR: the destructive loop walks the age-ordered iterator,
+        dropping the oldest candidate until ``target_bytes_to_free`` is
+        met. With two unexpired tombstones, the older one is purged
+        first; the loop stops once the target is satisfied.
+        """
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay()
+        vault = _vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
+            chunk_sizes: dict[str, int] = {}
+            for idx, (path, deleted_at) in enumerate([
+                ("oldest.txt", "2026-05-01T10:00:00.000Z"),
+                ("middle.txt", "2026-05-02T10:00:00.000Z"),
+                ("newest.txt", "2026-05-03T10:00:00.000Z"),
+            ]):
+                local = self.tmpdir / path
+                local.write_bytes(f"content for {path} #{idx}".encode("utf-8"))
+                head = _decrypt_current_manifest(vault, relay) if relay.root_envelope else manifest
+                uploaded = upload_file(
+                    vault=vault, relay=relay, manifest=head, local_path=local,
+                    remote_folder_id=DOCS_ID, remote_path=path,
+                    author_device_id=AUTHOR,
+                )
+                delete_file(
+                    vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
+                    remote_folder_id=DOCS_ID, remote_path=path,
+                    author_device_id=AUTHOR, deleted_at=deleted_at,
+                )
+                chunk_sizes[path] = sum(
+                    len(v) for k, v in relay.chunks.items()
+                    if any(k == c["chunk_id"] for c in uploaded.shard.get("entries", [])
+                           for v_ in c.get("versions", []) or [] for c in v_.get("chunks", []) or [])
+                )
+
+            # Target = just the oldest tombstone's bytes. Loop should
+            # drain `oldest.txt`, hit the target, stop. The two newer
+            # tombstones must still be present.
+            relay_bytes_total = sum(len(v) for v in relay.chunks.values())
+            target = 1  # any positive amount = trigger the destructive loop
+            result = eviction_pass(
+                vault=vault, relay=relay,
+                manifest=_decrypt_current_manifest(vault, relay),
+                author_device_id=AUTHOR,
+                target_bytes_to_free=target,
+                now_iso="2026-05-10T12:00:00.000Z",
+            )
+        finally:
+            vault.close()
+
+        # Loop ran at least once; oldest was purged first.
+        events = [stage.event for stage in result.stages]
+        self.assertIn("vault.eviction.auto_purged_oldest", events)
+        self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "oldest.txt"))
+        # Loop stopped at the boundary — newer tombstones intact.
+        self.assertIsNotNone(find_file_entry(result.manifest, DOCS_ID, "newest.txt"))
+        self.assertGreater(result.bytes_freed, 0)
+
+    def test_auto_purge_excludes_latest_version(self) -> None:
+        """v1 ADR: the destructive iterator must never drop the only
+        live version of a file. With a single-version live file +
+        target > 0, the loop exhausts immediately with
+        ``no_more_candidates=True``.
+        """
+        local = self.tmpdir / "single-version.txt"
+        local.write_bytes(b"only one version exists for this entry")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay()
+        vault = _vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
+            uploaded = upload_file(
+                vault=vault, relay=relay, manifest=manifest, local_path=local,
+                remote_folder_id=DOCS_ID, remote_path="single-version.txt",
+                author_device_id=AUTHOR,
+            )
+            result = eviction_pass(
+                vault=vault, relay=relay,
+                manifest=assemble_unified_manifest(
+                    uploaded.root, {uploaded.remote_folder_id: uploaded.shard},
+                ),
+                author_device_id=AUTHOR,
+                target_bytes_to_free=10_000,
+                now_iso="2026-05-10T12:00:00.000Z",
+            )
+        finally:
+            vault.close()
+
+        self.assertTrue(result.no_more_candidates)
+        self.assertEqual(result.bytes_freed, 0)
+        # The single live version is intact.
+        entry = find_file_entry(result.manifest, DOCS_ID, "single-version.txt")
+        self.assertIsNotNone(entry)
+        self.assertFalse(entry["deleted"])
+        self.assertEqual(len(entry["versions"]), 1)
+
+    def test_alarm_mode_emits_alarm_purged_oldest_event(self) -> None:
+        """v1 ADR: ``mode='alarm'`` swaps the destructive-loop event
+        from ``vault.eviction.auto_purged_oldest`` to
+        ``vault.eviction.alarm_purged_oldest`` so audit logs distinguish
+        "fit an upload" from "post-shrink cleanup."
+        """
+        local = self.tmpdir / "trash.txt"
+        local.write_bytes(b"unexpired tombstone bytes")
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay()
+        vault = _vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
+            uploaded = upload_file(
+                vault=vault, relay=relay, manifest=manifest, local_path=local,
+                remote_folder_id=DOCS_ID, remote_path="trash.txt",
+                author_device_id=AUTHOR,
+            )
+            delete_file(
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
+                remote_folder_id=DOCS_ID, remote_path="trash.txt",
+                author_device_id=AUTHOR,
+                deleted_at="2026-05-03T10:00:00.000Z",
+            )
+
+            result = eviction_pass(
+                vault=vault, relay=relay,
+                manifest=_decrypt_current_manifest(vault, relay),
+                author_device_id=AUTHOR,
+                target_bytes_to_free=1,
+                mode="alarm",
+                now_iso="2026-05-10T12:00:00.000Z",
+            )
+        finally:
+            vault.close()
+
+        events = [stage.event for stage in result.stages]
+        self.assertIn("vault.eviction.alarm_purged_oldest", events)
+        self.assertNotIn("vault.eviction.auto_purged_oldest", events)
+
+    def test_destructive_loop_interleaves_tombstones_and_versions_oldest_first(self) -> None:
+        """v1 ADR: the merged iterator considers both candidate sources
+        together, sorted oldest-first. A 6-month-old non-latest version
+        of a still-live file is purged before a 3-day-old tombstone.
+        """
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay()
+        vault = _vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest['vault_id'],
+                remote_folders=manifest['remote_folders'],
+                created_at=manifest['created_at'],
+                author_device_id=manifest['author_device_id'],
+            )
+
+            # Live file with two versions: v1 from 2025-11, v2 (latest) from 2026-05.
+            old_doc = self.tmpdir / "stale-version.txt"
+            old_doc.write_bytes(b"v1 of stale-version content")
+            v1 = upload_file(
+                vault=vault, relay=relay, manifest=manifest, local_path=old_doc,
+                remote_folder_id=DOCS_ID, remote_path="stale-version.txt",
+                author_device_id=AUTHOR,
+                created_at="2025-11-01T10:00:00.000Z",
+            )
+            old_doc.write_bytes(b"v2 of stale-version content - latest")
+            upload_file(
+                vault=vault, relay=relay,
+                manifest=assemble_unified_manifest(v1.root, {v1.remote_folder_id: v1.shard}),
+                local_path=old_doc,
+                remote_folder_id=DOCS_ID, remote_path="stale-version.txt",
+                author_device_id=AUTHOR,
+                created_at="2026-05-01T10:00:00.000Z",
+            )
+
+            # Recent tombstone from 2026-05-07 (newer than v1's 2025-11).
+            recent_trash = self.tmpdir / "recent-trash.txt"
+            recent_trash.write_bytes(b"recently deleted")
+            uploaded = upload_file(
+                vault=vault, relay=relay,
+                manifest=_decrypt_current_manifest(vault, relay),
+                local_path=recent_trash,
+                remote_folder_id=DOCS_ID, remote_path="recent-trash.txt",
+                author_device_id=AUTHOR,
+            )
+            delete_file(
+                vault=vault, relay=relay,
+                manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
+                remote_folder_id=DOCS_ID, remote_path="recent-trash.txt",
+                author_device_id=AUTHOR,
+                deleted_at="2026-05-07T10:00:00.000Z",
+            )
+
+            # Free just enough for one candidate. The 2025-11 version is
+            # older than the 2026-05-07 tombstone, so it must go first.
+            result = eviction_pass(
+                vault=vault, relay=relay,
+                manifest=_decrypt_current_manifest(vault, relay),
+                author_device_id=AUTHOR,
+                target_bytes_to_free=1,
+                now_iso="2026-05-10T12:00:00.000Z",
+            )
+        finally:
+            vault.close()
+
+        # First (and only) destructive iteration dropped the old version,
+        # NOT the recent tombstone.
+        entry = find_file_entry(result.manifest, DOCS_ID, "stale-version.txt")
+        self.assertIsNotNone(entry)
+        self.assertEqual(len(entry["versions"]), 1, "old version should be purged")
+        trash_entry = find_file_entry(result.manifest, DOCS_ID, "recent-trash.txt")
+        self.assertIsNotNone(trash_entry)
+        self.assertTrue(trash_entry["deleted"], "newer tombstone should still be present")
 
 
 def _vault() -> Vault:

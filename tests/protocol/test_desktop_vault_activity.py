@@ -226,7 +226,10 @@ class HumaniseEventTypeTests(unittest.TestCase):
             "vault.migration.committed": "Relay migration committed",
             "vault.eviction.tombstone_purged_expired":
                 "Eviction (expired tombstone)",
-            "vault.eviction.version_purged": "Eviction (old version)",
+            "vault.eviction.auto_purged_oldest":
+                "Eviction (auto-purged oldest)",
+            "vault.eviction.alarm_purged_oldest":
+                "Eviction (alarm cleanup)",
             "vault.purge.scheduled": "Hard purge scheduled",
             "vault.purge.executed": "Hard purge executed",
         }

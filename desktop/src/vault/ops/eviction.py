@@ -1,31 +1,44 @@
-"""Vault eviction pass (T7.5) — §D2 strict-order space reclaim.
+"""Vault eviction pass — v1 age-ordered auto-purge + alarm cleanup.
 
-The pass walks four stages until either the requested byte target is
-freed or the vault has no more historical material to drop:
+The pass runs two tracks:
 
-1. Hard-purge expired tombstones (``recoverable_until < now``)
-2. Hard-purge unexpired tombstones, oldest ``deleted_at`` first
-3. Hard-purge oldest historical version of each multi-version live file
-4. No candidates remain → caller surfaces the §D2 step-4 banner
+1. **Stage 1 (housekeeping)** — expired tombstones
+   (``recoverable_until < now``). Always safe, auto-runs on every sync
+   pass. Event: ``vault.eviction.tombstone_purged_expired``.
+2. **Destructive purge** — unexpired tombstones and oldest historical
+   versions of multi-version live files combined into one oldest-first
+   iterator. Fires only when ``target_bytes_to_free > 0``. Bound is
+   per-call: the loop stops as soon as the target is met. Two modes
+   distinguish the audit signal:
 
-Each stage is a transaction sequence:
+   - ``mode="auto"`` (default): silent transparent purge to fit a
+     pending upload. Event: ``vault.eviction.auto_purged_oldest``.
+   - ``mode="alarm"``: passphrase-gated cleanup after the relay reports
+     ``used > quota`` (quota-shrink / tamper signal). Event:
+     ``vault.eviction.alarm_purged_oldest``.
 
-- pure helper picks candidate chunk_ids + per-folder shard mutations
-- relay ``gc_plan`` resolves which of those the server is willing to drop
+   No more candidates → caller surfaces the "vault full, no backup
+   history remains" banner.
+
+Each loop iteration is a transaction sequence:
+
+- pure helper picks the single oldest destructive candidate (across
+  tombstones + versions) + the per-folder shard mutation to drop it
+- relay ``gc_plan`` resolves which chunks the server is willing to drop
   (e.g. shared chunks may still be referenced by another folder)
 - relay ``gc_execute`` actually deletes the ciphertext
 - per affected folder: build the post-purge shard, CAS-publish via
   ``publish_shard_with_root`` so other devices see the cleaned state.
-  Phase H step 7d: the pre-port path published one vault-wide manifest
-  revision per stage; the sharded path publishes one shard revision
-  per affected folder. Stage atomicity downgrades from vault-wide to
-  per-folder — a crash between two folders' publishes leaves the
-  earlier one purged and the later one still expired; the next
-  eviction run picks up the residue.
+  Stage atomicity is per-folder — a crash between folders' publishes
+  leaves the earlier one purged and the later one still expired; the
+  next eviction run picks up the residue.
 
 Activity-log events are emitted via standard ``logging``: every stage
 that does work logs ``vault.eviction.<event>`` so the diagnostics
 catalog stays in one place.
+
+ADR: see ``docs/architecture-decisions.md`` ``2026-05-18 — Eviction
+policy: age-ordered auto-purge with quota-shrink passphrase gate``.
 """
 
 from __future__ import annotations
@@ -33,7 +46,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from ..binding.lifecycle import SyncCancelledError
 from ..manifest import (
@@ -52,6 +65,13 @@ from ..upload.folder_state import (
 log = logging.getLogger(__name__)
 
 CAS_MAX_RETRIES = 5
+
+EvictionMode = Literal["auto", "alarm"]
+
+_DESTRUCTIVE_EVENT: dict[str, str] = {
+    "auto": "vault.eviction.auto_purged_oldest",
+    "alarm": "vault.eviction.alarm_purged_oldest",
+}
 
 
 class EvictionVault(Protocol):
@@ -135,34 +155,50 @@ def eviction_pass(
     manifest: dict[str, Any],
     author_device_id: str,
     target_bytes_to_free: int = 0,
+    mode: EvictionMode = "auto",
     now_iso: str | None = None,
     local_index: Any = None,
     should_continue: Callable[[], bool] | None = None,
 ) -> EvictionResult:
-    """Run the §D2 eviction pipeline until ``target_bytes_to_free`` is reached.
+    """Run the v1 eviction pipeline until ``target_bytes_to_free`` is reached.
 
     ``target_bytes_to_free=0`` runs the housekeeping subset (stage 1
     only — expired tombstones) per §A16's sync-driven flow. A positive
-    target is the eviction-driven flow that backs T6.6's 507 prompt;
-    stages 2 and 3 only fire when stage 1 didn't free enough.
+    target switches on the destructive age-ordered loop, which
+    interleaves unexpired tombstones (sorted by ``deleted_at``) and
+    oldest non-current versions of multi-version live files (sorted by
+    ``created_at``), purging one at a time until the target is met or
+    the manifest has no more destructive candidates.
+
+    ``mode`` selects the destructive event vocabulary:
+
+    - ``"auto"`` (default): silent retry path for a 507 where
+      ``used + size > quota`` but ``used ≤ quota``. Emits
+      ``vault.eviction.auto_purged_oldest``.
+    - ``"alarm"``: passphrase-gated cleanup after the relay reports
+      ``used > quota`` (a quota-shrink or tamper signal). Emits
+      ``vault.eviction.alarm_purged_oldest`` so audit logs can
+      distinguish "auto-purged for fitting an upload" from "alarm
+      cleanup after detected shrink".
 
     Phase H step 7d: ``manifest`` is accepted as the caller's view of
     state (e.g. the assembled unified manifest the wizard was
-    rendering) but is re-read fresh per stage from the sharded relay
-    surface. Each stage publishes one shard revision per affected
-    folder via ``publish_shard_with_root``.
+    rendering) but is re-read fresh per iteration from the sharded
+    relay surface. Each iteration publishes one shard revision per
+    affected folder via ``publish_shard_with_root``.
 
-    F-U03: ``should_continue`` is checked between every stage. Each
-    stage's per-folder publishes are independent CAS units, so a
-    Cancel between folders leaves the already-purged shards purged
-    and skips the rest; the next eviction run picks up where we left
-    off.
+    F-U03: ``should_continue`` is checked between every iteration.
+    Each iteration's per-folder publishes are independent CAS units,
+    so a Cancel between iterations leaves the already-purged shards
+    purged and skips the rest; the next eviction run picks up where
+    we left off.
     """
     current_manifest = manifest
     bytes_freed = 0
     chunks_freed = 0
     stages: list[EvictionStageResult] = []
     now = now_iso or _now_rfc3339()
+    destructive_event = _DESTRUCTIVE_EVENT[mode]
 
     def _check_cancel(stage_label: str) -> None:
         if should_continue is not None and not should_continue():
@@ -193,10 +229,10 @@ def eviction_pass(
         # Review §4.H4: when stage 1 finishes cleanup-only (the
         # shard had stale references but no expired tombstones to
         # actually evict), surface that to the operator BEFORE we
-        # cascade into stage 2's destructive forced-eviction. The
-        # user clicked "Free X bytes" — they should know the
-        # housekeeping pass freed nothing and we're about to
-        # destroy unexpired tombstones to make space.
+        # cascade into the destructive purge. The user clicked
+        # "Free X bytes" — they should know the housekeeping pass
+        # freed nothing and we're about to destroy unexpired
+        # tombstones / old versions to make space.
         if (
             stage_1.bytes_freed == 0
             and stage_1.chunks_freed == 0
@@ -205,20 +241,11 @@ def eviction_pass(
             log.warning(
                 "vault.eviction.cleanup_only_cascade_to_force "
                 "target=%d freed_bytes=0 — stage_1 was cleanup-only, "
-                "escalating to forced-eviction stage 2 (destructive)",
+                "escalating to destructive purge",
                 target_bytes_to_free,
             )
 
-    if target_bytes_to_free > 0 and bytes_freed >= target_bytes_to_free:
-        return EvictionResult(
-            manifest=current_manifest,
-            bytes_freed=bytes_freed,
-            chunks_freed=chunks_freed,
-            stages=stages,
-            no_more_candidates=False,
-        )
-
-    # Sync-driven housekeeping stops after stage 1 — no force-purge.
+    # Sync-driven housekeeping stops after stage 1 — no destructive purge.
     if target_bytes_to_free <= 0:
         return EvictionResult(
             manifest=current_manifest,
@@ -228,26 +255,42 @@ def eviction_pass(
             no_more_candidates=False,
         )
 
-    _check_cancel("stage_2")
+    if bytes_freed >= target_bytes_to_free:
+        return EvictionResult(
+            manifest=current_manifest,
+            bytes_freed=bytes_freed,
+            chunks_freed=chunks_freed,
+            stages=stages,
+            no_more_candidates=False,
+        )
 
-    # Stage 2 — unexpired tombstones, oldest deleted_at first. Review
-    # §3.C1: this is a hard-purge — flag the plan kind so the relay
-    # requires role=admin on gc/execute (a compromised sync-only
-    # device cannot wipe data inside the 30-day grace window).
-    stage_2, current_manifest = _run_stage(
-        vault=vault,
-        relay=relay,
-        manifest=current_manifest,
-        author_device_id=author_device_id,
-        candidates_fn=_unexpired_tombstone_candidates,
-        event="vault.eviction.tombstone_purged_early",
-        local_index=local_index,
-        purpose="forced_eviction",
-    )
-    if stage_2 is not None:
-        stages.append(stage_2)
-        bytes_freed += stage_2.bytes_freed
-        chunks_freed += stage_2.chunks_freed
+    # Destructive age-ordered loop. Each iteration picks the single
+    # oldest candidate (across unexpired tombstones + non-latest
+    # versions of multi-version live files), runs the
+    # admin-gated gc_plan + gc_execute, and publishes the shard
+    # mutation. Loop stops as soon as the target is met — "no
+    # batching, no slack" per the v1 design so a compromised path
+    # can only free as much as one upload reserves.
+    while bytes_freed < target_bytes_to_free:
+        _check_cancel("destructive_purge")
+        stage_n, current_manifest = _run_stage(
+            vault=vault,
+            relay=relay,
+            manifest=current_manifest,
+            author_device_id=author_device_id,
+            candidates_fn=_next_destructive_candidate,
+            event=destructive_event,
+            local_index=local_index,
+            purpose="forced_eviction",
+        )
+        if stage_n is None:
+            # Iterator exhausted (or the candidate's chunks were all
+            # still-referenced and nothing changed) — fall through
+            # to the no-more-candidates terminal.
+            break
+        stages.append(stage_n)
+        bytes_freed += stage_n.bytes_freed
+        chunks_freed += stage_n.chunks_freed
 
     if bytes_freed >= target_bytes_to_free:
         return EvictionResult(
@@ -258,36 +301,11 @@ def eviction_pass(
             no_more_candidates=False,
         )
 
-    _check_cancel("stage_3")
-
-    # Stage 3 — oldest historical version of multi-version live files.
-    # Review §3.C1: this is also a hard-purge; admin-gated on the relay.
-    stage_3, current_manifest = _run_stage(
-        vault=vault,
-        relay=relay,
-        manifest=current_manifest,
-        author_device_id=author_device_id,
-        candidates_fn=_oldest_version_candidates,
-        event="vault.eviction.version_purged",
-        local_index=local_index,
-        purpose="forced_eviction",
+    # No destructive material left — terminal banner.
+    log.info(
+        "vault.eviction.no_more_candidates target=%d freed=%d",
+        target_bytes_to_free, bytes_freed,
     )
-    if stage_3 is not None:
-        stages.append(stage_3)
-        bytes_freed += stage_3.bytes_freed
-        chunks_freed += stage_3.chunks_freed
-
-    if bytes_freed >= target_bytes_to_free:
-        return EvictionResult(
-            manifest=current_manifest,
-            bytes_freed=bytes_freed,
-            chunks_freed=chunks_freed,
-            stages=stages,
-            no_more_candidates=False,
-        )
-
-    # Stage 4 — nothing left to drop.
-    log.info("vault.eviction.no_more_candidates target=%d freed=%d", target_bytes_to_free, bytes_freed)
     return EvictionResult(
         manifest=current_manifest,
         bytes_freed=bytes_freed,
@@ -561,51 +579,54 @@ def _expired_tombstone_candidates(
     )
 
 
-def _unexpired_tombstone_candidates(manifest: dict[str, Any]) -> _StageBatch | None:
-    """Pick the oldest unexpired tombstone (by ``deleted_at``) and return its chunks."""
-    candidates: list[tuple[str, str, str, dict[str, Any]]] = []
+def _next_destructive_candidate(manifest: dict[str, Any]) -> _StageBatch | None:
+    """Pick the single oldest destructive candidate across the vault.
+
+    Interleaves two candidate sources, sorted oldest-first by a unified
+    timestamp key:
+
+    - **Unexpired tombstones** (``entry.deleted=True`` and still inside
+      the recoverable grace window), keyed by ``deleted_at``. Returns
+      every chunk across every version of the entry; the matching
+      shard mutation drops the entry outright.
+    - **Non-current versions** of multi-version live files
+      (``entry.deleted=False`` and ``len(versions) >= 2``), keyed by
+      that version's ``modified_at`` / ``created_at``. Returns the
+      version's chunks only; the matching shard mutation drops the
+      single version from the entry.
+
+    Matches the v1 design's "drop the stalest data first" iterator —
+    a 6-month-old v1 of a still-live file is purged before a 3-day-old
+    Trash entry, preserving recently-deleted-but-recoverable files
+    longer.
+    """
+    best: tuple[
+        str,                                # sort_key
+        str,                                # kind: "tombstone" | "version"
+        str,                                # folder_id
+        str,                                # path
+        dict[str, Any] | None,              # entry (tombstone kind)
+        dict[str, Any] | None,              # version (version kind)
+        str,                                # version_id (version kind)
+    ] | None = None
+
     for folder in manifest.get("remote_folders", []) or []:
         if not isinstance(folder, dict):
             continue
         folder_id = str(folder.get("remote_folder_id", ""))
         for entry in folder.get("entries", []) or []:
-            if not isinstance(entry, dict) or not bool(entry.get("deleted")):
+            if not isinstance(entry, dict):
                 continue
-            deleted_at = str(entry.get("deleted_at") or "")
-            candidates.append((deleted_at, folder_id, str(entry.get("path", "")), entry))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: x[0])
-    deleted_at, folder_id, path, entry = candidates[0]
-    chunk_ids: list[str] = []
-    sizes: dict[str, int] = {}
-    for cid, size in _entry_chunks(entry):
-        chunk_ids.append(cid)
-        sizes[cid] = size
-
-    if not chunk_ids:
-        return None
-
-    return _StageBatch(
-        chunk_ids=chunk_ids,
-        affected_paths=[path],
-        chunk_sizes=sizes,
-        per_folder_mutations={folder_id: _make_drop_tombstoned_mutation({path})},
-    )
-
-
-def _oldest_version_candidates(manifest: dict[str, Any]) -> _StageBatch | None:
-    """Pick the single oldest non-current version among all live files."""
-    best: tuple[str, str, str, str, dict[str, Any], dict[str, Any]] | None = None
-
-    for folder in manifest.get("remote_folders", []) or []:
-        if not isinstance(folder, dict):
-            continue
-        folder_id = str(folder.get("remote_folder_id", ""))
-        for entry in folder.get("entries", []) or []:
-            if not isinstance(entry, dict) or bool(entry.get("deleted")):
+            path = str(entry.get("path", ""))
+            if bool(entry.get("deleted")):
+                deleted_at = str(entry.get("deleted_at") or "")
+                if not deleted_at:
+                    continue
+                if best is None or deleted_at < best[0]:
+                    best = (
+                        deleted_at, "tombstone", folder_id, path,
+                        entry, None, "",
+                    )
                 continue
             versions = [v for v in entry.get("versions", []) or [] if isinstance(v, dict)]
             if len(versions) < 2:
@@ -621,20 +642,35 @@ def _oldest_version_candidates(manifest: dict[str, Any]) -> _StageBatch | None:
             sort_key = str(oldest.get("modified_at") or oldest.get("created_at") or "")
             if best is None or sort_key < best[0]:
                 best = (
-                    sort_key,
-                    folder_id,
-                    str(entry.get("path", "")),
-                    str(oldest.get("version_id", "")),
-                    entry,
-                    oldest,
+                    sort_key, "version", folder_id, path,
+                    None, oldest, str(oldest.get("version_id", "")),
                 )
 
     if best is None:
         return None
-    _, folder_id, path, version_id, _entry, version = best
 
-    chunk_ids: list[str] = []
-    sizes: dict[str, int] = {}
+    _, kind, folder_id, path, entry, version, version_id = best
+
+    if kind == "tombstone":
+        assert entry is not None
+        chunk_ids: list[str] = []
+        sizes: dict[str, int] = {}
+        for cid, size in _entry_chunks(entry):
+            chunk_ids.append(cid)
+            sizes[cid] = size
+        if not chunk_ids:
+            return None
+        return _StageBatch(
+            chunk_ids=chunk_ids,
+            affected_paths=[path],
+            chunk_sizes=sizes,
+            per_folder_mutations={folder_id: _make_drop_tombstoned_mutation({path})},
+        )
+
+    # kind == "version"
+    assert version is not None
+    chunk_ids = []
+    sizes = {}
     for chunk in version.get("chunks", []) or []:
         if not isinstance(chunk, dict):
             continue
@@ -759,6 +795,7 @@ def _now_rfc3339() -> str:
 
 
 __all__ = [
+    "EvictionMode",
     "EvictionResult",
     "EvictionStageResult",
     "eviction_pass",

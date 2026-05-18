@@ -76,7 +76,7 @@ want when arguing whether to flip the decision.
 
 ### 2026-05-18 — Eviction policy: age-ordered auto-purge with quota-shrink passphrase gate
 
-**Status:** decided. Implementation pending — design lives in [`docs/plans/vault-eviction-v1.md`](plans/vault-eviction-v1.md).
+**Status:** landed. Design originally in [`docs/plans/vault-eviction-v1.md`](plans/vault-eviction-v1.md); implementation collapses ``_unexpired_tombstone_candidates`` + ``_oldest_version_candidates`` into ``_next_destructive_candidate`` (single age-ordered iterator) and adds the ``mode={auto,alarm}`` parameter to ``eviction_pass``. Quota routing in ``QuotaMixin._handle_quota_exceeded`` splits into alarm (``used > quota`` → passphrase-gated cleanup), silent auto-purge (no dialog, fits the failing upload), and terminal no-history banner. Pre-existing key-name mismatch fixed in ``VaultQuotaExceededError`` — the alarm gate needs ``used_bytes`` / ``quota_bytes`` to read what the server actually emits.
 
 **Context.** The pre-shipping eviction pipeline ran in three tiers — expired-tombstone housekeeping (always safe), unexpired-tombstone purge (destructive), oldest-version purge (destructive). Stages 2 + 3 fired automatically on 507 with only the admin-role gate (commit ``f621dc1``) between an upload and irreversible deletion of recoverable data. Spec §D9 called for adding a ``purge_secret`` passphrase prompt to the 507 dialog as a second factor. The straight "prompt every purge" reading of the spec breaks the one-click reclaim UX users expect; the alternative of accepting admin-only gating leaves the system unable to detect a relay that shrinks its own quota under a paired fleet.
 
