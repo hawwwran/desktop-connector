@@ -52,6 +52,7 @@ from .crypto import (
 )
 from .ids import _generate_id_v1, _genesis_fingerprint_hex
 from .manifest import canonical_root_json, make_root_manifest
+from .relay_errors import VaultIdentityMismatchError
 
 log = logging.getLogger(__name__)
 
@@ -227,7 +228,9 @@ def complete_pending_publish(
         )
     )
 
-    relay_state = _probe_relay_state(relay, canonical, vault_access_secret)
+    relay_state = _probe_relay_state(
+        relay, canonical, vault_access_secret, master_key_bytes,
+    )
 
     if relay_state["exists"]:
         new_revision = int(relay_state["header_revision"]) + 1
@@ -294,7 +297,12 @@ def complete_pending_publish(
 # ---------------------------------------------------------------- internals
 
 
-def _probe_relay_state(relay, vault_id: str, vault_access_secret: str) -> dict:
+def _probe_relay_state(
+    relay,
+    vault_id: str,
+    vault_access_secret: str,
+    master_key: bytes,
+) -> dict:
     """Return ``{"exists": bool, "header_revision": int|None}`` for a vault
     id on the relay.
 
@@ -305,6 +313,16 @@ def _probe_relay_state(relay, vault_id: str, vault_access_secret: str) -> dict:
     the HTTP error message used to live here and was fragile — a future
     relay-adapter cleanup that touched the message format could
     silently flip a 5xx into a fake 404 and trigger a duplicate POST.
+
+    Review §4.H2: when the relay returns a header, decrypt it under
+    ``master_key`` and assert the embedded ``genesis_fingerprint``
+    matches our derived fingerprint. AEAD-tag failure (bytes encrypted
+    under a different master key) or fingerprint mismatch (defense-in-
+    depth against future header changes) raises
+    :class:`VaultIdentityMismatchError`. Pre-fix the worker treated
+    "relay has a row at this vault_id" as proof of ownership and
+    PUT a fresh recovery envelope on top, even when the row was a
+    cross-relay collision belonging to a stranger.
     """
     from .relay_errors import VaultNotFoundError
 
@@ -314,9 +332,44 @@ def _probe_relay_state(relay, vault_id: str, vault_access_secret: str) -> dict:
         return {"exists": False, "header_revision": None}
     if not isinstance(header_resp, dict):
         raise RuntimeError("Relay returned an invalid header response on probe.")
+
+    encrypted_header = header_resp.get("encrypted_header")
+    if not isinstance(encrypted_header, (bytes, bytearray)):
+        raise RuntimeError("Relay returned an invalid header ciphertext on probe.")
+    envelope_bytes = bytes(encrypted_header)
+    # Header envelope shape: format_version(1) | vault_id(12) | revision(8)
+    # | nonce(24) | aead_ciphertext_and_tag(>=16). Mirrors the inline parse
+    # in ``Vault.fetch_header_plaintext`` so the two paths stay byte-aligned.
+    if len(envelope_bytes) < 1 + 12 + 8 + 24 + 16:
+        raise VaultIdentityMismatchError(vault_id=vault_id)
+    if envelope_bytes[0] != 1:
+        raise RuntimeError(
+            f"vault_format_version_unsupported: header format_version={envelope_bytes[0]}"
+        )
+    header_revision_in_envelope = int.from_bytes(envelope_bytes[13:21], "big")
+    nonce = envelope_bytes[21:21 + 24]
+    header_ct = envelope_bytes[21 + 24:]
+    header_subkey = derive_subkey("dc-vault-v1/header", master_key)
+    header_aad = build_header_aad(vault_id, header_revision_in_envelope)
+    try:
+        plaintext = aead_decrypt(header_ct, header_subkey, nonce, header_aad)
+    except Exception:
+        # AEAD tag mismatch — header bytes were sealed under a different
+        # master key, i.e. someone else owns this vault_id on this relay.
+        raise VaultIdentityMismatchError(vault_id=vault_id)
+    try:
+        import json as _json
+        header = _json.loads(plaintext.decode("utf-8"))
+    except Exception:
+        raise VaultIdentityMismatchError(vault_id=vault_id)
+    relay_fp = str(header.get("genesis_fingerprint") or "").strip().lower()
+    expected_fp = _genesis_fingerprint_hex(master_key).strip().lower()
+    if not relay_fp or relay_fp != expected_fp:
+        raise VaultIdentityMismatchError(vault_id=vault_id)
+
     return {
         "exists": True,
-        "header_revision": int(header_resp.get("header_revision", 1)),
+        "header_revision": int(header_resp.get("header_revision", header_revision_in_envelope)),
     }
 
 

@@ -26,9 +26,12 @@ ensure_desktop_on_path()
 os.environ.setdefault("DESKTOP_CONNECTOR_NO_KEYRING", "1")
 
 from src.config import Config  # noqa: E402
+from src.vault.canonical import _canonical_json  # noqa: E402
 from src.vault.crypto import (  # noqa: E402
     aead_decrypt,
+    aead_encrypt,
     build_header_aad,
+    build_header_envelope,
     derive_subkey,
 )
 from src.vault.grant.store import (  # noqa: E402
@@ -36,7 +39,11 @@ from src.vault.grant.store import (  # noqa: E402
     VaultGrant,
     fallback_grant_path,
 )
-from src.vault.relay_errors import VaultNotFoundError  # noqa: E402
+from src.vault.ids import _genesis_fingerprint_hex  # noqa: E402
+from src.vault.relay_errors import (  # noqa: E402
+    VaultIdentityMismatchError,
+    VaultNotFoundError,
+)
 from src.vault.resume import (  # noqa: E402
     clear_pending_publish_marker,
     complete_pending_publish,
@@ -54,6 +61,41 @@ DEVICE_SEED = b"\x55" * 32
 # that to verify shape.
 ARGON_KIB = 8192
 ARGON_ITERS = 2
+
+
+def _build_real_header_envelope(
+    master_key: bytes,
+    vault_id: str = VAULT_ID,
+    header_revision: int = 1,
+) -> bytes:
+    """Build a header envelope that decrypts under ``master_key`` and
+    carries the matching ``genesis_fingerprint``.
+
+    Review §4.H2: ``_probe_relay_state`` now decrypts the header to
+    verify identity, so the orphan seed needs a real envelope (not the
+    pre-fix stub bytes). Helper is intentionally minimal — just the
+    canonical fields the identity gate reads.
+    """
+    import secrets
+
+    plaintext = _canonical_json({
+        "schema": "dc-vault-header-v1",
+        "vault_id": vault_id,
+        "genesis_fingerprint": _genesis_fingerprint_hex(master_key),
+        "recovery_envelopes": [],
+        "manifest_format_version": 1,
+        "header_format_version": 1,
+    })
+    nonce = secrets.token_bytes(24)
+    subkey = derive_subkey("dc-vault-v1/header", master_key)
+    aad = build_header_aad(vault_id, header_revision=header_revision)
+    ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+    return build_header_envelope(
+        vault_id=vault_id,
+        header_revision=header_revision,
+        nonce=nonce,
+        aead_ciphertext_and_tag=ciphertext,
+    )
 
 
 # --------------------------------------------------------------------- helpers
@@ -316,12 +358,13 @@ class CompletePendingPublishTests(unittest.TestCase):
     ) -> None:
         """Plant an entry shaped like what a prior session's
         ``Vault.prepare_new`` + ``publish_initial`` would have left.
-        The body is not byte-identical to a real publish (we don't
-        care for the resume worker), but the size and keys are
-        plausible — get_header just returns whatever we stashed.
+        The header envelope is now byte-correct (review §4.H2 made
+        ``_probe_relay_state`` decrypt the header to enforce identity);
+        the other fields are still placeholders the resume worker
+        doesn't consult on the adopt path.
         """
         relay.vaults[vault_id] = {
-            "encrypted_header": b"\x01" + vault_id.encode("ascii") + b"\x00" * 64,
+            "encrypted_header": _build_real_header_envelope(master_key, vault_id),
             "header_hash": "0" * 64,
             "header_revision": 1,
             "vault_access_token_hash": b"\x00" * 32,
@@ -525,6 +568,63 @@ class CompletePendingPublishTests(unittest.TestCase):
             # No relay calls, no config mutation, marker still present
             # so the user can retry or Discard.
             self.assertEqual(relay.get_header_calls, 0)
+            self.assertEqual(relay.create_calls, 0)
+            self.assertEqual(relay.put_header_calls, 0)
+            reopened = Config(tmp_path)
+            self.assertNotIn(
+                "last_known_id", reopened._data.get("vault", {}),
+            )
+            self.assertIsNotNone(read_pending_publish_marker(reopened))
+
+    def test_cross_relay_collision_raises_identity_mismatch(self) -> None:
+        """Review §4.H2: user repoints ``server_url`` to a new relay
+        where ``vault_id`` happens to collide. The relay's row was
+        created under a stranger's master key, so its header envelope
+        AEAD-fails to decrypt under our master key.
+        ``_probe_relay_state`` must raise
+        :class:`VaultIdentityMismatchError` — config stays untouched,
+        marker stays present, no PUT-header / POST-create lands.
+        Pre-fix the worker would PUT a fresh recovery envelope onto
+        the stranger's row, double-corrupting both vaults.
+        """
+        our_master_key = b"\x42" * 32
+        stranger_master_key = b"\x99" * 32
+        vault_access_secret = "bearer-secret"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            config = Config(tmp_path)
+            _seed_grant(tmp_path, our_master_key, vault_access_secret)
+            set_pending_publish_marker(
+                config, VAULT_ID, "http://example.test/relay",
+            )
+
+            relay = FakeResumeRelay()
+            # Seed an orphan whose header was sealed under a different
+            # master key — what a real cross-relay collision looks like.
+            relay.vaults[VAULT_ID] = {
+                "encrypted_header": _build_real_header_envelope(
+                    stranger_master_key, VAULT_ID,
+                ),
+                "header_hash": "0" * 64,
+                "header_revision": 1,
+                "vault_access_token_hash": b"\x00" * 32,
+                "manifest_envelope_bytes": b"",
+                "manifest_hash": "",
+                "manifest_revision": 1,
+            }
+
+            with self.assertRaises(VaultIdentityMismatchError):
+                complete_pending_publish(
+                    tmp_path, config, VAULT_ID, self.PASSPHRASE,
+                    relay=relay,
+                    grant_loader=_file_grant_loader(tmp_path),
+                    argon_memory_kib=ARGON_KIB,
+                    argon_iterations=ARGON_ITERS,
+                )
+
+            # No relay mutation, no config mutation, marker still there
+            # so the user can Discard and start fresh.
             self.assertEqual(relay.create_calls, 0)
             self.assertEqual(relay.put_header_calls, 0)
             reopened = Config(tmp_path)

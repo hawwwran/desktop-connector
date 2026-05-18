@@ -263,3 +263,32 @@ class VaultCASConflictError(VaultRelayError):
         if not self.current_root_ciphertext_b64:
             return b""
         return base64.b64decode(self.current_root_ciphertext_b64)
+
+
+class VaultIdentityMismatchError(RuntimeError):
+    """Relay row at this vault_id is encrypted under a different master key.
+
+    Raised by the resume worker when ``complete_pending_publish`` probes
+    the relay and the existing header envelope either won't decrypt
+    under our master key (AEAD tag mismatch — bytes belong to a stranger)
+    or decrypts but reports a different ``genesis_fingerprint``
+    (defense-in-depth against future header changes).
+
+    Review §4.H2: pre-fix the resume worker treated "relay has a row at
+    this vault_id" as proof of ownership and PUT a fresh recovery
+    envelope on top — even if the row was created under a foreign master
+    key. The UI saw "Resume succeeded" while the relay row was double-
+    corrupted: the stranger's data stayed put, our recovery envelope
+    overwrote one of theirs, and our local config believed it owned the
+    row. Cross-relay configuration is the trigger (user repoints
+    ``server_url`` to a new relay where ``vault_id`` happens to collide).
+    """
+
+    def __init__(self, *, vault_id: str) -> None:
+        self.vault_id = str(vault_id)
+        super().__init__(
+            f"vault_identity_mismatch: relay row {self.vault_id!r} is not "
+            "encrypted under this device's master key. Discard the pending "
+            "publish and start a fresh setup, or repoint the config back "
+            "to the original relay."
+        )
