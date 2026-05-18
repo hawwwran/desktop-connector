@@ -174,12 +174,33 @@ class VaultCrypto
         );
     }
 
+    /**
+     * Normalize a passphrase to NFC. Pure-ASCII input is its own NFC form
+     * so the ``intl``-less path is a safe passthrough for ASCII; non-ASCII
+     * input without ``intl`` would silently diverge from the Python twin
+     * (which always normalizes), producing a different Argon2id-derived
+     * key for the same human-typed passphrase.
+     *
+     * Review §2.M5 — hard-fail with a clear error when the input contains
+     * non-ASCII bytes AND the ``intl`` extension is unavailable. Pre-fix
+     * the function fell back to passthrough silently, which only matters
+     * the moment a user types a non-ASCII passphrase on a host missing
+     * ``php-intl`` (a plausible Apache-shared-host scenario).
+     */
     private static function nfcNormalize(string $s): string
     {
         if (class_exists('Normalizer')) {
             return Normalizer::normalize($s, Normalizer::FORM_C);
         }
-        return $s;   // ASCII-safe passthrough
+        // ASCII-only is its own NFC form, so passthrough is safe.
+        if (preg_match('/^[\x00-\x7F]*$/', $s)) {
+            return $s;
+        }
+        throw new RuntimeException(
+            'php-intl extension is required to NFC-normalize a non-ASCII '
+            . 'passphrase; install ext-intl on this host or restrict to '
+            . 'ASCII passphrases to match the Python/Android twins'
+        );
     }
 
     // ---------------------------------------------------------------- ID normalization

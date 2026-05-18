@@ -118,4 +118,36 @@ final class VaultCryptoInvariantsTest extends TestCase
             'TOO-SHORT', self::GRANT_ID_30B, self::DEVICE_ID_LOWER,
         );
     }
+
+    /**
+     * Review §2.M5 — passing a non-ASCII passphrase through
+     * argon2idKdf when the ``intl`` extension is missing MUST hard-
+     * fail rather than silently diverge from the Python twin (which
+     * always NFC-normalizes). On hosts WITH ``intl`` the
+     * normalization runs and the call succeeds; on hosts WITHOUT,
+     * the new guard raises with a clear remediation message.
+     *
+     * Pure ASCII passphrases work in both worlds (ASCII == NFC(ASCII)).
+     */
+    public function test_argon2idKdf_rejects_non_ascii_passphrase_when_intl_missing(): void
+    {
+        if (class_exists('Normalizer')) {
+            self::markTestSkipped('host has php-intl; the hard-fail path is unreachable');
+        }
+        $salt = str_repeat("\x00", 16);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('php-intl');
+        VaultCrypto::argon2idKdf(
+            "caf\u{00e9}",  // U+00E9 = "é" — non-ASCII (double quotes interpret \u)
+            $salt, 32, 8192, 2,
+        );
+    }
+
+    public function test_argon2idKdf_accepts_ascii_passphrase_without_intl(): void
+    {
+        // Pure ASCII = its own NFC form; safe passthrough.
+        $salt = str_repeat("\x00", 16);
+        $out = VaultCrypto::argon2idKdf('correct horse battery staple', $salt, 32, 8192, 2);
+        self::assertSame(32, strlen($out));
+    }
 }
