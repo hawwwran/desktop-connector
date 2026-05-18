@@ -1985,8 +1985,15 @@ class FakeUploadRelay:
             "expires_at": "2099-01-01T00:00:00.000Z",
         }
 
-    # §4.M1 — orphan reaper paginated chunk list.
-    def list_chunks(self, vault_id, vault_access_secret, *, page_limit=1024):
+    # §4.M1 — orphan reaper paginated chunk list. ``min_age_seconds``
+    # (B2 post-§4.M1) is accepted for protocol compatibility; the fake
+    # has no notion of creation time so the filter is a no-op here
+    # (tests that exercise the grace window run against the real PHP
+    # endpoint, ``test_listIds_min_age_seconds_excludes_recent_chunks``).
+    def list_chunks(
+        self, vault_id, vault_access_secret,
+        *, page_limit=1024, min_age_seconds=0,
+    ):
         return sorted(self.chunks.keys())
 
     def gc_execute(self, vault_id, vault_access_secret, *, plan_id, purge_secret=None):

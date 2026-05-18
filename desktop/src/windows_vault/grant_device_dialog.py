@@ -383,7 +383,7 @@ def build_grant_device_dialog(
             _show_error("Claim arrived but the relay did not include the claimant pubkey.")
             return
         admin_priv = state["admin_priv"]
-        shared = derive_shared_secret(admin_priv, claimant_pub)
+        shared = derive_shared_secret(bytes(admin_priv), claimant_pub)
         code = derive_verification_code(shared)
 
         state["claimant_pubkey"] = claimant_pub
@@ -451,7 +451,7 @@ def build_grant_device_dialog(
                     )
                     envelope = wrap_grant_for_claimant(
                         payload=payload,
-                        admin_priv=state["admin_priv"],
+                        admin_priv=bytes(state["admin_priv"]),
                         claimant_pub=claimant_pubkey,
                     )
                     approve_join_request(
@@ -532,6 +532,16 @@ def build_grant_device_dialog(
                 _delete_join_request_best_effort(
                     config, config_dir, vault_id_undashed, jr,
                 )
+        # C2/C3: zero the LIVE X25519 private scalar bytes. Workers
+        # that captured ``bytes(admin_priv)`` snapshots for
+        # derive_shared_secret / wrap_grant_for_claimant have
+        # already returned by this point; the live bytearray is
+        # the canonical storage we can actually scrub.
+        admin_priv = state.get("admin_priv")
+        if isinstance(admin_priv, bytearray):
+            for i in range(len(admin_priv)):
+                admin_priv[i] = 0
+        state["admin_priv"] = None
 
     dlg.connect("closed", on_dlg_close)
 
@@ -542,10 +552,18 @@ def build_grant_device_dialog(
 # ----- module helpers -----------------------------------------------
 
 
-def _generate_x25519_keypair() -> tuple[bytes, bytes]:
+def _generate_x25519_keypair() -> tuple[bytearray, bytes]:
+    """Mint a fresh X25519 ephemeral keypair for the grant exchange.
+
+    Private scalar is a ``bytearray`` (mutable) so the dialog's
+    close handler can zero its live bytes — pre-fix this was
+    ``bytes`` which is immutable, so the documented "zero on close"
+    pattern wrote into a copy and the real allocation sat on the
+    heap until GC.
+    """
     from nacl.bindings import crypto_scalarmult_base
-    priv = secrets.token_bytes(32)
-    pub = crypto_scalarmult_base(priv)
+    priv = bytearray(secrets.token_bytes(32))
+    pub = crypto_scalarmult_base(bytes(priv))
     return priv, pub
 
 

@@ -280,6 +280,53 @@ final class VaultChunksRepositoryTest extends TestCase
         $this->chunksRepo->listIds(self::VAULT_ID, '', 2048);
     }
 
+    public function test_listIds_min_age_seconds_excludes_recent_chunks(): void
+    {
+        // B2 (post-§4.M1 review): the desktop reaper races with
+        // concurrent uploads. ``min_age_seconds`` excludes chunks
+        // whose ``created_at`` is within the grace window so a
+        // mid-upload chunk (PUT'd but not yet referenced by a
+        // published shard) doesn't get misclassified as orphan.
+        $oldHash = str_repeat('a', 64);
+        $recentHash = str_repeat('b', 64);
+        $this->chunksRepo->put(
+            self::VAULT_ID, self::CHUNK_A, $oldHash, 100,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_A),
+            self::NOW,
+        );
+        $this->chunksRepo->put(
+            self::VAULT_ID, self::CHUNK_B, $recentHash, 200,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_B),
+            self::NOW + 30,
+        );
+
+        // No filter: both visible.
+        $ids = $this->chunksRepo->listIds(
+            self::VAULT_ID, '', 1024, 0, self::NOW + 100,
+        );
+        self::assertSame([self::CHUNK_A, self::CHUNK_B], $ids);
+
+        // 60-second grace at NOW + 100 → CHUNK_B (created at NOW+30,
+        // age 70) is visible; CHUNK_A (age 100) too. Both visible.
+        $ids = $this->chunksRepo->listIds(
+            self::VAULT_ID, '', 1024, 60, self::NOW + 100,
+        );
+        self::assertSame([self::CHUNK_A, self::CHUNK_B], $ids);
+
+        // 60-second grace at NOW + 60 → CHUNK_B (age 30) below grace;
+        // CHUNK_A (age 60, exactly at boundary) visible. Only CHUNK_A.
+        $ids = $this->chunksRepo->listIds(
+            self::VAULT_ID, '', 1024, 60, self::NOW + 60,
+        );
+        self::assertSame([self::CHUNK_A], $ids);
+    }
+
+    public function test_listIds_rejects_negative_min_age_seconds(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->chunksRepo->listIds(self::VAULT_ID, '', 1024, -1);
+    }
+
     // ---------------------------------------------------------------- setState
 
     public function test_setState_transitions_active_to_gc_pending(): void

@@ -263,9 +263,16 @@ def show_vault_join(config_dir: Path) -> None:
             from nacl.bindings import crypto_scalarmult_base
             from secrets import token_bytes
 
-            claimant_priv = token_bytes(32)
-            claimant_pub = crypto_scalarmult_base(claimant_priv)
-            shared = derive_shared_secret(claimant_priv, join_url.ephemeral_pubkey)
+            # C2/C3 review fix: hold the X25519 private scalar in a
+            # mutable bytearray so the on_close handler can zero its
+            # live bytes when the window goes away. The pre-fix
+            # ``bytearray(priv)`` was a copy — original bytes lingered
+            # on the heap for arbitrary GC delay.
+            claimant_priv = bytearray(token_bytes(32))
+            claimant_pub = crypto_scalarmult_base(bytes(claimant_priv))
+            shared = derive_shared_secret(
+                bytes(claimant_priv), join_url.ephemeral_pubkey,
+            )
             code = derive_verification_code(shared)
 
             state["claimant_priv"] = claimant_priv
@@ -406,7 +413,7 @@ def show_vault_join(config_dir: Path) -> None:
             try:
                 payload = unwrap_grant_for_claimant(
                     envelope=wrapped,
-                    claimant_priv=state["claimant_priv"],
+                    claimant_priv=bytes(state["claimant_priv"]),
                     admin_pub=join_url.ephemeral_pubkey,
                     expected_vault_id=join_url.vault_id_undashed,
                     expected_claimant_device_id=str(config.device_id or ""),
@@ -446,15 +453,17 @@ def show_vault_join(config_dir: Path) -> None:
         def on_close(_win) -> bool:
             state["cancelled"].set()
             _stop_polling()
-            # Best-effort secret scrub.
+            # C2/C3: zero the LIVE bytes of the X25519 private scalar.
+            # ``claimant_priv`` is stored as ``bytearray`` (mutable) so
+            # this overwrite reaches the actual buffer instead of a
+            # GC-deferred copy. Workers that captured ``bytes(...)``
+            # snapshots in earlier RPCs already returned by this
+            # point — Python ``bytes`` is immutable so those copies
+            # remain best-effort, but the live storage is gone.
             priv = state.get("claimant_priv")
-            if isinstance(priv, (bytes, bytearray)):
-                try:
-                    ba = bytearray(priv)
-                    for i in range(len(ba)):
-                        ba[i] = 0
-                except Exception:  # noqa: BLE001
-                    pass
+            if isinstance(priv, bytearray):
+                for i in range(len(priv)):
+                    priv[i] = 0
             state["claimant_priv"] = None
             state["shared_secret"] = None
             return False

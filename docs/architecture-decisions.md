@@ -74,6 +74,20 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-18 — Shard envelope author check relaxed at expected=0; root path stays strict
+
+**Status:** landed (commit ``b048d86``).
+
+**Context.** During the 2026-05-18 review pass on §5.M2 the migration runner appeared to fail because the server rejected ``new_shard_revision != expected + 1``. Actually testing it showed the chain check (``parent == new - 1``) is orthogonal to the CAS check (``expected == current``); genesis-insert at arbitrary revision already worked on the server. The genuine failure mode was ``validateShardEnvelopeAgainstBody``'s unconditional ``env.author_device_id == X-Device-ID`` check: migration replicates a source-side shard envelope verbatim, and that envelope's author is whichever peer wrote it on the source, not the migrating device. Result: every multi-device-vault migration died on the first peer-authored shard.
+
+**Decision.** ``validateShardEnvelopeAgainstBody`` gains an ``$allowEnvelopeAuthorMismatch`` flag. Both ``putShard`` and ``putShardWithRoot`` pass ``true`` when ``expected_current_shard_revision === 0`` — the genesis-insert path is also the migration-replication path. Non-genesis edits still enforce strict author match (regression-pinned by ``test_putShard_rejects_foreign_envelope_author_on_edit``).
+
+**Author field is metadata, not a security boundary.** All paired devices share ``master_key`` and can already construct any envelope they want with any author claim. AEAD AAD binds the author cryptographically (decrypt with the wrong author fails). The pre-fix check rejected a forged author at WRITE time, but a malicious paired device could just put its OWN author on a forged-content envelope and the check passes anyway. The check provides no isolation between paired devices; the genuine access control is the vault-bearer + X-Device-ID + per-role check.
+
+**Asymmetry vs ``putRoot``.** The corresponding root-only path (``putRoot``) still enforces strict ``env.author_device_id == X-Device-ID``. Intentional: migration replicates root envelopes via the ``create_vault`` path (initial_root_ciphertext on first vault create), not via ``putRoot``. ``create_vault`` doesn't check author at all (no row exists yet). After ``create_vault``, the target vault's root only mutates via ``putRoot``/``putShardWithRoot`` and those mutations come from the migrating device (root advances during migration's verify-then-commit phase), so the strict check is correct there. If a future migration path ever needs to replicate a peer-authored root post-create, this asymmetry would have to be revisited; ``test_putShardWithRoot_accepts_foreign_envelope_author_on_genesis`` pins the shard side of the same case.
+
+**Anchor.** ``server/src/Controllers/VaultController.php::validateShardEnvelopeAgainstBody`` (relaxed at line 783), call sites at ``putShard`` line 610 and ``putShardWithRoot`` line 701. Tests in ``server/tests/Vault/VaultControllerTest.php``: ``test_putShard_accepts_foreign_envelope_author_on_genesis_insert``, ``test_putShard_rejects_foreign_envelope_author_on_edit``, ``test_putShard_accepts_migration_genesis_at_arbitrary_rev``.
+
 ### 2026-05-18 — Eviction policy: age-ordered auto-purge with quota-shrink passphrase gate
 
 **Status:** landed. Design originally in [`docs/plans/vault-eviction-v1.md`](plans/vault-eviction-v1.md); implementation collapses ``_unexpired_tombstone_candidates`` + ``_oldest_version_candidates`` into ``_next_destructive_candidate`` (single age-ordered iterator) and adds the ``mode={auto,alarm}`` parameter to ``eviction_pass``. Quota routing in ``QuotaMixin._handle_quota_exceeded`` splits into alarm (``used > quota`` → passphrase-gated cleanup), silent auto-purge (no dialog, fits the failing upload), and terminal no-history banner. Pre-existing key-name mismatch fixed in ``VaultQuotaExceededError`` — the alarm gate needs ``used_bytes`` / ``quota_bytes`` to read what the server actually emits.

@@ -305,6 +305,26 @@ def show_vault_export(config_dir: Path) -> None:
         stack.add_named(error_page, "error")
 
         # --- helpers -------------------------------------------------
+        def _wipe_passphrase() -> None:
+            """C2 review fix: drop in-process passphrase references.
+
+            Mirrors the import wizard's ``_wipe_passphrase`` pattern.
+            Python ``str`` is immutable so the bytes can't be zeroed
+            in place — best we can do is release the references so
+            the string isn't pinned by the wizard's ``state`` dict
+            for the rest of the window's lifetime. The two
+            ``Gtk.PasswordEntry`` buffers are cleared so the
+            visible field doesn't carry the text past the operation
+            either.
+            """
+            state["passphrase"] = ""
+            state.pop("passphrase", None)
+            try:
+                pp_entry.set_text("")
+                pp_confirm.set_text("")
+            except Exception:  # noqa: BLE001
+                pass
+
         def _refresh_continue(*_args) -> None:
             pp = pp_entry.get_text()
             cf = pp_confirm.get_text()
@@ -374,6 +394,13 @@ def show_vault_export(config_dir: Path) -> None:
         setup_continue.connect("clicked", on_export)
 
         def _on_progress(prog: ExportProgress) -> None:
+            # N2 review: ``update`` closes over ``prog`` — Python
+            # binds the closure to the parameter cell, which is set
+            # ONCE per ``_on_progress`` invocation. Each
+            # write_export_bundle callback creates a fresh closure
+            # over a fresh ``prog`` snapshot, so the GLib.idle_add
+            # marshalling sees the right value at execution time
+            # even when the worker has moved on to the next phase.
             def update() -> bool:
                 if prog.phase == "derive":
                     derive_bar.pulse()
@@ -526,6 +553,12 @@ def show_vault_export(config_dir: Path) -> None:
                 )
             shred_warning.set_visible(True)
             go_to("done")
+            # C2: drop the passphrase references once the export
+            # bundle has been written + verified — they're not
+            # needed past this point and pinning them in
+            # ``state["passphrase"]`` keeps the string alive until
+            # window close.
+            _wipe_passphrase()
 
         def on_shred_clicked(_btn) -> None:
             path = state["result_path"]
@@ -576,6 +609,15 @@ def show_vault_export(config_dir: Path) -> None:
             dlg.present(win)
 
         done_shred.connect("clicked", on_shred_clicked)
+
+        # C2: drop the passphrase on window close so a stuck-in-state
+        # passphrase doesn't sit pinned in memory after the user
+        # cancels.
+        def on_close(_w) -> bool:
+            _wipe_passphrase()
+            return False
+
+        win.connect("close-request", on_close)
 
         apply_pointer_cursors(win)
         win.present()

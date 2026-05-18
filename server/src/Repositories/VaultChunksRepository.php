@@ -342,6 +342,17 @@ class VaultChunksRepository
      * ``gc_pending`` / ``purged`` rows are mid-flight server state
      * the client mustn't reason about.
      *
+     * B2 (post-§4.M1 review) — ``$minAgeSeconds`` excludes recently
+     * uploaded chunks from the listing. The reaper races with
+     * concurrent uploads: a chunk PUT'd in the last few seconds may
+     * not yet be referenced by a published shard (e.g. a folder
+     * upload that PUTs chunks file-by-file then publishes the shard
+     * at the end). Without the filter, the reaper would see those
+     * mid-upload chunks as orphans and DELETE them before the
+     * uploader's shard publish lands. Default ``0`` preserves
+     * backward-compat for any future caller that wants the full
+     * list; the reaper passes ``3600`` to apply a one-hour grace.
+     *
      * Cursor convention: ``$cursor`` is the last chunk_id returned by
      * the previous page (exclusive lower bound). Pass an empty string
      * for the first page. Caller stops when fewer than ``$limit``
@@ -351,26 +362,36 @@ class VaultChunksRepository
      */
     public function listIds(
         string $vaultId, string $cursor = '', int $limit = 1024,
+        int $minAgeSeconds = 0, ?int $now = null,
     ): array {
         if ($limit < 1 || $limit > 1024) {
             throw new \InvalidArgumentException(
                 "limit must be in [1, 1024]; got {$limit}"
             );
         }
+        if ($minAgeSeconds < 0) {
+            throw new \InvalidArgumentException(
+                "minAgeSeconds must be non-negative; got {$minAgeSeconds}"
+            );
+        }
+        $nowEpoch = $now ?? time();
+        $maxCreatedAt = $nowEpoch - $minAgeSeconds;
         $rows = $this->db->queryAll(
             'SELECT chunk_id
              FROM vault_chunks
              WHERE vault_id = :vid
                AND state IN (:active, :retained)
                AND chunk_id > :cursor
+               AND created_at <= :max_created_at
              ORDER BY chunk_id ASC
              LIMIT :lim',
             [
-                ':vid'      => $vaultId,
-                ':active'   => self::STATE_ACTIVE,
-                ':retained' => self::STATE_RETAINED,
-                ':cursor'   => $cursor,
-                ':lim'      => $limit,
+                ':vid'             => $vaultId,
+                ':active'          => self::STATE_ACTIVE,
+                ':retained'        => self::STATE_RETAINED,
+                ':cursor'          => $cursor,
+                ':max_created_at'  => $maxCreatedAt,
+                ':lim'             => $limit,
             ]
         );
         $out = [];

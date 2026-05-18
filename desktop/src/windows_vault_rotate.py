@@ -72,6 +72,13 @@ def show_vault_rotate(config_dir: Path) -> None:
         RotationRateLimitedError,
         rotate_access_secret,
     )
+    from .vault.grant.rotation_recovery import (
+        RotationMarker,
+        clear_marker,
+        probe_relay_with_secret,
+        read_marker,
+        write_marker,
+    )
     from .vault.grant.store import VaultGrant, open_default_grant_store
     from .vault.ui.window_args import resolve_active_vault_id
 
@@ -276,7 +283,66 @@ def show_vault_rotate(config_dir: Path) -> None:
         save_page.append(save_actions)
         stack.add_named(save_page, "save_kit")
 
-        # ===== Page 5: Error ======================================
+        # ===== Page 5: Recovery (B1 crash-recovery) ===============
+        # Reached on wizard launch when ``read_marker`` finds an
+        # in-progress rotation. The probe + keyring-save runs
+        # automatically; the user just sees status text.
+        recover_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        recover_page.append(Gtk.Label(
+            label="Recovering an unfinished rotation",
+            xalign=0, css_classes=["title-2"],
+        ))
+        recover_page.append(Gtk.Label(
+            label=(
+                "A previous rotation didn't finish on this device. "
+                "Checking the relay to determine whether the new "
+                "secret was actually committed there. If it was, "
+                "we'll finish saving it locally; if it wasn't, the "
+                "old secret is still valid and you can start a "
+                "fresh rotation."
+            ),
+            xalign=0, wrap=True, css_classes=["dim-label"],
+        ))
+        recover_spinner = Gtk.Spinner()
+        recover_spinner.set_size_request(48, 48)
+        recover_spinner.set_halign(Gtk.Align.START)
+        recover_page.append(recover_spinner)
+        recover_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        recover_page.append(recover_status)
+        recover_actions = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            halign=Gtk.Align.END,
+        )
+        recover_retry = Gtk.Button(label="Retry", css_classes=["pill"])
+        recover_retry.set_visible(False)
+        recover_actions.append(recover_retry)
+        recover_close = Gtk.Button(label="Close", css_classes=["pill"])
+        recover_close.connect("clicked", lambda _b: win.close())
+        recover_actions.append(recover_close)
+        recover_page.append(recover_actions)
+        stack.add_named(recover_page, "recover")
+
+        # ===== Page 6: Recovery success ===========================
+        recovered_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        recovered_page.append(Gtk.Label(
+            label="Rotation recovered",
+            xalign=0, css_classes=["title-2"],
+        ))
+        recovered_status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label"])
+        recovered_page.append(recovered_status)
+        recovered_actions = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8,
+            halign=Gtk.Align.END,
+        )
+        recovered_close = Gtk.Button(
+            label="Close", css_classes=["pill", "suggested-action"],
+        )
+        recovered_close.connect("clicked", lambda _b: win.close())
+        recovered_actions.append(recovered_close)
+        recovered_page.append(recovered_actions)
+        stack.add_named(recovered_page, "recovered")
+
+        # ===== Page 7: Error ======================================
         error_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         error_page.append(Gtk.Label(
             label="Rotation could not complete",
@@ -416,7 +482,12 @@ def show_vault_rotate(config_dir: Path) -> None:
                 new_secret = generate_new_secret()
                 state["new_secret"] = new_secret
                 old_secret: str | None = None
-                master_key: bytes | None = None
+                # B1: store the master_key copy as a bytearray so we
+                # can actually zero its bytes in place when we're
+                # done. ``bytes(...)`` would force a copy we couldn't
+                # mutate, defeating the cleanup.
+                master_key: bytearray | None = None
+                marker_written = False
                 try:
                     config.reload()
                     relay = create_vault_relay(config)
@@ -424,12 +495,30 @@ def show_vault_rotate(config_dir: Path) -> None:
                         config_dir, config, vault_id_undashed,
                     )
                     try:
-                        master_key = bytes(vault.master_key) if vault.master_key else None
+                        master_key = bytearray(vault.master_key) if vault.master_key else None
                         old_secret = vault.vault_access_secret
                     finally:
                         vault.close()
                     if not old_secret or master_key is None:
                         raise RuntimeError("local vault grant is closed / missing material")
+
+                    # B1: persist the crash-recovery marker BEFORE the
+                    # server POST. Between server-200 and store.save
+                    # is the bricking window (SIGKILL, OOM, GTK crash);
+                    # the marker carries the new_secret so a re-launched
+                    # wizard can finish the local keyring update.
+                    started_at = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%S.000Z",
+                    )
+                    write_marker(
+                        Path(config_dir),
+                        RotationMarker(
+                            vault_id=vault_id_undashed,
+                            new_secret=new_secret,
+                            started_at=started_at,
+                        ),
+                    )
+                    marker_written = True
 
                     response = rotate_access_secret(
                         relay, vault_id_undashed, old_secret, new_secret,
@@ -445,7 +534,7 @@ def show_vault_rotate(config_dir: Path) -> None:
                     # secret. Pre-rotation operations would 401 on the
                     # relay after this point.
                     new_grant = VaultGrant.from_bytes(
-                        vault_id_undashed, master_key, new_secret,
+                        vault_id_undashed, bytes(master_key), new_secret,
                     )
                     try:
                         store = open_default_grant_store(
@@ -457,17 +546,43 @@ def show_vault_rotate(config_dir: Path) -> None:
                         store.save(new_grant)
                     finally:
                         new_grant.zero()
+
+                    # B1: keyring save succeeded — marker no longer
+                    # needed. Failure to clear it is non-fatal; the
+                    # next wizard launch's recovery probe sees that
+                    # the new secret already works and discards.
+                    try:
+                        clear_marker(Path(config_dir), vault_id_undashed)
+                        marker_written = False
+                    except Exception:  # noqa: BLE001
+                        log.exception(
+                            "vault.rotate.marker_clear_failed vault=%s",
+                            vault_id_undashed[:12],
+                        )
                 except Exception as exc:  # noqa: BLE001
                     err = exc
+                    # B1: if rotation never reached the server (POST
+                    # exception or pre-POST failure), the marker is
+                    # stale — the device's existing secret is still
+                    # the live one. Distinguishing this from "POST
+                    # succeeded but keyring save failed" requires the
+                    # ``rotated_at`` sentinel: it's set only after
+                    # rotate_access_secret returns successfully.
+                    if marker_written and rotated_at is None:
+                        try:
+                            clear_marker(Path(config_dir), vault_id_undashed)
+                        except Exception:  # noqa: BLE001
+                            log.exception(
+                                "vault.rotate.marker_clear_failed_post_error vault=%s",
+                                vault_id_undashed[:12],
+                            )
 
-                # Best-effort scrub of the master_key copy we held.
+                # B1: zero the live bytearray (not a copy this time)
+                # so the master_key bytes don't linger on the heap
+                # for arbitrary GC delay.
                 if master_key is not None:
-                    try:
-                        ba = bytearray(master_key)
-                        for i in range(len(ba)):
-                            ba[i] = 0
-                    except Exception:  # noqa: BLE001
-                        pass
+                    for i in range(len(master_key)):
+                        master_key[i] = 0
 
                 def settle() -> bool:
                     progress_spinner.stop()
@@ -596,6 +711,141 @@ def show_vault_rotate(config_dir: Path) -> None:
             "vault.rotate.started vault=%s",
             (vault_id_undashed or "?")[:12],
         )
+
+        # B1: Recover from a previous rotation interrupted between
+        # server-200 and local-keyring-save. The probe + save runs
+        # on a worker thread; the user sees the recover_page spinner
+        # while it works, then either the recovered_page (we
+        # finished the keyring update) or the confirm_page (marker
+        # turned out to be stale; old secret still works).
+        def _run_recovery_probe(marker: RotationMarker) -> None:
+            recover_spinner.start()
+            recover_status.set_label(
+                "Probing the relay with the device's current secret…",
+            )
+            recover_retry.set_visible(False)
+
+            def worker() -> None:
+                err: Exception | None = None
+                outcome: str = "unknown"
+                try:
+                    config.reload()
+                    relay = create_vault_relay(config)
+                    vault = open_local_vault_from_grant(
+                        config_dir, config, vault_id_undashed,
+                    )
+                    try:
+                        cached_secret = vault.vault_access_secret
+                        cached_master_key = (
+                            bytearray(vault.master_key) if vault.master_key else None
+                        )
+                    finally:
+                        vault.close()
+                    if not cached_secret or cached_master_key is None:
+                        raise RuntimeError(
+                            "local vault grant is closed / missing material",
+                        )
+                    probe = probe_relay_with_secret(
+                        relay, vault_id_undashed, cached_secret,
+                    )
+                    if probe == "secret_works":
+                        # Marker existed but rotation never committed.
+                        # Clear the marker and let the normal flow run.
+                        clear_marker(Path(config_dir), vault_id_undashed)
+                        outcome = "marker_was_stale"
+                    elif probe == "secret_invalid":
+                        # Marker is actionable — save its new_secret
+                        # into the keyring so subsequent ops stop 401'ing.
+                        new_grant = VaultGrant.from_bytes(
+                            vault_id_undashed,
+                            bytes(cached_master_key),
+                            marker.new_secret,
+                        )
+                        try:
+                            store = open_default_grant_store(
+                                config_dir=Path(config_dir),
+                                device_seed_provider=_vault_device_seed_provider(
+                                    Path(config_dir), config,
+                                ),
+                            )
+                            store.save(new_grant)
+                        finally:
+                            new_grant.zero()
+                        clear_marker(Path(config_dir), vault_id_undashed)
+                        log.info(
+                            "vault.rotate.marker_recovered vault=%s",
+                            vault_id_undashed[:12],
+                        )
+                        outcome = "restored"
+                    else:
+                        outcome = "network_error"
+                except Exception as exc:  # noqa: BLE001
+                    err = exc
+                finally:
+                    # Zero the live bytearray we held briefly.
+                    if "cached_master_key" in locals() and cached_master_key is not None:
+                        for i in range(len(cached_master_key)):
+                            cached_master_key[i] = 0
+
+                def settle() -> bool:
+                    recover_spinner.stop()
+                    if err is not None:
+                        recover_status.set_label(
+                            "Could not finish recovery: "
+                            f"{humanize(err)}. The marker is preserved; "
+                            "try again later."
+                        )
+                        recover_retry.set_visible(True)
+                        return False
+                    if outcome == "restored":
+                        recovered_status.set_label(
+                            "The relay's new access secret is now saved on "
+                            "this device. Your previously-saved recovery kit "
+                            "still works (passphrase + kit unlocks the same "
+                            "master key). Open Vault Settings → Recovery → "
+                            "Update recovery material… to generate a fresh "
+                            "kit at your convenience."
+                        )
+                        go_to("recovered")
+                    elif outcome == "marker_was_stale":
+                        recover_status.set_label(
+                            "The relay still accepts the device's current "
+                            "secret — the previous rotation never committed. "
+                            "You can start a fresh rotation from the confirm "
+                            "page below."
+                        )
+                        go_to("confirm")
+                    else:  # network_error
+                        recover_status.set_label(
+                            "Could not reach the relay to verify recovery "
+                            "state. The marker is preserved — retry when "
+                            "you have a connection."
+                        )
+                        recover_retry.set_visible(True)
+                    return False
+
+                GLib.idle_add(settle)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        existing_marker = None
+        if vault_id_undashed:
+            try:
+                existing_marker = read_marker(
+                    Path(config_dir), vault_id_undashed,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "vault.rotate.marker_read_exception vault=%s",
+                    vault_id_undashed[:12],
+                )
+        if existing_marker is not None:
+            go_to("recover")
+            recover_retry.connect(
+                "clicked", lambda _b, m=existing_marker: _run_recovery_probe(m),
+            )
+            _run_recovery_probe(existing_marker)
+
         win.present()
 
     app.connect("activate", on_activate)

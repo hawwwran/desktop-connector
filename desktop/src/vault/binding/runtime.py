@@ -820,7 +820,7 @@ class VaultHttpRelay:
 
     def list_chunks(
         self, vault_id: str, vault_access_secret: str,
-        *, page_limit: int = 1024,
+        *, page_limit: int = 1024, min_age_seconds: int = 0,
     ) -> list[str]:
         """Paginated enumeration of every user-visible chunk_id on the relay.
 
@@ -830,17 +830,28 @@ class VaultHttpRelay:
         which subtracts the live manifest's chunk references to find
         ciphertext that the relay still holds but the vault no longer
         knows about.
+
+        ``min_age_seconds`` (B2 post-§4.M1 review) — exclude chunks
+        whose ``created_at`` is within the last N seconds from the
+        listing. The reaper passes 3600 (one hour) so a concurrent
+        upload's between-PUT-and-publish window doesn't end up with
+        its chunks misclassified as orphans. Default ``0`` returns
+        every user-visible chunk (use case: integrity inventory).
         """
         from ..relay_errors import VaultRelayError
 
         if page_limit < 1 or page_limit > 1024:
             raise RuntimeError("page_limit must be in [1, 1024]")
+        if min_age_seconds < 0:
+            raise RuntimeError("min_age_seconds must be non-negative")
         all_ids: list[str] = []
         cursor = ""
         while True:
             params = f"?limit={page_limit}"
             if cursor:
                 params += f"&cursor={cursor}"
+            if min_age_seconds > 0:
+                params += f"&min_age_seconds={min_age_seconds}"
             resp = self._conn.request(
                 "GET",
                 f"/api/vaults/{vault_id}/chunks{params}",

@@ -778,6 +778,52 @@ final class VaultControllerTest extends TestCase
         ]));
     }
 
+    public function test_putShardWithRoot_accepts_foreign_envelope_author_on_genesis(): void
+    {
+        // §5.M2 / N5: same author-mismatch relaxation as
+        // ``putShard`` — at ``expected_current_shard_revision === 0``
+        // the envelope.author check is skipped so a peer-authored
+        // shard can land via the atomic publish path. The atomic
+        // path enforces ``new == expected + 1`` (it's for normal
+        // edits, not migration replication which uses bare
+        // ``put_shard`` for arbitrary-rev genesis), so we exercise
+        // the relaxation at ``new=1, expected=0`` — same shape a
+        // first-folder-publish would take, with a forged author
+        // claim to confirm the check is genuinely skipped.
+        $foreignAuthor = str_repeat('e', 32);
+        $shardHash = str_repeat('a', 64);
+        $rootHash  = str_repeat('b', 64);
+        $body = [
+            'shard' => [
+                'expected_current_shard_revision' => 0,
+                'new_shard_revision'              => 1,
+                'parent_shard_revision'           => 0,
+                'shard_hash'                      => $shardHash,
+                'shard_ciphertext'                => base64_encode(
+                    $this->shardEnvelope(self::FOLDER_A, 1, 0, $foreignAuthor),
+                ),
+            ],
+            'root' => [
+                'expected_current_root_revision' => 1,
+                'new_root_revision'              => 2,
+                'parent_root_revision'           => 1,
+                'root_hash'                      => $rootHash,
+                'root_ciphertext'                => base64_encode($this->rootEnvelope(2, 1)),
+            ],
+        ];
+
+        $res = $this->invoke(fn() => VaultController::putShardWithRoot(
+            $this->db,
+            $this->jctx('PUT', [
+                'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A,
+            ], $body),
+        ));
+
+        self::assertSame(200, $res['status']);
+        self::assertSame(1, $res['json']['data']['shard_revision']);
+        self::assertSame($shardHash, $res['json']['data']['shard_hash']);
+    }
+
     public function test_putShardWithRoot_409_shard_root_conflict_when_both_stale(): void
     {
         // Advance shard + root out-of-band so the request's expectations

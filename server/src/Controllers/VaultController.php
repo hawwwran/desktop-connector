@@ -1285,9 +1285,31 @@ class VaultController
                 );
             }
         }
+        // B2: ``min_age_seconds`` excludes recently-uploaded chunks
+        // from the listing so the desktop reaper doesn't race with
+        // a concurrent upload's between-PUT-and-publish window.
+        $minAgeRaw = $ctx->query['min_age_seconds'] ?? null;
+        $minAgeSeconds = 0;
+        if ($minAgeRaw !== null) {
+            if (!ctype_digit((string)$minAgeRaw)) {
+                throw new VaultInvalidRequestError(
+                    'min_age_seconds must be a non-negative integer',
+                    'min_age_seconds'
+                );
+            }
+            $minAgeSeconds = (int)$minAgeRaw;
+            if ($minAgeSeconds < 0 || $minAgeSeconds > 86400 * 30) {
+                throw new VaultInvalidRequestError(
+                    'min_age_seconds must be in [0, 30 days]',
+                    'min_age_seconds'
+                );
+            }
+        }
 
         $chunksRepo = new VaultChunksRepository($db);
-        $ids = $chunksRepo->listIds($vaultId, $cursorRaw, $limit);
+        $ids = $chunksRepo->listIds(
+            $vaultId, $cursorRaw, $limit, $minAgeSeconds,
+        );
         $nextCursor = (count($ids) === $limit) ? end($ids) : null;
 
         Router::json([

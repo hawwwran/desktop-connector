@@ -127,7 +127,7 @@ class EvictionRelay(Protocol):
 
     def list_chunks(
         self, vault_id: str, vault_access_secret: str,
-        *, page_limit: int = 1024,
+        *, page_limit: int = 1024, min_age_seconds: int = 0,
     ) -> list[str]: ...
 
 
@@ -814,12 +814,16 @@ class OrphanReapResult:
     bytes_freed: int = 0
 
 
+DEFAULT_ORPHAN_GRACE_SECONDS = 3600
+
+
 def reap_orphan_chunks(
     *,
     vault: EvictionVault,
     relay: EvictionRelay,
     author_device_id: str,
     max_orphans_per_pass: int = 4096,
+    upload_grace_seconds: int = DEFAULT_ORPHAN_GRACE_SECONDS,
 ) -> OrphanReapResult:
     """§4.M1 — drop server-side chunks the live manifest no longer references.
 
@@ -836,6 +840,14 @@ def reap_orphan_chunks(
     autosync tick on an unbounded server-side cleanup. Anything
     over the cap is left for the next tick.
 
+    ``upload_grace_seconds`` (B2 post-§4.M1 review) — passed to the
+    relay's ``list_chunks`` endpoint so chunks newer than the grace
+    window aren't surfaced. Closes the race where a concurrent
+    upload's chunks (post-PUT, pre-shard-publish) get misclassified
+    as orphans and deleted. Default ``3600`` (one hour) covers
+    typical large folder uploads + retries; raise it for vaults
+    with sustained multi-hour uploads.
+
     No-op shape: when the diff is empty (or the manifest has zero
     chunks and the server reports zero chunks), returns
     :class:`OrphanReapResult` with empty lists — caller can skip
@@ -843,6 +855,7 @@ def reap_orphan_chunks(
     """
     server_chunks = relay.list_chunks(
         vault.vault_id, vault.vault_access_secret,
+        min_age_seconds=upload_grace_seconds,
     )
     if not server_chunks:
         return OrphanReapResult()
@@ -888,9 +901,16 @@ def reap_orphan_chunks(
     if not safe_to_delete:
         # Server reports every candidate as still-referenced — means
         # a concurrent publish reclaimed them between our list_chunks
-        # and gc_plan. Nothing to do; the next tick re-checks.
-        log.info(
-            "vault.eviction.orphan_reap_noop vault=%s candidates=%d",
+        # and gc_plan. N1 review fix: surface this at warning level
+        # with the candidate count + retry interval so operators
+        # don't have to wonder why an apparent leak persists across
+        # multiple ticks (the noop is non-trivial — N candidates
+        # showed up as orphans but the server contested every one).
+        log.warning(
+            "vault.eviction.orphan_reap_noop vault=%s candidates=%d "
+            "(server contested all candidates as still-referenced; "
+            "next attempt after autosync's per-vault reap throttle, "
+            "default 3600s)",
             vault.vault_id, len(orphans),
         )
         return OrphanReapResult(orphan_chunk_ids=orphans)
