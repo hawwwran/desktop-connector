@@ -72,6 +72,26 @@ class VaultController
         return (string) $body[$field];
     }
 
+    /**
+     * Review §1.M1 — `header_hash`, `root_hash`, `shard_hash` MUST match
+     * `^[a-f0-9]{64}$`. Pre-fix vaultRequireNonEmptyString accepted any
+     * non-empty string and "banana" would survive storage to surface in
+     * 409 `current_*_hash` payloads as opaque garbage. The §10.C decrypt
+     * checks still catch this on the desktop side, but a client that
+     * trusts the relay's 409 reply (e.g. to compare hash-equality for
+     * idempotency) needs the hash bytes to actually be hex.
+     */
+    private static function vaultRequireHex64(array $body, string $field): string
+    {
+        $raw = self::vaultRequireNonEmptyString($body, $field);
+        if (!preg_match('/^[a-f0-9]{64}$/D', $raw)) {
+            throw new VaultInvalidRequestError(
+                "{$field} must be 64 lowercase hex chars (SHA-256 digest)", $field,
+            );
+        }
+        return $raw;
+    }
+
     /** Server-side timestamp serialization (UTC, second precision, RFC 3339). */
     private static function ts(int $epoch): string
     {
@@ -133,14 +153,14 @@ class VaultController
         $tokenHash = self::decodeBase64Field($body, 'vault_access_token_hash', 32);
         $encHeader = self::decodeBase64Field($body, 'encrypted_header');
         self::guardEnvelopeSize('header', strlen($encHeader), self::MAX_HEADER_BYTES);
-        $headerHash = self::vaultRequireNonEmptyString($body, 'header_hash');
+        $headerHash = self::vaultRequireHex64($body, 'header_hash');
 
         // Sharded create — the only path. The pre-sharding
         // ``initial_manifest_*`` shape was retired alongside the
         // ``vault_manifests`` table and the ``/manifest`` endpoints.
         $rootCipher = self::decodeBase64Field($body, 'initial_root_ciphertext');
         self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
-        $rootHash = self::vaultRequireNonEmptyString($body, 'initial_root_hash');
+        $rootHash = self::vaultRequireHex64($body, 'initial_root_hash');
         $initialRootRevision = isset($body['initial_root_revision'])
             ? self::vaultRequireInt($body, 'initial_root_revision') : 1;
         if ($initialRootRevision < 1) {
@@ -328,7 +348,7 @@ class VaultController
             );
         }
         $encHeader  = self::decodeBase64Field($body, 'encrypted_header');
-        $headerHash = self::vaultRequireNonEmptyString($body, 'header_hash');
+        $headerHash = self::vaultRequireHex64($body, 'header_hash');
         self::guardEnvelopeSize('header', strlen($encHeader), self::MAX_HEADER_BYTES);
 
         // Authoritatively read (vault_id, header_revision) from the
@@ -451,7 +471,7 @@ class VaultController
         $expected   = self::vaultRequireInt($body, 'expected_current_root_revision');
         $newRev     = self::vaultRequireInt($body, 'new_root_revision');
         $parentRev  = self::vaultRequireInt($body, 'parent_root_revision');
-        $rootHash   = self::vaultRequireNonEmptyString($body, 'root_hash');
+        $rootHash   = self::vaultRequireHex64($body, 'root_hash');
         $rootCipher = self::decodeBase64Field($body, 'root_ciphertext');
         self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
 
@@ -549,7 +569,7 @@ class VaultController
         $expected    = self::vaultRequireInt($body, 'expected_current_shard_revision');
         $newRev      = self::vaultRequireInt($body, 'new_shard_revision');
         $parentRev   = self::vaultRequireInt($body, 'parent_shard_revision');
-        $shardHash   = self::vaultRequireNonEmptyString($body, 'shard_hash');
+        $shardHash   = self::vaultRequireHex64($body, 'shard_hash');
         $shardCipher = self::decodeBase64Field($body, 'shard_ciphertext');
         self::guardEnvelopeSize('shard', strlen($shardCipher), self::MAX_SHARD_BYTES);
 
@@ -640,14 +660,14 @@ class VaultController
         $expectedShardRev = self::vaultRequireInt($shardBody, 'expected_current_shard_revision');
         $newShardRev      = self::vaultRequireInt($shardBody, 'new_shard_revision');
         $parentShardRev   = self::vaultRequireInt($shardBody, 'parent_shard_revision');
-        $shardHash        = self::vaultRequireNonEmptyString($shardBody, 'shard_hash');
+        $shardHash        = self::vaultRequireHex64($shardBody, 'shard_hash');
         $shardCipher      = self::decodeBase64Field($shardBody, 'shard_ciphertext');
         self::guardEnvelopeSize('shard', strlen($shardCipher), self::MAX_SHARD_BYTES);
 
         $expectedRootRev = self::vaultRequireInt($rootBody, 'expected_current_root_revision');
         $newRootRev      = self::vaultRequireInt($rootBody, 'new_root_revision');
         $parentRootRev   = self::vaultRequireInt($rootBody, 'parent_root_revision');
-        $rootHash        = self::vaultRequireNonEmptyString($rootBody, 'root_hash');
+        $rootHash        = self::vaultRequireHex64($rootBody, 'root_hash');
         $rootCipher      = self::decodeBase64Field($rootBody, 'root_ciphertext');
         self::guardEnvelopeSize('root', strlen($rootCipher), self::MAX_ROOT_BYTES);
 

@@ -405,6 +405,39 @@ final class VaultControllerTest extends TestCase
     }
 
     /**
+     * Review §1.M1: hash fields MUST be 64 lowercase hex chars. Pre-fix
+     * any non-empty string passed validation and "banana" would survive
+     * storage to surface in 409 `current_*_hash` payloads as opaque
+     * garbage.
+     */
+    public function test_create_400_on_malformed_header_hash(): void
+    {
+        $this->db->execute('DELETE FROM vaults');
+        $this->db->execute('DELETE FROM vault_root_manifests');
+        $this->db->execute('DELETE FROM vault_folder_shards');
+        $this->db->execute('DELETE FROM vault_folder_shard_heads');
+
+        $body = [
+            'vault_id'                => self::VAULT_ID_DASHED,
+            'vault_access_token_hash' => base64_encode(hash('sha256', 'fresh', true)),
+            'encrypted_header'        => base64_encode($this->headerEnvelope(1)),
+            'header_hash'             => 'banana',  // not hex64
+            'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
+            'initial_root_hash'       => self::ROOT_HASH,
+        ];
+        try {
+            VaultController::create(
+                $this->db, $this->jctx('POST', [], $body)
+            );
+            self::fail('expected VaultInvalidRequestError');
+        } catch (VaultInvalidRequestError $e) {
+            self::assertSame(400, $e->status);
+            self::assertSame('header_hash', $e->details['field']);
+            self::assertStringContainsString('hex', $e->getMessage());
+        }
+    }
+
+    /**
      * Review §1.H4: a v0x02 envelope at create-time must 422 before
      * the row lands — same gate that already applies on putHeader.
      */
