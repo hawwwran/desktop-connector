@@ -438,6 +438,15 @@ class VaultCrypto
         int $chunkPlaintextSize,
     ): string {
         $canonical = self::normalizeVaultId($vaultId);
+        // Review §1.M2 — assert the canonical 12-byte length to match
+        // buildRootAad / buildShardAad (and the Python twin, which
+        // asserts in every builder). A future controller that forgets
+        // ``normalizeVaultId`` would otherwise silently produce a
+        // wrong-length AAD that still AEAD-passes on this device but
+        // breaks cross-runtime parity.
+        if (strlen($canonical) !== 12) {
+            throw new InvalidArgumentException("vault_id must canonicalize to 12 bytes");
+        }
         foreach ([$remoteFolderId, $fileId, $fileVersionId] as $id) {
             if (strlen($id) !== 30) {
                 throw new InvalidArgumentException("id must be 30 bytes; got {$id}");
@@ -497,6 +506,10 @@ class VaultCrypto
     public static function buildHeaderAad(string $vaultId, int $headerRevision): string
     {
         $canonical = self::normalizeVaultId($vaultId);
+        // Review §1.M2 — see buildChunkAad for rationale.
+        if (strlen($canonical) !== 12) {
+            throw new InvalidArgumentException("vault_id must canonicalize to 12 bytes");
+        }
         return self::HEADER_AAD_SCHEMA . $canonical . self::packBeU64($headerRevision);
     }
 
@@ -519,6 +532,10 @@ class VaultCrypto
     public static function buildRecoveryAad(string $vaultId, string $envelopeId): string
     {
         $canonical = self::normalizeVaultId($vaultId);
+        // Review §1.M2 — see buildChunkAad for rationale.
+        if (strlen($canonical) !== 12) {
+            throw new InvalidArgumentException("vault_id must canonicalize to 12 bytes");
+        }
         if (strlen($envelopeId) !== 30) {
             throw new InvalidArgumentException("envelope_id must be 30 bytes");
         }
@@ -572,6 +589,10 @@ class VaultCrypto
         string $claimantDeviceId,
     ): string {
         $canonical = self::normalizeVaultId($vaultId);
+        // Review §1.M2 — see buildChunkAad for rationale.
+        if (strlen($canonical) !== 12) {
+            throw new InvalidArgumentException("vault_id must canonicalize to 12 bytes");
+        }
         if (strlen($grantId) !== 30) {
             throw new InvalidArgumentException("grant_id must be 30 bytes");
         }

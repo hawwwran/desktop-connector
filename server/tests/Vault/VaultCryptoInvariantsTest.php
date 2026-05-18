@@ -75,4 +75,47 @@ final class VaultCryptoInvariantsTest extends TestCase
             self::VAULT_ID, self::GRANT_ID_30B, str_repeat('xy', 16)
         );
     }
+
+    /**
+     * Review §1.M2 — every AAD builder MUST canonicalize and assert the
+     * 12-byte vault_id length. Pre-fix buildChunkAad / buildHeaderAad /
+     * buildRecoveryAad / buildDeviceGrantAad accepted whatever
+     * ``normalizeVaultId`` returned (which could be empty if the input
+     * was malformed before reaching the builder). A future controller
+     * that forgot ``normalizeVaultId`` would have silently produced a
+     * wrong-length AAD that AEAD-passes locally but diverges from the
+     * Python twin's output, breaking the cross-runtime parity gate.
+     */
+    public function test_buildChunkAad_rejects_malformed_vault_id(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('12 bytes');
+        VaultCrypto::buildChunkAad(
+            'TOO-SHORT', self::GRANT_ID_30B,
+            str_repeat('a', 30), str_repeat('b', 30), 0, 0,
+        );
+    }
+
+    public function test_buildHeaderAad_rejects_malformed_vault_id(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('12 bytes');
+        VaultCrypto::buildHeaderAad('TOO-SHORT', 1);
+    }
+
+    public function test_buildRecoveryAad_rejects_malformed_vault_id(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('12 bytes');
+        VaultCrypto::buildRecoveryAad('TOO-SHORT', self::GRANT_ID_30B);
+    }
+
+    public function test_buildDeviceGrantAad_rejects_malformed_vault_id(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('12 bytes');
+        VaultCrypto::buildDeviceGrantAad(
+            'TOO-SHORT', self::GRANT_ID_30B, self::DEVICE_ID_LOWER,
+        );
+    }
 }
