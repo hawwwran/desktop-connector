@@ -52,6 +52,7 @@ from .session import (
     clear_session,
     default_upload_resume_dir,
     list_resumable_sessions,
+    reap_expired_sessions,
     save_session,
 )
 from .single_file import prepare_upload_for_batch, upload_file
@@ -84,6 +85,7 @@ __all__ = [
     "list_resumable_sessions",
     "make_conflict_renamed_path",
     "make_stub",
+    "reap_expired_sessions",
     "reap_expired_stubs",
     "reap_stubs_for_path",
     "prepare_upload_for_batch",

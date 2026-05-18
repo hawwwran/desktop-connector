@@ -557,6 +557,7 @@ relay log (filenames are local-only).
 | `vault.sync.scan_list_entries_failed` | desktop | error | `binding` | Catch-up scan couldn't list `vault_local_entries`; tombstone detection skipped this pass |
 | `vault.sync.scan_lookup_failed` | desktop | error | `binding`, `path` | Catch-up scan couldn't read a `vault_local_entries` row; treated as missing for upload-needed check |
 | `vault.sync.scan_skip_missing_root` | desktop | warning | `binding`, `path` | Catch-up scan: binding root vanished |
+| `vault.sync.session_ttl_reaped` | desktop | info | `vault`, `count` | Review §4.H1 — TTL sweep removed stale top-level `<session_id>.json` files (>14 days old); runs once per vault open alongside the batched-stub reaper |
 | `vault.sync.special_file_skipped` | desktop | info | `binding`, `path`, `kind` | T6.4 skipped a symlink/FIFO/socket/device |
 | `vault.sync.trash_failed` | desktop | warning | `path`, `exit`, `stderr` | `gio trash` returned non-zero |
 | `vault.sync.trash_fallback_unlink_failed` | desktop | error | `path`, `error` | trash fallback `unlink` also failed |
@@ -605,6 +606,8 @@ relay log (filenames are local-only).
 | `vault.upload.cas_exhausted` | desktop | warning | `vault`, `path`, `retries` | F-D25 — single-version upload retry budget exhausted; raised the CAS error to caller |
 | `vault.upload.cas_retry` | desktop | info | `attempt`, `path`, `shard_conflict`, `root_conflict` | Phase H — single-version upload shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
 | `vault.upload.completed` | desktop | info | `vault`, `revision`, `path` | A single-file upload completed (post-publish) |
+| `vault.upload.session_clear_failed` | desktop | warning | `session` | Review §4.H1 — `clear_session(session_id)` raised after a successful publish (rare disk error). Falling back to a `phase=complete` tombstone so `list_resumable_sessions` still skips it; TTL reaper sweeps eventually |
+| `vault.upload.session_tombstone_failed` | desktop | error | `session`, exception traceback | Review §4.H1 — both `clear_session` and the fallback `save_session(complete)` raised. Disk is failing; the JSON stays as it was and the TTL reaper will sweep it after 14 days |
 | `vault.usage.malformed_chunk_size_skipped` | desktop | warning | `chunk_id` (truncated) | F-515 — a manifest chunk had no usable `ciphertext_size`; usage rendered as 0 B for it |
 | `vault.vault.clear_pass_cap_hit` | desktop | warning | `folders_seen`, `cap` | Review §4.H3 — clear_vault hit its defensive 8-pass cap. A concurrent device is spamming folder creates faster than the clear can tombstone them; operator should investigate |
 | `vault.vault.cleared` | desktop | info | `total_tombstoned`, `folders`, `author` | T14.2 whole-vault bulk-soft-delete published (folder count added for review §4.H3 — the loop now re-fetches root per pass to catch concurrent folder creates) |

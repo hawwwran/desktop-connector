@@ -8,6 +8,7 @@ after every chunk PUT success.
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -96,6 +97,73 @@ def clear_session(session_id: str, cache_dir: Path) -> None:
         target.unlink()
     except FileNotFoundError:
         return
+
+
+_SESSION_TTL_DAYS_DEFAULT = 14
+
+
+def reap_expired_sessions(
+    cache_dir: Path,
+    *,
+    ttl_days: int = _SESSION_TTL_DAYS_DEFAULT,
+    now: datetime | None = None,
+) -> int:
+    """Drop every top-level ``<session_id>.json`` older than ``ttl_days``.
+
+    Review §4.H1: ``upload_file`` marks the session ``phase=complete``,
+    saves it, then unlinks the JSON. A process crash between the save
+    and the unlink leaves the file on disk forever —
+    :func:`list_resumable_sessions` correctly filters it out (so it
+    doesn't drive an unwanted resume), but nothing else reaps it.
+    Mirrors :func:`reap_expired_stubs` with the same 14-day window.
+
+    Unparseable JSON / missing ``created_at`` / schema drift is reaped
+    too: bit-rot is unsafe to keep indefinitely. Only top-level files
+    are touched — the ``batched/`` sub-directory has its own reaper.
+    """
+    cache_dir = Path(cache_dir)
+    if not cache_dir.exists():
+        return 0
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(
+        days=max(0, int(ttl_days)),
+    )
+    removed = 0
+    for path in sorted(cache_dir.glob("*.json")):
+        if not path.is_file():
+            continue
+        try:
+            with open(path, "rb") as fh:
+                data = json.loads(fh.read().decode("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+            continue
+        created_at = data.get("created_at")
+        try:
+            if not isinstance(created_at, str):
+                raise ValueError
+            raw = created_at.replace("Z", "+00:00") if created_at.endswith("Z") else created_at
+            when = datetime.fromisoformat(raw)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+        except (ValueError, AttributeError, TypeError):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+            continue
+        if when >= cutoff:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def list_resumable_sessions(vault_id: str, cache_dir: Path) -> list[UploadSession]:

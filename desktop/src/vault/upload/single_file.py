@@ -339,13 +339,29 @@ def upload_file(
         entry_id=entry_id,
         author_device_id=author_device_id,
     )
-    # F-D05: mark the session as published BEFORE the filesystem-side
-    # cleanup. If clear_session fails (rare disk error), the
-    # list_resumable_sessions filter still skips this row so we don't
-    # republish a duplicate version on the next resume.
-    session.phase = "complete"
-    save_session(session, cache_dir)
-    clear_session(session.session_id, cache_dir)
+    # Review §4.H1: unlink first so a crash after this point leaves no
+    # session JSON on disk. Pre-fix the ordering was
+    # save(phase=complete) → unlink — a crash between the two leaked
+    # the JSON forever (``list_resumable_sessions`` filtered it out
+    # correctly, but nothing reaped it). If the unlink itself errors
+    # (rare disk failure), fall back to the old marker behaviour so
+    # ``list_resumable_sessions`` still skips it; the TTL reaper
+    # (``reap_expired_sessions``) sweeps both lingerers after 14 days.
+    try:
+        clear_session(session.session_id, cache_dir)
+    except OSError:
+        log.warning(
+            "vault.upload.session_clear_failed session=%s",
+            session.session_id,
+        )
+        session.phase = "complete"
+        try:
+            save_session(session, cache_dir)
+        except OSError:
+            log.exception(
+                "vault.upload.session_tombstone_failed session=%s",
+                session.session_id,
+            )
     _report(progress, "done", total_chunks, total_chunks, bytes_uploaded)
 
     # F-510: anchor the Activity tab's "Uploaded" timeline row.

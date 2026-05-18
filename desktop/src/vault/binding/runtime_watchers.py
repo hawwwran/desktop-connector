@@ -96,12 +96,23 @@ class VaultWatcherRuntime:
                 self.vault_id, started,
             )
         try:
-            from ..upload import default_upload_resume_dir, reap_expired_stubs
-            reaped = reap_expired_stubs(default_upload_resume_dir())
+            from ..upload import (
+                default_upload_resume_dir,
+                reap_expired_sessions,
+                reap_expired_stubs,
+            )
+            cache_dir = default_upload_resume_dir()
+            reaped = reap_expired_stubs(cache_dir)
             if reaped:
                 log.info(
                     "vault.sync.batch_stubs_ttl_reaped vault=%s count=%d",
                     self.vault_id, reaped,
+                )
+            session_reaped = reap_expired_sessions(cache_dir)
+            if session_reaped:
+                log.info(
+                    "vault.sync.session_ttl_reaped vault=%s count=%d",
+                    self.vault_id, session_reaped,
                 )
         except Exception:  # noqa: BLE001
             log.exception(

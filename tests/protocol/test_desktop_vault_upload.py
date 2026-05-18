@@ -30,6 +30,7 @@ from src.vault.upload import (  # noqa: E402
     detect_path_conflict,
     list_resumable_sessions,
     make_conflict_renamed_path,
+    reap_expired_sessions,
     resume_upload,
     upload_file,
     upload_folder,
@@ -660,6 +661,112 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             vault.close()
 
         # No leftover sessions for this vault.
+        self.assertEqual(list_resumable_sessions(VAULT_ID, cache_dir), [])
+
+    def test_reap_expired_sessions_drops_old_top_level_json(self) -> None:
+        """Review §4.H1: ``upload_file`` saves the session, marks it
+        ``phase=complete``, then unlinks. A crash between save and
+        unlink leaks the JSON forever. ``reap_expired_sessions`` is the
+        belt-and-braces TTL sweep — runs at vault open, drops anything
+        older than 14 days (mirrors ``reap_expired_stubs`` for the
+        batched-stubs sub-directory)."""
+        from datetime import datetime, timedelta, timezone
+        import json as _json
+
+        from src.vault.upload.session import reap_expired_sessions
+
+        cache_dir = self.tmpdir / "resume_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        old_when = (datetime.now(timezone.utc) - timedelta(days=20)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+        fresh_when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        def _write(name: str, created_at: str) -> Path:
+            payload = {
+                "session_id": name,
+                "vault_id": VAULT_ID,
+                "remote_folder_id": DOCS_ID,
+                "remote_path": "a.txt",
+                "entry_id": "f_test",
+                "version_id": "v_test",
+                "author_device_id": AUTHOR,
+                "content_fingerprint": "0" * 64,
+                "logical_size": 0,
+                "local_path": "/tmp/a.txt",
+                "chunk_size": 1024,
+                "created_at": created_at,
+                "chunks": [],
+                "phase": "complete",
+            }
+            path = cache_dir / f"{name}.json"
+            path.write_text(_json.dumps(payload))
+            return path
+
+        stale = _write("stale_session", old_when)
+        fresh = _write("fresh_session", fresh_when)
+
+        # Also seed a corrupt JSON to confirm the reaper drops it too.
+        corrupt = cache_dir / "garbage_session.json"
+        corrupt.write_text("not-json{{{")
+
+        # And a sub-directory the reaper must NOT touch (batched/ has
+        # its own reaper).
+        (cache_dir / "batched").mkdir()
+        nested = cache_dir / "batched" / "should_stay.json"
+        nested.write_text("{}")
+
+        removed = reap_expired_sessions(cache_dir)
+
+        self.assertEqual(removed, 2)  # stale + corrupt
+        self.assertFalse(stale.exists())
+        self.assertFalse(corrupt.exists())
+        self.assertTrue(fresh.exists())
+        # Sub-directories are off-limits to this reaper.
+        self.assertTrue(nested.exists())
+
+    def test_upload_session_unlink_failure_falls_back_to_tombstone(self) -> None:
+        """Review §4.H1: if ``clear_session`` raises after a successful
+        publish, the upload pipeline now saves a ``phase=complete``
+        tombstone so ``list_resumable_sessions`` still skips it. Pre-
+        fix the marker was unconditional and the unlink raced behind
+        it — leaking a JSON file on every successful upload that hit
+        a process-kill window."""
+        from unittest import mock
+
+        local = self.tmpdir / "tombstone-me.txt"
+        local.write_bytes(b"x" * 4096)
+
+        manifest = _empty_manifest()
+        relay = FakeUploadRelay()
+        cache_dir = self.tmpdir / "resume_cache"
+
+        with mock.patch(
+            "src.vault.upload.single_file.clear_session",
+            side_effect=OSError("rare disk error"),
+        ):
+            vault = _vault()
+            try:
+                seed_sharded_state_from_manifest(vault, relay, manifest)
+                relay.published_shards = []
+                relay.published_roots = []
+                upload_file(
+                    vault=vault, relay=relay, manifest=manifest,
+                    local_path=local, remote_folder_id=DOCS_ID,
+                    remote_path="tombstone-me.txt",
+                    author_device_id=AUTHOR, resume_cache_dir=cache_dir,
+                )
+            finally:
+                vault.close()
+
+        # JSON stays on disk but phase=complete — list_resumable_sessions
+        # filters it out so no resume picks it up.
+        leftover = list(cache_dir.glob("*.json"))
+        self.assertEqual(len(leftover), 1)
+        import json as _json
+        data = _json.loads(leftover[0].read_text())
+        self.assertEqual(data["phase"], "complete")
         self.assertEqual(list_resumable_sessions(VAULT_ID, cache_dir), [])
 
     def test_upload_folder_walks_recursively_and_lands_one_publish(self) -> None:
