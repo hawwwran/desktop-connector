@@ -59,6 +59,13 @@ TAB_DANGER = (
     / "windows_vault"
     / "tab_danger.py"
 )
+PASSPHRASE_GEN = (
+    Path(REPO_ROOT)
+    / "desktop"
+    / "src"
+    / "windows_vault"
+    / "passphrase_generator.py"
+)
 
 
 class UiOffloadSmokeTests(unittest.TestCase):
@@ -134,6 +141,47 @@ class UiOffloadSmokeTests(unittest.TestCase):
         self.assertIn(
             'set_response_enabled("delete", False)', confirm_body,
             "the Delete response must start disabled (typed-confirm gate)",
+        )
+
+    def test_passphrase_generator_uses_password_entry_and_auto_clear(self) -> None:
+        """Review §6.H4 — three security-UX invariants on the
+        passphrase generator window:
+
+          1. The visible widget is a ``Gtk.PasswordEntry`` (obscured
+             by default, peek-icon to reveal), NOT a plain
+             ``Gtk.Entry`` (which shows the passphrase to anyone
+             shoulder-surfing).
+          2. The Copy button schedules a clipboard auto-clear via
+             ``GLib.timeout_add``.
+          3. The window mentions clipboard-manager history so a
+             user with CopyQ/Klipper/GPaste knows the auto-clear
+             doesn't wipe their snapshot history.
+        """
+        source = PASSPHRASE_GEN.read_text()
+        # (1) Obscured by default — and explicitly NOT the plaintext
+        # Gtk.Entry pattern.
+        self.assertIn(
+            "Gtk.PasswordEntry()", source,
+            "passphrase widget must be PasswordEntry, not Entry",
+        )
+        self.assertIn(
+            "set_show_peek_icon(True)", source,
+            "PasswordEntry must expose a peek-icon so the user can "
+            "still verify what they generated",
+        )
+        # (2) Auto-clear timer.
+        self.assertIn(
+            "GLib.timeout_add", source,
+            "Copy must arm a clipboard auto-clear timer",
+        )
+        self.assertIn(
+            "CLIPBOARD_AUTO_CLEAR_S", source,
+            "auto-clear delay must be a named constant for review",
+        )
+        # (3) Clipboard-manager tip.
+        self.assertIn(
+            "clipboard manager", source.lower(),
+            "tip text must warn about clipboard-manager history",
         )
 
     def test_schedule_purge_checks_admin_role(self) -> None:
