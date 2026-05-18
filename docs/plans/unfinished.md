@@ -273,19 +273,11 @@ The shard-aware `_in_shard` variants exist; port `upload/conflict.py` + `import_
 
 ### 3.5 — Legacy helpers in `desktop/src/vault/manifest.py`
 
-| Helper | Status | Last production caller |
-|---|---|---|
-| `make_manifest` | Test-fixture only | None — fixture builder, will go when test helpers migrate |
-| `add_remote_folder` (manifest-level) | Test-fixture only | None |
-| `rename_remote_folder` (manifest-level) | Test-fixture only | None |
-| `tombstone_file_entry` | Test-fixture only | None |
-| `add_or_append_file_version` | Production | `import_/bundle.py:34` |
-| `find_file_entry` | Production | `upload/conflict.py:6`, `import_/bundle.py:35` |
-| `merge_with_remote_head` | Defined, no production caller | Plan noted this — confirm + drop |
-| `normalize_manifest_plaintext` | Production (envelope shaping) | Still needed for unified-shape serialization paths |
-| `canonical_manifest_json` | Production (envelope shaping) | Still needed |
+**Landed:** `add_remote_folder` (manifest-level), `rename_remote_folder` (manifest-level), `add_or_append_file_version`, `merge_with_remote_head` all dropped.
 
-The shard-aware `_in_shard` variants (`find_file_entry_in_shard`, `add_or_append_file_version_in_shard`, `tombstone_file_entry_in_shard`) already exist alongside the legacy helpers. Migrating the last two production callers (`upload/conflict.py`, `import_/bundle.py`) to the `_in_shard` variants unlocks dropping `find_file_entry` / `add_or_append_file_version`.
+**Still present (test-fixture only):** `make_manifest`, `make_remote_folder`, `tombstone_file_entry`, `find_file_entry` — kept because ~140 test sites still build/inspect unified manifests with them. Migrating the tests to a pure-sharded fixture vocabulary is a separate refactor.
+
+`normalize_manifest_plaintext`, `canonical_manifest_json` stay — they shape envelope-serialization paths in production.
 
 ### 3.6 — Test-helper migration
 

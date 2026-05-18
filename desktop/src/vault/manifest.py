@@ -178,25 +178,6 @@ def normalize_remote_folder(
     return out
 
 
-def add_remote_folder(manifest: dict[str, Any], folder: dict[str, Any]) -> dict[str, Any]:
-    """Return a manifest copy with ``folder`` appended.
-
-    The caller owns revision/parent_revision values before calling this
-    helper; this function only mutates the plaintext folder set.
-    """
-    out = normalize_manifest_plaintext(manifest)
-    normalized_folder = normalize_remote_folder(
-        folder,
-        default_created_at=str(out.get("created_at", "")),
-        default_created_by_device_id=str(out.get("author_device_id", "")),
-    )
-    existing = {f["remote_folder_id"] for f in out["remote_folders"]}
-    if normalized_folder["remote_folder_id"] in existing:
-        raise ValueError(f"remote folder already exists: {normalized_folder['remote_folder_id']}")
-    out["remote_folders"].append(normalized_folder)
-    return out
-
-
 def remove_remote_folder(manifest: dict[str, Any], remote_folder_id: str) -> dict[str, Any]:
     """Return a manifest copy with ``remote_folder_id`` removed."""
     out = normalize_manifest_plaintext(manifest)
@@ -208,28 +189,6 @@ def remove_remote_folder(manifest: dict[str, Any], remote_folder_id: str) -> dic
     if len(out["remote_folders"]) == before:
         raise ValueError(f"remote folder not found: {remote_folder_id}")
     return out
-
-
-def rename_remote_folder(
-    manifest: dict[str, Any],
-    remote_folder_id: str,
-    new_display_name: str,
-) -> dict[str, Any]:
-    """Return a manifest copy with ``display_name_enc`` updated for one folder.
-
-    Per §D6, rename touches **only** the encrypted display name; binding,
-    retention, ignore patterns, state, and the per-device local-path map
-    are unaffected.
-    """
-    out = normalize_manifest_plaintext(manifest)
-    name = unicodedata.normalize("NFC", str(new_display_name)).strip()
-    if not name:
-        raise ValueError("folder name is required")
-    for folder in out["remote_folders"]:
-        if folder.get("remote_folder_id") == remote_folder_id:
-            folder["display_name_enc"] = name
-            return out
-    raise ValueError(f"remote folder not found: {remote_folder_id}")
 
 
 def update_remote_folder_settings(
@@ -401,88 +360,6 @@ def find_file_entry(
             if entry_path == normalized_path:
                 return entry
     return None
-
-
-def add_or_append_file_version(
-    manifest: dict[str, Any],
-    *,
-    remote_folder_id: str,
-    path: str,
-    version: dict[str, Any],
-    entry_id: str | None = None,
-) -> dict[str, Any]:
-    """Mutate ``manifest`` so ``path`` has ``version`` as its latest version.
-
-    If no entry exists at ``path``, a new file entry is created with a
-    fresh ``entry_id`` (or the caller-provided one). If an entry exists,
-    ``version`` is appended and ``latest_version_id`` flips to point at
-    it. The entry's ``deleted`` flag is cleared on append — re-uploading
-    over a tombstone restores the file (matches §D5 / T7.4 semantics).
-
-    Returns a new normalized manifest dict; callers own revision +
-    parent_revision bookkeeping.
-    """
-    if not _FILE_VERSION_ID_RE.match(str(version.get("version_id", ""))):
-        raise ValueError("version.version_id must match ^fv_v1_[a-z2-7]{24}$")
-
-    out = normalize_manifest_plaintext(manifest)
-    normalized_path = normalize_manifest_path(path)
-
-    folder = None
-    for candidate in out["remote_folders"]:
-        if candidate.get("remote_folder_id") == remote_folder_id:
-            folder = candidate
-            break
-    if folder is None:
-        raise ValueError(f"remote folder not found: {remote_folder_id}")
-
-    folder.setdefault("entries", [])
-    target = None
-    for entry in folder["entries"]:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("type", "file")) != "file":
-            continue
-        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
-            target = entry
-            break
-
-    new_version = copy.deepcopy(version)
-    if target is None:
-        new_entry_id = entry_id or generate_file_entry_id()
-        if not _FILE_ENTRY_ID_RE.match(new_entry_id):
-            raise ValueError("entry_id must match ^fe_v1_[a-z2-7]{24}$")
-        target = {
-            "entry_id": new_entry_id,
-            "type": "file",
-            "path": normalized_path,
-            "deleted": False,
-            "latest_version_id": new_version["version_id"],
-            "versions": [new_version],
-        }
-        folder["entries"].append(target)
-    else:
-        target["versions"] = [
-            v for v in target.get("versions", []) if isinstance(v, dict)
-        ]
-        # F-D05 defense in depth: idempotent re-publish must not append
-        # a duplicate version row. If the same version_id is already
-        # the latest, return the manifest unchanged (the caller has
-        # nothing new to do).
-        version_id_str = str(new_version.get("version_id", ""))
-        existing_ids = [str(v.get("version_id", "")) for v in target["versions"]]
-        if version_id_str and version_id_str in existing_ids:
-            target["latest_version_id"] = version_id_str
-            target["deleted"] = False
-            target.pop("deleted_at", None)
-            target.pop("recoverable_until", None)
-            return out
-        target["versions"].append(new_version)
-        target["latest_version_id"] = new_version["version_id"]
-        target["deleted"] = False
-        target.pop("deleted_at", None)
-        target.pop("recoverable_until", None)
-    return out
 
 
 def compute_recoverable_until(deleted_at: str, keep_deleted_days: int) -> str:
@@ -682,72 +559,22 @@ def restore_file_entry(
     return out
 
 
-def merge_with_remote_head(
-    *,
-    parent: dict[str, Any],
-    local_attempt: dict[str, Any],
-    server_head: dict[str, Any],
-    author_device_id: str,
-    now: str | None = None,
-) -> dict[str, Any]:
-    """§D4 CAS merge: rebuild ``local_attempt`` on top of ``server_head``.
-
-    Implements the deterministic per-op rules from §D4 that T6 cares
-    about (file uploads): "new file at path P", "new version of
-    existing file F", and the latest-version tie-breaker by
-    ``(modified_at, sha256(author_device_id))`` lex order. Other op
-    types — soft-delete, restore, rename, hard-purge — are not
-    exercised by T6 and intentionally land as a passthrough copy of
-    ``local_attempt``'s entry, to be revisited when T7 layers tombstone
-    semantics on top.
-
-    The output's ``revision`` is ``server_head.revision + 1`` and
-    ``parent_revision`` is ``server_head.revision``, so the caller can
-    immediately CAS-publish without further bookkeeping.
-    """
-    parent_n = normalize_manifest_plaintext(parent)
-    local_n = normalize_manifest_plaintext(local_attempt)
-    server_n = normalize_manifest_plaintext(server_head)
-
-    server_revision = int(server_n.get("revision", 0))
-    out = copy.deepcopy(server_n)
-    out["revision"] = server_revision + 1
-    out["parent_revision"] = server_revision
-    out["created_at"] = str(now or _now_rfc3339_default())
-    out["author_device_id"] = str(author_device_id)
-
-    parent_folders = {
-        str(f.get("remote_folder_id", "")): f for f in parent_n.get("remote_folders", [])
-    }
-    local_folders = {
-        str(f.get("remote_folder_id", "")): f for f in local_n.get("remote_folders", [])
-    }
-    out_folders_by_id: dict[str, dict[str, Any]] = {
-        str(f.get("remote_folder_id", "")): f for f in out["remote_folders"]
-    }
-
-    for folder_id, local_folder in local_folders.items():
-        parent_folder = parent_folders.get(folder_id)
-        out_folder = out_folders_by_id.get(folder_id)
-        if out_folder is None:
-            out["remote_folders"].append(copy.deepcopy(local_folder))
-            out_folders_by_id[folder_id] = out["remote_folders"][-1]
-            continue
-        _merge_folder_entries(
-            local_folder=local_folder,
-            parent_folder=parent_folder,
-            out_folder=out_folder,
-        )
-
-    return out
-
-
 def _merge_folder_entries(
     *,
     local_folder: dict[str, Any],
     parent_folder: dict[str, Any] | None,
     out_folder: dict[str, Any],
 ) -> None:
+    """Folder-scoped §D4 merge: rebuild ``out_folder.entries`` from
+    ``server_head`` + new versions/entries pulled from
+    ``local_attempt``.
+
+    Used today by ``merge_shard_with_remote_head`` (the sharded §D4
+    merge for the CAS-retry path). The legacy unified-shape
+    ``merge_with_remote_head`` was dropped in §3.6; the helper stays
+    because the shard variant synthesizes folder-wrappers around its
+    entry lists and reuses this body.
+    """
     parent_entries: dict[str, dict[str, Any]] = {
         str(e.get("entry_id", "")): e
         for e in (parent_folder or {}).get("entries", [])
@@ -780,13 +607,9 @@ def _merge_folder_entries(
             if isinstance(v, dict) and str(v.get("version_id", "")) not in parent_version_ids
         ]
         if not local_versions_new and parent_entry is not None:
-            # Local didn't actually add anything new; ignore.
             continue
 
         if out_entry is None:
-            # New file from local. Check for path collision against the
-            # server head and rename per the §D4 "Upload new file at path P"
-            # row.
             local_path = unicodedata.normalize("NFC", str(local_entry.get("path", "")))
             existing_paths = {
                 unicodedata.normalize("NFC", str(e.get("path", "")))
@@ -802,10 +625,6 @@ def _merge_folder_entries(
                 out_folder["entries"].append(copy.deepcopy(local_entry))
             continue
 
-        # Same entry exists on both sides; append the new local versions.
-        # Per §D4 row 3 the local-side new versions still land as
-        # restorable history regardless of whether the server tombstoned
-        # the entry — a future "Restore" action needs them visible.
         existing_version_ids = {
             str(v.get("version_id", ""))
             for v in out_entry.get("versions", [])
@@ -816,16 +635,10 @@ def _merge_folder_entries(
                 continue
             out_entry.setdefault("versions", []).append(copy.deepcopy(v))
 
-        # F-D07: ``latest_version_id`` is re-resolved deterministically
-        # per §D4 *only* when the entry is still live. When the server's
-        # head carries ``deleted=True`` we keep the server's existing
-        # ``latest_version_id`` (typically the pre-tombstone latest, or
-        # empty if the entry was tombstoned at genesis). Re-resolving on
-        # a tombstoned entry would point at a freshly-uploaded version's
-        # chunks; those chunks would then look like the "current" content
-        # to ``vault_eviction``'s preserve-latest pass and survive forever
-        # even though the entry is logically dead, no UI can reach the
-        # version, and it isn't part of any restore plan.
+        # F-D07: re-resolve ``latest_version_id`` only when the entry
+        # is still live; a tombstoned entry keeps the server's
+        # pre-tombstone latest so eviction's preserve-latest pass
+        # doesn't pin chunks belonging to a deleted file.
         if not bool(out_entry.get("deleted")):
             out_entry["latest_version_id"] = _resolve_latest_version_id(
                 [v for v in out_entry.get("versions", []) if isinstance(v, dict)]
@@ -934,10 +747,13 @@ def _normalize_string_list(value: Any, field_name: str) -> list[str]:
 # envelope per remote folder. The helpers below are the in-memory dict
 # shape that mirrors the new envelopes.
 #
-# During Phase C the *legacy* helpers above (``make_manifest``,
-# ``add_or_append_file_version``, ``tombstone_file_entry`` …) stay
-# functional; phases D + E migrate their callers to the new
-# shard-aware surface. Phase H drops the legacy helpers.
+# Phase H step 7f: production now uses the sharded helpers below
+# exclusively. The remaining legacy unified-shape helpers above
+# (``make_manifest``, ``make_remote_folder``, ``tombstone_file_entry``,
+# ``find_file_entry``) are kept as **test fixtures only** — call sites
+# in production code were retired earlier. A future cleanup will
+# migrate the last test scaffolding to the sharded shape and drop
+# these helpers entirely.
 #
 # Spec: docs/protocol/vault-v1.md §6.4–§6.8,
 #       docs/protocol/vault-v1-formats.md §10.A / §10.B.
