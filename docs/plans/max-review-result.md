@@ -108,8 +108,11 @@ Every call generates `random_bytes(19)` *before* checking whether an intent alre
 
 ### High
 
-#### §1.H1 — No rate limit on vault auth attempts or create-vault despite spec mandate
+#### ~~§1.H1~~ — No rate limit on vault auth attempts or create-vault despite spec mandate
+**Fix landed:** c041b46 2026-05-17
 **File:** `server/src/Auth/VaultAuthService.php:108`
+
+**Approach:** Migration 006 adds `vault_auth_attempts`; `VaultAuthAttemptsRepository.recordAndRead` is a single atomic UPSERT (window-reset via CASE expression). VaultAuthService bills auth + create attempts before the AEAD compare; overflow returns 429 `vault_rate_limited` with `retry_after_ms` + `Retry-After` header.
 
 Spec `docs/protocol/vault-v1.md` §10 mandates 10/min auth attempts and 5/hour create-vault, with `vault_rate_limited` + `Retry-After`. The only `VaultRateLimitedError` site in the entire codebase is `VaultGrantsController.php:157` (pending-join-count cap). The 32-byte access secret makes online brute-force impractical, but the missing limiter also means no IDS signal — a compromised paired device could hammer `vault_auth_failed` without observable rate-limit telemetry.
 
@@ -525,8 +528,11 @@ No path in `vault_binding_*.py`, `runtime.py`, or the manifest/header fetch help
 
 ### High
 
-#### §5.H1 — Import wizard never plumbs `genesis_fingerprint` → identity gate collapses to vault_id-only
+#### ~~§5.H1~~ — Import wizard never plumbs `genesis_fingerprint` → identity gate collapses to vault_id-only
+**Fix landed:** d6a2b11 2026-05-17
 **File:** `desktop/src/windows_vault_import.py:265-266, 362-369`
+
+**Approach:** Add `Vault.fetch_header_plaintext(relay)` for the active vault's fingerprint; persist `genesis_fingerprint` in the export bundle's `RECORD_TYPE_HEADER` plaintext (`BundleHeaderInfo.genesis_fingerprint`); wizard's open + run paths now extract both and pass them through `decide_import_action`. Legacy bundles missing the field fall back to vault_id-only.
 
 Calls runner with `active_genesis_fingerprint=None, bundle_genesis_fingerprint=None`. `decide_import_action` (`vault/import_/bundle.py:146-150`) short-circuits the comparison when either side is `None`. Merge happens on vault_id match alone. The bundle header carries no `genesis_fingerprint` field; the active vault writes it into the *encrypted header envelope* which the wizard does not extract.
 
@@ -638,8 +644,11 @@ Spec at `docs/vault-architecture.md:1008` requires "typed-confirm vault ID + del
 
 ### High
 
-#### §6.H1 — Hard-purge scheduling is client-side-only with no executor
+#### ~~§6.H1~~ — Hard-purge scheduling is client-side-only with no executor
+**Fix landed (partial — detection + notification):** 0b836aa 2026-05-17 — auto-execute design tracked in `review-doubts.md`.
 **File:** `desktop/src/vault/ops/purge_schedule.py` + tray autosync at `vault_submenu.py:223-337`
+
+**Approach:** Wire autosync tick to consume `list_due_purges` + emit `vault.purge.due_awaiting_user` event + system notification. Updated dialog copy to be honest about the online dependency. Full auto-execution requires `purge_secret` persistence (three design options logged for user scoping).
 
 `schedule_purge` writes to a local `purge_state.json`; **nothing reads `list_due_pending_purges`** and calls `gc/execute`. The dialog promises "After {N} hour(s), every chunk and manifest in this vault is deleted from the relay" — user reasonably thinks they can close the laptop and the purge fires. **It cannot.** If the desktop is offline at `scheduled_for_epoch`, nothing happens.
 

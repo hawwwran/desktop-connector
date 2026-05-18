@@ -37,3 +37,6 @@ Continuing autonomously into the High section.
 - 2026-05-17 — fixed §3.H4 (commit c98e913): two-way tombstone declines unlink fallback when gio is missing; op marks trash_failed instead of silent permanent delete.
 - 2026-05-17 — fixed §3.H5 (commit 095523b): WatcherCoordinator now locks _pending/debouncer/gate across observer + tick threads.
 - 2026-05-17 — fixed §6.H4 (commit 45abecc): passphrase generator uses PasswordEntry + 30 s clipboard auto-clear + clipboard-manager tip.
+- 2026-05-17 — fixed §1.H1 (commit c041b46): vault auth + create rate limits per protocol §10; new vault_auth_attempts table + repo; 429 vault_rate_limited on overflow.
+- 2026-05-17 — fixed §5.H1 (commit d6a2b11): export bundle persists genesis_fingerprint; Vault.fetch_header_plaintext + import wizard extract both sides; identity gate now anchored on the cryptographic fingerprint.
+- 2026-05-17 — partial §6.H1 (commit 0b836aa): autosync notifies on due scheduled-purges + dialog copy is now honest; auto-fire half needs purge_secret persistence design (logged to review-doubts.md).
