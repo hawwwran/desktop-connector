@@ -154,6 +154,30 @@ class Router
                 $e->getMessage()
             ), $level);
             ErrorResponder::send($e);
+        } catch (\Throwable $e) {
+            // Review §1.M4 — anything that escapes the controllers as a
+            // non-ApiError exception (uncaught \Throwable, fatal PDO
+            // errors, type errors) used to land on PHP's default error
+            // handler, which can leak file paths / stack frames /
+            // SQL fragments via the standard error envelope unless the
+            // operator has remembered to set ``display_errors=Off``.
+            // Catch + log the full trace server-side (operator visible)
+            // and emit the vault_v1 envelope so the client sees a
+            // typed code without any details.
+            AppLog::log('Api', sprintf(
+                'apierror.uncaught_throwable type=%s method=%s uri=%s reason=%s trace=%s',
+                $e::class,
+                $_SERVER['REQUEST_METHOD'] ?? '-',
+                $_SERVER['REQUEST_URI'] ?? '-',
+                $e->getMessage(),
+                $e->getTraceAsString(),
+            ), 'error');
+            $envelope = new ApiError(
+                status: 500,
+                errorCode: 'vault_internal_error',
+                message: 'internal error',
+            );
+            ErrorResponder::send($envelope);
         }
     }
 
