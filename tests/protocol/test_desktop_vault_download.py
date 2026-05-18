@@ -463,6 +463,44 @@ class VaultDownloadTests(unittest.TestCase):
         self.assertEqual(progress[-1].phase, "done")
         self.assertFalse(list(out.rglob("*.dc-temp-*")))
 
+    def test_download_folder_fsyncs_each_distinct_directory(self) -> None:
+        """Review §3.M6: power loss after the per-file fsyncs but
+        before any directory fsync can leave file inodes on disk while
+        the directory entries that name them are lost. Folder restore
+        must ``fsync_dir`` every distinct destination directory after
+        the per-file loop. Pin via a monkeypatch on ``fsync_dir``: drive
+        a 3-file folder restore into a nested tree (``batch/`` and
+        ``batch/nested/``) and assert ``fsync_dir`` was called for both
+        directories.
+        """
+        from unittest import mock
+        files = {
+            "batch/file-1.txt": b"payload 1",
+            "batch/file-2.txt": b"payload 2",
+            "batch/nested/file-3.txt": b"payload 3",
+        }
+        manifest, chunks = _folder_manifest_and_chunks(files)
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        try:
+            with mock.patch(
+                "src.vault.download.folder.fsync_dir",
+                autospec=True,
+            ) as mock_fsync:
+                out = download_folder(
+                    vault=vault, relay=relay, manifest=manifest,
+                    path="Documents",
+                    destination=self.tmpdir / "Documents",
+                )
+        finally:
+            vault.close()
+        fsynced_paths = {str(call.args[0]) for call in mock_fsync.call_args_list}
+        self.assertIn(str(out / "batch"), fsynced_paths)
+        self.assertIn(str(out / "batch" / "nested"), fsynced_paths)
+        # Final root is fsynced too (even though no files live directly
+        # under it, the resolve_folder_destination + mkdir creates it).
+        self.assertIn(str(out), fsynced_paths)
+
     def test_download_latest_file_streams_via_atomic_write_chunks(self) -> None:
         """Review §3.H3: ``download_latest_file`` and
         ``download_version`` previously accumulated ``plaintext_parts:

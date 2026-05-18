@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from ..atomic import fsync_dir
 from ..binding.lifecycle import SyncCancelledError
 from ..manifest import normalize_manifest_plaintext
 from .cache import _load_cached_chunk, _store_cached_chunk
@@ -150,6 +151,24 @@ def download_folder(
                 f"downloaded size mismatch for {plan.display_path}: "
                 f"expected {expected_size}, got {written_for_file}"
             )
+
+    # Review §3.M6 — fsync every distinct directory we wrote into. The
+    # per-file ``atomic_write_chunks`` fsyncs the file data, but the
+    # directory entries (filename → inode pointers) only land on disk
+    # when the directory itself is fsynced. Without this, a power loss
+    # mid-restore of a thousand-file folder could survive every file's
+    # bytes but lose the entries that name them — the user reopens
+    # their disk and finds blank directories where they expected
+    # files. Best-effort: ``fsync_dir`` silently no-ops on filesystems
+    # that refuse directory fsync (FAT, some FUSE).
+    fsynced_dirs: set[Path] = set()
+    for plan in plans:
+        parent = (final_root / plan.relative_path).parent
+        if parent not in fsynced_dirs:
+            fsync_dir(parent)
+            fsynced_dirs.add(parent)
+    if final_root not in fsynced_dirs:
+        fsync_dir(final_root)
 
     _report(progress, "done", total_chunks, total_chunks, bytes_written)
     return final_root
