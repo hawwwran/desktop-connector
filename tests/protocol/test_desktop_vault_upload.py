@@ -23,6 +23,7 @@ from src.vault.download import download_latest_file  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
     find_file_entry,
+    find_file_entry_in_shard,
     make_manifest,
     make_remote_folder,
 )
@@ -293,7 +294,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         # second pass added nothing.
         self.assertEqual(len(relay.published_shards), 1)
         self.assertEqual(len(relay.published_roots), 1)
-        entry = find_file_entry(assemble_unified_manifest(second.root, {second.remote_folder_id: second.shard}), DOCS_ID, "twice.bin")
+        entry = find_file_entry_in_shard(second.shard, "twice.bin")
         self.assertEqual(len(entry["versions"]), 1)
         self.assertEqual(entry["latest_version_id"], first.version_id)
 
@@ -390,8 +391,8 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             "report (conflict uploaded Laptop 2026-05-04 17-30).docx",
         )
         self.assertNotEqual(first.entry_id, second.entry_id)
-        original = find_file_entry(assemble_unified_manifest(second.root, {second.remote_folder_id: second.shard}), DOCS_ID, "report.docx")
-        renamed = find_file_entry(assemble_unified_manifest(second.root, {second.remote_folder_id: second.shard}), DOCS_ID, renamed_path)
+        original = find_file_entry_in_shard(second.shard, "report.docx")
+        renamed = find_file_entry_in_shard(second.shard, renamed_path)
         self.assertIsNotNone(original)
         self.assertIsNotNone(renamed)
         self.assertEqual(original["entry_id"], first.entry_id)
@@ -894,7 +895,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # Final manifest holds all three entries under the requested sub-path.
         for rel in ("batch/src/main.py", "batch/src/lib/util.py", "batch/docs/README.md"):
-            entry = find_file_entry(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), DOCS_ID, rel)
+            entry = find_file_entry_in_shard(result.shard, rel)
             self.assertIsNotNone(entry, f"missing manifest entry for {rel}")
 
         self.assertEqual(progress[-1].phase, "done")
@@ -1291,7 +1292,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         self.assertEqual(len(relay.published_shards), 3)
         self.assertEqual(len(relay.published_roots), 3)
 
-        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "report.txt")
+        entry = find_file_entry_in_shard(res_b.shard, "report.txt")
         self.assertIsNotNone(entry)
         version_ids = {v["version_id"] for v in entry["versions"]}
         # All three versions live in F.versions.
@@ -1375,7 +1376,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             key=lambda d: hashlib.sha256(d.encode("utf-8")).digest(),
         )
         expected = res_a.version_id if winner == device_a else res_b.version_id
-        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "tied.txt")
+        entry = find_file_entry_in_shard(res_b.shard, "tied.txt")
         self.assertEqual(entry["latest_version_id"], expected)
 
     def test_concurrent_new_file_at_same_path_renames_imported(self) -> None:
@@ -1577,7 +1578,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             if r.path == "shared/tied.txt"
         )
         expected = a_version_id if winner == device_a else b_version_id
-        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "shared/tied.txt")
+        entry = find_file_entry_in_shard(res_b.shard, "shared/tied.txt")
         self.assertEqual(entry["latest_version_id"], expected)
 
     def test_concurrent_new_file_at_same_path_renames_imported_folder_batch(self) -> None:
@@ -1822,7 +1823,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # (c) No entries lost — every publisher's version_id present
         # in the final entry. Five publishers (seed, A, C, D, B).
-        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "report.txt")
+        entry = find_file_entry_in_shard(res_b.shard, "report.txt")
         self.assertIsNotNone(entry)
         version_ids = {v["version_id"] for v in entry["versions"]}
         self.assertIn(seed_res.version_id, version_ids,
