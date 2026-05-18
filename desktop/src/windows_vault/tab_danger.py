@@ -542,10 +542,15 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
         dlg = Adw.AlertDialog(
             heading="Schedule hard purge?",
             body=(
-                f"⚠ Permanent. After {hours} hour(s), every chunk and "
+                f"⚠ Permanent. After {hours} hour(s) elapse AND this "
+                "desktop is online to fire it, every chunk and "
                 "manifest in this vault is deleted from the relay. "
                 "The recovery kit cannot restore the vault after this "
-                f"point. Type the full Vault ID ({expected}) to confirm."
+                "point. You will receive a notification when the "
+                "delay elapses; reopen this Danger tab with the "
+                "recovery kit to complete the purge. The schedule "
+                "stays armed until you confirm or cancel it. "
+                f"Type the full Vault ID ({expected}) to confirm."
             ),
         )
         dlg.add_response("cancel", "Cancel")

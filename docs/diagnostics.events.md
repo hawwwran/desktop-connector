@@ -467,7 +467,9 @@ relay log (filenames are local-only).
 | `vault.publish.ok` | desktop | info | `vault_id`, `revision` | Manifest CAS-published successfully |
 | `vault.purge.cancelled` | desktop | info | `vault`, `job_id` | User cancelled before fire |
 | `vault.purge.cleared_all_on_toggle_off` | desktop | info | `count` | T14.5 toggle-OFF wiped pending purges |
+| `vault.purge.due_awaiting_user` | desktop | warning | `vault`, `job_id`, `scheduled_for` | Review §6.H1 — tray autosync detected a scheduled hard-purge whose `scheduled_for_epoch` has elapsed; emits a system notification so the user knows to reopen Vault Settings → Danger zone to complete it (auto-execution would require purge_secret persistence, tracked separately in review-doubts.md) |
 | `vault.purge.executed` | desktop | info | `vault`, `job_id` | T14.4 hard-purge fired and cleaned local state |
+| `vault.purge.notify_failed` | desktop | error | `vault`, exception traceback | Review §6.H1 — the system notification raised while announcing a due purge; logged so operators can spot a silent UX-failure path |
 | `vault.purge.scheduled` | desktop | info | `vault`, `job_id`, `scope`, `scheduled_for` | T14.3 hard-purge queued |
 | `vault.purge.state_read_failed` | desktop | warning | `path`, `error` | Pending-purges JSON unreadable; treating as empty |
 | `vault.recovery_test.*` | desktop | info | varies | Subsystem for the M1 recovery-test dialog (T3.5/T3.6) |
@@ -493,6 +495,7 @@ relay log (filenames are local-only).
 | `vault.sync.autosync.tick` | desktop | info | `reason`, `active_bindings` | F-LT06 — tick fired (`reason ∈ {kick, interval}`) with N bindings to drain |
 | `vault.sync.autosync_flush_failed` | desktop | error | `binding`, exception traceback | F-LT06 — `flush_and_sync_binding` raised; loop continues, manual Sync now still works |
 | `vault.sync.autosync_list_bindings_failed` | desktop | error | exception traceback | F-LT06 — bindings store query raised; tick skipped, retried on next interval |
+| `vault.sync.autosync_purge_check_failed` | desktop | error | exception traceback | Review §6.H1 — the autosync tick's due-purge check raised; tick continues, retried on next interval |
 | `vault.sync.autosync_state_subscribe_failed` | desktop | error | exception traceback | F-LT06 — `conn.on_state_change` registration raised; the autosync loop still starts but won't be kicked on reconnect (next interval tick still drains) |
 | `vault.sync.autosync_tick_failed` | desktop | error | exception traceback | F-LT06 — `watcher_runtime.tick_all()` raised; flush attempt still proceeds |
 | `vault.sync.batch_cas_conflict` | desktop | warning | `binding`, `batch_size` | SO-3 — caller-visible end of the batch publish loop after exhausting CAS retries; every batched op rolls back to "failed" |

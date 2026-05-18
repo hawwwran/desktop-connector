@@ -85,3 +85,43 @@ shipping multi-device story.
 Need from user: confirmation that QR-join can stay v1.1 (so this
 Critical drops to "won't fix for v1.0, tracked elsewhere"), or
 scoping for the build.
+
+---
+
+## §6.H1 — Scheduled-purge auto-executor needs purge_secret persistence
+
+Status: partial-needs-followup
+Date: 2026-05-17
+Verified against: `desktop/src/vault/ops/purge_schedule.py:171-186`
+(``build_execute_request_body`` requires ``purge_secret: str``);
+``vaults.purge_token_hash`` BLOB column in
+``server/migrations/002_vault.sql:32`` (server-optional, never set
+by the desktop's create flow).
+Doubt: To wire the autosync to literally call ``gc/execute`` on a
+due purge, the desktop needs ``purge_secret`` in scope at the
+moment the autosync fires. There are three paths and each has
+real trade-offs:
+
+  (a) Generate ``purge_token_hash`` at vault-create time, record
+      ``purge_secret`` in the recovery kit, persist a keyring copy
+      at schedule_purge time, read it from the keyring during
+      autosync. Full automation — but the keyring stores a
+      long-lived purge-fire credential, which is a new at-rest
+      secret class. Need user buy-in.
+
+  (b) Push the schedule to the relay as a real `KIND_SCHEDULED_PURGE`
+      row with a server-side cron — server fires when due. Removes
+      the desktop's "must be online" constraint entirely. But the
+      relay currently has no scheduler infra; would need a small
+      cron + retention policy.
+
+  (c) Leave fire-on-attended (current behaviour with my partial
+      fix): autosync notifies, user reopens Vault Settings →
+      Danger zone, completes with the recovery kit. Dialog copy
+      is now honest about this.
+
+Action taken: partial fix in commit (this commit) — autosync
+notifies on due purges, dialog copy clarifies the online
+dependency. ``vault.purge.due_awaiting_user`` event documented.
+The "auto-fire" half is still open.
+Need from user: pick (a), (b), or (c). (c) ships as-is.

@@ -364,6 +364,59 @@ class VaultSubmenuMixin:
                         binding.binding_id, len(outcomes),
                     )
 
+            # Review §6.H1: at the end of every autosync tick, inspect
+            # the local purge_state.json for any scheduled-purge whose
+            # ``scheduled_for_epoch`` has elapsed. Pre-fix the schedule
+            # was a dialog promise with NO executor — list_due_purges
+            # had zero callers. The full automated flow would need
+            # purge_secret persisted at schedule time (out of scope —
+            # tracked in review-doubts.md). What we wire today: detect
+            # the due record, log the event, and surface a notification
+            # so the user knows to reopen Vault Settings → Danger to
+            # complete the purge. That converts the silent-no-fire bug
+            # into an honest "purge ready, attend the desktop" signal.
+            try:
+                self._handle_due_purges_for_tick()
+            except Exception:  # noqa: BLE001
+                log.exception("vault.sync.autosync_purge_check_failed")
+
+    def _handle_due_purges_for_tick(self) -> None:
+        """Notify on any due scheduled-purge (review §6.H1)."""
+        from ..vault.ops.purge_schedule import list_due_purges
+        notified = getattr(self, "_vault_purge_notified", set())
+        if not isinstance(notified, set):
+            notified = set()
+        due = list_due_purges(self.config.config_dir)
+        if not due:
+            return
+        for pending in due:
+            key = (pending.vault_id_dashed, pending.job_id)
+            if key in notified:
+                continue
+            notified.add(key)
+            log.warning(
+                "vault.purge.due_awaiting_user vault=%s job_id=%s scheduled_for=%s",
+                pending.vault_id_dashed, pending.job_id,
+                pending.scheduled_for_epoch,
+            )
+            try:
+                self.platform.notifications.notify(
+                    title="Vault — Hard purge is due",
+                    body=(
+                        "The hard purge you scheduled for this vault is "
+                        "now due. Open Vault Settings → Danger zone to "
+                        "complete the purge with the recovery kit. The "
+                        "schedule stays armed until you confirm or "
+                        "cancel it."
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "vault.purge.notify_failed vault=%s",
+                    pending.vault_id_dashed,
+                )
+        self._vault_purge_notified = notified
+
     def _vault_export_stub(self, *_) -> None:
         # T8 export bundle logic (vault/export/bundle.py) is shipped at
         # the data layer but no UI launcher is wired yet. The previous

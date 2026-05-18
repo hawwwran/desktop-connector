@@ -59,6 +59,13 @@ TAB_DANGER = (
     / "windows_vault"
     / "tab_danger.py"
 )
+TRAY_VAULT_SUBMENU = (
+    Path(REPO_ROOT)
+    / "desktop"
+    / "src"
+    / "tray"
+    / "vault_submenu.py"
+)
 PASSPHRASE_GEN = (
     Path(REPO_ROOT)
     / "desktop"
@@ -141,6 +148,61 @@ class UiOffloadSmokeTests(unittest.TestCase):
         self.assertIn(
             'set_response_enabled("delete", False)', confirm_body,
             "the Delete response must start disabled (typed-confirm gate)",
+        )
+
+    def test_tray_autosync_handles_due_purges_each_tick(self) -> None:
+        """Review §6.H1: the tray autosync must consume
+        ``list_due_purges`` on every tick and emit a notification
+        when a scheduled-purge is due. Pre-fix nobody called
+        ``list_due_purges`` — the dialog promised "after N hours,
+        every chunk is deleted" but if the desktop was offline at
+        ``scheduled_for_epoch`` nothing fired and the user got no
+        signal.
+
+        Asserts the wiring is present at the source level. Full
+        executor behaviour (auto-call gc/execute) requires
+        ``purge_secret`` persistence which is tracked separately;
+        what we land today is detection + notification + honest
+        dialog copy.
+        """
+        source = TRAY_VAULT_SUBMENU.read_text()
+        self.assertIn(
+            "list_due_purges", source,
+            "autosync tick must consult list_due_purges",
+        )
+        # Method that handles the per-tick scan.
+        handler_body = _slice_function(source, "def _handle_due_purges_for_tick(")
+        self.assertIn(
+            "vault.purge.due_awaiting_user", handler_body,
+            "due-purge detection must emit the catalogued event tag",
+        )
+        self.assertIn(
+            "self.platform.notifications.notify", handler_body,
+            "due-purge detection must surface a system notification",
+        )
+
+    def test_schedule_purge_dialog_copy_is_honest_about_online_requirement(self) -> None:
+        """Review §6.H1: the dialog text used to promise unconditional
+        firing after N hours. The desktop has no server-side scheduler
+        and no in-memory purge_secret for offline execution. Updated
+        copy must mention that the desktop has to be online and that
+        the user will be notified.
+
+        Strings are split across adjacent string literals by
+        formatting; collapse whitespace before matching.
+        """
+        import re
+        source = TAB_DANGER.read_text()
+        # Collapse all whitespace + cross-string-literal joins so
+        # multi-line dialog copy still matches as a single phrase.
+        flat = re.sub(r"\s+", " ", source.replace('" "', ""))
+        self.assertIn(
+            "desktop is online to fire it", flat,
+            "dialog must clarify the online dependency",
+        )
+        self.assertIn(
+            "notification", flat.lower(),
+            "dialog must tell the user to expect a notification",
         )
 
     def test_passphrase_generator_uses_password_entry_and_auto_clear(self) -> None:
