@@ -296,32 +296,45 @@ Recent commit `3fb7470 fix(vault): folder-batch CAS retry must run §D4 merge on
 
 ### Medium
 
-#### §2.M1 — `decrypt_root_envelope` / `decrypt_shard_envelope` skip plaintext-prefix vault_id sanity check
+#### ~~§2.M1~~ — `decrypt_root_envelope` / `decrypt_shard_envelope` skip plaintext-prefix vault_id sanity check
+**Fix landed:** 4b4901d 2026-05-17
 **File:** `desktop/src/vault/vault.py:552-584, 670-708`
 
 CAS-conflict-payload decrypt paths build AAD from envelope-extracted fields but use `self._vault_id` for AAD. AEAD catches a vault_id mismatch (CryptoError), but the error becomes "vault_root_tampered" rather than "wrong vault_id in envelope". The header path does this explicitly (line 482-483); root + shard paths don't. Cheap defense-in-depth.
 
-#### §2.M2 — `VaultFormatVersionUnsupported` typed exception is defined but never raised
+**Approach:** Explicit `envelope_bytes[1:13].decode("ascii") != self._vault_id` guard before the AEAD call in both helpers; mirrors `fetch_header_plaintext`. Two new pin tests build envelopes under a different vault_id and assert ValueError with "vault_id" in the message.
+
+#### ~~§2.M2~~ — `VaultFormatVersionUnsupported` typed exception is defined but never raised
+**Fix landed:** 0e8a619 2026-05-17
 **File:** `desktop/src/vault/crypto.py:95-142`
 
 Production decrypt paths re-implement the byte check inline with bare `ValueError` containing the error code in the message string. Callers can't `except VaultFormatVersionUnsupported`; they have to substring-grep. Migrate the 4 inline checks to call `assert_supported_format_version(envelope_bytes, kind="root")`.
 
-#### §2.M3 — Recovery envelope wire form per §12.4 is build-only — no production read path
+**Approach:** Replaced all four inline checks (header, root, shard, manifest) with `assert_supported_format_version(envelope_bytes, kind="...")`. Typed exception carries structured `envelope_kind` + `observed_version` attributes — callers can now do `except VaultFormatVersionUnsupported` cleanly.
+
+#### ~~§2.M3~~ — Recovery envelope wire form per §12.4 is build-only — no production read path
+**Fix landed:** d159811 2026-05-17
 **File:** `desktop/src/vault/crypto.py:852-881`
 
 The 131-byte envelope is only built by test vectors. Production stores discrete fields (`argon_salt`, `nonce`, `aead_ciphertext_and_tag`, `argon_params`) in JSON inside the header. The actual unwrap path bypasses the format-version byte. Either drop §12.4 from the spec or migrate the open path to consume byte-form envelopes.
 
-#### §2.M4 — Legacy `dc-vault-v1/manifest` HKDF label still reachable in `browser_model.decrypt_manifest`
+**Approach:** Added `parse_recovery_envelope` + `RECOVERY_ENVELOPE_TOTAL_LEN`. The byte form is now end-to-end round-trippable in code (not just via test vectors). Production unwrap still consumes discrete JSON fields — migrating the unwrap path is a wire-format change beyond the Medium scope; with the parser landed, that migration becomes a small refactor when scheduled.
+
+#### ~~§2.M4~~ — Legacy `dc-vault-v1/manifest` HKDF label still reachable in `browser_model.decrypt_manifest`
+**Fix landed:** afe28db 2026-05-17
 **File:** `desktop/src/vault/ui/browser_model.py:100-108`
 
 Verified personally. Recent commit `075e3ff` claims the legacy surface was dropped, but `browser_model` still falls back to `derive_subkey("dc-vault-v1/manifest", ...)` + `build_manifest_aad(...)` on AEAD failure of the root path. The label isn't in spec §4.2. Dead-compat path; maintenance trap.
 
-**Fix:** remove the legacy fallback.
+**Approach:** Split into two explicitly-named helpers sharing the 85-byte prefix parser. `decrypt_manifest` is now root-only (production relay-fetched path); `decrypt_bundle_manifest_envelope` carries the legacy fallback and is the only path the import wizard's bundle-decode reaches. Removing the silent fallback eliminates the "why does this accept two shapes" maintenance trap.
 
-#### §2.M5 — PHP server NFC normalises only when `intl` extension is installed
+#### ~~§2.M5~~ — PHP server NFC normalises only when `intl` extension is installed
+**Fix landed:** 91a278c 2026-05-17
 **File:** `server/src/Crypto/VaultCrypto.php:177-183`
 
 Inert today (server never derives passphrase keys), but a future server-side flow with non-ASCII passphrase on a host without `php-intl` derives a different key than the Python client. Either remove `argon2idKdf` from the PHP surface or hard-fail when intl is missing.
+
+**Approach:** Hard-fail with RuntimeException when input contains a non-ASCII byte AND Normalizer is unavailable; pure-ASCII passthrough still works. Two new tests pin the behaviour on both intl-present and intl-missing hosts.
 
 ### Low
 
@@ -469,23 +482,41 @@ If the head shard is intermittently corrupt and returns `entries=[]`, every loca
 
 ### Medium
 
-#### §3.M1 — Baseline doesn't validate binding state before running
+#### ~~§3.M1~~ — Baseline doesn't validate binding state before running
+**Fix landed:** 46c36b5 2026-05-17
 **File:** `desktop/src/vault/binding/baseline.py:82`. No `assert binding.state == "needs-preflight"`. A second call on `bound` binding can overwrite local entries.
 
-#### §3.M2 — Conflict-naming exhaust path leaks into `download_latest_file(existing_policy="overwrite")`
+**Approach:** Explicit `binding.state != "needs-preflight"` check at the top of `run_initial_baseline` raises `RuntimeError`. Test flips a binding to `bound` and asserts the second baseline call raises with the remediation hint.
+
+#### ~~§3.M2~~ — Conflict-naming exhaust path leaks into `download_latest_file(existing_policy="overwrite")`
+**Fix landed:** 2d22e81 2026-05-17
 **File:** `desktop/src/vault/binding/twoway.py:866-895, 731`. `RuntimeError` from `_unique_conflict_path` isn't caught in `_apply_remote_upsert`; before the abort, the fallback to `existing_policy="overwrite"` may run.
 
-#### §3.M3 — Stability gate timeout silently drops growing files (log not user-visible)
+**Approach:** On verification the RuntimeError actually propagates BEFORE the download call (function returns early), so the literal "leak into overwrite" wasn't reachable. But the RuntimeError did take down the whole cycle for a single problematic path. Defensive try/except now converts RuntimeError to a typed `failed` `SyncOpOutcome` with `error="conflict_naming_exhausted: ..."` so the cycle continues with the remaining ops. New `vault.sync.twoway_conflict_naming_exhausted` catalog entry.
+
+#### ~~§3.M3~~ — Stability gate timeout silently drops growing files (log not user-visible)
+**Fix landed:** 6ffeb67 2026-05-17
 **File:** `desktop/src/vault/binding/filesystem_watcher.py:272-280`. 5-min cap → path dropped from `_pending` with log line only. File stays un-synced for hours.
 
-#### §3.M4 — `prepare_upload_for_batch` reads bytes at prep time, not enqueue time
+**Approach:** Three-part: (a) coordinator gains optional `on_stability_timeout` callback; (b) `vault.sync.file_stability_hung` escalated from `warning` to `error` + added `binding` field; (c) runtime-level `set_stability_timeout_callback` setter that threads through to every coordinator. Two new tests pin the callback fires + default behaviour preserved.
+
+#### ~~§3.M4~~ — `prepare_upload_for_batch` reads bytes at prep time, not enqueue time — *docs clarified, no code change*
+**Fix landed:** 13f63bf 2026-05-17
 **File:** `desktop/src/vault/upload/single_file.py:486-493`. Last-write-wins, but breaks intuition for 200-event bursts.
 
-#### §3.M5 — `disconnect_binding` drops pending ops; user's unsynced changes silently lost
+**Approach:** On verification this is correct by design — the stability gate (3 s local / 10 s network) buffers bursts, and prep reads happen AFTER the gate settles. A 200-event burst coalesces to one upload of the final bytes. Added a docstring paragraph explaining the semantics so future readers don't suspect a race; no code change needed.
+
+#### ~~§3.M5~~ — `disconnect_binding` drops pending ops; user's unsynced changes silently lost
+**Fix landed:** 117c7b5 2026-05-17
 **File:** `desktop/src/vault/binding/lifecycle.py:296-309`. Refuse disconnect with pending ops, OR run one final cycle synchronously.
 
-#### §3.M6 — `download_folder` skips `fsync_dir` on the destination root after per-file loop
+**Approach:** `disconnect_binding` gains `force: bool = False`; without force + pending ops → raises new `VaultDisconnectHasPendingOpsError` carrying `pending_count`. `dispatch_disconnect` gains `confirm_force_drop: Callable[[int], bool] | None` so the GTK layer can prompt with the count and re-call with force only on explicit user confirmation.
+
+#### ~~§3.M6~~ — `download_folder` skips `fsync_dir` on the destination root after per-file loop
+**Fix landed:** 6359f3d 2026-05-17
 **File:** `desktop/src/vault/download/folder.py:80-123`. Power loss during 1000-file folder restore can lose some directory entries.
+
+**Approach:** After the per-file loop, walk plans + dedupe via a set to `fsync_dir` every distinct parent + the final root. Best-effort (no-op on FAT/FUSE that refuse directory fsync). Test monkey-patches `fsync_dir` and verifies both `batch/` and `batch/nested/` show up.
 
 ### Low
 

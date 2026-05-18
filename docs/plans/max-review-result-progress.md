@@ -97,3 +97,22 @@ Continuing into the Medium section.
 - 2026-05-17 — fixed §1.M5 (commit d91ea3a): rotateAccessSecret wrapped in BEGIN IMMEDIATE/COMMIT; rotation+audit either both land or neither does; missing vault row → 404.
 - 2026-05-17 — fixed §1.M6 (commit 6e5df0c): decodeBase64Field explicit strlen($raw)===0 guard in both controllers (defense-in-depth; strict-mode already covers practical attack).
 - 2026-05-17 — fixed §1.M7 (commit 86a7087): migrationVerifySource explicit migrated_to state guard so post-commit /verify never stamps a fresh verified_at.
+
+§1 Mediums complete (7 of 7: M1-M7).
+
+- 2026-05-17 — fixed §2.M4 (commit afe28db): browser_model.decrypt_manifest split into root-only + decrypt_bundle_manifest_envelope (legacy bundle path); legacy HKDF label is now reachable only via the deliberately-named bundle helper.
+- 2026-05-17 — fixed §2.M1 (commit 4b4901d): decrypt_root_envelope + decrypt_shard_envelope add explicit envelope-prefix vault_id check mirroring fetch_header_plaintext.
+- 2026-05-17 — fixed §2.M2 (commit 0e8a619): four production decrypt sites now call assert_supported_format_version → typed VaultFormatVersionUnsupported with structured envelope_kind + observed_version.
+- 2026-05-17 — fixed §2.M5 (commit 91a278c): nfcNormalize hard-fails when non-ASCII input + intl missing; ASCII passthrough preserved.
+- 2026-05-17 — fixed §2.M3 (commit d159811): added parse_recovery_envelope + RECOVERY_ENVELOPE_TOTAL_LEN so the §12.4 wire form is round-trippable in code (production unwrap migration is a follow-up).
+
+§2 Mediums complete (5 of 5: M1, M2, M3, M4, M5).
+
+- 2026-05-17 — fixed §3.M1 (commit 46c36b5): run_initial_baseline refuses on non-preflight binding so a second call can't clobber two-way local_entries.
+- 2026-05-17 — fixed §3.M6 (commit 6359f3d): download_folder fsyncs every distinct destination directory after per-file loop so power loss doesn't lose entries.
+- 2026-05-17 — fixed §3.M2 (commit 2d22e81): _apply_remote_upsert catches _unique_conflict_path's RuntimeError as typed failed outcome; cycle continues with other ops.
+- 2026-05-17 — fixed §3.M3 (commit 6ffeb67): stability-gate timeout surfaces user-visible signal via runtime-level set_stability_timeout_callback; log severity bumped to error.
+- 2026-05-17 — fixed §3.M4 (commit 13f63bf): docs clarification — prep-time reads happen AFTER stability gate settles; last-write-wins is correct by design, not a race.
+- 2026-05-17 — fixed §3.M5 (commit 117c7b5): disconnect_binding force=False refuses pending-ops drop (typed VaultDisconnectHasPendingOpsError); UI gets count + re-call seam.
+
+§3 Mediums complete (6 of 6: M1, M2, M3, M4, M5, M6).
