@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -189,6 +190,16 @@ class WatcherCoordinator:
         )
         self._gate = StabilityGate(window_s=window)
         self._pending: dict[str, _PendingPath] = {}
+        # Review §3.H5: observe() runs on the watchdog observer thread;
+        # tick() runs on the per-binding sync thread (or GLib timeout).
+        # Pre-fix the two compound RMW patterns on ``_pending`` raced
+        # — observe's "load existing, mutate fields" could collide
+        # with tick's "pop and enqueue", leaving an enqueued=False
+        # state on a path the sync cycle is mid-publishing. Same risk
+        # for the debouncer's _last_seen / gate's _snapshots. Cover
+        # all four dicts with one coarse lock at the coordinator
+        # boundary.
+        self._lock = threading.Lock()
 
     # --- ingress -------------------------------------------------------
 
@@ -209,35 +220,41 @@ class WatcherCoordinator:
         if not path:
             return
 
-        if kind == "deleted":
-            self._pending.pop(path, None)
-            self._debouncer.forget(path)
-            self._gate.forget(path)
-            # F-Y22: persist the wall-clock timestamp regardless of the
-            # monotonic clock injected for stability-gate math.
-            self._enqueue_delete_if_synced(path, now=int(time.time()))
-            return
+        # §3.H5: serialize observe() and tick() so the two-thread
+        # compound RMW patterns on _pending / _debouncer / _gate
+        # don't race.
+        with self._lock:
+            if kind == "deleted":
+                self._pending.pop(path, None)
+                self._debouncer.forget(path)
+                self._gate.forget(path)
+                # F-Y22: persist the wall-clock timestamp regardless
+                # of the monotonic clock injected for stability-gate
+                # math.
+                self._enqueue_delete_if_synced(path, now=int(time.time()))
+                return
 
-        # Always update debouncer + pending-path bookkeeping; tick()
-        # is what checks stability.
-        is_fresh = self._debouncer.observe(path, now=now_t)
-        existing = self._pending.get(path)
-        if existing is None:
-            self._pending[path] = _PendingPath(
-                relative_path=path,
-                last_event_at=now_t,
-                last_event_kind=kind,
-                first_event_at=now_t,
-            )
-        else:
-            existing.last_event_at = now_t
-            existing.last_event_kind = kind
-            existing.enqueued = False  # reopen the gate if the file changed again
-            # F-Y19: actively-edited files (e.g. KeePass long save) hit
-            # the hung-after cap when first_event_at stays pinned to the
-            # original event. Advance it so the cap counts "tried to
-            # settle but failed" rather than "user is editing fast".
-            existing.first_event_at = now_t
+            # Always update debouncer + pending-path bookkeeping;
+            # tick() is what checks stability.
+            is_fresh = self._debouncer.observe(path, now=now_t)
+            existing = self._pending.get(path)
+            if existing is None:
+                self._pending[path] = _PendingPath(
+                    relative_path=path,
+                    last_event_at=now_t,
+                    last_event_kind=kind,
+                    first_event_at=now_t,
+                )
+            else:
+                existing.last_event_at = now_t
+                existing.last_event_kind = kind
+                existing.enqueued = False  # reopen the gate if the file changed again
+                # F-Y19: actively-edited files (e.g. KeePass long
+                # save) hit the hung-after cap when first_event_at
+                # stays pinned to the original event. Advance it so
+                # the cap counts "tried to settle but failed" rather
+                # than "user is editing fast".
+                existing.first_event_at = now_t
 
     # --- driver --------------------------------------------------------
 
@@ -249,55 +266,66 @@ class WatcherCoordinator:
         """
         now_t = self._clock() if now is None else float(now)
         enqueued = 0
-        for path, pending in list(self._pending.items()):
-            if pending.enqueued:
-                continue
-            stat = self._stat_provider(path)
-            if stat is None:
-                # Path vanished without us seeing a "deleted" event
-                # (e.g. atomic rename overwrite). Treat as deletion,
-                # gated on the §T12.2 "was previously synced" rule.
-                self._pending.pop(path, None)
-                self._debouncer.forget(path)
-                self._gate.forget(path)
-                if self._enqueue_delete_if_synced(path, now=int(now_t)):
-                    enqueued += 1
-                continue
-            size, mtime_ns = stat
-            verdict = self._gate.check(
-                path,
-                size=size, mtime_ns=mtime_ns,
-                now=now_t, first_event_at=pending.first_event_at,
-            )
-            if verdict.timed_out:
-                log.warning(
-                    "vault.sync.file_stability_hung path=%s waited=%.1fs",
-                    path, now_t - pending.first_event_at,
+        # §3.H5: lock the whole drain pass — the snapshot is cheap
+        # (~tens of paths typically), and the alternative (snapshot
+        # outside, lock per-path) leaves a race window where observe()
+        # resets an entry's ``enqueued = False`` between our snapshot
+        # and the per-path pop. coalesce_op (the only call inside
+        # this loop that touches an external resource) is a thin
+        # SQLite write — holding the watcher lock across it is
+        # acceptable because the watcher is not in any other lock-
+        # acquisition path.
+        with self._lock:
+            for path, pending in list(self._pending.items()):
+                if pending.enqueued:
+                    continue
+                stat = self._stat_provider(path)
+                if stat is None:
+                    # Path vanished without us seeing a "deleted" event
+                    # (e.g. atomic rename overwrite). Treat as deletion,
+                    # gated on the §T12.2 "was previously synced" rule.
+                    self._pending.pop(path, None)
+                    self._debouncer.forget(path)
+                    self._gate.forget(path)
+                    if self._enqueue_delete_if_synced(path, now=int(now_t)):
+                        enqueued += 1
+                    continue
+                size, mtime_ns = stat
+                verdict = self._gate.check(
+                    path,
+                    size=size, mtime_ns=mtime_ns,
+                    now=now_t, first_event_at=pending.first_event_at,
                 )
+                if verdict.timed_out:
+                    log.warning(
+                        "vault.sync.file_stability_hung path=%s waited=%.1fs",
+                        path, now_t - pending.first_event_at,
+                    )
+                    self._pending.pop(path, None)
+                    self._debouncer.forget(path)
+                    self._gate.forget(path)
+                    continue
+                if not verdict.ready:
+                    continue
+                self.store.coalesce_op(
+                    binding_id=self.binding_id,
+                    op_type="upload",
+                    relative_path=path,
+                    # F-Y22: use wall-clock for persistence (the column
+                    # is consumed by humans/timeline UIs); the monotonic
+                    # clock stays inside StabilityGate.
+                    now=int(time.time()),
+                )
+                pending.enqueued = True
                 self._pending.pop(path, None)
                 self._debouncer.forget(path)
                 self._gate.forget(path)
-                continue
-            if not verdict.ready:
-                continue
-            self.store.coalesce_op(
-                binding_id=self.binding_id,
-                op_type="upload",
-                relative_path=path,
-                # F-Y22: use wall-clock for persistence (the column is
-                # consumed by humans/timeline UIs); the monotonic clock
-                # stays inside StabilityGate.
-                now=int(time.time()),
-            )
-            pending.enqueued = True
-            self._pending.pop(path, None)
-            self._debouncer.forget(path)
-            self._gate.forget(path)
-            enqueued += 1
+                enqueued += 1
         return enqueued
 
     def pending_paths(self) -> list[str]:
-        return list(self._pending.keys())
+        with self._lock:
+            return list(self._pending.keys())
 
     # --- helpers -------------------------------------------------------
 
