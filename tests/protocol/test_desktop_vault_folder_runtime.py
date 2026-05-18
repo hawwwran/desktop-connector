@@ -321,6 +321,68 @@ class VaultRuntimeFlushAndSyncBindingTests(unittest.TestCase):
         self.assertTrue(h.vault.closed)
 
 
+class VaultRuntimeBaselineHeadCheckTests(unittest.TestCase):
+    """Review §3.H6: ``run_initial_baseline`` must refuse to run if
+    the relay's head has advanced between the Connect-Folder
+    preflight snapshot and the user clicking Confirm.
+
+    Pre-fix the baseline silently fetched fresh + ran against the
+    new head, so the user's preflight expectations (file counts,
+    bytes, conflict count) could be wrong.
+    """
+
+    def test_baseline_refuses_when_head_moved(self) -> None:
+        from src.vault.folder.runtime import VaultBaselineHeadMovedError
+
+        tmp = Path(tempfile.mkdtemp(prefix="vault_baseline_head_"))
+        try:
+            from src.vault.state.local_index import VaultLocalIndex
+            index = VaultLocalIndex(tmp)
+            h = _RuntimeHarness()
+            h.runtime._local_index = index
+            # Fresh fetch returns revision 42; preflight expected 41.
+            h.vault.fetch_result = {
+                "revision": 42, "remote_folders": [],
+            }
+            class _FakeRecord:
+                binding_id = "ghost"
+            with self.assertRaises(VaultBaselineHeadMovedError) as cm:
+                h.runtime.run_initial_baseline(
+                    record=_FakeRecord(),
+                    expected_root_revision=41,
+                )
+            self.assertEqual(cm.exception.expected_revision, 41)
+            self.assertEqual(cm.exception.observed_revision, 42)
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_baseline_no_check_when_expected_revision_omitted(self) -> None:
+        """Callers that don't supply ``expected_root_revision`` get
+        the pre-§3.H6 behaviour — the runtime fetches fresh and runs
+        without a head check. Preserves backwards-compat for any
+        future caller that doesn't go through the dialog."""
+        tmp = Path(tempfile.mkdtemp(prefix="vault_baseline_no_check_"))
+        try:
+            from src.vault.state.local_index import VaultLocalIndex
+            index = VaultLocalIndex(tmp)
+            h = _RuntimeHarness()
+            h.runtime._local_index = index
+            h.vault.fetch_result = {
+                "revision": 42, "remote_folders": [],
+            }
+            class _FakeRecord:
+                binding_id = "ghost"
+            # Without expected_root_revision the baseline progresses
+            # past the head check (and fails later on "binding row
+            # vanished" because we didn't create a binding).
+            with self.assertRaisesRegex(RuntimeError, "binding row vanished"):
+                h.runtime.run_initial_baseline(record=_FakeRecord())
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class VaultRuntimeSourcePins(unittest.TestCase):
     """F-518 source pins — keep the runtime's structural shape from
     drifting back into the tab's worker bodies.

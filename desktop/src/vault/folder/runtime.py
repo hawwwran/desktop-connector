@@ -228,19 +228,41 @@ class VaultRuntime:
                 should_continue=should_continue,
             )
 
-    def run_initial_baseline(self, *, record) -> None:
+    def run_initial_baseline(
+        self,
+        *,
+        record,
+        expected_root_revision: int | None = None,
+    ) -> None:
         """Run the initial baseline for a freshly created binding.
 
         Holds the vault lock across both the manifest fetch and the
         baseline scan so the binding can't be sync'd by a sibling
         Sync-now worker mid-baseline (overlapping master_key copies
         + concurrent local-disk writes for the same binding root).
+
+        Review §3.H6: ``expected_root_revision`` is the head the
+        Connect-Folder dialog showed the user at preflight time. If
+        the relay's head has advanced since (another device
+        published between the dialog opening and the user clicking
+        Confirm), refuse the baseline and surface a typed error so
+        the dialog can ask the user to re-preflight against the
+        fresh state. Pre-fix the baseline silently ran against the
+        new head, so the user's preflight expectations (file counts,
+        bytes, conflict count) could be wrong.
         """
         relay = self._relay_factory(self._config)
         with self._open_serialized() as vault:
             manifest = vault.fetch_unified_manifest(
                 relay, local_index=self._local_index,
             )
+            if expected_root_revision is not None:
+                fresh_revision = int(manifest.get("revision", 0))
+                if fresh_revision != int(expected_root_revision):
+                    raise VaultBaselineHeadMovedError(
+                        expected_revision=int(expected_root_revision),
+                        observed_revision=fresh_revision,
+                    )
             store = VaultBindingsStore(self._local_index.db_path)
             binding = store.get_binding(record.binding_id)
             if binding is None:
@@ -254,6 +276,25 @@ class VaultRuntime:
                 store=store,
                 binding=binding,
             )
+
+
+class VaultBaselineHeadMovedError(RuntimeError):
+    """Review §3.H6: the relay's head advanced between the
+    Connect-Folder preflight snapshot and the user clicking Confirm.
+
+    The Connect dialog catches this and asks the user to re-preflight
+    against the fresh state rather than running the baseline against
+    a manifest the user never saw.
+    """
+
+    def __init__(self, *, expected_revision: int, observed_revision: int) -> None:
+        super().__init__(
+            f"vault head moved during connect dialog: "
+            f"preflight saw revision {expected_revision}, "
+            f"baseline fetched revision {observed_revision}",
+        )
+        self.expected_revision = expected_revision
+        self.observed_revision = observed_revision
 
 
 __all__ = ["VaultRuntime"]

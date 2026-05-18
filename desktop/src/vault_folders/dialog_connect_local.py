@@ -19,6 +19,7 @@ from gi.repository import GLib  # noqa: E402
 
 from ..vault.binding.bindings import VaultBindingsStore
 from ..vault.folder.connect_dialog import present_connect_folder_dialog
+from ..vault.folder.runtime import VaultBaselineHeadMovedError
 from ..vault.error_messages import humanize
 from .context import FoldersContext
 
@@ -73,6 +74,13 @@ def open_connect_local_dialog(
 
             store = VaultBindingsStore(ctx.local_index.db_path)
 
+            # Review §3.H6: capture the preflight head revision so the
+            # baseline run can refuse to fire if the relay's head
+            # has advanced between dialog open and user-Confirm. The
+            # baseline-side check lives in
+            # ``VaultRuntime.run_initial_baseline``.
+            preflight_revision = int(manifest.get("revision", 0))
+
             def on_dialog_confirmed(record) -> None:
                 ctx.set_content_status(
                     "Binding created — running initial baseline…",
@@ -80,13 +88,32 @@ def open_connect_local_dialog(
                 ctx.selection_state["folder_id"] = record.remote_folder_id
                 ctx.refresh_all()
                 threading.Thread(
-                    target=lambda: _run_baseline_for_record(record),
+                    target=lambda: _run_baseline_for_record(record, preflight_revision),
                     daemon=True,
                 ).start()
 
-            def _run_baseline_for_record(record) -> None:
+            def _run_baseline_for_record(record, expected_revision) -> None:
                 try:
-                    ctx.runtime.run_initial_baseline(record=record)
+                    ctx.runtime.run_initial_baseline(
+                        record=record,
+                        expected_root_revision=expected_revision,
+                    )
+                except VaultBaselineHeadMovedError as exc:
+                    def re_preflight() -> bool:
+                        ctx.set_content_status(
+                            "Another device published while you were "
+                            "choosing the local folder. Re-open the "
+                            "Connect dialog so the preflight numbers "
+                            "match the new server head "
+                            f"(was rev {exc.expected_revision}, now "
+                            f"rev {exc.observed_revision}).",
+                            "error",
+                        )
+                        ctx.refresh_all()
+                        return False
+
+                    GLib.idle_add(re_preflight)
+                    return
                 except Exception as exc:  # noqa: BLE001
                     msg = str(exc)
 
