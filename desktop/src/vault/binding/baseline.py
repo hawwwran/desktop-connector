@@ -98,6 +98,22 @@ def run_initial_baseline(
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
 
+    # Review §3.M1 — explicit state guard. ``run_initial_baseline``
+    # materializes the binding's remote folder into the local path and
+    # overwrites local_entries rows; a second call on a binding that's
+    # already ``bound`` would clobber whatever the two-way sync has
+    # accumulated since. Caller must transition the binding through
+    # the preflight → bound state machine. ``"unbound"`` and
+    # ``"paused"`` are also rejected — both indicate the caller has
+    # not driven the binding to the pre-baseline state.
+    if binding.state != "needs-preflight":
+        raise RuntimeError(
+            f"run_initial_baseline called on binding {binding.binding_id} "
+            f"in state {binding.state!r}; expected 'needs-preflight'. "
+            "Drive the binding through the preflight state machine "
+            "first."
+        )
+
     folder = _find_folder(manifest, binding.remote_folder_id)
     if folder is None:
         raise KeyError(

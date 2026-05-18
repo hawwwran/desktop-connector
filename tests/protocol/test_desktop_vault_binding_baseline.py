@@ -265,6 +265,35 @@ class VaultBaselineTests(unittest.TestCase):
         if mkfifo_supported:
             self.assertNotIn("control_pipe", seen)
 
+    def test_baseline_refuses_to_run_on_non_preflight_binding(self) -> None:
+        """Review §3.M1 — run_initial_baseline must NOT be invocable on
+        a binding that's already past the preflight stage. Pre-fix
+        nothing checked the state and a second call could clobber
+        local_entries the two-way sync had since populated.
+        """
+        relay, manifest = self._seed_remote({"x.txt": b"x"})
+        binding = self.store.create_binding(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            local_path=str(self.local_root),
+        )
+        # Manually flip the binding to "bound" — pretending the
+        # baseline already ran and the two-way loop is active.
+        self.store.update_binding_state(binding.binding_id, state="bound")
+        bound_binding = self.store.get_binding(binding.binding_id)
+        self.assertEqual(bound_binding.state, "bound")
+
+        vault = _vault()
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                run_initial_baseline(
+                    vault=vault, relay=relay, manifest=manifest,
+                    store=self.store, binding=bound_binding,
+                )
+            self.assertIn("needs-preflight", str(ctx.exception))
+        finally:
+            vault.close()
+
     def test_unknown_remote_folder_raises_keyerror(self) -> None:
         relay, manifest = self._seed_remote({"x.txt": b"x"})
         binding = self.store.create_binding(
