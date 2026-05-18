@@ -226,7 +226,8 @@ After `COMMIT` lands and the disk write fails, two writes (`deleteRow` + `incUse
 
 ### Low
 
-#### §1.L1 — `Validators::requireNonEmptyString` rejects `"0"` via `empty()` semantics
+#### ~~§1.L1~~ — `Validators::requireNonEmptyString` rejects `"0"` via `empty()` semantics
+**Fix landed:** d2edc49 2026-05-17
 **File:** `server/src/Http/Validators.php:18-24`. Cosmetic.
 
 #### §1.L2 — `migrationCommit` URL parser accepts private IPs / localhost
@@ -235,8 +236,11 @@ After `COMMIT` lands and the disk write fails, two writes (`deleteRow` + `incUse
 #### §1.L3 — `VaultStorage::ensureDir` chmod 0700 inaccessible to other request pools on shared-host PHP-FPM
 **File:** `server/src/VaultStorage.php:45`. Operator-deployment caveat.
 
-#### §1.L4 — `getJoinRequest` row LOOKUP not vault-scoped (defense-in-depth gap)
+#### ~~§1.L4~~ — `getJoinRequest` row LOOKUP not vault-scoped (defense-in-depth gap)
+**Fix landed:** d2edc49 2026-05-17
 **File:** `VaultGrantsController.php:191-217`. The row's `vault_id` mismatch is caught post-fetch; `$repo->get($reqId, $vaultId)` would be tighter.
+
+**Approach:** New `getScoped` repo method with `AND vault_id = :vault_id` in SQL; controller uses it. Defense-in-depth so a future controller forgetting the post-fetch check can't expose another vault's data.
 
 ### Info (verified clean)
 
@@ -338,7 +342,8 @@ Inert today (server never derives passphrase keys), but a future server-side flo
 
 ### Low
 
-#### §2.L1 — Genesis fingerprint compared with `!=`, not `hmac.compare_digest`
+#### ~~§2.L1~~ — Genesis fingerprint compared with `!=`, not `hmac.compare_digest`
+**Fix landed:** d2edc49 2026-05-17
 **File:** `desktop/src/vault/import_/bundle.py:146-150`. Defense-in-depth pattern.
 
 #### §2.L2 — CAS retry loop has no overall livelock cap beyond `CAS_MAX_RETRIES`
@@ -347,8 +352,11 @@ Inert today (server never derives passphrase keys), but a future server-side flo
 #### §2.L3 — `_imported_rename` caps at 10 000 collisions with `RuntimeError`
 **File:** `desktop/src/vault/manifest.py:861-866`. Acceptable sanity bound; flag for awareness.
 
-#### §2.L4 — `verify_recovery_kit` catches bare `Exception` → masks real OS errors as wrong-passphrase
+#### ~~§2.L4~~ — `verify_recovery_kit` catches bare `Exception` → masks real OS errors as wrong-passphrase
+**Fix landed:** d2edc49 2026-05-17
 **File:** `desktop/src/vault/recovery_kit.py:268-271`. Should let `KeyError` etc. bubble; only `nacl.exceptions.CryptoError` is "wrong passphrase".
+
+**Approach:** Narrowed catch to `(nacl.exceptions.CryptoError, KeyError)`. OS errors / Argon2id failures propagate so the user sees the real fault instead of "wrong passphrase".
 
 ### Info — verified clean
 

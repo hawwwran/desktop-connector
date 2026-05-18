@@ -154,3 +154,19 @@ Logged as needs-design / conditional:
 - §5.M3 (cross-subprocess fresh-unlock — security/UX tradeoff documented)
 
 Continuing into the Low / Info section will be lighter — most §1.L–§7.L items are already noted as "acceptable for v1" in the review.
+
+## Low section — actionable subset landed
+
+- 2026-05-17 — fixed §1.L1 (commit d2edc49): Validators::requireNonEmptyString accepts the literal string "0" (no more empty()-trap).
+- 2026-05-17 — fixed §1.L4 (commit d2edc49): VaultJoinRequestsRepository::getScoped — SQL-level vault scoping.
+- 2026-05-17 — fixed §2.L1 (commit d2edc49): decide_import_action uses hmac.compare_digest for genesis fingerprint compare.
+- 2026-05-17 — fixed §2.L4 (commit d2edc49): verify_recovery_kit narrows catch to (CryptoError, KeyError); OS errors propagate.
+
+Remaining Lows are explicitly polish-tier or verified-clean by reviewer:
+- §1.L2 private-IP blocking for migration URLs (operator-config option)
+- §1.L3 chmod 0700 shared-host caveat (deployment note)
+- §2.L2 CAS retry backoff (log-volume cosmetic)
+- §2.L3 _imported_rename collision cap (sanity bound, already documented)
+- §3.L1-L4 watcher/sync polish (the four items reviewer described as cosmetic or operator-aware)
+- §6.L1-L8 reviewer noted as "verified clean" or "acceptable for v1"
+- §7.L1-L3 test polish (parallel-claim race lower bound; case-insensitive mount; README schema doc)
