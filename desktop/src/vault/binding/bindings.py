@@ -562,6 +562,15 @@ class VaultBindingsStore:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        # Review §3.H8: same DB file as VaultLocalIndex. WAL is
+        # database-file-level, not connection-level, so this is
+        # redundant when both repos run in the same process — but
+        # keep the PRAGMA here too so a hypothetical caller that
+        # opens bindings before local_index doesn't end up with the
+        # default rollback-journal mode.
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
 

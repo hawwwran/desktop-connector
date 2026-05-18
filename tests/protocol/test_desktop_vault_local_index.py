@@ -102,6 +102,26 @@ class VaultRemoteFoldersCacheTests(unittest.TestCase):
             self.assertEqual([row["remote_folder_id"] for row in rows], [DOCS_ID])
             self.assertEqual(rows[0]["manifest_revision"], 2)
 
+    def test_database_uses_wal_journal_mode(self) -> None:
+        """Review §3.H8: the watcher/sync engine writes and reads the
+        same SQLite file from two threads. Default rollback-journal
+        mode serializes them; WAL lets them run concurrently. Without
+        WAL a watcher burst could time out the 3-second stability
+        gate's stat reads with stale data."""
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            index = VaultLocalIndex(Path(tmp))
+            # Trigger schema creation (and the connect pragmas).
+            index.list_remote_folders(VAULT_ID)
+            # Open an independent connection to read the PRAGMA.
+            db_path = str(Path(tmp) / DB_FILENAME)
+            conn = sqlite3.connect(db_path)
+            try:
+                row = conn.execute("PRAGMA journal_mode").fetchone()
+                self.assertEqual(row[0].lower(), "wal")
+            finally:
+                conn.close()
+
     def test_cache_database_is_created_with_restrictive_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             index = VaultLocalIndex(Path(tmp))

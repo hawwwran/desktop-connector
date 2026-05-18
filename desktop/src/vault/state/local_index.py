@@ -247,6 +247,16 @@ class VaultLocalIndex:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        # Review §3.H8: WAL mode lets the watcher (writer) and the
+        # sync cycle (reader) run concurrently. Pre-fix the default
+        # rollback-journal mode meant every watcher write briefly
+        # blocked sync reads, and a watcher burst could cause the
+        # 3-second stability gate's stat reads to time out with
+        # stale data. busy_timeout absorbs short contention; WAL is
+        # the structural fix.
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
         self._tighten_permissions()
         return conn
 
