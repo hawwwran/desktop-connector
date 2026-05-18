@@ -195,6 +195,104 @@ class VaultRoundTripTests(unittest.TestCase):
             vault.close()
 
 
+class DecryptEnvelopeVaultIdSanityTests(unittest.TestCase):
+    """Review §2.M1 — ``decrypt_root_envelope`` and
+    ``decrypt_shard_envelope`` must explicitly verify the envelope's
+    prefix vault_id matches the active vault BEFORE the AAD-bound AEAD
+    decrypt. AEAD alone would catch the mismatch via tag failure, but
+    the surfaced error becomes ``vault_root_tampered`` / opaque AEAD
+    failure instead of the informative "wrong vault_id in envelope".
+    Defense-in-depth pin so the explicit check doesn't regress.
+    """
+
+    PASSPHRASE = "correct horse battery staple"
+    ARGON_KIB = 8192
+    ARGON_ITERS = 2
+
+    def test_decrypt_root_envelope_rejects_wrong_vault_id(self) -> None:
+        relay = FakeRelay()
+        vault = Vault.create_new(
+            relay, recovery_passphrase=self.PASSPHRASE,
+            argon_memory_kib=self.ARGON_KIB, argon_iterations=self.ARGON_ITERS,
+        )
+        try:
+            # Build a root envelope whose prefix vault_id differs from
+            # the active vault. Same author + revision shape — just
+            # flip the 12-byte vault_id field.
+            import secrets
+            from src.vault.crypto import (
+                aead_encrypt, build_root_aad, build_root_envelope,
+                derive_subkey,
+            )
+            from src.vault.manifest import (
+                canonical_root_json, make_root_manifest,
+            )
+
+            wrong_vault_id = "WRONG" + vault.vault_id[5:]  # same length, different prefix
+            wrong_root = make_root_manifest(
+                vault_id=wrong_vault_id, root_revision=2, parent_root_revision=1,
+                created_at="2026-05-04T12:00:00.000Z",
+                author_device_id="0" * 32, remote_folders=[],
+                operation_log_tail=[], archived_op_segments=[],
+            )
+            plaintext = canonical_root_json(wrong_root)
+            subkey = derive_subkey("dc-vault-v1/root", bytes(vault.master_key))
+            nonce = secrets.token_bytes(24)
+            aad = build_root_aad(
+                vault_id=wrong_vault_id, root_revision=2,
+                parent_root_revision=1, author_device_id="0" * 32,
+            )
+            ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+            wrong_envelope = build_root_envelope(
+                vault_id=wrong_vault_id, root_revision=2,
+                parent_root_revision=1, author_device_id="0" * 32,
+                nonce=nonce, aead_ciphertext_and_tag=ciphertext,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                vault.decrypt_root_envelope(wrong_envelope)
+            self.assertIn("vault_id", str(ctx.exception).lower())
+        finally:
+            vault.close()
+
+    def test_decrypt_shard_envelope_rejects_wrong_vault_id(self) -> None:
+        relay = FakeRelay()
+        vault = Vault.create_new(
+            relay, recovery_passphrase=self.PASSPHRASE,
+            argon_memory_kib=self.ARGON_KIB, argon_iterations=self.ARGON_ITERS,
+        )
+        try:
+            import secrets
+            from src.vault.crypto import (
+                aead_encrypt, build_shard_aad, build_shard_envelope,
+                derive_subkey,
+            )
+
+            folder_id = "rf_v1_" + "a" * 24
+            wrong_vault_id = "WRONG" + vault.vault_id[5:]
+            plaintext = b'{"schema":"dc-vault-shard-v1","entries":[]}'
+            subkey = derive_subkey("dc-vault-v1/shard", bytes(vault.master_key))
+            nonce = secrets.token_bytes(24)
+            aad = build_shard_aad(
+                vault_id=wrong_vault_id, remote_folder_id=folder_id,
+                shard_revision=1, parent_shard_revision=0,
+                author_device_id="0" * 32,
+            )
+            ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+            wrong_envelope = build_shard_envelope(
+                vault_id=wrong_vault_id, remote_folder_id=folder_id,
+                shard_revision=1, parent_shard_revision=0,
+                author_device_id="0" * 32,
+                nonce=nonce, aead_ciphertext_and_tag=ciphertext,
+            )
+
+            with self.assertRaises(ValueError) as ctx:
+                vault.decrypt_shard_envelope(wrong_envelope, folder_id)
+            self.assertIn("vault_id", str(ctx.exception).lower())
+        finally:
+            vault.close()
+
+
 class VaultPrepareThenPublishTests(unittest.TestCase):
     """T8-pre: prepare_new + publish_initial split (the wizard's
     defer-the-relay-create safety net).

@@ -607,6 +607,18 @@ class Vault(RemoteFoldersMixin):
             raise ValueError(
                 f"vault_format_version_unsupported: root format_version={envelope_bytes[0]}"
             )
+        # Review §2.M1: defense-in-depth — explicit envelope-prefix
+        # vault_id check (mirroring fetch_header_plaintext). AEAD alone
+        # would catch a vault_id mismatch via tag failure, but the
+        # surfaced error becomes "vault_root_tampered" instead of the
+        # more informative "wrong vault_id in envelope". This branch
+        # raises before any AEAD attempt.
+        envelope_vault_id = envelope_bytes[1:13].decode("ascii")
+        if envelope_vault_id != self._vault_id:
+            raise ValueError(
+                f"root envelope vault_id {envelope_vault_id!r} does not "
+                f"match active vault {self._vault_id!r}"
+            )
         revision = int.from_bytes(envelope_bytes[13:21], "big")
         parent_revision = int.from_bytes(envelope_bytes[21:29], "big")
         author_device_id = envelope_bytes[29:61].decode("ascii")
@@ -724,6 +736,17 @@ class Vault(RemoteFoldersMixin):
         if envelope_bytes[0] != 1:
             raise ValueError(
                 f"vault_format_version_unsupported: shard format_version={envelope_bytes[0]}"
+            )
+        # Review §2.M1: defense-in-depth — explicit envelope-prefix
+        # vault_id check before the AAD-bound AEAD decrypt. Mirrors
+        # decrypt_root_envelope. AEAD would catch the mismatch via tag
+        # failure but the error becomes "vault_shard_tampered" instead
+        # of the more informative "wrong vault_id in envelope".
+        envelope_vault_id = envelope_bytes[1:13].decode("ascii")
+        if envelope_vault_id != self._vault_id:
+            raise ValueError(
+                f"shard envelope vault_id {envelope_vault_id!r} does not "
+                f"match active vault {self._vault_id!r}"
             )
         envelope_rf_id = envelope_bytes[13:43].decode("ascii")
         if envelope_rf_id != remote_folder_id:
