@@ -535,6 +535,21 @@ def _decrypt_record_with_any_type(
     know the type up front or try all types until one decrypts. With 6
     types this is cheap; the hot loop is chunks (one type) so in
     practice only one decrypt is attempted per record after the first.
+
+    Review §5.M4 — wall-clock cost analysis. The worst case is
+    O(6 × AEAD-decrypt-attempts) per non-CHUNK record (HEADER,
+    MANIFEST, FOOTER fire once each); chunk records hit on the first
+    attempt because ``RECORD_TYPE_CHUNK`` leads the tuple. AEAD
+    failures are constant-time (Poly1305 tag compare), so a timing
+    attack cannot distinguish "right type, wrong key" from "wrong
+    type". No correctness issue; cost is bounded.
+
+    Future bundle format bumps (``EXPORT_FORMAT_VERSION`` ≥ 2) should
+    move the record-type tag OUTSIDE the AEAD plaintext (carry it in
+    the on-disk frame alongside the length prefix). That eliminates
+    the brute-force loop entirely and shrinks parser code. v1 keeps
+    the type inside the plaintext to preserve byte-format parity
+    across runtimes that have already shipped.
     """
     last_error: Exception | None = None
     for record_type in (
