@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _paths import ensure_desktop_on_path  # noqa: E402
@@ -62,6 +63,25 @@ def _keyed_fingerprint(content: bytes) -> str:
     return make_content_fingerprint(
         derive_content_fingerprint_key(MASTER_KEY), sha,
     )
+
+
+def _simulate_gio_missing(path, *, log_event="vault.sync.file_moved_to_trash",
+                          allow_unlink_fallback: bool = True) -> bool:
+    """Stand-in for ``trash_path`` that pretends ``gio`` isn't on PATH.
+
+    Returns False (and leaves the file alone) when the caller declines
+    the unlink fallback — review §3.H4's "minimal Linux install"
+    scenario. If a caller still passes allow_unlink_fallback=True we
+    let it perform the irreversible unlink, so this helper doubles as
+    a regression guard: a future caller dropping the kwarg would
+    visibly fail the §3.H4 test.
+    """
+    if not Path(path).exists():
+        return True
+    if not allow_unlink_fallback:
+        return False
+    Path(path).unlink()
+    return True
 
 
 class TwoWayCycleTests(unittest.TestCase):
@@ -226,6 +246,48 @@ class TwoWayCycleTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # T12.1.B — remote tombstone trashes the unmodified local copy
     # ------------------------------------------------------------------
+
+    def test_remote_tombstone_without_gio_leaves_local_file(self) -> None:
+        """Review §3.H4: on minimal Linux installs ``gio`` is absent.
+        Pre-fix the default ``allow_unlink_fallback=True`` silently
+        unlinked the local file (irreversible, no Trash entry, no UI
+        signal). Post-fix: the op marks as "trash_failed" and the
+        local file stays put so the user can recover it manually."""
+        relay, manifest = self._empty_remote()
+        manifest = self._seed_remote_file(
+            relay, manifest, path="goner.txt", content=b"goodbye",
+        )
+        binding = self._make_two_way_binding(
+            last_revision=int(manifest["revision"]),
+        )
+        self._seed_local_entry(
+            binding.binding_id, relative="goner.txt",
+            content=b"goodbye", revision=int(manifest["revision"]),
+        )
+        manifest = self._tombstone_remote_file(relay, manifest, path="goner.txt")
+
+        vault = _vault()
+        try:
+            with mock.patch(
+                "src.vault.binding.twoway.trash_path",
+                wraps=_simulate_gio_missing,
+            ) as wrapped:
+                result = run_two_way_cycle(
+                    vault=vault, relay=relay,
+                    store=self.store, binding=binding,
+                    author_device_id=THIS_DEVICE,
+                    device_name=DEVICE_NAME,
+                )
+        finally:
+            vault.close()
+
+        # The mock was called with allow_unlink_fallback=False — the
+        # security-relevant invariant — and the local file survived.
+        self.assertTrue(wrapped.called)
+        _, kwargs = wrapped.call_args
+        self.assertEqual(kwargs.get("allow_unlink_fallback"), False)
+        self.assertTrue((self.local_root / "goner.txt").is_file())
+        self.assertGreaterEqual(result.failed_count, 1)
 
     def test_remote_tombstone_trashes_unmodified_local_file(self) -> None:
         relay, manifest = self._empty_remote()

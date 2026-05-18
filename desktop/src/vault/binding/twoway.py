@@ -582,8 +582,15 @@ def _apply_remote_delete(
             error="local_fingerprint_unreadable",
         )
     if local_fp == local_entry.content_fingerprint:
-        # Unmodified: safe to trash.
-        ok = trash_path(target)
+        # Unmodified: safe to trash. Review §3.H4: on minimal Linux
+        # installs ``gio`` may be missing; the default
+        # ``allow_unlink_fallback=True`` would silently unlink the
+        # local file (no Trash recovery path) when a remote tombstone
+        # syncs in. That's irreversible data loss with no UI signal.
+        # Explicitly decline the unlink fallback so the op marks as
+        # "trash_failed" and the user sees the binding stuck instead
+        # of finding a permanently-gone file in their Documents.
+        ok = trash_path(target, allow_unlink_fallback=False)
         if ok:
             store.delete_local_entry(binding.binding_id, relative)
             log.info(
