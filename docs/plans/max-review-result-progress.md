@@ -68,3 +68,11 @@ Continuing autonomously into the High section.
 - 2026-05-17 — skipped §6.H2 (logged to review-doubts.md): Revoke-device UI is a new feature build (Devices tab placeholder + locked §3.3 wording + double-gate).
 
 §6 Highs: §6.H4 (45abecc), §6.H5 (cd76131), §6.H3 (b3d84ad) fixed; §6.H1 partial (0b836aa + review-doubts.md); §6.H2 logged as new-feature build.
+
+- 2026-05-17 — fixed §7.H1 (commit 421f5be): cross-vault chunk replay tests pin AAD-vault_id + master_key separation; encrypt(A) fails to decrypt under (B-key, A-AAD) and (A-key, B-AAD).
+- 2026-05-17 — fixed §7.H2 (commit 421f5be): content_fingerprint negative vectors — different-master-key + different-plaintext both pin inequality via expected.diverges_from_b64 across Python + PHP runners.
+- 2026-05-17 — fixed §7.H3 (commit 421f5be): open_bundle_for_preview verified to make zero relay writes — every FakeUploadRelay write counter is unchanged after preview; only batch_head_calls increments.
+- 2026-05-17 — fixed §7.H4 (commit 421f5be): export bundle reorder test — swap two on-disk chunk records, assert read raises vault_export_tampered (spec §16 record_index AAD + footer hash chain).
+- 2026-05-17 — fixed §7.H5 (commit 421f5be): PHP getHeader-after-commit test drives /start → /verify → /commit and asserts migrated_to surfaces on GET /header (the discovery signal propagate_relay_migration consumes).
+
+§7 Highs complete (5 of 5: H1, H2, H3, H4, H5).

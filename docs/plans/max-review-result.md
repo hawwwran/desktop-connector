@@ -779,20 +779,35 @@ Defines runners for chunk, header, recovery, device_grant, content_fingerprint, 
 
 ### High
 
-#### §7.H1 — Cross-vault chunk replay isn't directly tested
+#### ~~§7.H1~~ — Cross-vault chunk replay isn't directly tested
+**Fix landed:** 421f5be 2026-05-17
 The threat: chunk from vault A, decrypted under vault B's master key + AAD-with-vault-B-id, must fail. Generic `test_wrong_aad_fails_closed` covers it transitively; no test explicitly exercises the cross-vault scenario. The AAD-includes-vault_id-failure is the entire security guarantee.
 
-#### §7.H2 — Content fingerprint has zero negative-case coverage
+**Approach:** New `CrossVaultChunkReplayTests` in `test_desktop_vault_crypto.py` pins three cases — encrypt under (vault_A, master_A), then assert AEAD raises when decrypting with (master_B, vault_A_AAD) AND with (master_A, vault_B_AAD). Positive control round-trips under (master_A, vault_A_AAD) so the failure mode is anchored.
+
+#### ~~§7.H2~~ — Content fingerprint has zero negative-case coverage
+**Fix landed:** 421f5be 2026-05-17
 `content_fingerprint_v1.json` has only `happy-path` + `empty-plaintext`. No tamper, no different-master-key-different-output. The HMAC keying is the entire point; without that vector cross-runtime parity is weaker than it appears.
 
-#### §7.H3 — Import preview doesn't assert "no writes to relay"
+**Approach:** Added two negative vectors with `expected.diverges_from_b64` pinning the inequality — different master_key, then different plaintext_sha256. Both Python `_run_content_fingerprint_case` runner and PHP twin honour the field; case-name frozenset pin updated.
+
+#### ~~§7.H3~~ — Import preview doesn't assert "no writes to relay"
+**Fix landed:** 421f5be 2026-05-17
 `test_desktop_vault_import.py:86-122` verifies preview shape but doesn't pass a `RecordingRelay` and assert `publish_attempts == 0`, `chunk_uploads == 0`. Memory `feedback_no_fake_tests` applies.
 
-#### §7.H4 — Export bundle record reorder/index attack not exercised
+**Approach:** New `test_open_bundle_for_preview_does_not_write_to_relay` captures every FakeUploadRelay write counter (put_calls, chunks, published_shards, published_roots, shard_with_root_puts) before and after the preview run; the only allowed mutation is `batch_head_calls` (the head-count round-trip is part of the preview by design).
+
+#### ~~§7.H4~~ — Export bundle record reorder/index attack not exercised
+**Fix landed:** 421f5be 2026-05-17
 `test_desktop_vault_export.py:194` covers a single-byte mid-stream tamper; truncation covered. Neither reorders records (e.g. swapping two chunk records' positions). Spec §16: `record_index` is bound into each AAD; reorder should fail.
 
-#### §7.H5 — Migration multi-device discovery via `GET /header.migrated_to` lacks E2E test
+**Approach:** New `test_chunk_record_reorder_fails_closed` exports a two-chunk bundle, walks the on-disk record-length-prefix structure, swaps the two chunk records' byte ranges, and asserts `read_export_bundle` raises `vault_export_tampered`. Both spec §16's `record_index` AAD bind and the footer hash chain trip on the swap.
+
+#### ~~§7.H5~~ — Migration multi-device discovery via `GET /header.migrated_to` lacks E2E test
+**Fix landed:** 421f5be 2026-05-17
 PHP side has no test that source relay's `GET /header` returns `migrated_to` post-commit. Desktop side has unit test of the decision; no integration walk-through.
+
+**Approach:** New `test_getHeader_after_commit_carries_migrated_to` in `VaultControllerTest.php` drives the full `/start` → `/verify` → `/commit` sequence then asserts `GET /header` returns the target URL in `migrated_to`. The desktop's `propagate_relay_migration` consumes this signal — pre-fix only the DB row's column was asserted, leaving the public API shape uncovered.
 
 ### Medium
 
