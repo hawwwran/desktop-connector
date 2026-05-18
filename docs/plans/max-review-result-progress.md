@@ -123,3 +123,34 @@ Continuing into the Medium section.
 - 2026-05-17 — skipped §4.M1 (logged to review-doubts.md): orphan-chunk reaper needs new GET /chunks endpoint or server-side KIND_RECLAIM_ORPHAN_CHUNKS GC job; leak is bounded by 30-day retention.
 
 §4 Mediums: 3 fixed (M2, M3, M4), 1 logged as needs-design (M1).
+
+- 2026-05-17 — fixed §5.M5 (commit bfc1792): write_export_bundle refuses passphrases below EXPORT_PASSPHRASE_MIN_LEN=8.
+- 2026-05-17 — fixed §5.M1 (commit bfc1792): import wizard wipes state[passphrase] + entry buffer on every terminal path (cancel/cancelled/fail/succeed).
+- 2026-05-17 — fixed §5.M4 (commit 388f85f): documented brute-force decrypt cost + format-bump migration path (constant-time AEAD makes it safe today).
+- 2026-05-17 — skipped §5.M2 (logged): bundle with §5.C1 migration wizard.
+- 2026-05-17 — skipped §5.M3 (logged): per-subprocess fresh-unlock is more secure than spec; three resolution paths documented.
+- 2026-05-17 — skipped §5.M6 (logged): bundle with §5.C1 migration wizard UX.
+
+§5 Mediums: 3 fixed (M1, M4, M5), 3 logged as conditional/needs-design (M2, M3, M6).
+
+- 2026-05-17 — fixed §6.M1 + §6.M2 (commit c9afb0d): disconnect-vault dialog gains warning glyph + bulleted artefact list; add-folder library-layer name-collision check (case-insensitive + trim).
+
+§6 Mediums complete (2 of 2).
+
+- 2026-05-17 — fixed §7.M5 (commit df9f976): chunk-index AAD flip vector + frozenset pin; cross-runtime parity verified.
+- 2026-05-17 — fixed §7.M4 (commit df9f976): quota 507 byte-precise pins via assertSame(false, ...) + assertArrayHasKey for documented keys.
+- 2026-05-17 — fixed §7.M3 (commit df9f976): server-clock authority source-grep pins all controllers; no client-supplied timestamps reach DB writes.
+- 2026-05-17 — fixed §7.M2 (commit df9f976): folder-runtime serialization test uses poll-on-state instead of sleep(50ms); CI-resilient.
+- 2026-05-17 — fixed §7.M1 (commit df9f976): production Argon2id (128 MiB / 4 iter) end-to-end test with byte-exact output (~170ms).
+
+§7 Mediums complete (5 of 5).
+
+## Milestone: All Mediums processed
+
+§1.M1-M7 + §2.M1-M5 + §3.M1-M6 + §4.M2-M4 + §5.M1+M4+M5 + §6.M1+M2 + §7.M1-M5 all fixed.
+Logged as needs-design / conditional:
+- §4.M1 (orphan-chunk reaper needs server-side support)
+- §5.M2 + §5.M6 (bundle with §5.C1 migration wizard)
+- §5.M3 (cross-subprocess fresh-unlock — security/UX tradeoff documented)
+
+Continuing into the Low / Info section will be lighter — most §1.L–§7.L items are already noted as "acceptable for v1" in the review.

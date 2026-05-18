@@ -799,11 +799,17 @@ A v1 vault that can grant device access but cannot revoke it has no defence agai
 
 ### Medium
 
-#### §6.M1 — Disconnect-vault dialog wording understates impact
+#### ~~§6.M1~~ — Disconnect-vault dialog wording understates impact
+**Fix landed:** c9afb0d 2026-05-17
 **File:** `desktop/src/windows_vault/tab_danger.py:52-79`. The local-data wipe should be visually distinguished, not paragraph text.
 
-#### §6.M2 — Add Folder dialog has no name-collision check
+**Approach:** Warning glyph + bulleted list naming each artefact class (keys, manifests, downloaded chunks, folder bindings); reaffirms "relay vault is untouched" in a separate paragraph. The wording the source-pin test asserts stays verbatim.
+
+#### ~~§6.M2~~ — Add Folder dialog has no name-collision check
+**Fix landed:** c9afb0d 2026-05-17
 **File:** `desktop/src/vault_folders/dialog_add_folder.py:141-149`. Two "Documents" folders silently coexist; UI dropdowns become ambiguous.
+
+**Approach:** Check moved to the library layer (`Vault.add_remote_folder`) so any future caller gets it. Case-insensitive + whitespace-trimmed; tombstoned folders don't block recreation under the same name.
 
 ### Low / Info
 
@@ -883,11 +889,11 @@ PHP side has no test that source relay's `GET /header` returns `migrated_to` pos
 
 ### Medium
 
-- **§7.M1** — Argon2id parameters in vectors are reduced (8 MiB / 2 iter). Production defaults aren't exercised end-to-end.
-- **§7.M2** — `test_desktop_vault_folder_runtime.py:209` uses `time.sleep(0.05)`. Migrate to the fake-clock pattern used in `test_desktop_vault_download.py:63`.
-- **§7.M3** — Tombstone server-clock authority not asserted. Add a test where request `deleted_at` is back-dated and stored `recoverable_until` is server-now + keep_deleted_days.
-- **§7.M4** — Quota 507 with `eviction_available` flag not byte-asserted in `VaultQuotaPressureTest.php`.
-- **§7.M5** — AAD tamper coverage per envelope kind incomplete. No per-field AAD-flip chunk vector (e.g., flip chunk_index).
+- ~~**§7.M1**~~ — Argon2id parameters in vectors are reduced (8 MiB / 2 iter). Production defaults aren't exercised end-to-end. **Fix landed:** df9f976 — `test_production_params_round_trip` pins the v1-locked params with byte-exact output (~170ms).
+- ~~**§7.M2**~~ — `test_desktop_vault_folder_runtime.py:209` uses `time.sleep(0.05)`. Migrate to the fake-clock pattern used in `test_desktop_vault_download.py:63`. **Fix landed:** df9f976 — replaced 50ms sleep with explicit poll-on-state (fake-clock doesn't fit because the test serializes real threads).
+- ~~**§7.M3**~~ — Tombstone server-clock authority not asserted. Add a test where request `deleted_at` is back-dated and stored `recoverable_until` is server-now + keep_deleted_days. **Fix landed:** df9f976 — source-grep test asserts no controller reads client-supplied timestamp fields (the structural invariant; no server-stored row currently honours a client-controlled timestamp).
+- ~~**§7.M4**~~ — Quota 507 with `eviction_available` flag not byte-asserted in `VaultQuotaPressureTest.php`. **Fix landed:** df9f976 — `assertSame(false, ...)` + `assertArrayHasKey` pins for the three documented detail keys.
+- ~~**§7.M5**~~ — AAD tamper coverage per envelope kind incomplete. No per-field AAD-flip chunk vector (e.g., flip chunk_index). **Fix landed:** df9f976 — new `chunk-v1-aad-chunk-index-flipped` vector + frozenset pin.
 
 ### Low
 
