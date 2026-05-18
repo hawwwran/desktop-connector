@@ -31,8 +31,6 @@ from typing import Any, Iterable, Literal, Sequence
 
 from ..crypto import normalize_vault_id
 from ..manifest import (
-    add_or_append_file_version,
-    find_file_entry,
     generate_file_entry_id,
     normalize_manifest_path,
     normalize_manifest_plaintext,

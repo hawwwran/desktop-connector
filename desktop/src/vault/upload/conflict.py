@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from ..manifest import find_file_entry
+from ..manifest import find_file_entry_in_shard
 
 
 def make_conflict_renamed_path(
@@ -34,11 +34,19 @@ def detect_path_conflict(
 ) -> bool:
     """Return True if ``remote_path`` already has a non-deleted file entry.
 
-    Uses ``find_file_entry`` (which returns deleted entries too) so the
-    UI's conflict prompt fires only for live entries — re-uploading over
-    a tombstone implicitly restores the file in T6.1.
+    Walks the per-folder shard view inside the assembled unified
+    manifest (each folder dict carries its own ``entries[]`` — same
+    shape ``find_file_entry_in_shard`` consumes). Deleted entries are
+    treated as no-conflict so re-uploading over a tombstone implicitly
+    restores the file in T6.1.
     """
-    entry = find_file_entry(manifest, remote_folder_id, remote_path)
-    if entry is None:
-        return False
-    return not bool(entry.get("deleted"))
+    for folder in manifest.get("remote_folders", []) or []:
+        if not isinstance(folder, dict):
+            continue
+        if folder.get("remote_folder_id") != remote_folder_id:
+            continue
+        entry = find_file_entry_in_shard(folder, remote_path)
+        if entry is None:
+            return False
+        return not bool(entry.get("deleted"))
+    return False
