@@ -136,29 +136,41 @@ No `isUserVisibleChunkState()` filter (unlike `headChunk:949` and `batchHead`). 
 
 **Fix:** add `!self::isUserVisibleChunkState((string)$row['state'])` to the early-404 condition.
 
-#### §1.H3 — Migration `target_relay_url` validation is in `migrationCommit` only, not `migrationStart`
+#### ~~§1.H3~~ — Migration `target_relay_url` validation is in `migrationCommit` only, not `migrationStart`
+**Fix landed:** 08bbcd9 2026-05-17
 **File:** `server/src/Controllers/VaultController.php:1317-1357` vs `1465-1477`
+
+**Approach:** Extracted `guardMigrationTargetRelayUrl` helper; called from both `migrationStart` and `migrationCommit`. `javascript:`/`data:`/`file://` and malformed URLs now refused at start.
 
 `migrationStart` writes `target` directly via `Validators::requireNonEmptyString`. `migrationVerifySource` re-emits this URL to admin callers. `migrationCommit` has `filter_var(FILTER_VALIDATE_URL)` + scheme check. So an admin can persist `javascript:`, `data:`, `file://`, or internal-only URL at start; the desktop's "switch active relay" path may follow it before commit catches the bad URL.
 
 **Fix:** extract the URL validator into a helper, call from `migrationStart` too.
 
-#### §1.H4 — `POST /api/vaults` (create) skips `guardFormatVersion` / envelope-prefix consistency checks
+#### ~~§1.H4~~ — `POST /api/vaults` (create) skips `guardFormatVersion` / envelope-prefix consistency checks
+**Fix landed:** d5222cd 2026-05-17
 **File:** `server/src/Controllers/VaultController.php:134-141`
+
+**Approach:** Parse both envelopes via `VaultCrypto::parse*EnvelopeHeader`; call `guardFormatVersion`; assert envelope vault_id + revision match the request body. Same shape as `putHeader` / `putRoot`.
 
 `createVault` decodes `encrypted_header` + `initial_root_ciphertext` and stores them via repositories without running `VaultCrypto::parseHeaderEnvelopeHeader` / `parseRootEnvelopeHeader`. `putHeader` and `putRoot` run `guardFormatVersion` to enforce 0x01 before AEAD attempt. The asymmetry means a malformed envelope can be persisted at create-time.
 
 **Fix:** call parse helpers + `guardFormatVersion` on `createVault`; confirm envelope `vault_id` + revision values match request body fields.
 
-#### §1.H5 — `gcCancel` permits cross-author cancellation by any `sync`-role caller
+#### ~~§1.H5~~ — `gcCancel` permits cross-author cancellation by any `sync`-role caller
+**Fix landed:** a28f46d 2026-05-17
 **File:** `server/src/Controllers/VaultController.php:1252-1295`
+
+**Approach:** Sync-role cancel now also requires either ownership-match (`requested_by_device_id == caller`) or admin role. Cross-author cancel by a non-admin sync caller now 403s.
 
 `gcCancel` cancels any open job regardless of `requested_by_device_id`. The repo records `requested_by_device_id` at row creation (line 1091) but the controller never consults it. A compromised paired device with `sync` role can interfere with the legitimate admin device's GC, eventually exhausting quota.
 
 **Fix:** require admin OR ownership-match: `if ($job['requested_by_device_id'] !== $callerDevice && $callerRole !== 'admin') throw …;`.
 
-#### §1.H6 — Chunk-write failure path's row-delete + bytes-decrement is non-transactional
+#### ~~§1.H6~~ — Chunk-write failure path's row-delete + bytes-decrement is non-transactional
+**Fix landed:** 380dc2b 2026-05-17
 **File:** `server/src/Controllers/VaultController.php:884-887`
+
+**Approach:** Wrap `deleteRow` + `incUsedBytes(-size, -1)` in BEGIN IMMEDIATE / COMMIT so a crash between them either commits both or rolls back both — no permanent (used_bytes, chunk_count) skew.
 
 After `COMMIT` lands and the disk write fails, two writes (`deleteRow` + `incUsedBytes(-size, -1)`) happen sequentially with no transaction. Crash between → permanent counter skew.
 
@@ -243,15 +255,21 @@ If the relay serves a downgrade, the floor check raises but the **in-memory cach
 
 **Fix:** hoist the floor check *before* the four attribute writes.
 
-#### §2.H2 — `binding/sync.py:_publish_batch_with_cas_retry` uses blind path-append on CAS retry
+#### ~~§2.H2~~ — `binding/sync.py:_publish_batch_with_cas_retry` uses blind path-append on CAS retry
+**Fix landed:** e1fe2f9 2026-05-17
 **File:** `desktop/src/vault/binding/sync.py:1106, 926-989`
+
+**Approach:** Mirror commit 3fb7470's folder-upload fix — first attempt blind apply, flip `use_merge=True` on the first 409, rebuild candidate via new `_merge_batch_into_shard_with_bump` that handles both uploads (via `merge_local_version_into_shard` for §D4 collision-rename + tie-break) and deletes.
 
 Recent commit `3fb7470 fix(vault): folder-batch CAS retry must run §D4 merge on conflict` fixed the same bug in `upload/folder.py` (flips `use_merge=True` after first 409). The backup-sync engine's `_publish_batch_with_cas_retry` was NOT fixed — still re-invokes `_apply_batch_to_shard` (blind path match) on every retry. Two devices uploading the same path to a backup-only folder under different `entry_id`s → Device B's version silently appended to Device A's entry, losing the §D4 collision-rename. Comment claims "last-writer-wins on backup-only" but the manifest result is incoherent (entry_id is supposed to be path-stable per device).
 
 **Fix:** match the upload-path fix (use_merge after first 409) or rigorously document the backup-only collapse semantics.
 
-#### §2.H3 — Sensitive-op fresh-unlock window is 120 s, architecture doc implies 15 min
+#### ~~§2.H3~~ — Sensitive-op fresh-unlock window is 120 s, architecture doc implies 15 min
+**Fix landed:** b1d2cde 2026-05-17
 **File:** `desktop/src/vault/fresh_unlock.py:36`, `docs/vault-architecture.md:1020`
+
+**Approach:** `FRESH_UNLOCK_WINDOW_S = 900.0` (15 min). Per-process — process restart re-locks.
 
 `FRESH_UNLOCK_WINDOW_S = 120.0`. Spec §13 says "15 min idle...sensitive ops always require fresh unlock regardless". Chained ops (revoke → rotate access secret) past 2 min re-prompt twice. Either bump to match the doc or update §13.
 
@@ -402,15 +420,21 @@ Loops `if not (local_root / candidate).exists(): return candidate`. Caller does 
 
 **Fix:** `os.rename` into an `O_EXCL`-opened sentinel, retry on `EEXIST`.
 
-#### §3.H8 — SQLite local index without WAL mode → watcher/sync contention serializes
+#### ~~§3.H8~~ — SQLite local index without WAL mode → watcher/sync contention serializes
+**Fix landed:** f92b664 2026-05-17
 **File:** `desktop/src/vault/state/local_index.py:246-251`, `vault/binding/bindings.py:561-565`
+
+**Approach:** `PRAGMA journal_mode=WAL; synchronous=NORMAL; busy_timeout=5000` in both `_connect` implementations.
 
 No `PRAGMA journal_mode=WAL`. Watcher writes block sync reads during a burst; the 3-second stability gate is short enough that mid-burst events can be queued with stale stat data.
 
 **Fix:** `PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000` in `_ensure_schema`.
 
-#### §3.H9 — `_apply_remote_to_local` ghost-row reaper trusts an empty `entries` list
+#### ~~§3.H9~~ — `_apply_remote_to_local` ghost-row reaper trusts an empty `entries` list
+**Fix landed:** 7b276bd 2026-05-17
 **File:** `desktop/src/vault/binding/twoway.py:491-523`
+
+**Approach:** Refuse to enter the ghost-reaper loop unless `state.shard.schema == "dc-vault-shard-v1"`. New `vault.sync.twoway_shard_schema_unexpected` event documented.
 
 If the head shard is intermittently corrupt and returns `entries=[]`, every local-entries row appears orphaned → every on-disk file demoted to "extra" → next watcher tick re-uploads them all as new bytes. Self-DDoS.
 

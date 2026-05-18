@@ -40,3 +40,11 @@ Continuing autonomously into the High section.
 - 2026-05-17 — fixed §1.H1 (commit c041b46): vault auth + create rate limits per protocol §10; new vault_auth_attempts table + repo; 429 vault_rate_limited on overflow.
 - 2026-05-17 — fixed §5.H1 (commit d6a2b11): export bundle persists genesis_fingerprint; Vault.fetch_header_plaintext + import wizard extract both sides; identity gate now anchored on the cryptographic fingerprint.
 - 2026-05-17 — partial §6.H1 (commit 0b836aa): autosync notifies on due scheduled-purges + dialog copy is now honest; auto-fire half needs purge_secret persistence design (logged to review-doubts.md).
+- 2026-05-17 — fixed §1.H3 (commit 08bbcd9): migrationStart now validates target_relay_url via shared helper with migrationCommit.
+- 2026-05-17 — fixed §1.H4 (commit d5222cd): createVault parses both envelopes + guardFormatVersion + asserts envelope (vault_id, revision) matches body.
+- 2026-05-17 — fixed §1.H5 (commit a28f46d): gcCancel sync-role caller must also be plan owner OR admin.
+- 2026-05-17 — fixed §1.H6 (commit 380dc2b): chunk-write rollback pair wrapped in BEGIN IMMEDIATE/COMMIT.
+- 2026-05-17 — fixed §2.H2 (commit e1fe2f9): batch CAS retry flips to use_merge=True after first 409 (mirrors folder-upload fix); §1.H4 cascade-fixed three test envelopes.
+- 2026-05-17 — fixed §2.H3 (commit b1d2cde): FRESH_UNLOCK_WINDOW_S aligned with spec at 900 s (15 min).
+- 2026-05-17 — fixed §3.H8 (commit f92b664): SQLite WAL + synchronous=NORMAL + busy_timeout=5000 on both local_index + bindings _connect.
+- 2026-05-17 — fixed §3.H9 (commit 7b276bd): ghost-reaper refuses to demote when shard plaintext missing schema header; prevents self-DDoS.
