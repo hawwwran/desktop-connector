@@ -488,6 +488,22 @@ def _apply_remote_to_local(
     # Tombstones the manifest still carries are NOT ghosts — those
     # were handled by the ``deleted`` branch above and are in
     # ``visited``.
+    #
+    # Review §3.H9: refuse to ghost-reap if the shard plaintext looks
+    # incoherent. An intermittently-corrupt head whose ``entries`` is
+    # empty would otherwise demote every on-disk file to "extra" and
+    # the next watcher tick would re-upload them as fresh bytes —
+    # self-DDoS. The canary is the shard's schema header: a
+    # well-formed shard always carries ``dc-vault-shard-v1``, even
+    # when the entries list is genuinely empty.
+    if str(state.shard.get("schema", "")) != "dc-vault-shard-v1":
+        log.warning(
+            "vault.sync.twoway_shard_schema_unexpected binding=%s folder=%s "
+            "schema=%r — skipping ghost-reaper to avoid self-DDoS",
+            binding.binding_id, binding.remote_folder_id,
+            state.shard.get("schema"),
+        )
+        return outcomes
     for local_entry in store.list_local_entries(binding.binding_id):
         if local_entry.relative_path in visited:
             continue

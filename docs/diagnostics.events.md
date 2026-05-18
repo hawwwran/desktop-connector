@@ -576,6 +576,7 @@ relay log (filenames are local-only).
 | `vault.sync.twoway_remote_tombstone_applied` | desktop | info | `binding`, `path` | Local file trashed after remote-tombstone applied (unmodified case) |
 | `vault.sync.twoway_remote_tombstone_kept_local_modified` | desktop | info | `binding`, `path` | Local edits preserved over remote tombstone (re-upload re-enqueued) |
 | `vault.sync.twoway_remote_tombstone_unreadable` | desktop | warning | `binding`, `path` | F-Y05 — fingerprint failed; deferred to next cycle |
+| `vault.sync.twoway_shard_schema_unexpected` | desktop | warning | `binding`, `folder`, `schema` | Review §3.H9 — head shard plaintext was missing the `dc-vault-shard-v1` schema header; ghost-reaper skipped to avoid demoting every local file to "extra" and triggering a self-DDoS re-upload on the next watcher tick |
 | `vault.sync.twoway_skip_unsafe_path` | desktop | warning | `path` | Two-way refused a manifest path that traverses out of root |
 | `vault.sync.twoway_trash_failed` | desktop | warning | `binding`, `path` | T12.1 remote-tombstone trash failed; row left in place |
 | `vault.sync.upload_cancelled` | desktop | info | `vault`, `remote_path`, `chunks_done`, `total` | F-Y08 — upload_file bailed mid-chunk-loop |

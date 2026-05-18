@@ -551,6 +551,92 @@ class TwoWayCycleTests(unittest.TestCase):
     # F-Y20 — ghost local-entries reaping
     # ------------------------------------------------------------------
 
+    def test_ghost_reaper_skipped_when_shard_schema_missing(self) -> None:
+        """Review §3.H9: if the head shard plaintext is corrupt and
+        comes back with ``entries=[]`` and no schema header, the
+        ghost-reaper must NOT demote every local-entries row to
+        "extra" — that would make the next watcher tick re-upload
+        every file as fresh bytes (self-DDoS).
+
+        Drive the path by directly invoking ``_apply_remote_to_local``
+        with a synthetic state whose shard has no schema. Assert the
+        local-entries row survives and no demote-to-extra event was
+        emitted.
+        """
+        from unittest import mock
+        from src.vault.binding.twoway import _apply_remote_to_local, _BindingFolderState
+        from src.vault.manifest import make_remote_folder
+
+        relay, manifest = self._empty_remote()
+        binding = self._make_two_way_binding(
+            last_revision=int(manifest["revision"]),
+        )
+        # Seed a local-entries row that "should" be ghost-demoted by
+        # the pre-fix logic (the synthetic shard has no entries).
+        self.store.upsert_local_entry(VaultLocalEntry(
+            binding_id=binding.binding_id,
+            relative_path="should-survive.txt",
+            content_fingerprint="x" * 16,
+            size_bytes=4,
+            mtime_ns=1_700_000_000_000_000_000,
+            last_synced_revision=int(manifest["revision"]),
+        ))
+        (self.local_root / "should-survive.txt").write_bytes(b"abcd")
+
+        # Build the synthetic state: shard with NO schema header and
+        # NO entries — i.e. the "intermittently corrupt" payload.
+        root = manifest
+        bad_shard = {
+            # Note: schema key intentionally missing.
+            "remote_folder_id": DOCS_ID,
+            "shard_revision": 1,
+            "parent_shard_revision": 0,
+            "entries": [],
+        }
+        state = _BindingFolderState(root=root, shard=bad_shard)
+
+        vault = _vault()
+        try:
+            with mock.patch(
+                "src.vault.binding.twoway.log.warning",
+            ) as warning:
+                _apply_remote_to_local(
+                    vault=vault, relay=relay,
+                    store=self.store, binding=binding,
+                    state=state,
+                    local_root=self.local_root,
+                    cache_dir=self.tmpdir / "cache",
+                    device_name=DEVICE_NAME,
+                    progress=None,
+                )
+        finally:
+            vault.close()
+
+        # The schema-mismatch warning fired.
+        warning_messages = [
+            str(call.args[0]) for call in warning.call_args_list
+        ]
+        self.assertTrue(
+            any("twoway_shard_schema_unexpected" in m for m in warning_messages),
+            f"expected twoway_shard_schema_unexpected warning, got: {warning_messages}",
+        )
+        # The local-entries row SURVIVED — no demote-to-extra
+        # happened, no row was deleted.
+        relatives = {
+            e.relative_path
+            for e in self.store.list_local_entries(binding.binding_id)
+        }
+        self.assertIn(
+            "should-survive.txt", relatives,
+            "ghost-reaper must skip when shard schema is missing — "
+            "otherwise the next watcher tick self-DDoSes the relay",
+        )
+        # Local-entry's fingerprint preserved (not zeroed by demote).
+        survivor = self.store.get_local_entry(
+            binding.binding_id, "should-survive.txt",
+        )
+        self.assertEqual(survivor.content_fingerprint, "x" * 16)
+
     def test_ghost_row_reaped_when_local_file_also_gone(self) -> None:
         """Both the manifest entry AND the local file have vanished
         (the manifest's tombstone was server-side-purged after retention
