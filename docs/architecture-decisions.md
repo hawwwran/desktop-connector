@@ -74,6 +74,42 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-18 — Eviction policy: age-ordered auto-purge with quota-shrink passphrase gate
+
+**Status:** decided. Implementation pending — design lives in [`docs/plans/vault-eviction-v1.md`](plans/vault-eviction-v1.md).
+
+**Context.** The pre-shipping eviction pipeline ran in three tiers — expired-tombstone housekeeping (always safe), unexpired-tombstone purge (destructive), oldest-version purge (destructive). Stages 2 + 3 fired automatically on 507 with only the admin-role gate (commit ``f621dc1``) between an upload and irreversible deletion of recoverable data. Spec §D9 called for adding a ``purge_secret`` passphrase prompt to the 507 dialog as a second factor. The straight "prompt every purge" reading of the spec breaks the one-click reclaim UX users expect; the alternative of accepting admin-only gating leaves the system unable to detect a relay that shrinks its own quota under a paired fleet.
+
+**Decision.** Stages 2 + 3 merge into a single age-ordered destructive purge that auto-runs when the upload's projected bytes won't fit. The merged iterator interleaves unexpired-tombstone chunks (sorted by ``deleted_at``) and oldest-version chunks of multi-version live files (sorted by ``created_at``); the loop deletes the oldest candidate until the failing upload fits, then retries init. Bound is strictly per-upload — no batching, no slack — so a compromised path can only free as much as one upload reserves. A passphrase gate fires only on the unambiguous tampering signal ``used > quota``: the server's existing init-deny guard makes ``used > quota`` impossible under normal operation, so observing it = the relay's quota shrank below previously-stored bytes. The alarm suspends uploads, surfaces a brand-styled dialog with passphrase entry, runs a one-pass cleanup until ``used ≤ quota``, and resumes.
+
+**What we deliberately did NOT do.** No client-side ledger of stored chunks vs server-reported ``used``. A consistently-lying relay could under-report ``used`` and avoid tripping the alarm; the architectural answer is perimeter trust + transport pinning, not client-side accounting. No proactive ``used`` / ``quota`` poll on connect — reactive on 507 is sufficient for v1; can layer proactive checks later if the lag matters. No fresh-device baseline tracking — the alarm condition is stateless (``used > quota`` at each check), so there's nothing for an attacker to spoof on first contact.
+
+**Anchor.** Algorithm + threat model + UX comparison + test coverage in [`docs/plans/vault-eviction-v1.md`](plans/vault-eviction-v1.md). Implementation will touch ``desktop/src/vault/ops/eviction.py``, ``desktop/src/windows_vault_browser/quota.py``, ``desktop/src/vault/upload/errors.py``. Admin-role gate (``KIND_FORCED_EVICTION``) stays exactly as it landed in ``f621dc1``.
+
+### 2026-05-18 — Scheduled-purge auto-executor stays fire-on-attended
+
+**Status:** accepted.
+
+**Context.** ``schedule_purge`` lets the user pre-arm a destructive vault clear at a future date. To execute it without user interaction, the desktop needs ``purge_secret`` in scope at the moment the autosync fires — but ``purge_secret`` is derived from the passphrase at unlock time and is in-memory only. Three real options: (a) generate ``purge_token_hash`` at vault-create, persist a copy in the keyring, read it during autosync; (b) push the schedule to the relay as a real ``KIND_SCHEDULED_PURGE`` row with a server-side cron; (c) leave fire-on-attended — autosync notifies; user reopens settings, completes with the recovery kit.
+
+**Decision.** Option (c). Autosync already notifies on due purges (commit ``0b836aa``); the dialog copy is explicit about the online dependency. The user reopens Vault Settings → Danger zone when convenient and completes the purge with their kit. No new at-rest secret class (option a's keyring-persisted purge credential), no new server infrastructure (option b's cron + retention policy). The scheduled-purge feature stays useful as a "reminder + arming" tool rather than a fully autonomous trigger.
+
+**What we deliberately did NOT do.** No keyring-persisted ``purge_secret``. The threat model gain from a long-lived at-rest purge credential is unfavourable: an attacker who exfiltrates the keyring blob can fire any scheduled purge regardless of unlock state. No server-side scheduler — keeps the relay surface area small + avoids a clock-skew failure mode where the relay fires a purge before the desktop's clock thinks the schedule is due.
+
+**Anchor.** ``desktop/src/vault/ops/purge_schedule.py`` (existing autosync notification path), ``desktop/src/windows_vault/tab_danger.py`` (user completes manually). Tracked as resolved in ``docs/plans/unfinished.md`` §6.H1.
+
+### 2026-05-18 — Fresh-unlock state is per-subprocess by design
+
+**Status:** accepted.
+
+**Context.** Spec §13 talks about a unified 15-minute idle window — once you've typed the passphrase to authorize a sensitive action, you have 15 minutes to chain another without re-prompting. The current implementation is *more conservative* than the spec: ``_last_unlock_at`` is per-process module state, so each subprocess (Settings window, Import wizard, Danger tab) re-prompts independently. Cross-subprocess composition would require persisting the timestamp somewhere — config-dir file or POSIX shm — which exposes a new at-rest signal that a malicious local process under the same uid can time an attack against.
+
+**Decision.** Document the per-subprocess scope as the intentional v1 contract. Strictly tighter than the spec text. Sensitive ops chain within a single subprocess only (e.g. Settings → Danger reuses unlock); crossing into the Import wizard subprocess re-prompts. UX cost: ~1 extra prompt per multi-subprocess session — acceptable for the security gain.
+
+**What we deliberately did NOT do.** No on-disk timestamp file. No POSIX shm segment. Both broaden the read surface for local-process attacks under the same uid; the spec's 15-minute window doesn't justify the new at-rest signal. The spec text needs an amendment to record this v1 tightening — flagged as a doc-only follow-up.
+
+**Anchor.** ``desktop/src/vault/fresh_unlock.py:38-46`` (per-process ``_last_unlock_at``). Tracked as resolved in ``docs/plans/unfinished.md`` §5.M3.
+
 ### 2026-05-18 — Migration target relay URL rejects private hosts by literal-IP only
 
 **Status:** accepted.
