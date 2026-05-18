@@ -15,7 +15,9 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _paths import REPO_ROOT  # noqa: E402
+from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
+
+ensure_desktop_on_path()
 
 
 class _ServerHarness:
@@ -794,6 +796,18 @@ class ServerProtocolContractTests(unittest.TestCase):
     def test_dashboard_shows_vaults_with_last_sync_time(self):
         device_id, auth_token, _ = self._register_device("desktop")
         vault_id = "DASH2345WXY2"
+        # Review §1.H4: ``create`` parses both envelope prefixes.
+        # Build proper envelopes via the crypto twin.
+        from src.vault.crypto import build_header_envelope, build_root_envelope
+        header_env = build_header_envelope(
+            vault_id=vault_id, header_revision=1,
+            nonce=b"\x00" * 24, aead_ciphertext_and_tag=b"stub-ct",
+        )
+        root_env = build_root_envelope(
+            vault_id=vault_id, root_revision=1, parent_root_revision=0,
+            author_device_id=device_id, nonce=b"\x00" * 24,
+            aead_ciphertext_and_tag=b"stub-ct",
+        )
         status, _h, body = self.h.request(
             "POST",
             "/api/vaults",
@@ -802,9 +816,9 @@ class ServerProtocolContractTests(unittest.TestCase):
             json_body={
                 "vault_id": "DASH-2345-WXY2",
                 "vault_access_token_hash": base64.b64encode(os.urandom(32)).decode("ascii"),
-                "encrypted_header": base64.b64encode(b"header").decode("ascii"),
+                "encrypted_header": base64.b64encode(header_env).decode("ascii"),
                 "header_hash": "a" * 64,
-                "initial_root_ciphertext": base64.b64encode(b"root").decode("ascii"),
+                "initial_root_ciphertext": base64.b64encode(root_env).decode("ascii"),
                 "initial_root_hash": "b" * 64,
             },
         )

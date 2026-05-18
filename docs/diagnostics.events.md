@@ -412,6 +412,7 @@ relay log (filenames are local-only).
 | `vault.browser.skip_unsafe` | desktop | warning | `path` | F-519 — manifest entry contained a `..` component the browser refused to walk |
 | `vault.browser.sync_status_count_failed` | desktop | warning | exception traceback | Ambient "Vault sync K/N" banner couldn't count pending ops for a binding; the count is omitted from this tick but the next refresh retries |
 | `vault.browser.sync_status_tick_failed` | desktop | warning | exception traceback | Ambient sync-status banner refresh tick raised; banner stays on the prior value, next tick retries |
+| `vault.chunk.rollback_failed` | server | error | `chunk`, `err` | Review §1.H6 — the post-disk-write rollback transaction (deleteRow + incUsedBytes) raised; surfaces the inner error so an operator can spot a half-state from a chunk-write failure |
 | `vault.debug_bundle.schema_dump_failed` | desktop | warning | `path`, `error` | T17.5 — schema dump failed; bundle still produced |
 | `vault.delete.cas_exhausted` | desktop | warning | `vault`, `retries` | F-D25 — delete retry budget exhausted; raised the CAS error to caller |
 | `vault.delete.cas_retry` | desktop | info | `attempt`, `folder`, `shard_conflict`, `root_conflict` | Phase H — delete/restore shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |

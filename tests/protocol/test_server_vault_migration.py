@@ -22,7 +22,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _paths import REPO_ROOT  # noqa: E402
+from _paths import REPO_ROOT, ensure_desktop_on_path  # noqa: E402
+
+ensure_desktop_on_path()
 
 # Re-use the harness from the existing server contract tests.
 from test_server_contract import _ServerHarness  # noqa: E402
@@ -55,16 +57,31 @@ class ServerVaultMigrationTests(unittest.TestCase):
         return body["device_id"], body["auth_token"]
 
     def _create_vault(self, *, device_id: str, token: str, vault_secret: str) -> dict:
+        # Review §1.H4: ``create`` now parses the envelope prefix.
+        # Build proper envelopes via the crypto twin instead of
+        # passing stub bytes.
+        from src.vault.crypto import build_header_envelope, build_root_envelope
         secret_hash = hashlib.sha256(vault_secret.encode("ascii")).digest()
+        author = "0" * 32
+        nonce = b"\x00" * 24
+        header_env = build_header_envelope(
+            vault_id=VAULT_ID_BARE, header_revision=1,
+            nonce=nonce, aead_ciphertext_and_tag=b"stub-ciphertext",
+        )
+        root_env = build_root_envelope(
+            vault_id=VAULT_ID_BARE, root_revision=1, parent_root_revision=0,
+            author_device_id=author, nonce=nonce,
+            aead_ciphertext_and_tag=b"stub-ciphertext",
+        )
         status, _h, body = self.h.request(
             "POST", "/api/vaults",
             token=token, device_id=device_id,
             json_body={
                 "vault_id": VAULT_ID_DASHED,
                 "vault_access_token_hash": base64.b64encode(secret_hash).decode("ascii"),
-                "encrypted_header": base64.b64encode(b"header-bytes-stub").decode("ascii"),
+                "encrypted_header": base64.b64encode(header_env).decode("ascii"),
                 "header_hash": "a" * 64,
-                "initial_root_ciphertext": base64.b64encode(b"root-stub").decode("ascii"),
+                "initial_root_ciphertext": base64.b64encode(root_env).decode("ascii"),
                 "initial_root_hash": "b" * 64,
             },
         )

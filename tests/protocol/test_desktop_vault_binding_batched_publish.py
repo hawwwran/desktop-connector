@@ -239,6 +239,48 @@ class CleanBatchTests(_BatchTestBase):
 
 
 class CASConflictMidBatchTests(_BatchTestBase):
+    def test_publish_batch_with_cas_retry_uses_merge_after_first_409(self) -> None:
+        """Review §2.H2: the batch CAS retry must flip to merge-mode
+        on the first 409 — matches the upload/folder.py fix from
+        commit 3fb7470. Pre-fix the retry blindly re-applied the
+        batch via ``_apply_batch_to_shard`` (path + entry_id match),
+        so two devices uploading the same path to a backup-only
+        folder under different entry_ids would have Device B's
+        version silently appended to Device A's entry, losing the
+        §D4 collision-rename. This is a source-level check that the
+        ``use_merge=True`` flip is present; end-to-end CAS-conflict
+        flow is exercised by the integration test above."""
+        from pathlib import Path as _P
+        from tests.protocol._paths import REPO_ROOT
+        source = (
+            _P(REPO_ROOT)
+            / "desktop"
+            / "src"
+            / "vault"
+            / "binding"
+            / "sync.py"
+        ).read_text()
+        # Find the _publish_batch_with_cas_retry function body.
+        marker = "def _publish_batch_with_cas_retry("
+        idx = source.find(marker)
+        self.assertGreater(idx, 0, "function not found")
+        # 8000 chars covers the loop body + helper definition.
+        body = source[idx : idx + 8000]
+        self.assertIn(
+            "use_merge = False", body,
+            "batch CAS retry must start with use_merge=False",
+        )
+        self.assertIn(
+            "use_merge = True", body,
+            "batch CAS retry must flip to use_merge=True on conflict",
+        )
+        self.assertIn(
+            "_merge_batch_into_shard_with_bump", body,
+            "merge-mode candidate must rebuild via "
+            "_merge_batch_into_shard_with_bump (§D4 collision-rename "
+            "+ tie-break)",
+        )
+
     def test_batch_retries_after_one_cas_conflict(self) -> None:
         """The first publish 409s with the inline server head; the
         retry re-applies the batch on the new head and the second

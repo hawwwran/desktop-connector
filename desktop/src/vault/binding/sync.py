@@ -1042,20 +1042,44 @@ def _publish_batch_with_cas_retry(
         else None
     )
 
-    candidate_shard = _apply_batch_to_shard(
-        parent_state.shard, batch,
-        remote_folder_id=remote_folder_id,
-        folder_retention_policy=folder_retention,
-        author_device_id=author_device_id,
-        created_at=created_at,
-    )
-    candidate_root = _bumped_root_for_shard_publish(
-        parent_state.root,
-        author_device_id=author_device_id,
-        created_at=created_at,
-    )
+    # Review §2.H2: mirror the folder-upload fix from commit 3fb7470.
+    # First attempt uses blind path-append (matches the pre-Phase-H
+    # semantic: a non-conflicting batch is a fresh write, no §D4
+    # tie-break needed). On the first 409 we flip ``use_merge=True``
+    # and rebuild every retry candidate via
+    # ``_merge_batch_into_shard_with_bump`` so a concurrent same-path
+    # upload from a different device on a backup-only folder lands
+    # with the §D4-correct ``entry_id`` (collision-rename) and
+    # ``latest_version_id`` (tie-break by modified_at +
+    # sha256(author_device_id)) instead of silently appending to the
+    # wrong entry under a stale entry_id.
+    initial_parent = parent_state
     current_state = parent_state
+    use_merge = False
     for attempt in range(max_retries):
+        if use_merge:
+            candidate_shard = _merge_batch_into_shard_with_bump(
+                server_shard=current_state.shard,
+                parent_shard=initial_parent.shard,
+                batch=batch,
+                remote_folder_id=remote_folder_id,
+                folder_retention_policy=folder_retention,
+                author_device_id=author_device_id,
+                created_at=created_at,
+            )
+        else:
+            candidate_shard = _apply_batch_to_shard(
+                current_state.shard, batch,
+                remote_folder_id=remote_folder_id,
+                folder_retention_policy=folder_retention,
+                author_device_id=author_device_id,
+                created_at=created_at,
+            )
+        candidate_root = _bumped_root_for_shard_publish(
+            current_state.root,
+            author_device_id=author_device_id,
+            created_at=created_at,
+        )
         try:
             shard_out, root_out = vault.publish_shard_with_root(
                 relay, remote_folder_id, candidate_shard, candidate_root,
@@ -1088,13 +1112,6 @@ def _publish_batch_with_cas_retry(
                 attempt + 1, max_retries, len(batch),
                 bool(shard_envelope), bool(root_envelope),
             )
-            # Backup-only is last-writer-wins; the replay below will
-            # land our version on top of the server-head shard,
-            # demoting any concurrent writer's version on the same
-            # path to a prior version (or reviving a tombstone we're
-            # re-uploading over). Surface per-path so an operator can
-            # correlate "my other desktop's upload isn't the latest
-            # anymore" with this cycle's CAS retry.
             _log_batch_cas_steamrolls(batch=batch, server_shard=new_shard)
             current_state = _BindingFolderState(root=new_root, shard=new_shard)
             pointer = _find_root_folder_pointer(new_root, remote_folder_id)
@@ -1103,19 +1120,62 @@ def _publish_batch_with_cas_retry(
                 if pointer is not None and isinstance(pointer.get("retention_policy"), dict)
                 else None
             )
-            candidate_shard = _apply_batch_to_shard(
-                new_shard, batch,
-                remote_folder_id=remote_folder_id,
-                folder_retention_policy=folder_retention,
-                author_device_id=author_device_id,
-                created_at=created_at,
-            )
-            candidate_root = _bumped_root_for_shard_publish(
-                new_root,
-                author_device_id=author_device_id,
-                created_at=created_at,
-            )
+            use_merge = True
     raise AssertionError("unreachable: loop exits via return or raise")
+
+
+def _merge_batch_into_shard_with_bump(
+    *,
+    server_shard: dict[str, Any],
+    parent_shard: dict[str, Any],
+    batch: list[_BatchEntry],
+    remote_folder_id: str,
+    folder_retention_policy: dict[str, int] | None,
+    author_device_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Review §2.H2: CAS-retry candidate for the binding-batch path.
+
+    Like ``_merge_additions_into_shard_with_bump`` in upload/folder.py,
+    but handles both uploads and deletes — the binding batch can
+    interleave them. Uploads go through
+    ``merge_local_version_into_shard`` so §D4 collision-rename +
+    tie-break run; deletes use the same idempotent tombstone helper
+    as the blind-apply path (KeyError on already-gone is tolerated).
+    """
+    from ..manifest import merge_local_version_into_shard
+
+    server_n = normalize_shard_plaintext(server_shard)
+    parent_revision = int(server_n.get("shard_revision", 0))
+    merged = server_n
+    for entry in batch:
+        if entry.kind == "upload":
+            assert entry.prepared is not None
+            merged = merge_local_version_into_shard(
+                merged,
+                parent_shard=parent_shard,
+                entry_id=entry.prepared.entry_id,
+                path=entry.prepared.normalized_remote_path,
+                version=entry.prepared.version_payload,
+            )
+        elif entry.kind == "delete":
+            normalized = normalize_manifest_path(entry.op.relative_path)
+            try:
+                merged = tombstone_file_entry_in_shard(
+                    merged,
+                    path=normalized,
+                    deleted_at=str(entry.deleted_at or created_at),
+                    author_device_id=author_device_id,
+                    folder_retention_policy=folder_retention_policy,
+                )
+            except KeyError:
+                pass
+    merged["shard_revision"] = parent_revision + 1
+    merged["parent_shard_revision"] = parent_revision
+    merged["created_at"] = created_at
+    merged["author_device_id"] = str(author_device_id)
+    merged["remote_folder_id"] = remote_folder_id
+    return merged
 
 
 def _log_batch_cas_steamrolls(

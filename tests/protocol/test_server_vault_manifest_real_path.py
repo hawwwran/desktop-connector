@@ -27,7 +27,7 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 from _real_relay_server import get_shared_server  # noqa: E402
 
 ensure_desktop_on_path()
-from src.vault.crypto import build_root_envelope  # noqa: E402
+from src.vault.crypto import build_header_envelope, build_root_envelope  # noqa: E402
 
 
 VAULT_ID_DASHED = "MFRP-2345-WXYZ"
@@ -72,7 +72,15 @@ class ServerVaultManifestRealPathTests(unittest.TestCase):
     ) -> str:
         """Create a vault with root_revision=1 and return the initial root hash."""
         secret_hash = hashlib.sha256(vault_secret.encode("ascii")).digest()
-        encrypted_header = b"\x01" + b"\x00" * 84
+        # Review §1.H4: ``create`` parses the envelope prefix; build a
+        # proper header envelope via the crypto twin rather than a
+        # stub byte string.
+        encrypted_header = build_header_envelope(
+            vault_id=vault_id_bare,
+            header_revision=1,
+            nonce=b"\x00" * 24,
+            aead_ciphertext_and_tag=b"\x00" * 32,
+        )
         # Initial root envelope with root_revision=1, parent_root_revision=0.
         # AEAD bytes are opaque to the server, but the 61-byte deterministic
         # prefix must parse cleanly. The author_device_id must match
