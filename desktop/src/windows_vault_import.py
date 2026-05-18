@@ -268,8 +268,17 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                         # whole anchor.
                         active_fp = _safe_genesis_fingerprint(vault, relay)
                         state["active_genesis_fingerprint"] = active_fp
+                        # Review §5.H4: thread ``relay`` so
+                        # ``open_bundle_for_preview`` does the
+                        # ``batch_head_chunks`` round-trip and the
+                        # preview's "0 of N chunks already on this
+                        # relay" line shows the real number BEFORE
+                        # the user clicks Import. Pre-fix the head
+                        # call lived inside ``run_import``, so the
+                        # preview always read zero.
                         contents, bundle_manifest, preview = open_bundle_for_preview(
                             vault=vault,
+                            relay=relay,
                             bundle_path=state["bundle_path"],
                             passphrase=state["passphrase"],
                             active_manifest=active_manifest,
@@ -277,7 +286,6 @@ def show_vault_import(config_dir: Path, vault_id_override: str | None = None) ->
                             bundle_genesis_fingerprint=_safe_bundle_genesis_fingerprint(
                                 state["bundle_path"], state["passphrase"], vault.vault_id,
                             ),
-                            chunks_already_on_relay=0,  # filled at run-time
                         )
                     finally:
                         vault.close()

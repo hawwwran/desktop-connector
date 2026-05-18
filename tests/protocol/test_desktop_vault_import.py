@@ -82,6 +82,7 @@ class VaultImportDecisionTests(unittest.TestCase):
         self.assertEqual(action, "refuse")
 
 
+
 class VaultImportPreviewTests(unittest.TestCase):
     def test_preview_for_new_vault_path_reports_full_bundle(self) -> None:
         bundle = _manifest_with_files(VAULT_ID, [
@@ -598,6 +599,157 @@ class VaultImportRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.action, "refuse")
         self.assertIsNone(result.published_manifest)
+
+    def test_open_bundle_for_preview_counts_chunks_already_on_relay(self) -> None:
+        """Review §5.H4: ``open_bundle_for_preview`` now takes a relay
+        and calls ``batch_head_chunks`` so the preview's
+        ``chunks_already_on_relay`` reflects reality BEFORE the user
+        clicks Import. Pre-fix the wizard passed
+        ``chunks_already_on_relay=0`` and the real head-count happened
+        inside ``run_import`` after commit — bandwidth claims were
+        fiction. This test exports a bundle then opens-for-preview
+        against both a relay that already has every chunk (export
+        relay) and a fresh empty relay; the count must match each.
+        """
+        from src.vault import Vault
+        from src.vault.crypto import DefaultVaultCrypto
+        from src.vault.export.bundle import write_export_bundle
+        from src.vault.import_.runner import open_bundle_for_preview
+        from src.vault.upload import upload_file
+        from tests.protocol.test_desktop_vault_manifest import (
+            AUTHOR as MASTER_AUTHOR,
+            DOCS_ID as MASTER_DOCS_ID,
+            MASTER_KEY,
+            VAULT_ID as MASTER_VAULT_ID,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay,
+            seed_sharded_state_from_manifest,
+        )
+
+        VAULT_ACCESS_SECRET = "vault-secret"
+
+        def make_vault() -> Vault:
+            return Vault(
+                vault_id=MASTER_VAULT_ID, master_key=MASTER_KEY,
+                recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
+                header_revision=1, manifest_revision=1,
+                manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+            )
+
+        def encrypt_manifest_envelope(manifest: dict) -> bytes:
+            from src.vault.crypto import (
+                aead_encrypt, build_manifest_aad,
+                build_manifest_envelope, derive_subkey,
+            )
+            from src.vault.manifest import (
+                canonical_manifest_json, normalize_manifest_plaintext,
+            )
+            import secrets as _secrets
+            normalized = normalize_manifest_plaintext(manifest)
+            plaintext = canonical_manifest_json(normalized)
+            subkey = derive_subkey("dc-vault-v1/manifest", bytes(MASTER_KEY))
+            nonce = _secrets.token_bytes(24)
+            aad = build_manifest_aad(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+            )
+            ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+            return build_manifest_envelope(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+                nonce=nonce,
+                aead_ciphertext_and_tag=ciphertext,
+            )
+
+        empty = make_manifest(
+            vault_id=MASTER_VAULT_ID, revision=1, parent_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=MASTER_AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=MASTER_DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-01T10:00:00.000Z",
+                    created_by_device_id=MASTER_AUTHOR,
+                    entries=[],
+                )
+            ],
+        )
+
+        relay_a = FakeUploadRelay()
+        vault = make_vault()
+        try:
+            seed_sharded_state_from_manifest(vault, relay_a, empty)
+            local_a = self.tmpdir / "exported.txt"
+            local_a.write_bytes(b"exported bytes for the preview")
+            uploaded = upload_file(
+                vault=vault, relay=relay_a, manifest=empty,
+                local_path=local_a, remote_folder_id=MASTER_DOCS_ID,
+                remote_path="exported.txt", author_device_id=MASTER_AUTHOR,
+            )
+            bundle_path = self.tmpdir / "vault.dcvault"
+            write_export_bundle(
+                vault=vault, relay=relay_a,
+                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
+                manifest_plaintext=uploaded.manifest,
+                output_path=bundle_path,
+                passphrase="preview-passphrase",
+                argon_memory_kib=8192, argon_iterations=2,
+                genesis_fingerprint="ff" * 16,
+            )
+            chunk_ids_in_bundle = set()
+            for folder in uploaded.manifest.get("remote_folders", []) or []:
+                for entry in folder.get("entries", []) or []:
+                    for version in entry.get("versions", []) or []:
+                        for chunk in version.get("chunks", []) or []:
+                            chunk_ids_in_bundle.add(chunk["chunk_id"])
+            self.assertGreater(len(chunk_ids_in_bundle), 0)
+        finally:
+            vault.close()
+
+        # Preview against the export relay — every chunk should already
+        # be there.
+        vault = make_vault()
+        try:
+            _contents, _manifest, preview_same = open_bundle_for_preview(
+                vault=vault,
+                relay=relay_a,
+                bundle_path=bundle_path,
+                passphrase="preview-passphrase",
+                active_manifest=empty,
+                active_genesis_fingerprint="ff" * 16,
+                bundle_genesis_fingerprint="ff" * 16,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(
+            preview_same.chunks_already_on_relay,
+            len(chunk_ids_in_bundle),
+        )
+
+        # Preview against a fresh empty relay — count must be zero so
+        # the user sees the real upload cost.
+        relay_b = FakeUploadRelay()
+        vault = make_vault()
+        try:
+            seed_sharded_state_from_manifest(vault, relay_b, empty)
+            _contents, _manifest, preview_empty = open_bundle_for_preview(
+                vault=vault,
+                relay=relay_b,
+                bundle_path=bundle_path,
+                passphrase="preview-passphrase",
+                active_manifest=empty,
+                active_genesis_fingerprint="ff" * 16,
+                bundle_genesis_fingerprint="ff" * 16,
+            )
+        finally:
+            vault.close()
+        self.assertEqual(preview_empty.chunks_already_on_relay, 0)
 
     def test_run_import_creates_root_pointers_for_bundle_only_folders(self) -> None:
         """Phase H step 7c crash-fix: importing a bundle whose folder set

@@ -125,3 +125,59 @@ notifies on due purges, dialog copy clarifies the online
 dependency. ``vault.purge.due_awaiting_user`` event documented.
 The "auto-fire" half is still open.
 Need from user: pick (a), (b), or (c). (c) ships as-is.
+
+---
+
+## §5.H2 — Per-folder import conflict resolution UI
+
+Status: skipped-needs-design (new feature build)
+Date: 2026-05-17
+Verified against: `desktop/src/windows_vault_import.py:36, 364`
+(`ImportMergeResolution(per_folder={})` always — module docstring
+admits "Conflict-resolution UI is not yet wired here");
+`desktop/src/vault/import_/conflicts.find_conflict_batches` is the
+library function with zero non-test callers in `desktop/src/`.
+Doubt: The wizard currently defaults to `rename` (the conservative,
+data-loss-free option) for every conflicting folder, so the failure
+mode is "user can't pick overwrite or skip per folder" rather than
+"data corruption". Spec §17 calls for per-folder conflict batches
+with an "Apply to remaining" button — that's a new wizard page
+between Preview and Progress with N controls + a "Apply to all
+remaining folders with the same conflict kind" affordance.
+Building that page autonomously violates the per-issue protocol's
+"never build a new feature autonomously" rule (~300 LOC of GTK +
+threading + AT-SPI labels + brand styling).
+Action taken: nothing; the conservative default (rename) keeps the
+shipping behaviour safe. The library is ready.
+Need from user: decision on (a) build the per-folder conflict
+page as a follow-up PR, (b) ship v1 with the rename-only default
+and document the gap as "v1.1 enhancement", or (c) inline a single
+global picker on the Preview page (rename / overwrite / skip for
+the whole import) as a minimal step before the per-folder UI.
+
+---
+
+## §5.H3 — Access-secret rotation has no client trigger
+
+Status: skipped-needs-design (new feature build)
+Date: 2026-05-17
+Verified against: `desktop/src/vault/grant/access_rotation.py:65-110`
+(`generate_new_secret`, `rotation_request_body`, reminders all
+exported; zero non-test callers in `desktop/src/`);
+`desktop/src/windows_vault/tab_recovery.py:56` tooltip reads
+"Recovery-material rotation is not implemented yet".
+Doubt: Until rotation is wired, nothing breaks — the library waits
+for callers. This is a pre-emptive risk: when rotation lands, every
+existing recovery kit becomes silently undecryptable on the relay
+side (right master_key, wrong bearer), so the wizard has to
+prompt for kit regeneration in the same flow. Building the trigger
+requires (a) a "Rotate access secret" button under Settings →
+Recovery, (b) a confirmation dialog explaining "this invalidates
+your existing recovery kits", (c) the post-rotation recovery-kit
+regeneration step, (d) a server-side `/rotate` endpoint + auth
+hooks. (d) is also missing today.
+Action taken: nothing; current shipping behaviour is "no rotation"
+which is safe pending the build.
+Need from user: decision on whether v1 ships without rotation
+(documented as v1.x), or scope a build that bundles UI + server
+endpoint + kit-regeneration prompt together.

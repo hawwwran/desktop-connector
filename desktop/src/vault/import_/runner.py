@@ -160,7 +160,8 @@ def open_bundle_for_preview(
     active_manifest: dict[str, Any] | None,
     active_genesis_fingerprint: str | None,
     bundle_genesis_fingerprint: str | None,
-    chunks_already_on_relay: int,
+    chunks_already_on_relay: int = 0,
+    relay: ImportRelay | None = None,
     source_label: str | None = None,
 ) -> tuple[BundleContents, dict[str, Any], ImportPreview]:
     """Read+decrypt the bundle and build the preview.
@@ -169,6 +170,15 @@ def open_bundle_for_preview(
     invariant per §D9). Returns ``(bundle_contents,
     decrypted_bundle_manifest, preview)`` so the wizard can show the
     §17 fields and reuse the manifest for the merge step.
+
+    Review §5.H4: when ``relay`` is provided, ``batch_head_chunks`` is
+    called here so the preview's ``chunks_already_on_relay`` reflects
+    reality before the user clicks Import. Pre-fix the wizard passed
+    ``chunks_already_on_relay=0`` and the real head-count happened
+    inside ``run_import`` after the user had already committed —
+    decisions were made on bandwidth fantasy. ``chunks_already_on_relay``
+    stays for callers that want to supply a precomputed count
+    (test harnesses), but ``relay`` is the preferred input.
     """
     contents = read_export_bundle(
         bundle_path=bundle_path,
@@ -180,6 +190,16 @@ def open_bundle_for_preview(
         expected_vault_id=vault.vault_id,
     )
     bundle_manifest = decrypt_manifest_envelope(vault, contents.manifest_envelope)
+    if relay is not None:
+        bundle_chunk_ids = sorted(contents.chunks.keys())
+        heads = relay.batch_head_chunks(
+            vault.vault_id, vault.vault_access_secret, bundle_chunk_ids,
+        )
+        chunks_already_on_relay = sum(
+            1
+            for cid in bundle_chunk_ids
+            if isinstance(heads.get(cid), dict) and heads[cid].get("present")
+        )
     preview = preview_import(
         bundle_manifest=bundle_manifest,
         bundle_vault_id=contents.header.vault_id,
