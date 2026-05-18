@@ -18,6 +18,7 @@ from gi.repository import GLib, Gtk  # noqa: E402
 
 from ..vault.binding.lifecycle import SyncCancelledError
 from ..vault.error_messages import humanize
+from ..vault.manifest import assemble_unified_manifest
 from ..vault.binding.runtime import (
     create_vault_relay,
     open_local_vault_from_grant,
@@ -148,7 +149,9 @@ class ResumeBannerMixin:
                                 local_index=self.local_index,
                                 should_continue=lambda: not cancel_event.is_set(),
                             )
-                            last_manifest = result.manifest
+                            last_manifest = assemble_unified_manifest(
+                                result.root, {result.remote_folder_id: result.shard},
+                            )
                             completed += 1
                         except SyncCancelledError:
                             cancelled_count += 1

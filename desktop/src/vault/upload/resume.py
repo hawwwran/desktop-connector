@@ -23,7 +23,6 @@ from ..crypto import (
     make_chunk_id,
     make_chunk_nonce,
 )
-from ..manifest import assemble_unified_manifest
 from .folder_state import fetch_folder_state
 from .protocols import UploadRelay, UploadVault
 from .results import UploadProgress, UploadResult
@@ -228,10 +227,8 @@ def resume_upload(
     _report(progress, "done", len(chunk_ids), len(chunk_ids), bytes_uploaded)
 
     return UploadResult(
-        manifest=assemble_unified_manifest(
-            published_state.root,
-            {session.remote_folder_id: published_state.shard},
-        ),
+        root=published_state.root,
+        shard=published_state.shard,
         entry_id=session.entry_id,
         version_id=session.version_id,
         path=session.remote_path,

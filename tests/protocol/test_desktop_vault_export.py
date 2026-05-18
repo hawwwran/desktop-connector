@@ -26,6 +26,7 @@ from src.vault.export.bundle import (  # noqa: E402
     write_export_bundle,
 )
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     make_manifest,
     make_remote_folder,
 )
@@ -494,14 +495,13 @@ def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, 
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path=relative, author_device_id=AUTHOR,
             )
-            current_manifest = res.manifest
+            current_manifest = assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
     finally:
         vault.close()
     # Assemble the unified manifest view that the export bundle still
     # embeds as a single ``manifest_envelope`` record. After Phase H
     # the relay no longer maintains a legacy single envelope, so we
     # build it here from the post-upload sharded state.
-    from src.vault.manifest import assemble_unified_manifest
     vault_observer = _vault()
     try:
         root = vault_observer.fetch_root_manifest(relay)

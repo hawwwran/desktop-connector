@@ -25,6 +25,7 @@ from src.vault.crypto import (  # noqa: E402
     derive_content_fingerprint_key, make_content_fingerprint,
 )
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     make_manifest,
     make_remote_folder,
 )
@@ -151,7 +152,7 @@ class TwoWayCycleTests(unittest.TestCase):
             )
         finally:
             vault.close()
-        return res.manifest
+        return assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
 
     def _tombstone_remote_file(
         self,

@@ -22,7 +22,15 @@ class FileSkipped:
 
 @dataclass(frozen=True)
 class FolderUploadResult:
-    manifest: dict[str, Any]
+    # Sharded folder-state at completion: ``root`` is the published root
+    # envelope plaintext, ``shard`` is the published shard plaintext for
+    # ``remote_folder_id``. Callers that need the legacy unified shape
+    # synthesize via ``assemble_unified_manifest(root, {remote_folder_id:
+    # shard})`` at the consumption point — the producer no longer carries
+    # a unified copy through, so other folders' entries are never stale.
+    root: dict[str, Any]
+    shard: dict[str, Any]
+    remote_folder_id: str
     uploaded: list["UploadResult"]
     skipped: list[FileSkipped] = field(default_factory=list)
 
@@ -59,7 +67,9 @@ class UploadProgress:
 
 @dataclass(frozen=True)
 class UploadResult:
-    manifest: dict[str, Any]
+    # Sharded folder-state at completion (see FolderUploadResult docstring).
+    root: dict[str, Any]
+    shard: dict[str, Any]
     entry_id: str
     version_id: str
     path: str

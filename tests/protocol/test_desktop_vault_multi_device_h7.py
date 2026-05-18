@@ -57,7 +57,7 @@ from src.vault.crypto import (  # noqa: E402
     derive_content_fingerprint_key, make_content_fingerprint,
 )
 from src.vault.manifest import (  # noqa: E402
-    find_file_entry, make_manifest, make_remote_folder,
+    assemble_unified_manifest, find_file_entry, make_manifest, make_remote_folder,
 )
 from src.vault.upload import upload_file  # noqa: E402
 
@@ -239,7 +239,6 @@ class MultiDeviceH7Tests(unittest.TestCase):
         # Synthesize a unified-shape manifest from the current sharded
         # state for assertions + legacy ``upload_file`` calls. Removed
         # when ``upload_file`` is ported in step 4.
-        from src.vault.manifest import assemble_unified_manifest
         observer = _make_vault()
         try:
             root = observer.decrypt_root_envelope(self.relay.root_envelope)
@@ -306,8 +305,8 @@ class MultiDeviceH7Tests(unittest.TestCase):
                 local_path=seed_local, remote_folder_id=DOCS_ID,
                 remote_path="shared.txt", author_device_id=AUTHOR,
             )
-            seed_sharded_state_from_manifest(bootstrap, self.relay, res.manifest)
-            seeded_revision = int(res.manifest["revision"])
+            seed_sharded_state_from_manifest(bootstrap, self.relay, assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard}))
+            seeded_revision = int(assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})["revision"])
         finally:
             bootstrap.close()
 

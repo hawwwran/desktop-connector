@@ -23,6 +23,7 @@ from src.vault.import_.bundle import (  # noqa: E402
     preview_import,
 )
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     find_file_entry,
     make_manifest,
     make_remote_folder,
@@ -480,8 +481,8 @@ class VaultImportRunnerTests(unittest.TestCase):
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay_a,
-                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
-                manifest_plaintext=uploaded.manifest,
+                manifest_envelope=encrypt_manifest_envelope(assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard})),
+                manifest_plaintext=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 output_path=bundle_path,
                 passphrase="user-export-passphrase",
                 argon_memory_kib=8192,
@@ -695,15 +696,15 @@ class VaultImportRunnerTests(unittest.TestCase):
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay_a,
-                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
-                manifest_plaintext=uploaded.manifest,
+                manifest_envelope=encrypt_manifest_envelope(assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard})),
+                manifest_plaintext=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 output_path=bundle_path,
                 passphrase="preview-passphrase",
                 argon_memory_kib=8192, argon_iterations=2,
                 genesis_fingerprint="ff" * 16,
             )
             chunk_ids_in_bundle = set()
-            for folder in uploaded.manifest.get("remote_folders", []) or []:
+            for folder in assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}).get("remote_folders", []) or []:
                 for entry in folder.get("entries", []) or []:
                     for version in entry.get("versions", []) or []:
                         for chunk in version.get("chunks", []) or []:
@@ -844,8 +845,8 @@ class VaultImportRunnerTests(unittest.TestCase):
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=export_relay,
-                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
-                manifest_plaintext=uploaded.manifest,
+                manifest_envelope=encrypt_manifest_envelope(assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard})),
+                manifest_plaintext=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 output_path=bundle_path,
                 passphrase="bundle-passphrase",
                 argon_memory_kib=8192, argon_iterations=2,
@@ -998,8 +999,8 @@ class VaultImportRunnerTests(unittest.TestCase):
             bundle_path = self.tmpdir / "vault.dcvault"
             write_export_bundle(
                 vault=vault, relay=relay_a,
-                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
-                manifest_plaintext=uploaded.manifest,
+                manifest_envelope=encrypt_manifest_envelope(assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard})),
+                manifest_plaintext=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 output_path=bundle_path,
                 passphrase="user-export-passphrase",
                 argon_memory_kib=8192, argon_iterations=2,

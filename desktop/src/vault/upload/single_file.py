@@ -31,7 +31,6 @@ from ..crypto import (
 )
 from ..manifest import (
     add_or_append_file_version_in_shard,
-    assemble_unified_manifest,
     find_file_entry_in_shard,
     generate_file_entry_id,
     generate_file_version_id,
@@ -199,9 +198,8 @@ def upload_file(
                not bool(existing_entry.get("deleted")):
                 _report(progress, "done", 0, 0, 0)
                 return UploadResult(
-                    manifest=assemble_unified_manifest(
-                        state.root, {remote_folder_id: state.shard},
-                    ),
+                    root=state.root,
+                    shard=state.shard,
                     entry_id=str(existing_entry["entry_id"]),
                     version_id=str(version.get("version_id", "")),
                     path=normalized_remote_path,
@@ -373,9 +371,8 @@ def upload_file(
     )
 
     return UploadResult(
-        manifest=assemble_unified_manifest(
-            published_state.root, {remote_folder_id: published_state.shard},
-        ),
+        root=published_state.root,
+        shard=published_state.shard,
         entry_id=entry_id,
         version_id=version_id,
         path=normalized_remote_path,

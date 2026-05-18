@@ -17,7 +17,11 @@ ensure_desktop_on_path()
 
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
+    make_manifest,
+    make_remote_folder,
+)
 from src.vault.migration.state import load_state, save_state, MigrationRecord  # noqa: E402
 from src.vault.migration.runner import (  # noqa: E402
     MigrationVerifyOutcome,
@@ -756,7 +760,7 @@ class VaultMigrationRunnerTests(unittest.TestCase):
                     local_path=local, remote_folder_id=DOCS_ID,
                     remote_path=path, author_device_id=AUTHOR,
                 )
-                current_manifest = res.manifest
+                current_manifest = assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
         finally:
             vault.close()
         return relay, relay.root_envelope

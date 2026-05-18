@@ -19,6 +19,7 @@ from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.ops.delete import delete_file  # noqa: E402
 from src.vault.ops.eviction import eviction_pass  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     find_file_entry,
     make_manifest,
     make_remote_folder,
@@ -66,7 +67,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
             )
             after_delete = delete_file(
-                vault=vault, relay=relay, manifest=uploaded.manifest,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 remote_folder_id=DOCS_ID, remote_path="old.txt",
                 author_device_id=AUTHOR,
                 deleted_at="2026-04-01T10:00:00.000Z",  # > 30 days ago
@@ -107,7 +108,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
             )
             after_delete = delete_file(
-                vault=vault, relay=relay, manifest=uploaded.manifest,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 remote_folder_id=DOCS_ID, remote_path="fresh.txt",
                 author_device_id=AUTHOR,
                 deleted_at="2026-05-01T10:00:00.000Z",
@@ -148,7 +149,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                     author_device_id=AUTHOR,
                 )
                 delete_file(
-                    vault=vault, relay=relay, manifest=uploaded.manifest,
+                    vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                     remote_folder_id=DOCS_ID, remote_path=path,
                     author_device_id=AUTHOR, deleted_at=deleted_at,
                 )
@@ -190,7 +191,7 @@ class VaultEvictionPassTests(unittest.TestCase):
             )
             local.write_bytes(b"v2 content - distinct bytes here")
             v2 = upload_file(
-                vault=vault, relay=relay, manifest=v1.manifest, local_path=local,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(v1.root, {v1.remote_folder_id: v1.shard}), local_path=local,
                 remote_folder_id=DOCS_ID, remote_path="doc.txt",
                 author_device_id=AUTHOR,
                 created_at="2026-05-01T10:00:00.000Z",
@@ -234,7 +235,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
             )
             result = eviction_pass(
-                vault=vault, relay=relay, manifest=uploaded.manifest,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 author_device_id=AUTHOR,
                 target_bytes_to_free=10_000,
                 now_iso="2026-05-04T12:00:00.000Z",
@@ -272,7 +273,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                 author_device_id=AUTHOR,
             )
             after_delete = delete_file(
-                vault=vault, relay=relay, manifest=uploaded.manifest,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 remote_folder_id=DOCS_ID, remote_path="stranded.txt",
                 author_device_id=AUTHOR,
                 deleted_at="2026-04-01T10:00:00.000Z",  # > 30 days ago
@@ -336,7 +337,7 @@ class VaultEvictionPassTests(unittest.TestCase):
                     author_device_id=AUTHOR,
                 )
                 delete_file(
-                    vault=vault, relay=relay, manifest=uploaded.manifest,
+                    vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                     remote_folder_id=DOCS_ID, remote_path=path,
                     author_device_id=AUTHOR, deleted_at=deleted_at,
                 )

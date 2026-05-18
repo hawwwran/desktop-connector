@@ -20,7 +20,12 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.download import download_latest_file  # noqa: E402
-from src.vault.manifest import find_file_entry, make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
+    find_file_entry,
+    make_manifest,
+    make_remote_folder,
+)
 from src.vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError  # noqa: E402
 from src.vault.upload import (  # noqa: E402
     FileSkipped,
@@ -68,11 +73,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         """Boundary guard for the "upload but file doesn't show" failure mode.
 
         Asserts the contract the vault browser leans on:
-        ``result.manifest`` returned by ``upload_file`` actually carries
+        ``assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard})`` returned by ``upload_file`` actually carries
         the new file entry — both via direct lookup and via the
         ``list_folder`` walk the file list calls. If this drifts, the
         browser will silently fail to render new uploads no matter how
-        clean ``state["manifest"] = result.manifest`` is.
+        clean ``state["manifest"] = assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard})`` is.
         """
         from src.vault.ui.browser_model import list_folder
 
@@ -99,19 +104,19 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             vault.close()
 
         # 1. Direct entry lookup hits the new file with the right version_id.
-        entry = find_file_entry(result.manifest, DOCS_ID, "guarded.txt")
-        self.assertIsNotNone(entry, "result.manifest is missing the uploaded entry")
+        entry = find_file_entry(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), DOCS_ID, "guarded.txt")
+        self.assertIsNotNone(entry, "assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}) is missing the uploaded entry")
         self.assertEqual(entry["latest_version_id"], result.version_id)
 
-        # 2. result.manifest is NOT the input dict (caller can swap it in
+        # 2. assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}) is NOT the input dict (caller can swap it in
         # without worrying about shared state).
-        self.assertIsNot(result.manifest, manifest)
+        self.assertIsNot(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), manifest)
         # The pre-upload manifest must not be mutated under the caller's feet.
         self.assertIsNone(find_file_entry(manifest, DOCS_ID, "guarded.txt"))
 
         # 3. list_folder — the call the browser's render_file_list runs —
         # surfaces the file row at the requested folder display name.
-        _folders, files = list_folder(result.manifest, "Documents")
+        _folders, files = list_folder(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), "Documents")
         names = [str(f.get("name")) for f in files]
         self.assertIn("guarded.txt", names)
 
@@ -149,15 +154,15 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         for rel in ("batch/top.txt", "batch/sub/leaf.txt"):
             self.assertIsNotNone(
-                find_file_entry(result.manifest, DOCS_ID, rel),
+                find_file_entry(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), DOCS_ID, rel),
                 f"folder upload published manifest is missing {rel}",
             )
-        self.assertIsNot(result.manifest, manifest)
+        self.assertIsNot(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), manifest)
 
         # Browser-shaped walks at both depths see the new files.
-        _f, top_files = list_folder(result.manifest, "Documents/batch")
+        _f, top_files = list_folder(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), "Documents/batch")
         self.assertIn("top.txt", [str(f.get("name")) for f in top_files])
-        _f, leaf_files = list_folder(result.manifest, "Documents/batch/sub")
+        _f, leaf_files = list_folder(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), "Documents/batch/sub")
         self.assertIn("leaf.txt", [str(f.get("name")) for f in leaf_files])
 
     def test_upload_then_download_roundtrips_bytes(self) -> None:
@@ -183,7 +188,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 author_device_id=AUTHOR,
                 chunk_size=8 * 1024,
             )
-            new_manifest = result.manifest
+            new_manifest = assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard})
             entry = find_file_entry(new_manifest, DOCS_ID, "report.txt")
             self.assertIsNotNone(entry)
             self.assertEqual(entry["latest_version_id"], result.version_id)
@@ -200,7 +205,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             vault.close()
 
         self.assertEqual(destination.read_bytes(), payload)
-        latest_chunks = _latest_chunk_list(result.manifest, DOCS_ID, "report.txt")
+        latest_chunks = _latest_chunk_list(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), DOCS_ID, "report.txt")
         self.assertEqual(result.chunks_uploaded, len(latest_chunks))
         self.assertEqual(result.chunks_skipped, 0)
 
@@ -233,7 +238,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             second = upload_file(
                 vault=vault,
                 relay=relay,
-                manifest=first.manifest,
+                manifest=assemble_unified_manifest(first.root, {first.remote_folder_id: first.shard}),
                 local_path=local,
                 remote_folder_id=DOCS_ID,
                 remote_path="twice.bin",
@@ -255,7 +260,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         # second pass added nothing.
         self.assertEqual(len(relay.published_shards), 1)
         self.assertEqual(len(relay.published_roots), 1)
-        entry = find_file_entry(second.manifest, DOCS_ID, "twice.bin")
+        entry = find_file_entry(assemble_unified_manifest(second.root, {second.remote_folder_id: second.shard}), DOCS_ID, "twice.bin")
         self.assertEqual(len(entry["versions"]), 1)
         self.assertEqual(entry["latest_version_id"], first.version_id)
 
@@ -325,7 +330,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             second = upload_file(
                 vault=vault,
                 relay=relay,
-                manifest=first.manifest,
+                manifest=assemble_unified_manifest(first.root, {first.remote_folder_id: first.shard}),
                 local_path=local,
                 remote_folder_id=DOCS_ID,
                 remote_path=renamed_path,
@@ -340,8 +345,8 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             "report (conflict uploaded Laptop 2026-05-04 17-30).docx",
         )
         self.assertNotEqual(first.entry_id, second.entry_id)
-        original = find_file_entry(second.manifest, DOCS_ID, "report.docx")
-        renamed = find_file_entry(second.manifest, DOCS_ID, renamed_path)
+        original = find_file_entry(assemble_unified_manifest(second.root, {second.remote_folder_id: second.shard}), DOCS_ID, "report.docx")
+        renamed = find_file_entry(assemble_unified_manifest(second.root, {second.remote_folder_id: second.shard}), DOCS_ID, renamed_path)
         self.assertIsNotNone(original)
         self.assertIsNotNone(renamed)
         self.assertEqual(original["entry_id"], first.entry_id)
@@ -394,7 +399,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         finally:
             vault.close()
 
-        self.assertTrue(detect_path_conflict(first.manifest, DOCS_ID, "live.txt"))
+        self.assertTrue(detect_path_conflict(assemble_unified_manifest(first.root, {first.remote_folder_id: first.shard}), DOCS_ID, "live.txt"))
 
     def test_make_conflict_renamed_path_handles_directory_and_recursion(self) -> None:
         first = make_conflict_renamed_path(
@@ -808,7 +813,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # Final manifest holds all three entries under the requested sub-path.
         for rel in ("batch/src/main.py", "batch/src/lib/util.py", "batch/docs/README.md"):
-            entry = find_file_entry(result.manifest, DOCS_ID, rel)
+            entry = find_file_entry(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), DOCS_ID, rel)
             self.assertIsNotNone(entry, f"missing manifest entry for {rel}")
 
         self.assertEqual(progress[-1].phase, "done")
@@ -1079,7 +1084,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             )
             self.assertEqual(len(relay.published_shards), 1)
             second = upload_folder(
-                vault=vault, relay=relay, manifest=first.manifest, local_root=root,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(first.root, {first.remote_folder_id: first.shard}), local_root=root,
                 remote_folder_id=DOCS_ID, remote_sub_path="batch",
                 author_device_id=AUTHOR,
             )
@@ -1126,7 +1131,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             seed_vault.close()
 
         # Both A and B fetch the post-seed manifest as their "parent".
-        shared_parent = seed_res.manifest
+        shared_parent = assemble_unified_manifest(seed_res.root, {seed_res.remote_folder_id: seed_res.shard})
 
         local_a = self.tmpdir / "from_a.txt"
         local_a.write_bytes(b"alpha bytes one")
@@ -1169,7 +1174,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         self.assertEqual(len(relay.published_shards), 3)
         self.assertEqual(len(relay.published_roots), 3)
 
-        entry = find_file_entry(res_b.manifest, DOCS_ID, "report.txt")
+        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "report.txt")
         self.assertIsNotNone(entry)
         version_ids = {v["version_id"] for v in entry["versions"]}
         # All three versions live in F.versions.
@@ -1197,7 +1202,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             # Reset publish counters so tests can count only post-init publishes.
             relay.published_shards = []
             relay.published_roots = []
-            shared_parent = upload_file(
+            _seed = upload_file(
                 vault=seed_vault,
                 relay=relay,
                 manifest=manifest,
@@ -1206,7 +1211,10 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 remote_path="tied.txt",
                 author_device_id=device_seed,
                 created_at="2026-05-04T11:00:00.000Z",
-            ).manifest
+            )
+            shared_parent = assemble_unified_manifest(
+                _seed.root, {_seed.remote_folder_id: _seed.shard},
+            )
         finally:
             seed_vault.close()
 
@@ -1244,7 +1252,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             key=lambda d: hashlib.sha256(d.encode("utf-8")).digest(),
         )
         expected = res_a.version_id if winner == device_a else res_b.version_id
-        entry = find_file_entry(res_b.manifest, DOCS_ID, "tied.txt")
+        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "tied.txt")
         self.assertEqual(entry["latest_version_id"], expected)
 
     def test_concurrent_new_file_at_same_path_renames_imported(self) -> None:
@@ -1323,7 +1331,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 upload_file(
                     vault=vault,
                     relay=relay,
-                    manifest=first.manifest,
+                    manifest=assemble_unified_manifest(first.root, {first.remote_folder_id: first.shard}),
                     local_path=local,
                     remote_folder_id=DOCS_ID,
                     remote_path="first.txt",
@@ -1359,7 +1367,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             seed_sharded_state_from_manifest(seed_vault, relay, manifest)
             relay.published_shards = []
             relay.published_roots = []
-            shared_parent = upload_folder(
+            _seed = upload_folder(
                 vault=seed_vault,
                 relay=relay,
                 manifest=manifest,
@@ -1368,7 +1376,10 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 remote_sub_path="",
                 author_device_id=device_seed,
                 created_at="2026-05-04T11:00:00.000Z",
-            ).manifest
+            )
+            shared_parent = assemble_unified_manifest(
+                _seed.root, {_seed.remote_folder_id: _seed.shard},
+            )
         finally:
             seed_vault.close()
 
@@ -1425,7 +1436,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             if r.path == "shared/tied.txt"
         )
         expected = a_version_id if winner == device_a else b_version_id
-        entry = find_file_entry(res_b.manifest, DOCS_ID, "shared/tied.txt")
+        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "shared/tied.txt")
         self.assertEqual(entry["latest_version_id"], expected)
 
     def test_concurrent_new_file_at_same_path_renames_imported_folder_batch(self) -> None:
@@ -1470,7 +1481,6 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # Decode the post-publish sharded state and verify both entries
         # coexist: original "shared/taken.bin" + rename-imported variant.
-        from src.vault.manifest import assemble_unified_manifest
         observer = _vault()
         try:
             root = observer.fetch_root_manifest(relay)
@@ -1540,7 +1550,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             )
         finally:
             seed_vault.close()
-        shared_parent = seed_res.manifest
+        shared_parent = assemble_unified_manifest(seed_res.root, {seed_res.remote_folder_id: seed_res.shard})
 
         # Capture B's pre-A view BEFORE A publishes — without this,
         # B's own fetch_folder_state would see A's post-publish head
@@ -1635,7 +1645,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         # (b) Same final root_revision for any observer — i.e. the
         #     head moved forward monotonically; B observed at least
         #     two distinct conflicts before winning.
-        head_rev_b_observed = int(res_b.manifest["revision"])
+        head_rev_b_observed = int(res_b.root["root_revision"])
         head_rev_relay = relay.root_revision
         self.assertEqual(
             head_rev_b_observed, head_rev_relay,
@@ -1655,7 +1665,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # (c) No entries lost — every publisher's version_id present
         # in the final entry. Five publishers (seed, A, C, D, B).
-        entry = find_file_entry(res_b.manifest, DOCS_ID, "report.txt")
+        entry = find_file_entry(assemble_unified_manifest(res_b.root, {res_b.remote_folder_id: res_b.shard}), DOCS_ID, "report.txt")
         self.assertIsNotNone(entry)
         version_ids = {v["version_id"] for v in entry["versions"]}
         self.assertIn(seed_res.version_id, version_ids,
@@ -1675,7 +1685,6 @@ def _fetch_current_head(vault, relay) -> dict:
     """Tiny helper for the §7.C3 test — pull and assemble the current
     sharded head into a unified-manifest dict the upload helpers can
     consume as ``manifest=``."""
-    from src.vault.manifest import assemble_unified_manifest
     root = vault.fetch_root_manifest(relay)
     shards = {}
     for folder in root.get("remote_folders", []):

@@ -20,7 +20,6 @@ from ..crypto import (
 )
 from ..manifest import (
     add_or_append_file_version_in_shard,
-    assemble_unified_manifest,
     find_file_entry_in_shard,
     generate_file_entry_id,
     generate_file_version_id,
@@ -204,9 +203,9 @@ def upload_folder(
     if not any(addition for addition in additions):
         _report_folder(progress, "done", files_total, files_total, bytes_total, bytes_completed, "")
         return FolderUploadResult(
-            manifest=assemble_unified_manifest(
-                state.root, {remote_folder_id: state.shard},
-            ),
+            root=state.root,
+            shard=state.shard,
+            remote_folder_id=remote_folder_id,
             uploaded=upload_results,
             skipped=skipped,
         )
@@ -231,14 +230,12 @@ def upload_folder(
     )
     _report_folder(progress, "done", files_total, files_total, bytes_total, bytes_completed, "")
 
-    # Re-stamp uploaded entries with the published manifest so the caller
-    # sees consistent state in `result.uploaded[i].manifest`.
-    published_manifest = assemble_unified_manifest(
-        published_state.root, {remote_folder_id: published_state.shard},
-    )
+    # Re-stamp uploaded entries with the published sharded state so the
+    # caller sees consistent (root, shard) on every per-file result.
     upload_results = [
         UploadResult(
-            manifest=published_manifest,
+            root=published_state.root,
+            shard=published_state.shard,
             entry_id=r.entry_id,
             version_id=r.version_id,
             path=r.path,
@@ -253,7 +250,9 @@ def upload_folder(
         for r in upload_results
     ]
     return FolderUploadResult(
-        manifest=published_manifest,
+        root=published_state.root,
+        shard=published_state.shard,
+        remote_folder_id=remote_folder_id,
         uploaded=upload_results,
         skipped=skipped,
     )
@@ -352,9 +351,8 @@ def _upload_one_into_batch(
                 continue
             if str(version.get("content_fingerprint", "")) == fingerprint:
                 return UploadResult(
-                    manifest=assemble_unified_manifest(
-                        parent_state.root, {remote_folder_id: parent_state.shard},
-                    ),
+                    root=parent_state.root,
+                    shard=parent_state.shard,
                     entry_id=str(existing_entry["entry_id"]),
                     version_id=str(version.get("version_id", "")),
                     path=normalized_remote_path,
@@ -417,9 +415,11 @@ def _upload_one_into_batch(
     ))
 
     return UploadResult(
-        manifest=assemble_unified_manifest(
-            parent_state.root, {remote_folder_id: parent_state.shard},
-        ),  # patched after the batch publish
+        # ``root`` and ``shard`` carry the pre-publish state for the
+        # per-file result; the caller re-stamps them with the post-
+        # publish state after the batch CAS lands.
+        root=parent_state.root,
+        shard=parent_state.shard,
         entry_id=entry_id,
         version_id=version_id,
         path=normalized_remote_path,

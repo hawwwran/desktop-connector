@@ -43,6 +43,7 @@ from src.vault.binding.sync import (  # noqa: E402
 from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     find_file_entry,
     make_manifest,
     make_remote_folder,
@@ -132,7 +133,7 @@ class _BatchTestBase(unittest.TestCase):
             )
         finally:
             vault.close()
-        return res.manifest
+        return assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
 
     def _make_bound_binding(self, *, last_revision: int):
         binding = self.store.create_binding(

@@ -23,6 +23,7 @@ from src.vault.binding.baseline import (  # noqa: E402
 from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     make_manifest,
     make_remote_folder,
     tombstone_file_entry,
@@ -92,7 +93,7 @@ class VaultBaselineTests(unittest.TestCase):
                     local_path=local, remote_folder_id=DOCS_ID,
                     remote_path=path, author_device_id=AUTHOR,
                 )
-                current = res.manifest
+                current = assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
             if with_tombstone is not None:
                 current = tombstone_file_entry(
                     current,
@@ -106,7 +107,6 @@ class VaultBaselineTests(unittest.TestCase):
                 seed_sharded_state_from_manifest(vault, relay, current)
         finally:
             vault.close()
-        from src.vault.manifest import assemble_unified_manifest
         observer = _vault()
         try:
             root = observer.fetch_root_manifest(relay)

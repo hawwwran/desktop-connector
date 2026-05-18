@@ -19,6 +19,7 @@ from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 from ..vault.binding.lifecycle import SyncCancelledError
 from ..vault.error_messages import humanize
+from ..vault.manifest import assemble_unified_manifest
 from ..vault.relay_errors import VaultQuotaExceededError
 from ..vault.binding.runtime import (
     create_vault_relay,
@@ -149,7 +150,9 @@ class UploadsMixin:
                 return
 
             def succeed() -> bool:
-                self.state.manifest = result.manifest
+                self.state.manifest = assemble_unified_manifest(
+                    result.root, {result.remote_folder_id: result.shard},
+                )
                 self._disarm_cancel()
                 if self.refresh_btn is not None:
                     self.refresh_btn.set_sensitive(True)
@@ -379,7 +382,9 @@ class UploadsMixin:
                 return
 
             def succeed() -> bool:
-                self.state.manifest = result.manifest
+                self.state.manifest = assemble_unified_manifest(
+                    result.root, {result.remote_folder_id: result.shard},
+                )
                 self._disarm_cancel()
                 if self.refresh_btn is not None:
                     self.refresh_btn.set_sensitive(True)

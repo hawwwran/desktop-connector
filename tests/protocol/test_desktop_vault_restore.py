@@ -18,6 +18,7 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     make_manifest,
     make_remote_folder,
     tombstone_file_entry,
@@ -91,7 +92,7 @@ class RestoreRemoteFolderTests(unittest.TestCase):
                     local_path=local, remote_folder_id=DOCS_ID,
                     remote_path=path, author_device_id=AUTHOR,
                 )
-                current = res.manifest
+                current = assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
             if with_tombstone is not None:
                 current = tombstone_file_entry(
                     current,
@@ -414,7 +415,7 @@ class RestoreAtDateTests(unittest.TestCase):
                     remote_path=path, author_device_id=AUTHOR,
                     created_at=ts,
                 )
-                current = res.manifest
+                current = assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
         finally:
             vault.close()
         observer = _vault()
@@ -514,7 +515,7 @@ class RestoreAtDateTests(unittest.TestCase):
                 created_at="2026-01-01T12:00:00.000Z",
             )
             current = tombstone_file_entry(
-                res.manifest, remote_folder_id=DOCS_ID, path="alpha.txt",
+                assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard}), remote_folder_id=DOCS_ID, path="alpha.txt",
                 deleted_at="2026-02-01T12:00:00.000Z", author_device_id=AUTHOR,
             )
             current["revision"] = int(current["revision"]) + 1

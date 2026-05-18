@@ -25,6 +25,7 @@ from src.vault.ops.delete import (  # noqa: E402
     restore_version_to_current,
 )
 from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
     compute_recoverable_until,
     find_file_entry,
     make_manifest,
@@ -252,7 +253,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
                     author_device_id=AUTHOR,
                 )
                 published = delete_file(
-                    vault=vault, relay=relay, manifest=uploaded.manifest,
+                    vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                     remote_folder_id=DOCS_ID, remote_path="doomed.txt",
                     author_device_id=AUTHOR,
                     deleted_at="2026-05-04T18:00:00.000Z",
@@ -386,14 +387,14 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
             )
             local.write_bytes(b"version 2 content - different bytes")
             v2 = upload_file(
-                vault=vault, relay=relay, manifest=v1.manifest,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(v1.root, {v1.remote_folder_id: v1.shard}),
                 local_path=local, remote_folder_id=DOCS_ID,
                 remote_path="report.txt", author_device_id=AUTHOR,
                 created_at="2026-05-02T10:00:00.000Z",
             )
             puts_before = list(relay.put_calls)
             restored = restore_version_to_current(
-                vault=vault, relay=relay, manifest=v2.manifest,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(v2.root, {v2.remote_folder_id: v2.shard}),
                 remote_folder_id=DOCS_ID, remote_path="report.txt",
                 source_version_id=v1.version_id,
                 author_device_id=AUTHOR,
@@ -438,7 +439,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
                 remote_path="ghost.txt", author_device_id=AUTHOR,
             )
             after_delete = delete_file(
-                vault=vault, relay=relay, manifest=uploaded.manifest,
+                vault=vault, relay=relay, manifest=assemble_unified_manifest(uploaded.root, {uploaded.remote_folder_id: uploaded.shard}),
                 remote_folder_id=DOCS_ID, remote_path="ghost.txt",
                 author_device_id=AUTHOR,
             )
