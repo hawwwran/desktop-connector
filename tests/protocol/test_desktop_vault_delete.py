@@ -243,12 +243,12 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         with self.assertLogs("src.vault.ops.delete", level="INFO") as cm:
             try:
                 seed_sharded_state(
-                vault, relay,
-                vault_id=manifest['vault_id'],
-                remote_folders=manifest['remote_folders'],
-                created_at=manifest['created_at'],
-                author_device_id=manifest['author_device_id'],
-            )
+                    vault, relay,
+                    vault_id=manifest['vault_id'],
+                    remote_folders=manifest['remote_folders'],
+                    created_at=manifest['created_at'],
+                    author_device_id=manifest['author_device_id'],
+                )
                 # Reset publish counters so the test counts only the
                 # upload + delete (not the seed's bootstrap publishes).
                 relay.published_shards = []

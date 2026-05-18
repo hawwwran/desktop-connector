@@ -111,12 +111,12 @@ class VaultBaselineTests(unittest.TestCase):
                 current["revision"] = int(current["revision"]) + 1
                 current["parent_revision"] = current["revision"] - 1
                 seed_sharded_state(
-                vault, relay,
-                vault_id=current['vault_id'],
-                remote_folders=current['remote_folders'],
-                created_at=current['created_at'],
-                author_device_id=current['author_device_id'],
-            )
+                    vault, relay,
+                    vault_id=current['vault_id'],
+                    remote_folders=current['remote_folders'],
+                    created_at=current['created_at'],
+                    author_device_id=current['author_device_id'],
+                )
         finally:
             vault.close()
         observer = _vault()

@@ -74,6 +74,18 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-18 — Migration target relay URL rejects private hosts by literal-IP only
+
+**Status:** accepted.
+
+**Context.** ``migrationStart`` / ``migrationCommit`` persist a target relay URL into the ``vaults`` table and re-expose it through ``GET /header`` to every paired device. A malicious or misconfigured admin who owns the original relay can therefore redirect the paired fleet anywhere — including an internal service that exfiltrates the next set of encrypted payloads via auth header replay. The vault is end-to-end encrypted, so the *content* still can't be decrypted by the redirected target, but device tokens + envelope-shape side channels (sizes, timing) leak.
+
+**Decision.** ``VaultController::rejectPrivateOrLoopbackHost`` (called from ``guardMigrationTargetRelayUrl``) refuses literal loopback, RFC 1918, link-local, and IPv6 ULA / ``::1`` addresses by default, plus the ``localhost`` and ``*.localhost`` DNS literals. Implementation uses PHP's ``FILTER_VALIDATE_IP`` with ``FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE``. Operators with a legitimate need to migrate across local URLs (paired desktop hitting ``http://127.0.0.1:4441`` on a developer rig) flip ``migrationAllowPrivateUrls: true`` in ``server/data/config.json``. The toggle is intentionally not surfaced in any UI — it's a deployment-time decision, not a per-operation one.
+
+**What we deliberately did NOT do.** The filter does **not** resolve DNS at validation time. An admin who controls both the relay and an authoritative DNS server can still point ``relay.example.com`` at ``192.168.1.1`` and bypass the check. Config-time DNS resolution is too fragile to lean on — split-horizon resolvers, short TTLs, NXDOMAIN→NOERROR flips all turn an "approved" URL into a wrong-host one between the filter and the eventual request. The architectural answer to a malicious admin who owns DNS is perimeter trust + transport pinning, not a URL string filter. Documenting this gap explicitly so future-us doesn't reach for resolution as a "fix".
+
+**Anchor.** ``server/src/Controllers/VaultController.php::rejectPrivateOrLoopbackHost``, ``server/src/Config.php::migrationAllowPrivateUrls``, ``server/tests/Vault/VaultControllerTest::test_migrationStart_rejects_private_url_by_default`` (covers ``localhost``, ``*.localhost``, RFC 1918 v4, ``169.254.169.254`` cloud-metadata, ``::1``, ``fc00::/7``). Landed in ``ff499e6``.
+
 ### 2026-05-17 — Vault manifest is sharded: root + per-folder shards
 
 **Status:** accepted.

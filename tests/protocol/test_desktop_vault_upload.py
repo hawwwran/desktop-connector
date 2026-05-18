@@ -72,12 +72,14 @@ class VaultUploadRoundTripTests(unittest.TestCase):
     def test_upload_file_result_manifest_surfaces_new_entry_in_browser_view(self) -> None:
         """Boundary guard for the "upload but file doesn't show" failure mode.
 
-        Asserts the contract the vault browser leans on:
-        ``assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard})`` returned by ``upload_file`` actually carries
-        the new file entry — both via direct lookup and via the
-        ``list_folder`` walk the file list calls. If this drifts, the
-        browser will silently fail to render new uploads no matter how
-        clean ``state["manifest"] = assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard})`` is.
+        Asserts the contract the vault browser leans on: after an
+        ``upload_file`` call, the unified manifest assembled from
+        ``result.root`` + ``result.shard`` carries the new file entry —
+        both via direct lookup and via the ``list_folder`` walk the
+        file list calls. If this drifts, the browser will silently
+        fail to render new uploads no matter how clean
+        ``state["manifest"] = assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard})``
+        is at the call site.
         """
         from src.vault.ui.browser_model import list_folder
 
@@ -109,20 +111,24 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         finally:
             vault.close()
 
+        unified = assemble_unified_manifest(
+            result.root, {result.remote_folder_id: result.shard},
+        )
+
         # 1. Direct entry lookup hits the new file with the right version_id.
-        entry = find_file_entry(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), DOCS_ID, "guarded.txt")
-        self.assertIsNotNone(entry, "assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}) is missing the uploaded entry")
+        entry = find_file_entry(unified, DOCS_ID, "guarded.txt")
+        self.assertIsNotNone(entry, "unified manifest is missing the uploaded entry")
         self.assertEqual(entry["latest_version_id"], result.version_id)
 
-        # 2. assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}) is NOT the input dict (caller can swap it in
-        # without worrying about shared state).
-        self.assertIsNot(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), manifest)
+        # 2. The synthesized unified manifest is NOT the input dict
+        # (caller can swap it in without worrying about shared state).
+        self.assertIsNot(unified, manifest)
         # The pre-upload manifest must not be mutated under the caller's feet.
         self.assertIsNone(find_file_entry(manifest, DOCS_ID, "guarded.txt"))
 
         # 3. list_folder — the call the browser's render_file_list runs —
         # surfaces the file row at the requested folder display name.
-        _folders, files = list_folder(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), "Documents")
+        _folders, files = list_folder(unified, "Documents")
         names = [str(f.get("name")) for f in files]
         self.assertIn("guarded.txt", names)
 
@@ -164,17 +170,20 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         finally:
             vault.close()
 
+        unified = assemble_unified_manifest(
+            result.root, {result.remote_folder_id: result.shard},
+        )
         for rel in ("batch/top.txt", "batch/sub/leaf.txt"):
             self.assertIsNotNone(
-                find_file_entry(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), DOCS_ID, rel),
+                find_file_entry(unified, DOCS_ID, rel),
                 f"folder upload published manifest is missing {rel}",
             )
-        self.assertIsNot(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), manifest)
+        self.assertIsNot(unified, manifest)
 
         # Browser-shaped walks at both depths see the new files.
-        _f, top_files = list_folder(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), "Documents/batch")
+        _f, top_files = list_folder(unified, "Documents/batch")
         self.assertIn("top.txt", [str(f.get("name")) for f in top_files])
-        _f, leaf_files = list_folder(assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard}), "Documents/batch/sub")
+        _f, leaf_files = list_folder(unified, "Documents/batch/sub")
         self.assertIn("leaf.txt", [str(f.get("name")) for f in leaf_files])
 
     def test_upload_then_download_roundtrips_bytes(self) -> None:
@@ -814,12 +823,12 @@ class VaultUploadRoundTripTests(unittest.TestCase):
             vault = _vault()
             try:
                 seed_sharded_state(
-                vault, relay,
-                vault_id=manifest['vault_id'],
-                remote_folders=manifest['remote_folders'],
-                created_at=manifest['created_at'],
-                author_device_id=manifest['author_device_id'],
-            )
+                    vault, relay,
+                    vault_id=manifest['vault_id'],
+                    remote_folders=manifest['remote_folders'],
+                    created_at=manifest['created_at'],
+                    author_device_id=manifest['author_device_id'],
+                )
                 relay.published_shards = []
                 relay.published_roots = []
                 upload_file(
@@ -1788,7 +1797,11 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # (b) Same final root_revision for any observer — i.e. the
         #     head moved forward monotonically; B observed at least
-        #     two distinct conflicts before winning.
+        #     two distinct conflicts before winning. The root envelope's
+        #     ``root_revision`` is byte-equal to the unified manifest's
+        #     ``revision`` (see ``assemble_unified_manifest``), so reading
+        #     it off ``res_b.root`` is the post-sharding equivalent of
+        #     the legacy ``res_b.manifest["revision"]``.
         head_rev_b_observed = int(res_b.root["root_revision"])
         head_rev_relay = relay.root_revision
         self.assertEqual(

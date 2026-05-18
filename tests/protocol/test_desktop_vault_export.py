@@ -486,12 +486,12 @@ def _populated_relay_with(tmpdir: Path, files: dict[str, bytes]) -> tuple[dict, 
     vault = _vault()
     try:
         seed_sharded_state(
-                vault, relay,
-                vault_id=manifest['vault_id'],
-                remote_folders=manifest['remote_folders'],
-                created_at=manifest['created_at'],
-                author_device_id=manifest['author_device_id'],
-            )
+            vault, relay,
+            vault_id=manifest['vault_id'],
+            remote_folders=manifest['remote_folders'],
+            created_at=manifest['created_at'],
+            author_device_id=manifest['author_device_id'],
+        )
         current_manifest = manifest
         for relative, content in files.items():
             local = tmpdir / relative.replace("/", "_")
