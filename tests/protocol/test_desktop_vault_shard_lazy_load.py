@@ -1,6 +1,6 @@
 """Phase F acceptance test — lazy shard load.
 
-Per ``docs/plans/vault-manifest-sharding.md`` Phase F:
+Per ``temp/finished-plans/vault-manifest-sharding.md`` Phase F:
 
   > **Lazy shard load**: opening one folder fetches only that folder's
   > shard, not all of them. Counted via a probe relay.

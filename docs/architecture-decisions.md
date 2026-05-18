@@ -92,7 +92,7 @@ each) would see ~ 9 MB encrypted manifest per publish and ~
 390 MiB RAM peak on a single-binding edit. Manifest sharding —
 splitting the envelope along the natural folder boundary — was
 the natural next step. The scoping doc
-``docs/plans/vault-manifest-sharding.md`` captured the eight-
+``temp/finished-plans/vault-manifest-sharding.md`` captured the eight-
 phase plan; this entry records the lock.
 
 **What we decided.** The encrypted manifest on the relay is now
@@ -212,7 +212,7 @@ device-grant-side compartment to track. The scoping doc's
 
 **Compatibility note.** ``vault_v1`` had never shipped (per
 the operating constraints in
-``docs/plans/vault-manifest-sharding.md``), so the wire format
+``temp/finished-plans/vault-manifest-sharding.md``), so the wire format
 was altered in place — no compatibility shim, no deprecation
 runway, no coexistence period across devices. The
 developer's dev twin re-seeds its vault via the suite-start

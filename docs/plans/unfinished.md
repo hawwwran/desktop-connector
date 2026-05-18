@@ -1,14 +1,15 @@
 # Vault v1 — outstanding follow-ups
 
-Single source of truth for every item from the max-effort review (`temp/finished-plans/max-review-result.md`) that did NOT land as a code fix. Detail-per-entry inlined here so you don't have to cross-reference the archive.
+Single source of truth for every plan item that did NOT land as a code fix. Detail-per-entry inlined here so you don't have to cross-reference the archives.
 
-Three categories:
+Three sections:
 
-1. **Needs-design** (§1) — fix scope requires explicit user decision before any code lands. Each has 2–3 resolution paths.
-2. **Deferred Low** (§2) — reviewer-classified as polish-tier, acceptable for v1, or operator-deployment caveats.
-3. **Summary count** (§3) — verified by grepping the archived tracker.
+1. **Max-effort review needs-design** (§1) — fix scope requires explicit user decision before any code lands. Each has 2–3 resolution paths.
+2. **Deferred Low** (§2) — review items reviewer-classified as polish-tier, acceptable for v1, or operator-deployment caveats.
+3. **Manifest-sharding step 7f cleanup** (§3) — mechanical legacy-API removal still pending from `temp/finished-plans/vault-manifest-sharding.md`. The sharded surface is the production path; the legacy unified-manifest helpers are kept as compat shims while last call sites migrate.
+4. **Summary count** (§4) — verified by grepping the archived trackers.
 
-Last reconciled against `temp/finished-plans/max-review-result.md` on 2026-05-17.
+Last reconciled on 2026-05-17.
 
 ---
 
@@ -239,7 +240,65 @@ All eight §6 Lows below are pure verified-clean acknowledgements — listed for
 
 ---
 
-## 3. Summary count
+## 3. Manifest-sharding step 7f cleanup
+
+Carried over from [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/finished-plans/vault-manifest-sharding.md). Phases A → 7e shipped; step 7f did the heavy lifting (legacy `Vault.fetch_manifest` / `publish_manifest`, server `vault_manifests` table + `/manifest` endpoints, `FakeUploadRelay.put_manifest` / `get_manifest`, migration script + legacy fixture all gone). What's left is the final cleanup pass — eliminating the unified-manifest shape from APIs that now have shard-aware equivalents.
+
+**Status (verified 2026-05-17):** the sharded surface IS the production path. All 1612 Python + 303 PHP tests pass. The remaining work is API surface area cleanup, not functional gaps. Roughly one mid-size commit + one mechanical pass.
+
+### 3.1 — Result-shape rename + `assemble_unified_manifest` callers
+
+| Surface | Sites | Where |
+|---|---|---|
+| `UploadResult.manifest` / `FolderUploadResult.manifest` field rename to `.root` + `.shard` | 2 dataclass slots | `desktop/src/vault/upload/results.py:25, 62` |
+| `assemble_unified_manifest` production callers | 10 sites | `ops/delete.py` (4), `upload/folder.py` (3), `ui/browser_model.py` (2), `remote_folders.py` (1) — all synthesize a unified manifest for caller compat after a sharded mutation |
+| `Vault.fetch_unified_manifest` | 1 method | `desktop/src/vault/vault.py:905` — backs the compat synthesizer used by integrity + folder/runtime + browser callers |
+
+Once the result-shape rename lands, the `assemble_unified_manifest` synthesis points all collapse: callers read `.root` / `.shard` directly. `fetch_unified_manifest` then becomes a one-folder convenience or goes away entirely.
+
+### 3.2 — Protocol narrowing
+
+| Surface | Action |
+|---|---|
+| `IntegrityVault.fetch_unified_manifest` Protocol slot | `desktop/src/vault/ops/integrity.py:68` — still required because `_safe_fetch_manifest` (line 317) uses it. Migrate to a shard-walking integrity check that reads root + each shard directly, then drop the slot. |
+| `UploadVault` / `DeleteVault` Protocols | Already narrowed (no legacy slots remain per the plan's intent). Verified by grep. |
+
+### 3.3 — Legacy helpers in `desktop/src/vault/manifest.py`
+
+| Helper | Status | Last production caller |
+|---|---|---|
+| `make_manifest` | Test-fixture only | None — fixture builder, will go when test helpers migrate |
+| `add_remote_folder` (manifest-level) | Test-fixture only | None |
+| `rename_remote_folder` (manifest-level) | Test-fixture only | None |
+| `tombstone_file_entry` | Test-fixture only | None |
+| `add_or_append_file_version` | Production | `import_/bundle.py:34` |
+| `find_file_entry` | Production | `upload/conflict.py:6`, `import_/bundle.py:35` |
+| `merge_with_remote_head` | Defined, no production caller | Plan noted this — confirm + drop |
+| `normalize_manifest_plaintext` | Production (envelope shaping) | Still needed for unified-shape serialization paths |
+| `canonical_manifest_json` | Production (envelope shaping) | Still needed |
+
+The shard-aware `_in_shard` variants (`find_file_entry_in_shard`, `add_or_append_file_version_in_shard`, `tombstone_file_entry_in_shard`) already exist alongside the legacy helpers. Migrating the last two production callers (`upload/conflict.py`, `import_/bundle.py`) to the `_in_shard` variants unlocks dropping `find_file_entry` / `add_or_append_file_version`.
+
+### 3.4 — Test-helper migration
+
+`seed_sharded_state_from_manifest` and `mirror_legacy_from_sharded` appear in **89 test sites** across the suite. They were the bridge for porting test setups one at a time during Plan A. With the legacy `Vault.fetch_manifest` / `publish_manifest` declarations now gone, these helpers' "mirror" half is no longer needed; their "seed" half can be replaced by a pure sharded `seed_sharded_state(vault, relay, *, remote_folders=[...])` that doesn't take a unified manifest.
+
+Mechanical migration — 89 sites, but the change shape is identical at each (replace `seed_sharded_state_from_manifest(vault, relay, manifest)` + setup with a sharded-only call). One sweep commit should land all of them.
+
+### 3.5 — Recommended sequencing
+
+1. **Result-shape rename + caller fanout** (~1 commit, mid-size): `UploadResult.manifest` → `.root` + `.shard`; update the ~30 caller sites; drop `assemble_unified_manifest` from production paths it backed.
+2. **Drop `Vault.fetch_unified_manifest`** (~1 commit, small): once §3.1 lands, the compat synthesizer has no callers.
+3. **Narrow `IntegrityVault` Protocol** (~1 commit, small): port `_safe_fetch_manifest` to walk root + shards directly.
+4. **Migrate last two `find_file_entry` / `add_or_append_file_version` production callers** (~1 commit, small): `upload/conflict.py`, `import_/bundle.py` → `_in_shard` variants.
+5. **Test-helper mechanical sweep** (~1 commit, large mechanical diff): replace `seed_sharded_state_from_manifest` + `mirror_legacy_from_sharded` across 89 sites with the pure sharded seed.
+6. **Drop the legacy manifest helpers** (~1 commit, small): `make_manifest`, `add_remote_folder`, `rename_remote_folder`, `tombstone_file_entry`, `add_or_append_file_version`, `find_file_entry`, `merge_with_remote_head` from `manifest.py`.
+
+Total: ~6 commits, none risky individually (the sharded surface is already what production uses).
+
+---
+
+## 4. Summary count
 
 Numbers verified by grepping the archived tracker on 2026-05-17.
 
@@ -260,9 +319,10 @@ User-facing math: 3 unfixed Highs + 4 unfixed Mediums + 20 unfixed Lows = 27 not
 
 ---
 
-## 4. Source of truth references
+## 5. Source of truth references
 
-- **Fixes landed:** [`temp/finished-plans/max-review-result.md`](../../temp/finished-plans/max-review-result.md) — every fixed item has a strikethrough heading + commit SHA + Approach paragraph.
-- **Append-only fix log:** [`temp/finished-plans/max-review-result-progress.md`](../../temp/finished-plans/max-review-result-progress.md).
-- **Historical doubts snapshot:** [`temp/finished-plans/review-doubts.md`](../../temp/finished-plans/review-doubts.md) — the original per-issue doubt log; superseded by §1 of this file. Kept for the commit-time context strings that some code comments reference.
+- **Max-effort review fixes landed:** [`temp/finished-plans/max-review-result.md`](../../temp/finished-plans/max-review-result.md) — every fixed item has a strikethrough heading + commit SHA + Approach paragraph.
+- **Max-effort review fix log:** [`temp/finished-plans/max-review-result-progress.md`](../../temp/finished-plans/max-review-result-progress.md).
+- **Historical doubts snapshot:** [`temp/finished-plans/review-doubts.md`](../../temp/finished-plans/review-doubts.md) — superseded by §1 of this file; kept for context strings that some code comments reference.
+- **Manifest-sharding plan:** [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/finished-plans/vault-manifest-sharding.md) — phases A → 7e + the bulk of 7f done; §3 of this file tracks the remaining cleanup.
 - **This file:** the single live open-item index, kept in `docs/plans/` so it surfaces alongside active planning docs.

@@ -1,7 +1,7 @@
 """Phase C unit tests for the shard-aware manifest model.
 
 Spec: ``docs/protocol/vault-v1-formats.md`` §10.A / §10.B and
-``docs/plans/vault-manifest-sharding.md`` Phase C.
+``temp/finished-plans/vault-manifest-sharding.md`` Phase C.
 
 Covers the in-memory dict builders + canonicalizers + entry-level
 helpers Phase C introduced (``make_root_manifest`` / ``make_folder_shard``

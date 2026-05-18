@@ -91,7 +91,7 @@ or tombstone) touch one shard + atomically re-publish the root
 via ``PUT /api/vaults/{id}/folders/{folder_id}/shard-with-root``;
 the other folders' shards stay put. Folder set changes (add /
 remove / rename) and vault-wide policy edits publish the root
-alone. See ``docs/plans/vault-manifest-sharding.md`` for the
+alone. See ``temp/finished-plans/vault-manifest-sharding.md`` for the
 scoping doc and ``docs/architecture-decisions.md`` 2026-05-17
 entry for the trade-offs.
 
