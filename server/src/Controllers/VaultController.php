@@ -1324,6 +1324,15 @@ class VaultController
         $body = $ctx->jsonBody();
         $planId = self::vaultRequireNonEmptyString($body, 'plan_id');
 
+        // Review §1.M3 — minimum-role gate up front so a ``read-only``
+        // caller cannot probe plan IDs and learn state from the
+        // downstream error codes (completed→200, cancelled/expired→404,
+        // planned→400). Below-sync roles get a uniform 403 before any
+        // plan inspection runs. The per-kind admin re-check below
+        // still escalates for SCHEDULED_PURGE / FORCED_EVICTION.
+        $callerDevice = (string)($ctx->deviceId ?? "");
+        VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'sync');
+
         $jobsRepo = new VaultGcJobsRepository($db);
         $job = $jobsRepo->getById($planId);
         if ($job === null || $job['vault_id'] !== $vaultId) {
@@ -1364,15 +1373,15 @@ class VaultController
             throw new VaultNotFoundError($planId);
         }
 
-        // §6.13: sync GC requires role=sync; scheduled_purge requires
-        // role=admin AND a valid purge_secret (vault_purge_not_allowed
-        // covers both the role gap and a wrong-secret). Review §3.C1:
+        // §6.13: sync GC requires role=sync (already enforced upfront
+        // by the §1.M3 gate above); scheduled_purge requires role=admin
+        // AND a valid purge_secret (vault_purge_not_allowed covers both
+        // the role gap and a wrong-secret). Review §3.C1:
         // forced_eviction (eviction stages 2/3) is a hard-purge — it
         // requires role=admin too, but does NOT yet enforce
         // purge_secret (the desktop's 507-quota flow has no passphrase
         // prompt yet; that's tracked as the spec-conformance follow-up
         // in docs/plans/review-doubts.md §3.C1).
-        $callerDevice = (string)($ctx->deviceId ?? "");
         if ($job['kind'] === VaultGcJobsRepository::KIND_SCHEDULED_PURGE) {
             try {
                 VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'admin');
@@ -1399,9 +1408,9 @@ class VaultController
                     'forced eviction requires role=admin'
                 );
             }
-        } else {
-            VaultAuthService::requireRole($db, $vaultId, $callerDevice, 'sync');
         }
+        // The default sync-only GC path needs no extra role check —
+        // the upfront §1.M3 ``requireRole(sync)`` gate covered it.
 
         $chunksRepo = new VaultChunksRepository($db);
         $vaultsRepo = new VaultsRepository($db);

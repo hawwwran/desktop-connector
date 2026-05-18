@@ -1558,6 +1558,63 @@ final class VaultControllerTest extends TestCase
     }
 
     /**
+     * Review §1.M3 — a read-only caller must NOT be able to probe
+     * gc/execute plan IDs and learn state from error codes. Pre-fix
+     * gcExecute looked up the job + inspected its state BEFORE the
+     * per-kind role check, so a read-only device could probe plans
+     * by submitting plan_ids and watching the response codes
+     * (completed→200, cancelled/expired→404, planned→400 about
+     * state). Now ``requireRole(sync)`` runs upfront so the
+     * read-only caller gets a uniform 403 before any plan lookup.
+     */
+    public function test_gcExecute_read_only_caller_403_before_plan_lookup(): void
+    {
+        // Plan a real GC job as the default (admin) caller.
+        $cid = 'ch_v1_readonlyprobe234abcdefij';
+        $bytes = 'probe-target';
+        $this->uploadChunk($cid, $bytes);
+        $planRes = $this->invoke(fn() => VaultController::gcPlan(
+            $this->db,
+            $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                'root_revision'       => 1,
+                'encrypted_gc_auth'   => 'x',
+                'candidate_chunk_ids' => [$cid],
+            ])
+        ));
+        $realPlanId = $planRes['json']['data']['plan_id'];
+
+        // Demote caller to read-only. From here, gc/execute must 403
+        // before the plan lookup runs — both a real plan_id and a
+        // bogus one should return the same uniform "denied" error so
+        // the attacker can't distinguish state.
+        $this->demoteCaller('read-only');
+
+        $bogusPlanId = 'pl_v1_doesnotexistdoesnotex';
+        $shapes = [
+            'real' => $realPlanId,
+            'bogus' => $bogusPlanId,
+        ];
+        foreach ($shapes as $shape => $planId) {
+            try {
+                VaultController::gcExecute(
+                    $this->db,
+                    $this->jctx('POST', ['vault_id' => self::VAULT_ID], [
+                        'plan_id' => $planId,
+                    ])
+                );
+                self::fail("expected VaultAccessDeniedError for {$shape}");
+            } catch (VaultAccessDeniedError $e) {
+                self::assertSame(403, $e->status, "{$shape}: status");
+                // Same error regardless of whether the plan_id is real.
+                self::assertSame(
+                    'sync', $e->details['required_role'] ?? null,
+                    "{$shape}: required_role attribution",
+                );
+            }
+        }
+    }
+
+    /**
      * Review §3.C1: admin device with purpose='forced_eviction'
      * succeeds end-to-end. Confirms the admin-gated path still works.
      */
