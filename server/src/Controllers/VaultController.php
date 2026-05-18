@@ -996,6 +996,33 @@ class VaultController
         header('X-Chunk-Stored-At: ' . self::ts((int)$head['created_at']));
     }
 
+    /**
+     * Validate a vault-migration target relay URL.
+     *
+     * Review §1.H3: ``migrationCommit`` checked scheme + filter_var
+     * but ``migrationStart`` accepted any non-empty string. Both
+     * endpoints persist the URL into the same table and both expose
+     * it via GET /header, so the validation policy must be shared.
+     * Throws ``VaultInvalidRequestError`` on any failure (caller
+     * surfaces the standard 400 envelope).
+     */
+    private static function guardMigrationTargetRelayUrl(string $target): void
+    {
+        if (filter_var($target, FILTER_VALIDATE_URL) === false) {
+            throw new VaultInvalidRequestError(
+                'target_relay_url must be a valid URL',
+                'target_relay_url',
+            );
+        }
+        $scheme = parse_url($target, PHP_URL_SCHEME);
+        if ($scheme === false || ($scheme !== 'http' && $scheme !== 'https')) {
+            throw new VaultInvalidRequestError(
+                'target_relay_url must use http(s)',
+                'target_relay_url',
+            );
+        }
+    }
+
     /** Whether a chunk's lifecycle state is visible to user-facing queries. */
     private static function isUserVisibleChunkState(string $state): bool
     {
@@ -1457,6 +1484,14 @@ class VaultController
 
         $body = $ctx->jsonBody();
         $target = Validators::requireNonEmptyString($body, 'target_relay_url');
+        // Review §1.H3: validate the URL at /migration/start too.
+        // The pre-fix path accepted ``javascript:`` / ``data:`` /
+        // ``file://`` / internal-only URLs, then re-emitted them via
+        // /migration/verify-source to admin callers — the desktop's
+        // switch-relay path might have followed the bad URL before
+        // /migration/commit's check fired. Same policy now lives in
+        // both endpoints.
+        self::guardMigrationTargetRelayUrl($target);
         $deviceId = (string)($_SERVER['HTTP_X_DEVICE_ID'] ?? '');
 
         $intentsRepo = new VaultMigrationIntentsRepository($db);
@@ -1626,19 +1661,7 @@ class VaultController
         // F-S14: target_relay_url is exposed to all paired devices via
         // GET /header. Keep the storage shape clean by validating to a
         // real http(s) URL before we commit it.
-        if (filter_var($target, FILTER_VALIDATE_URL) === false) {
-            throw new VaultInvalidRequestError(
-                'target_relay_url must be a valid URL',
-                'target_relay_url',
-            );
-        }
-        $scheme = parse_url($target, PHP_URL_SCHEME);
-        if ($scheme === false || ($scheme !== 'http' && $scheme !== 'https')) {
-            throw new VaultInvalidRequestError(
-                'target_relay_url must use http(s)',
-                'target_relay_url',
-            );
-        }
+        self::guardMigrationTargetRelayUrl($target);
 
         $intentsRepo = new VaultMigrationIntentsRepository($db);
         $intent = $intentsRepo->getIntent($vaultId);

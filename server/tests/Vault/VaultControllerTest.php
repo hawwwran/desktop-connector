@@ -1717,6 +1717,57 @@ final class VaultControllerTest extends TestCase
         );
     }
 
+    /**
+     * Review §1.H3: ``migrationStart`` previously accepted any
+     * non-empty string; ``migrationCommit`` validated scheme +
+     * filter_var. The asymmetry let a buggy admin client (or a
+     * compromised paired-admin device) persist ``javascript:`` /
+     * ``data:`` / ``file://`` targets at /start that the desktop's
+     * switch-relay path might follow before /commit's check
+     * fired. The validator now lives in a shared helper.
+     */
+    public function test_migrationStart_rejects_non_http_url(): void
+    {
+        try {
+            VaultController::migrationStart(
+                $this->db, $this->jctx(
+                    'POST', ['vault_id' => self::VAULT_ID],
+                    ['target_relay_url' => 'javascript:alert(1)'],
+                ),
+            );
+            self::fail('expected VaultInvalidRequestError');
+        } catch (VaultInvalidRequestError $e) {
+            self::assertSame(400, $e->status);
+            self::assertSame('target_relay_url', $e->details['field']);
+        }
+    }
+
+    public function test_migrationStart_rejects_malformed_url(): void
+    {
+        try {
+            VaultController::migrationStart(
+                $this->db, $this->jctx(
+                    'POST', ['vault_id' => self::VAULT_ID],
+                    ['target_relay_url' => 'not a url'],
+                ),
+            );
+            self::fail('expected VaultInvalidRequestError');
+        } catch (VaultInvalidRequestError $e) {
+            self::assertSame('target_relay_url', $e->details['field']);
+        }
+    }
+
+    public function test_migrationStart_accepts_valid_https_url(): void
+    {
+        $res = $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => 'https://relay.example.test/path'],
+            ),
+        ));
+        self::assertSame(201, $res['status']);
+    }
+
     public function test_migrationStart_different_target_409(): void
     {
         $this->invoke(fn() => VaultController::migrationStart(
