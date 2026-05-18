@@ -36,6 +36,7 @@ require_once $root . '/src/Repositories/VaultGcJobsRepository.php';
 require_once $root . '/src/Repositories/VaultJoinRequestsRepository.php';
 require_once $root . '/src/Repositories/VaultDeviceGrantsRepository.php';
 require_once $root . '/src/Repositories/VaultMigrationIntentsRepository.php';
+require_once $root . '/src/Repositories/VaultAuthAttemptsRepository.php';
 
 // Storage helper + capability advertising.
 require_once $root . '/src/VaultStorage.php';

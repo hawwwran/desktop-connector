@@ -33,6 +33,17 @@ class VaultAuthService
         'admin'          => 4,
     ];
 
+    // Review §1.H1 — protocol §10 rate limits. Hardcoded here rather
+    // than in Config so a deployer can't accidentally widen them via
+    // a config typo; the values are tight enough that legitimate
+    // clients never hit them (a real user retries auth maybe 2-3
+    // times on a typed passphrase) and just lax enough to allow a
+    // brief network-flake retry storm.
+    private const AUTH_WINDOW_S    = 60;
+    private const AUTH_LIMIT       = 10;   // attempts per (device, vault) per minute
+    private const CREATE_WINDOW_S  = 3600;
+    private const CREATE_LIMIT     = 5;    // create attempts per device per hour
+
     /**
      * Validate device + vault auth and confirm the vault exists. Returns
      * the matched vault row on success so the caller doesn't need a
@@ -92,7 +103,29 @@ class VaultAuthService
             throw new VaultAuthFailedError('vault');
         }
 
-        // 4. Existence + bearer match. Look up the vault row first so we
+        // 4. §1.H1 rate limit: bill this attempt against (device,
+        //    vault, kind='auth') BEFORE the AEAD compare. Even on
+        //    success the counter increments — that's intentional;
+        //    the limit caps total auth attempts, successful or not,
+        //    so a misbehaving client storm can't drown out the IDS
+        //    signal. Legitimate clients (10 successful auths/minute
+        //    is well above any realistic UI flow) never hit it.
+        $now = time();
+        $attemptsRepo = new VaultAuthAttemptsRepository($db);
+        $state = $attemptsRepo->recordAndRead(
+            $identity->deviceId, $vaultId,
+            VaultAuthAttemptsRepository::KIND_AUTH,
+            self::AUTH_WINDOW_S, $now,
+        );
+        if ($state['attempts'] > self::AUTH_LIMIT) {
+            $retryAfterMs = max(0, ($state['window_end'] - $now) * 1000);
+            throw new VaultRateLimitedError(
+                'too many vault auth attempts; retry after the rate-limit window',
+                $retryAfterMs,
+            );
+        }
+
+        // 5. Existence + bearer match. Look up the vault row first so we
         //    can return it on success, then constant-time-compare the
         //    secret hash. Order matters: an unknown vault yields
         //    vault_not_found (404) so a typo in the path doesn't masquerade
@@ -126,6 +159,25 @@ class VaultAuthService
             $identity = AuthService::requireAuth($db);
         } catch (UnauthorizedError $e) {
             throw new VaultAuthFailedError('device');
+        }
+        // Review §1.H1: protocol §10 caps create-vault at 5 / hour
+        // per device. Vault creation is irreversible (the relay
+        // allocates storage + a new vault_id) so a misbehaving
+        // client could grind through vault_ids without bound; the
+        // limit makes such storms observable.
+        $now = time();
+        $attemptsRepo = new VaultAuthAttemptsRepository($db);
+        $state = $attemptsRepo->recordAndRead(
+            $identity->deviceId, '',
+            VaultAuthAttemptsRepository::KIND_CREATE,
+            self::CREATE_WINDOW_S, $now,
+        );
+        if ($state['attempts'] > self::CREATE_LIMIT) {
+            $retryAfterMs = max(0, ($state['window_end'] - $now) * 1000);
+            throw new VaultRateLimitedError(
+                'too many vault-create attempts; retry after the rate-limit window',
+                $retryAfterMs,
+            );
         }
         return $identity->deviceId;
     }

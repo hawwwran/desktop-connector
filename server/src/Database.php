@@ -303,6 +303,16 @@ class Database
             'CREATE INDEX IF NOT EXISTS idx_vault_folder_shard_heads_vault
                 ON vault_folder_shard_heads (vault_id)'
         );
+
+        // Review §1.H1 — vault auth + create rate limit table per
+        // protocol §10. Loaded from the SQL file like the other
+        // vault migrations.
+        $authAttemptsSql = file_get_contents(
+            __DIR__ . '/../migrations/006_vault_auth_attempts.sql'
+        );
+        if ($authAttemptsSql !== false) {
+            $this->db->exec($authAttemptsSql);
+        }
     }
 
     public function query(string $sql, array $params = []): SQLite3Result
