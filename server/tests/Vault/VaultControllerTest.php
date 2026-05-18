@@ -886,6 +886,95 @@ final class VaultControllerTest extends TestCase
         }
     }
 
+    /**
+     * Review §1.H6: when the post-commit disk write fails, the
+     * row-delete + bytes-decrement must land atomically. Pre-fix
+     * the two writes ran sequentially after the outer COMMIT; a
+     * crash between them left ``used_ciphertext_bytes`` /
+     * ``chunk_count`` skewed without the row to back the bytes.
+     * Force the disk write to fail by pre-creating the chunk path
+     * as a directory.
+     */
+    /**
+     * Review §1.H6: source-level invariant for the rollback path.
+     * deleteRow + incUsedBytes(-size, -1) must sit inside a writer
+     * transaction (BEGIN IMMEDIATE / COMMIT). The end-to-end test
+     * below verifies the no-crash outcome; this asserts the
+     * transactional wrapping so a future refactor can't silently
+     * un-bracket it.
+     */
+    public function test_putChunk_rollback_pair_is_wrapped_in_transaction(): void
+    {
+        $source = file_get_contents(__DIR__ . '/../../src/Controllers/VaultController.php');
+        // Find the post-disk-failure rollback region and assert its
+        // structure: BEGIN IMMEDIATE precedes BOTH writes, COMMIT
+        // closes the block, and a catch arm runs ROLLBACK.
+        $idx = strpos($source, 'Failed to write chunk to');
+        self::assertNotFalse($idx, 'rollback region not found');
+        // Walk backwards 1500 chars; the pair of writes + tx should
+        // live in this window.
+        $window = substr($source, max(0, $idx - 1500), 1500);
+        self::assertStringContainsString("BEGIN IMMEDIATE", $window);
+        self::assertStringContainsString("\$chunksRepo->deleteRow", $window);
+        self::assertStringContainsString("\$vaultsRepo->incUsedBytes", $window);
+        self::assertStringContainsString("COMMIT", $window);
+        self::assertStringContainsString("ROLLBACK", $window);
+        // The deleteRow + incUsedBytes calls must appear after the
+        // BEGIN IMMEDIATE (so they're inside the transaction).
+        $beginIdx = strrpos($window, "BEGIN IMMEDIATE");
+        $deleteIdx = strrpos($window, "\$chunksRepo->deleteRow");
+        $incIdx = strrpos($window, "\$vaultsRepo->incUsedBytes");
+        $commitIdx = strrpos($window, "COMMIT");
+        self::assertGreaterThan($beginIdx, $deleteIdx);
+        self::assertGreaterThan($beginIdx, $incIdx);
+        self::assertGreaterThan($incIdx, $commitIdx);
+    }
+
+    public function test_putChunk_atomically_rolls_back_on_disk_write_failure(): void
+    {
+        $chunkId = 'ch_v1_rollback234abcdefghijklm';
+        // Force file_put_contents to fail: pre-create a directory at
+        // the temp-write path's parent so the final rename target is
+        // a directory (rename(file, dir) fails).
+        $absPath = VaultStorage::chunkAbsolutePath(self::VAULT_ID, $chunkId);
+        VaultStorage::ensureDir($absPath);
+        mkdir($absPath, 0755, true);
+        self::assertDirectoryExists($absPath);
+
+        $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
+        $usedBefore = (int)$vault['used_ciphertext_bytes'];
+        $chunkCountBefore = (int)$vault['chunk_count'];
+
+        try {
+            VaultController::putChunk(
+                $this->db,
+                $this->ctx('PUT', [
+                    'vault_id' => self::VAULT_ID, 'chunk_id' => $chunkId,
+                ], 'payload'),
+            );
+            self::fail('expected VaultStorageUnavailableError');
+        } catch (VaultStorageUnavailableError $e) {
+            self::assertSame(503, $e->status);
+        }
+
+        $vault = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
+        // No row left behind, AND the counters are exactly what they
+        // were before the failed write — no half-state.
+        $row = (new VaultChunksRepository($this->db))->get(self::VAULT_ID, $chunkId);
+        self::assertNull(
+            $row,
+            'failed chunk write must clean up its row',
+        );
+        self::assertSame(
+            $usedBefore, (int)$vault['used_ciphertext_bytes'],
+            'used_ciphertext_bytes must return to pre-write value',
+        );
+        self::assertSame(
+            $chunkCountBefore, (int)$vault['chunk_count'],
+            'chunk_count must return to pre-write value',
+        );
+    }
+
     public function test_putChunk_400_on_invalid_chunk_id(): void
     {
         $this->expectException(VaultInvalidRequestError::class);

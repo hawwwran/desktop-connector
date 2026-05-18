@@ -949,8 +949,30 @@ class VaultController
                 if (is_file($tempPath)) {
                     @unlink($tempPath);
                 }
-                $chunksRepo->deleteRow($vaultId, $chunkId);
-                $vaultsRepo->incUsedBytes($vaultId, -$size, -1, $now);
+                // Review §1.H6: the row-delete and bytes-decrement
+                // must land atomically. Pre-fix the two writes ran
+                // sequentially after the outer COMMIT, so a crash
+                // between them left a permanent (vaults.used_bytes,
+                // chunk_count) skew: the row was gone but the bytes
+                // stayed counted. Wrap in a writer transaction so
+                // the pair either both commit or both roll back.
+                $db->execute('BEGIN IMMEDIATE');
+                try {
+                    $chunksRepo->deleteRow($vaultId, $chunkId);
+                    $vaultsRepo->incUsedBytes($vaultId, -$size, -1, $now);
+                    $db->execute('COMMIT');
+                } catch (\Throwable $rollbackExc) {
+                    try { $db->execute('ROLLBACK'); } catch (\Throwable $ignored) {}
+                    // Surface the underlying storage error to the
+                    // caller; the inner rollback failure is logged
+                    // for operator visibility but doesn't replace
+                    // the user-facing 5xx.
+                    AppLog::log('vault', sprintf(
+                        'vault.chunk.rollback_failed chunk=%s err=%s',
+                        substr($chunkId, 0, 12),
+                        $rollbackExc->getMessage(),
+                    ), 'error');
+                }
                 throw new VaultStorageUnavailableError("Failed to write chunk to {$relativePath}");
             }
         } else {
