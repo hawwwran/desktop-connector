@@ -151,10 +151,14 @@ def restore_remote_folder(
                 f"/{len(plan)} of folder {remote_folder_id}"
             )
         target = destination / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # F-D28: refuse to follow a symlinked subdirectory out of the
-        # restore root. ``resolve(strict=False)`` returns the canonical
-        # path with all symlinks expanded.
+        # Review §4.M2 — the symlink-escape check MUST run BEFORE
+        # ``target.parent.mkdir(parents=True)``. Pre-fix the mkdir came
+        # first; if ``destination/A/`` was a pre-existing symlink to
+        # ``/tmp/elsewhere`` and the entry's relative_path was
+        # ``A/B/file.txt``, ``mkdir(parents=True)`` happily created
+        # ``/tmp/elsewhere/B`` on the wrong side of the symlink BEFORE
+        # the check fired and the entry was skipped. Hoisting the
+        # check closes that pre-skip side-effect window.
         try:
             resolved_target = target.resolve(strict=False)
             resolved_root = destination.resolve(strict=False)
@@ -172,6 +176,8 @@ def restore_remote_folder(
                 relative_path,
             )
             continue
+        # Only after the escape check passes do we create directories.
+        target.parent.mkdir(parents=True, exist_ok=True)
         display_path = f"{folder_display_name}/{relative_path}"
         _emit(progress, "downloading", len(plan),
               len(result.written) + len(result.skipped_identical),

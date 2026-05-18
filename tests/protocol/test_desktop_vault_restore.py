@@ -281,6 +281,47 @@ class RestoreRemoteFolderTests(unittest.TestCase):
     # Re-running a restore on a clean tree yields zero work
     # ------------------------------------------------------------------
 
+    def test_symlinked_destination_subdir_does_not_create_outside_root(self) -> None:
+        """Review §4.M2 — pre-fix ``target.parent.mkdir(parents=True)``
+        ran BEFORE the symlink-escape check. If ``destination/A`` was
+        a pre-existing symlink pointing outside the restore root, mkdir
+        created ``destination/A/B/...`` on the WRONG SIDE of the
+        symlink before the check fired and the entry was skipped. The
+        directories survived the skip. Post-fix the check runs first
+        and the skipped entry leaves no side-effects.
+        """
+        import os
+
+        outside_root = self.dest.parent / "elsewhere_outside_restore_root"
+        outside_root.mkdir(parents=True, exist_ok=True)
+        # Symlink destination/escape_dir → outside_root
+        (self.dest / "escape_dir").symlink_to(outside_root, target_is_directory=True)
+
+        relay, manifest = self._seed_remote({
+            "escape_dir/nested/sneaky.bin": b"do not write me anywhere",
+        })
+        vault = _vault()
+        try:
+            result = restore_remote_folder(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, destination=self.dest,
+                device_name=DEVICE_NAME, when=WHEN,
+            )
+        finally:
+            vault.close()
+
+        # Entry skipped by the escape check — nothing written.
+        self.assertEqual(result.written, [])
+        # The pre-existing symlink itself is left alone.
+        self.assertTrue((self.dest / "escape_dir").is_symlink())
+        # CRITICAL: the directories that pre-fix would have been
+        # created on the wrong side of the symlink must NOT exist.
+        self.assertFalse(
+            (outside_root / "nested").exists(),
+            "Review §4.M2: restore must not create nested/ on the "
+            "wrong side of the symlinked destination subdir",
+        )
+
     def test_second_restore_run_skips_everything_via_fingerprint(self) -> None:
         relay, manifest = self._seed_remote({"alpha.txt": b"unchanged"})
         vault = _vault()
