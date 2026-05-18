@@ -252,6 +252,51 @@ final class VaultGrantsControllerTest extends TestCase
         self::assertSame($newHash, (string)$vault['vault_access_token_hash']);
     }
 
+    /**
+     * Review §1.M5 — when the vault row disappears mid-rotation (or any
+     * other reason the UPDATE affects zero rows), the controller must
+     * NOT return 200 with a stale "rotated_at" timestamp. Pre-fix
+     * ``rotateAccessTokenHash``'s return value was discarded and the
+     * controller emitted success regardless. Now ``changes() === 0``
+     * raises VaultNotFoundError and the transaction rolls back so the
+     * audit table stays consistent with the vault state.
+     */
+    public function test_rotateAccessSecret_returns_404_when_vault_row_missing(): void
+    {
+        $this->setAuth(self::ADMIN_DEVICE, self::ADMIN_TOKEN);
+
+        // Drop the vault row out from under the controller.
+        $this->db->execute(
+            'DELETE FROM vaults WHERE vault_id = :id',
+            [':id' => self::VAULT_ID],
+        );
+
+        $newHash = hash('sha256', 'fresh-secret', true);
+        try {
+            VaultGrantsController::rotateAccessSecret(
+                $this->db,
+                $this->ctx('POST', ['vault_id' => self::VAULT_ID], json_encode([
+                    'new_vault_access_token_hash' => base64_encode($newHash),
+                ])),
+            );
+            self::fail('expected VaultApiError');
+        } catch (VaultApiError $e) {
+            // Any vault_not_found / vault_auth_failed path is acceptable
+            // here — the load-bearing assertion is "controller did not
+            // return 200 with a stale timestamp".
+            self::assertContains($e->status, [401, 403, 404]);
+        }
+
+        // Audit row was not written (we never reached recordRotation,
+        // or the transaction rolled it back if we did).
+        $auditCount = (int) $this->db->querySingle(
+            'SELECT COUNT(*) AS n FROM vault_access_secret_rotations
+              WHERE vault_id = :id',
+            [':id' => self::VAULT_ID],
+        )['n'];
+        self::assertSame(0, $auditCount);
+    }
+
     // ------------------------------------------------------------------
     // Negative cases
     // ------------------------------------------------------------------

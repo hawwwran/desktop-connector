@@ -538,14 +538,35 @@ class VaultGrantsController
             throw new VaultInvalidRequestError('access-secret rotation not supported on this relay');
         }
         $now = time();
-        $vaultsRepo->rotateAccessTokenHash($vaultId, $newHash, $now);
 
+        // Review §1.M5 — wrap the rotate + audit pair in BEGIN IMMEDIATE
+        // so a crash between can never leave the rotation done with no
+        // audit row. Also assert ``rotateAccessTokenHash`` actually
+        // affected one row — pre-fix the controller returned 200 even
+        // when changes() == 0 (vault disappeared mid-request, table
+        // mismatch, ...).
         $grants = new VaultDeviceGrantsRepository($db);
         $triggered = $body['triggered_by_revoke_grant_id'] ?? null;
-        $grants->recordRotation(
-            $vaultId, $caller, $now,
-            $triggered !== null ? (string)$triggered : null
-        );
+        $db->execute('BEGIN IMMEDIATE');
+        try {
+            $rotated = $vaultsRepo->rotateAccessTokenHash($vaultId, $newHash, $now);
+            if (!$rotated) {
+                throw new VaultNotFoundError($vaultId);
+            }
+            $grants->recordRotation(
+                $vaultId, $caller, $now,
+                $triggered !== null ? (string)$triggered : null
+            );
+            $db->execute('COMMIT');
+        } catch (\Throwable $e) {
+            try {
+                $db->execute('ROLLBACK');
+            } catch (\Throwable $ignored) {
+                // best-effort; the outer transaction is already
+                // half-committed, but the original $e is what matters.
+            }
+            throw $e;
+        }
 
         Router::json([
             'ok' => true,
