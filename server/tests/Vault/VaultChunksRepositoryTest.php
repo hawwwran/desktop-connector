@@ -215,6 +215,71 @@ final class VaultChunksRepositoryTest extends TestCase
         self::assertNull($batch[self::CHUNK_A]);
     }
 
+    // ---------------------------------------------------------------- §4.M1 listIds
+
+    public function test_listIds_returns_sorted_user_visible_chunks(): void
+    {
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_B, str_repeat('b', 64), 200,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_B), self::NOW);
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_A, str_repeat('a', 64), 100,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_A), self::NOW);
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_C, str_repeat('c', 64), 300,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_C), self::NOW);
+
+        $ids = $this->chunksRepo->listIds(self::VAULT_ID);
+        self::assertSame(
+            [self::CHUNK_A, self::CHUNK_B, self::CHUNK_C],
+            $ids,
+            'listIds must return chunk_ids sorted ascending so the cursor anchor is stable',
+        );
+    }
+
+    public function test_listIds_excludes_gc_pending_and_purged_states(): void
+    {
+        // §4.M1: the reaper would otherwise see in-flight server-side
+        // state as "still present", scheduling already-half-deleted
+        // chunks for a redundant delete.
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_A, str_repeat('a', 64), 100,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_A), self::NOW);
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_B, str_repeat('b', 64), 200,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_B), self::NOW);
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_C, str_repeat('c', 64), 300,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_C), self::NOW);
+        $this->chunksRepo->setState(self::VAULT_ID, self::CHUNK_B, VaultChunksRepository::STATE_GC_PENDING);
+        $this->chunksRepo->setState(self::VAULT_ID, self::CHUNK_C, VaultChunksRepository::STATE_PURGED);
+
+        // Only A remains in a user-visible (active/retained) state.
+        $ids = $this->chunksRepo->listIds(self::VAULT_ID);
+        self::assertSame([self::CHUNK_A], $ids);
+    }
+
+    public function test_listIds_paginates_via_cursor(): void
+    {
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_A, str_repeat('a', 64), 100,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_A), self::NOW);
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_B, str_repeat('b', 64), 200,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_B), self::NOW);
+        $this->chunksRepo->put(self::VAULT_ID, self::CHUNK_C, str_repeat('c', 64), 300,
+            VaultChunksRepository::storagePath(self::VAULT_ID, self::CHUNK_C), self::NOW);
+
+        $page1 = $this->chunksRepo->listIds(self::VAULT_ID, '', 2);
+        self::assertSame([self::CHUNK_A, self::CHUNK_B], $page1);
+
+        // Cursor = last id of page 1 → page 2 starts AFTER that.
+        $page2 = $this->chunksRepo->listIds(self::VAULT_ID, self::CHUNK_B, 2);
+        self::assertSame([self::CHUNK_C], $page2);
+
+        // Cursor past last id → empty page (signals end-of-stream).
+        $page3 = $this->chunksRepo->listIds(self::VAULT_ID, self::CHUNK_C, 2);
+        self::assertSame([], $page3);
+    }
+
+    public function test_listIds_rejects_out_of_range_limit(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->chunksRepo->listIds(self::VAULT_ID, '', 2048);
+    }
+
     // ---------------------------------------------------------------- setState
 
     public function test_setState_transitions_active_to_gc_pending(): void

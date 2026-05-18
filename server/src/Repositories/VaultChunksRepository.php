@@ -332,6 +332,55 @@ class VaultChunksRepository
     }
 
     /**
+     * §4.M1 — enumerate every user-visible chunk_id for ``$vaultId``,
+     * sorted ascending, with cursor pagination.
+     *
+     * Used by the desktop's orphan-chunk reaper: it lists all server-
+     * side chunks, subtracts the set referenced by the live manifest,
+     * and DELETEs the diff via the existing admin-gated gc/execute
+     * path. Only ``active`` + ``retained`` states are user-visible —
+     * ``gc_pending`` / ``purged`` rows are mid-flight server state
+     * the client mustn't reason about.
+     *
+     * Cursor convention: ``$cursor`` is the last chunk_id returned by
+     * the previous page (exclusive lower bound). Pass an empty string
+     * for the first page. Caller stops when fewer than ``$limit``
+     * rows come back.
+     *
+     * @return list<string>
+     */
+    public function listIds(
+        string $vaultId, string $cursor = '', int $limit = 1024,
+    ): array {
+        if ($limit < 1 || $limit > 1024) {
+            throw new \InvalidArgumentException(
+                "limit must be in [1, 1024]; got {$limit}"
+            );
+        }
+        $rows = $this->db->queryAll(
+            'SELECT chunk_id
+             FROM vault_chunks
+             WHERE vault_id = :vid
+               AND state IN (:active, :retained)
+               AND chunk_id > :cursor
+             ORDER BY chunk_id ASC
+             LIMIT :lim',
+            [
+                ':vid'      => $vaultId,
+                ':active'   => self::STATE_ACTIVE,
+                ':retained' => self::STATE_RETAINED,
+                ':cursor'   => $cursor,
+                ':lim'      => $limit,
+            ]
+        );
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = (string)$row['chunk_id'];
+        }
+        return $out;
+    }
+
+    /**
      * Conditional row delete used by the §1.C2 residual reaper. Returns
      * true iff a row in state ``purged`` was deleted. The state guard
      * defends against the §1.C1 revival race: between the reaper reading

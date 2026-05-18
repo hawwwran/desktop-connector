@@ -30,6 +30,14 @@ log = logging.getLogger(__name__)
 # blip while still bounded enough to recover from a missed watcher event.
 VAULT_AUTOSYNC_INTERVAL_S = 60.0
 
+# §4.M1 — orphan-chunk reaper minimum gap between passes.
+# Each pass paginates the full server-side chunk list (potentially
+# many KB of metadata over the wire), so we don't want to run it
+# every 60 s tick — orphans accumulate at most ~one batch's worth
+# per CAS-exhaust event, so an hourly cadence catches them long
+# before the server's 30-day retention sweep does.
+VAULT_ORPHAN_REAP_INTERVAL_S = 3600.0
+
 
 class VaultSubmenuMixin:
     def _vault_submenu_visible(self) -> bool:
@@ -414,6 +422,78 @@ class VaultSubmenuMixin:
                 self._handle_due_purges_for_tick()
             except Exception:  # noqa: BLE001
                 log.exception("vault.sync.autosync_purge_check_failed")
+
+            # §4.M1: orphan-chunk reaper. Subtracts the manifest's
+            # referenced chunks from the relay's stored chunk set
+            # and DELETEs the diff. Throttled to hourly via
+            # ``VAULT_ORPHAN_REAP_INTERVAL_S`` so each tick doesn't
+            # paginate the full chunk list on cold runs.
+            try:
+                self._reap_orphans_for_tick(autosync_runtime)
+            except Exception:  # noqa: BLE001
+                log.exception("vault.sync.autosync_orphan_reap_failed")
+
+    def _reap_orphans_for_tick(self, autosync_runtime) -> None:
+        """§4.M1: hourly orphan-chunk reap from the autosync tick.
+
+        Wall-clock throttle via :attr:`_vault_last_orphan_reap_at`
+        keeps the cost bounded — orphans can only arise from
+        CAS-exhaust on chunk uploads, migration cancel, or other
+        interrupted flows. At most one batch's worth (~<100 chunks)
+        per event, so an hourly cadence reclaims them long before
+        the relay's 30-day retention pass does.
+
+        Falls through silently on any error — the manual eviction
+        pass remains the backstop, and a transient relay outage
+        shouldn't break the loop.
+        """
+        import time as _time
+        last_at = getattr(self, "_vault_last_orphan_reap_at", 0.0)
+        now = _time.monotonic()
+        if now - last_at < VAULT_ORPHAN_REAP_INTERVAL_S:
+            return
+        self._vault_last_orphan_reap_at = now
+
+        vault_id = autosync_runtime.vault_id
+        if not vault_id:
+            return
+
+        from ..vault.binding.runtime import (
+            create_vault_relay,
+            open_local_vault_from_grant,
+        )
+        from ..vault.ops.eviction import reap_orphan_chunks
+
+        try:
+            self.config.reload()
+            relay = create_vault_relay(self.config)
+            vault = open_local_vault_from_grant(
+                self.config.config_dir, self.config, vault_id,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("vault.sync.autosync_orphan_reap_open_failed")
+            return
+
+        try:
+            device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+            result = reap_orphan_chunks(
+                vault=vault, relay=relay,
+                author_device_id=device_id,
+            )
+            if result.deleted_chunk_ids:
+                log.info(
+                    "vault.sync.autosync.orphan_reap_landed vault=%s "
+                    "deleted=%d bytes_freed=%d",
+                    vault_id[:12], len(result.deleted_chunk_ids),
+                    result.bytes_freed,
+                )
+        except Exception:  # noqa: BLE001
+            log.exception("vault.sync.autosync_orphan_reap_exception")
+        finally:
+            try:
+                vault.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _handle_due_purges_for_tick(self) -> None:
         """Notify on any due scheduled-purge (review §6.H1)."""

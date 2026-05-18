@@ -1985,6 +1985,10 @@ class FakeUploadRelay:
             "expires_at": "2099-01-01T00:00:00.000Z",
         }
 
+    # §4.M1 — orphan reaper paginated chunk list.
+    def list_chunks(self, vault_id, vault_access_secret, *, page_limit=1024):
+        return sorted(self.chunks.keys())
+
     def gc_execute(self, vault_id, vault_access_secret, *, plan_id, purge_secret=None):
         plan = getattr(self, "gc_plans", {}).get(plan_id)
         if plan is None:

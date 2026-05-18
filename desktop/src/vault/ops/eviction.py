@@ -125,6 +125,11 @@ class EvictionRelay(Protocol):
         purge_secret: str | None = None,
     ) -> dict[str, Any]: ...
 
+    def list_chunks(
+        self, vault_id: str, vault_access_secret: str,
+        *, page_limit: int = 1024,
+    ) -> list[str]: ...
+
 
 @dataclass
 class EvictionStageResult:
@@ -794,9 +799,127 @@ def _now_rfc3339() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+@dataclass
+class OrphanReapResult:
+    """Outcome of one ``reap_orphan_chunks`` invocation.
+
+    ``orphan_chunk_ids`` is the diff that was POSTed to ``gc/plan``.
+    ``deleted_chunk_ids`` is what the server actually deleted —
+    may be a subset if any chunks were concurrently reclaimed by a
+    parallel publish (server reports them as still-referenced).
+    """
+
+    orphan_chunk_ids: list[str] = field(default_factory=list)
+    deleted_chunk_ids: list[str] = field(default_factory=list)
+    bytes_freed: int = 0
+
+
+def reap_orphan_chunks(
+    *,
+    vault: EvictionVault,
+    relay: EvictionRelay,
+    author_device_id: str,
+    max_orphans_per_pass: int = 4096,
+) -> OrphanReapResult:
+    """§4.M1 — drop server-side chunks the live manifest no longer references.
+
+    Walks the relay's full chunk list, computes
+    ``set(server_chunks) − set(manifest_chunk_refs)``, and DELETEs
+    the diff via the existing admin-gated gc/execute path with
+    ``purpose='sync'`` (orphan chunks aren't user data — no admin
+    gate; same role any sync-capable device has). Designed as a
+    pre-stage to the autosync cycle, NOT to fire per-507 — the cost
+    is amortized across the per-tick wake-up rather than spiking
+    when storage gets tight.
+
+    ``max_orphans_per_pass`` caps the diff to avoid spending the
+    autosync tick on an unbounded server-side cleanup. Anything
+    over the cap is left for the next tick.
+
+    No-op shape: when the diff is empty (or the manifest has zero
+    chunks and the server reports zero chunks), returns
+    :class:`OrphanReapResult` with empty lists — caller can skip
+    logging if both lists are empty.
+    """
+    server_chunks = relay.list_chunks(
+        vault.vault_id, vault.vault_access_secret,
+    )
+    if not server_chunks:
+        return OrphanReapResult()
+
+    # Build the live-reference set from the unified manifest. Both
+    # remote-folder shards and root-only manifests share the same
+    # entries/versions/chunks walk under ``remote_folders``.
+    manifest = vault.fetch_unified_manifest(relay)
+    referenced: set[str] = set()
+    for folder in manifest.get("remote_folders", []) or []:
+        if not isinstance(folder, dict):
+            continue
+        for entry in folder.get("entries", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            for version in entry.get("versions", []) or []:
+                if not isinstance(version, dict):
+                    continue
+                for chunk in version.get("chunks", []) or []:
+                    if not isinstance(chunk, dict):
+                        continue
+                    cid = str(chunk.get("chunk_id") or "")
+                    if cid:
+                        referenced.add(cid)
+
+    orphans = [cid for cid in server_chunks if cid not in referenced]
+    if not orphans:
+        return OrphanReapResult()
+
+    # Cap the diff so a single tick can't burn its budget on an
+    # unbounded cleanup; subsequent ticks pick up the residue.
+    if len(orphans) > max_orphans_per_pass:
+        orphans = orphans[:max_orphans_per_pass]
+
+    revision = int(manifest.get("revision", 0))
+    plan = relay.gc_plan(
+        vault.vault_id, vault.vault_access_secret,
+        manifest_revision=revision,
+        candidate_chunk_ids=list(orphans),
+        purpose="sync",
+    )
+    safe_to_delete = list(plan.get("safe_to_delete") or [])
+    if not safe_to_delete:
+        # Server reports every candidate as still-referenced — means
+        # a concurrent publish reclaimed them between our list_chunks
+        # and gc_plan. Nothing to do; the next tick re-checks.
+        log.info(
+            "vault.eviction.orphan_reap_noop vault=%s candidates=%d",
+            vault.vault_id, len(orphans),
+        )
+        return OrphanReapResult(orphan_chunk_ids=orphans)
+
+    plan_id = str(plan.get("plan_id") or "")
+    execute_result = relay.gc_execute(
+        vault.vault_id, vault.vault_access_secret, plan_id=plan_id,
+    )
+    bytes_freed = int(execute_result.get("freed_ciphertext_bytes") or 0)
+    deleted_count = int(execute_result.get("deleted_count") or 0)
+    if deleted_count == 0:
+        deleted_count = len(safe_to_delete)
+
+    log.info(
+        "vault.eviction.orphan_reaped vault=%s orphans=%d freed_bytes=%d freed_chunks=%d",
+        vault.vault_id, len(orphans), bytes_freed, deleted_count,
+    )
+    return OrphanReapResult(
+        orphan_chunk_ids=orphans,
+        deleted_chunk_ids=safe_to_delete,
+        bytes_freed=bytes_freed,
+    )
+
+
 __all__ = [
     "EvictionMode",
     "EvictionResult",
     "EvictionStageResult",
+    "OrphanReapResult",
     "eviction_pass",
+    "reap_orphan_chunks",
 ]

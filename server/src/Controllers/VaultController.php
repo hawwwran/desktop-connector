@@ -1211,6 +1211,64 @@ class VaultController
     }
 
     // ===================================================================
+    //  §4.M1  GET /api/vaults/{vault_id}/chunks?cursor=…&limit=…
+    // ===================================================================
+
+    /**
+     * §4.M1 — paginated list of user-visible chunk_ids for the vault.
+     *
+     * Desktop reaper enumerates server-side chunks, subtracts the set
+     * referenced by the live manifest, and DELETEs the diff via the
+     * existing admin-gated gc/execute path. Only ``active`` +
+     * ``retained`` rows surface here (matches ``batchHead``'s filter
+     * via ``isUserVisibleChunkState``).
+     *
+     * Auth shape mirrors ``batchHead``: vault-bearer required, no
+     * device-role restriction beyond that — the data exposed is
+     * already implicit in the manifest chain the client just
+     * fetched.
+     */
+    public static function listChunks(Database $db, RequestContext $ctx): void
+    {
+        $vaultId = self::normalizeVaultId($ctx->params['vault_id'] ?? '');
+        VaultAuthService::requireVaultAuth($db, $vaultId, $ctx);
+
+        $cursorRaw = (string)($ctx->query['cursor'] ?? '');
+        if ($cursorRaw !== '' && !VaultChunksRepository::isValidChunkId($cursorRaw)) {
+            throw new VaultInvalidRequestError(
+                'cursor must be a valid chunk_id or empty', 'cursor'
+            );
+        }
+        $limitRaw = $ctx->query['limit'] ?? null;
+        $limit = 1024;
+        if ($limitRaw !== null) {
+            if (!ctype_digit((string)$limitRaw)) {
+                throw new VaultInvalidRequestError(
+                    'limit must be a positive integer', 'limit'
+                );
+            }
+            $limit = (int)$limitRaw;
+            if ($limit < 1 || $limit > 1024) {
+                throw new VaultInvalidRequestError(
+                    'limit must be in [1, 1024]', 'limit'
+                );
+            }
+        }
+
+        $chunksRepo = new VaultChunksRepository($db);
+        $ids = $chunksRepo->listIds($vaultId, $cursorRaw, $limit);
+        $nextCursor = (count($ids) === $limit) ? end($ids) : null;
+
+        Router::json([
+            'ok' => true,
+            'data' => [
+                'chunk_ids'   => $ids,
+                'next_cursor' => $nextCursor,
+            ],
+        ], 200);
+    }
+
+    // ===================================================================
     //  6.11  POST /api/vaults/{vault_id}/chunks/batch-head
     // ===================================================================
 

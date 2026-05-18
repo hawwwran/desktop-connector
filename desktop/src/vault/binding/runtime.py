@@ -816,6 +816,58 @@ class VaultHttpRelay:
                 self._extract_error(resp), status_code=resp.status_code,
             )
 
+    # ---- §4.M1 orphan-chunk reaper ----------------------------------
+
+    def list_chunks(
+        self, vault_id: str, vault_access_secret: str,
+        *, page_limit: int = 1024,
+    ) -> list[str]:
+        """Paginated enumeration of every user-visible chunk_id on the relay.
+
+        Walks ``GET /api/vaults/{id}/chunks?cursor=...&limit=...`` until
+        the server returns ``next_cursor=null``. Returns the full
+        sorted list of chunk_ids. Used by the orphan-chunk reaper
+        which subtracts the live manifest's chunk references to find
+        ciphertext that the relay still holds but the vault no longer
+        knows about.
+        """
+        from ..relay_errors import VaultRelayError
+
+        if page_limit < 1 or page_limit > 1024:
+            raise RuntimeError("page_limit must be in [1, 1024]")
+        all_ids: list[str] = []
+        cursor = ""
+        while True:
+            params = f"?limit={page_limit}"
+            if cursor:
+                params += f"&cursor={cursor}"
+            resp = self._conn.request(
+                "GET",
+                f"/api/vaults/{vault_id}/chunks{params}",
+                headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            )
+            if resp is None:
+                raise RuntimeError(
+                    "Could not reach the relay while listing vault chunks.",
+                )
+            if resp.status_code != 200:
+                raise VaultRelayError(
+                    self._extract_error(resp), status_code=resp.status_code,
+                )
+            try:
+                data = resp.json()["data"]
+            except Exception as exc:
+                raise RuntimeError("Relay returned an invalid chunks list response.") from exc
+            page = data.get("chunk_ids")
+            if not isinstance(page, list):
+                raise RuntimeError("chunks list response missing chunk_ids array")
+            all_ids.extend(str(cid) for cid in page)
+            next_cursor = data.get("next_cursor")
+            if not next_cursor:
+                break
+            cursor = str(next_cursor)
+        return all_ids
+
     # ---- §5.H3 access-secret rotation -------------------------------
 
     def rotate_access_secret(

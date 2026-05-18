@@ -92,14 +92,13 @@ Tracked as a separate v1.x follow-up.
 
 ---
 
-### 8. §4.M1 — Orphan-chunk reaper *(design landed 2026-05-18 — new server endpoint + desktop reaper)*
+### 8. ~~§4.M1 — Orphan-chunk reaper~~ *(landed 2026-05-18)*
 
-**Why this slot:** bounded housekeeping. Each CAS-exhaust event leaks at most one batch's worth of chunks (~<100), and the existing 30-day server-side retention eventually reaps them. Blast radius is "wasted ciphertext quota until retention fires." Visible in test logs as "ghost bytes" — not a user-facing bug today.
+**Status:** landed. Server-side: new `VaultChunksRepository::listIds(vault_id, cursor, limit)` + `VaultController::listChunks` action wired at `GET /api/vaults/{id}/chunks?cursor=…&limit=…`. Only `active` + `retained` rows surface (matches `batchHead`'s `isUserVisibleChunkState` filter); cursor is the last chunk_id from the previous page; limit clamped to [1, 1024]. Desktop-side: new `reap_orphan_chunks()` in `desktop/src/vault/ops/eviction.py` paginates the server endpoint, walks the unified manifest's chunk references, computes `set(server) − set(referenced)`, and DELETEs the diff via the existing `gc/plan` + `gc/execute` plumbing with `purpose='sync'` (no admin gate — orphans aren't user data by definition). `max_orphans_per_pass=4096` caps the diff so a single tick can't blow its budget on an unbounded cleanup.
 
-**Status:** scoped — implementation pending.
-**Decision:** add a new paginated `GET /api/vaults/{id}/chunks` server endpoint that lists every stored chunk_id; desktop computes `set(server_chunks) − set(manifest_chunk_refs)` and DELETEs the diff as a stage-0 housekeeping pass before stage 1 of [`vault-eviction-v1.md`](vault-eviction-v1.md). Rejected: server-side `KIND_RECLAIM_ORPHAN_CHUNKS` GC job (cleaner separation but more state-machine surface); accept-the-leak (the leak is bounded but visible in test logs as "ghost bytes"). Sized ~1 day server-side + ~1 day desktop-side.
+**Wiring:** `_reap_orphans_for_tick` runs from the tray autosync loop, throttled to once per `VAULT_ORPHAN_REAP_INTERVAL_S=3600` (hourly). Hourly cadence catches the typical CAS-exhaust leak rate (~<100 chunks per event) long before the relay's 30-day retention sweep does.
 
-**Implementation pointers:** server endpoint mirrors `batch_head_chunks` auth shape; pagination via `cursor` query param. Desktop reaper sits in `desktop/src/vault/ops/eviction.py` as a new `_reap_orphan_chunks` pre-stage that runs once per autosync cycle (not per-507) so the cost is amortized.
+**Tests:** `tests/protocol/test_desktop_vault_orphan_reap.py` (no-op when sync, empty vault no-op, unreferenced chunks deleted, purpose=sync not admin-gated, max_orphans_per_pass cap) + `server/tests/Vault/VaultChunksRepositoryTest.php` (sorted output, gc_pending/purged excluded, cursor pagination, limit validation). Diagnostics: 6 new events covering normal flow + failure modes.
 
 ---
 
@@ -240,19 +239,19 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 |---|---|---|---|---|---|
 | Criticals | 17 | 17 | 0 | 0 | 0 |
 | Highs | 37 | 36 | 0 | 1 (§6.H1) | 0 |
-| Mediums | 35 | 32 | 2 (§4.M1, §5.M2) | 1 (§5.M3) | 0 |
+| Mediums | 35 | 33 | 1 (§5.M2) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **89** | **2** | **2** | **20** |
+| **Total** | **113** | **90** | **1** | **2** | **20** |
 
-§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §5.H2 + §5.H3 + §6.H2 + §6.H3 all fully landed on 2026-05-18 — every Critical + every High is now closed.
+§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §4.M1 + §5.C1 + §5.C2 + §5.H2 + §5.H3 + §6.H2 + §6.H3 all fully landed on 2026-05-18 — every Critical, every High, and all but one Medium is now closed.
 
-### Breakdown of the 24 not-fully-fixed-by-code items
+### Breakdown of the 23 not-fully-fixed-by-code items
 
-- **2 design-landed-pending-implementation** (§1 above): 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
+- **1 design-landed-pending-implementation** (§1 above): 1 Medium (§5.M2 — separated out of §5.C1 because the bundled-fix turned out to need server-side coordination). Plan-doc link in `unfinished.md` §4b.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **24 entries are not-yet-fully-fixed-by-code** — 2 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **22 are open work** (2 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **23 entries are not-yet-fully-fixed-by-code** — 1 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **21 are open work** (1 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

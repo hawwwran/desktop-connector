@@ -230,6 +230,9 @@ $router->vaultHead('/api/vaults/{vault_id}/chunks/{chunk_id}', function (Request
 $router->vaultPost('/api/vaults/{vault_id}/chunks/batch-head', function (RequestContext $ctx) use ($db) {
     VaultController::batchHead($db, $ctx);
 });
+$router->vaultGet('/api/vaults/{vault_id}/chunks', function (RequestContext $ctx) use ($db) {
+    VaultController::listChunks($db, $ctx);
+});
 $router->vaultPost('/api/vaults/{vault_id}/gc/plan', function (RequestContext $ctx) use ($db) {
     VaultController::gcPlan($db, $ctx);
 });

@@ -437,6 +437,8 @@ relay log (filenames are local-only).
 | `vault.eviction.cas_retry` | desktop | info | `attempt`, `folder`, `shard_conflict`, `root_conflict` | Phase H — per-folder eviction shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
 | `vault.eviction.cleanup_only_cascade_to_force` | desktop | warning | `target` | Review §4.H4 — stage 1 ran cleanup-only (shard had stale references but no expired tombstones); the eviction is now escalating to the destructive purge because the user asked for `target_bytes_to_free > 0`. Surfacing the cascade so operators can correlate it with "I asked to free space and unexpired tombstones got purged" reports |
 | `vault.eviction.no_more_candidates` | desktop | info | `vault_id` | Quota pressure ran out of evictable old versions |
+| `vault.eviction.orphan_reap_noop` | desktop | info | `vault`, `candidates` | §4.M1 — orphan reaper found server-side candidates that the manifest doesn't reference, but the server reported every one as still-referenced (likely a concurrent publish reclaimed them). Next tick re-checks |
+| `vault.eviction.orphan_reaped` | desktop | info | `vault`, `orphans`, `freed_bytes`, `freed_chunks` | §4.M1 — orphan reaper deleted ciphertext the live manifest no longer references. Each pass is bounded by ``max_orphans_per_pass`` (4096); residue is reclaimed on the next autosync tick |
 | `vault.eviction.shard_cleanup_only` | desktop | info | `event`, `stale_chunk_refs`, `paths` | Crash-recovery — server reported `safe_to_delete=[]` but `already_deleted_chunk_ids` for stale shard entries; ran shard cleanup without re-running `gc_execute` |
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal — stage 1 housekeeping that runs on every sync pass) |
 | `vault.export.completed` | desktop | info | `vault` (truncated), `bytes` | §6.H3 — wizard's `write_export_bundle` worker returned successfully; bundle is on disk at the picked path |
@@ -516,10 +518,14 @@ relay log (filenames are local-only).
 | `vault.rotation.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when access-secret rotation logs through this surface (F-510) |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
 | `vault.sync.autosync.flushed` | desktop | info | `binding`, `ops` | F-LT06 — per-binding flush applied N ops in this tick |
+| `vault.sync.autosync.orphan_reap_landed` | desktop | info | `vault`, `deleted`, `bytes_freed` | §4.M1 — hourly orphan reaper deleted ciphertext from the relay that the live manifest no longer references |
 | `vault.sync.autosync.started` | desktop | info | `interval_s` | F-LT06 — tray-side autosync loop entered (one per app launch) |
 | `vault.sync.autosync.tick` | desktop | info | `reason`, `active_bindings` | F-LT06 — tick fired (`reason ∈ {kick, interval}`) with N bindings to drain |
 | `vault.sync.autosync_flush_failed` | desktop | error | `binding`, exception traceback | F-LT06 — `flush_and_sync_binding` raised; loop continues, manual Sync now still works |
 | `vault.sync.autosync_list_bindings_failed` | desktop | error | exception traceback | F-LT06 — bindings store query raised; tick skipped, retried on next interval |
+| `vault.sync.autosync_orphan_reap_exception` | desktop | warning | _exception_ | §4.M1 — orphan reaper raised mid-call (relay outage, AEAD error, etc.); next tick retries — manual eviction stays the backstop |
+| `vault.sync.autosync_orphan_reap_failed` | desktop | warning | _exception_ | §4.M1 — top-level catch in the autosync loop wrapping ``_reap_orphans_for_tick``; partial-completion edge cases land here |
+| `vault.sync.autosync_orphan_reap_open_failed` | desktop | warning | _exception_ | §4.M1 — reaper couldn't open the local vault grant (closed, missing material, keyring outage); skipping this tick |
 | `vault.sync.autosync_purge_check_failed` | desktop | error | exception traceback | Review §6.H1 — the autosync tick's due-purge check raised; tick continues, retried on next interval |
 | `vault.sync.autosync_state_subscribe_failed` | desktop | error | exception traceback | F-LT06 — `conn.on_state_change` registration raised; the autosync loop still starts but won't be kicked on reconnect (next interval tick still drains) |
 | `vault.sync.autosync_tick_failed` | desktop | error | exception traceback | F-LT06 — `watcher_runtime.tick_all()` raised; flush attempt still proceeds |
