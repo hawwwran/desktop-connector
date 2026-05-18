@@ -246,24 +246,32 @@ Carried over from [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/
 
 **Status (verified 2026-05-17):** the sharded surface IS the production path. All 1612 Python + 303 PHP tests pass. The remaining work is API surface area cleanup, not functional gaps. Roughly one mid-size commit + one mechanical pass.
 
-### 3.1 — Result-shape rename + `assemble_unified_manifest` callers
+### ~~3.1 — Result-shape rename + `assemble_unified_manifest` callers~~ *(landed 878af94)*
 
-| Surface | Sites | Where |
-|---|---|---|
-| `UploadResult.manifest` / `FolderUploadResult.manifest` field rename to `.root` + `.shard` | 2 dataclass slots | `desktop/src/vault/upload/results.py:25, 62` |
-| `assemble_unified_manifest` production callers | 10 sites | `ops/delete.py` (4), `upload/folder.py` (3), `ui/browser_model.py` (2), `remote_folders.py` (1) — all synthesize a unified manifest for caller compat after a sharded mutation |
-| `Vault.fetch_unified_manifest` | 1 method | `desktop/src/vault/vault.py:905` — backs the compat synthesizer used by integrity + folder/runtime + browser callers |
+Upload-result dataclasses now carry the sharded `(root, shard, remote_folder_id)` triple; the 7 upload-result-populating callers in `upload/folder.py` (4), `upload/single_file.py` (2), `upload/resume.py` (1) no longer call `assemble_unified_manifest`. Browser consumers synthesize at the `state.manifest =` assignment.
 
-Once the result-shape rename lands, the `assemble_unified_manifest` synthesis points all collapse: callers read `.root` / `.shard` directly. `fetch_unified_manifest` then becomes a one-folder convenience or goes away entirely.
+Remaining `assemble_unified_manifest` production callers (ops/delete.py 4 sites, remote_folders.py 1 site, binding/twoway.py 1 site, browser_model.py 2 sites) are not result-shape concerns and either land alongside §3.2 (twoway uses `fetch_unified_manifest`) or remain as decode-only paths (browser_model decrypts a root envelope into the unified shape — kept until BrowserIndex is shard-aware).
 
-### 3.2 — Protocol narrowing
+### 3.2 — *(skipped — premise invalidated)* Drop `Vault.fetch_unified_manifest`
+
+The plan's "Recommended sequencing" item 2 ("compat synthesizer has no callers once §3.1 lands") is **wrong**: a fresh audit (2026-05-18) finds **17 production callers** spanning eviction, integrity, browser refresh, import wizard, folder runtime, remote-folders bootstrap. Most genuinely need the multi-folder unified view (browser state.manifest, eviction stage walks, sidebar refresh, …) — migrating each to inline `fetch_root_manifest + per-folder fetch_folder_shard + assemble_unified_manifest` would just **clone the method's body 17 times** with no benefit.
+
+**Conclusion:** `Vault.fetch_unified_manifest` is a legitimate convenience method that assembles the multi-folder unified view from the sharded relay surface. It stays. Its docstring claims "Phase H removes this method" — that line needs an amendment, not a removal.
+
+**Action taken:** none. The §3 cleanup proceeds with §3.3 onward.
+
+### 3.3 — Protocol narrowing
 
 | Surface | Action |
 |---|---|
 | `IntegrityVault.fetch_unified_manifest` Protocol slot | `desktop/src/vault/ops/integrity.py:68` — still required because `_safe_fetch_manifest` (line 317) uses it. Migrate to a shard-walking integrity check that reads root + each shard directly, then drop the slot. |
 | `UploadVault` / `DeleteVault` Protocols | Already narrowed (no legacy slots remain per the plan's intent). Verified by grep. |
 
-### 3.3 — Legacy helpers in `desktop/src/vault/manifest.py`
+### 3.4 — Migrate last two `find_file_entry` / `add_or_append_file_version` production callers
+
+The shard-aware `_in_shard` variants exist; port `upload/conflict.py` + `import_/bundle.py` to them so the legacy helpers can drop.
+
+### 3.5 — Legacy helpers in `desktop/src/vault/manifest.py`
 
 | Helper | Status | Last production caller |
 |---|---|---|
@@ -279,13 +287,13 @@ Once the result-shape rename lands, the `assemble_unified_manifest` synthesis po
 
 The shard-aware `_in_shard` variants (`find_file_entry_in_shard`, `add_or_append_file_version_in_shard`, `tombstone_file_entry_in_shard`) already exist alongside the legacy helpers. Migrating the last two production callers (`upload/conflict.py`, `import_/bundle.py`) to the `_in_shard` variants unlocks dropping `find_file_entry` / `add_or_append_file_version`.
 
-### 3.4 — Test-helper migration
+### 3.6 — Test-helper migration
 
 `seed_sharded_state_from_manifest` and `mirror_legacy_from_sharded` appear in **89 test sites** across the suite. They were the bridge for porting test setups one at a time during Plan A. With the legacy `Vault.fetch_manifest` / `publish_manifest` declarations now gone, these helpers' "mirror" half is no longer needed; their "seed" half can be replaced by a pure sharded `seed_sharded_state(vault, relay, *, remote_folders=[...])` that doesn't take a unified manifest.
 
 Mechanical migration — 89 sites, but the change shape is identical at each (replace `seed_sharded_state_from_manifest(vault, relay, manifest)` + setup with a sharded-only call). One sweep commit should land all of them.
 
-### 3.5 — Recommended sequencing
+### 3.7 — Recommended sequencing
 
 1. **Result-shape rename + caller fanout** (~1 commit, mid-size): `UploadResult.manifest` → `.root` + `.shard`; update the ~30 caller sites; drop `assemble_unified_manifest` from production paths it backed.
 2. **Drop `Vault.fetch_unified_manifest`** (~1 commit, small): once §3.1 lands, the compat synthesizer has no callers.
