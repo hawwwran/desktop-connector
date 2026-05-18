@@ -16,6 +16,7 @@ Usage:
     python3 -m src.windows vault-join --config-dir=~/.config/desktop-connector
     python3 -m src.windows vault-migration --config-dir=~/.config/desktop-connector
     python3 -m src.windows vault-rotate --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-export --config-dir=~/.config/desktop-connector
     python3 -m src.windows vault-passphrase-generator --config-dir=~/.config/desktop-connector
 
 ``--vault-id`` (F-U14) is optional and honoured by ``vault-main`` /
@@ -37,6 +38,7 @@ from .windows_pairing import show_pairing
 from .windows_send import show_send_files
 from .windows_settings import show_settings
 from .windows_vault_browser import show_vault_browser
+from .windows_vault_export import show_vault_export
 from .windows_vault_import import show_vault_import
 from .windows_vault_join import show_vault_join
 from .windows_vault_migration import show_vault_migration
@@ -56,9 +58,9 @@ def main():
             "send-files", "settings", "history", "pairing",
             "find-phone", "locate-alert", "onboarding",
             "secret-storage-warning",
-            "vault-main", "vault-browser", "vault-import", "vault-join",
-            "vault-migration", "vault-onboard", "vault-passphrase-generator",
-            "vault-rotate",
+            "vault-main", "vault-browser", "vault-export", "vault-import",
+            "vault-join", "vault-migration", "vault-onboard",
+            "vault-passphrase-generator", "vault-rotate",
         ],
     )
     parser.add_argument("--config-dir", required=True)
@@ -109,6 +111,8 @@ def main():
         show_vault_main(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-browser":
         show_vault_browser(config_dir, vault_id_override=vault_id_override)
+    elif args.window == "vault-export":
+        show_vault_export(config_dir)
     elif args.window == "vault-import":
         show_vault_import(config_dir, vault_id_override=vault_id_override)
     elif args.window == "vault-join":

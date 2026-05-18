@@ -81,6 +81,35 @@ def build_recovery_tab(ctx: MainContext, win: "Adw.ApplicationWindow") -> "Gtk.B
     update_recovery_btn.connect("clicked", on_update_recovery)
     actions.append(update_recovery_btn)
 
+    # §6.H3: Export wizard launcher. Disabled when no vault is loaded
+    # (no vault = nothing to export); the data layer's
+    # ``write_export_bundle`` itself enforces the 8-char passphrase
+    # floor, so this button is the safe entry point.
+    export_bundle_btn = Gtk.Button(label="Export vault…", css_classes=["pill"])
+    export_bundle_btn.set_sensitive(bool(vault_id_undashed))
+    if vault_id_undashed:
+        export_bundle_btn.set_tooltip_text(
+            "Write a passphrase-encrypted .dcvault bundle to disk. "
+            "Restorable via the Import wizard on any device with the "
+            "matching vault_id."
+        )
+    else:
+        export_bundle_btn.set_tooltip_text(
+            "Open a vault first — export requires a connected vault."
+        )
+
+    def on_export_bundle(_btn) -> None:
+        subprocess.Popen(
+            [
+                sys.executable, "-m", "src.windows", "vault-export",
+                f"--config-dir={config_dir}",
+            ],
+            close_fds=True,
+        )
+
+    export_bundle_btn.connect("clicked", on_export_bundle)
+    actions.append(export_bundle_btn)
+
     recovery_warning = Gtk.Label(
         label="Recovery has not been tested. Test it now to confirm you "
               "can actually restore the vault.",

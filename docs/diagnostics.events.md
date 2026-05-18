@@ -439,6 +439,11 @@ relay log (filenames are local-only).
 | `vault.eviction.no_more_candidates` | desktop | info | `vault_id` | Quota pressure ran out of evictable old versions |
 | `vault.eviction.shard_cleanup_only` | desktop | info | `event`, `stale_chunk_refs`, `paths` | Crash-recovery — server reported `safe_to_delete=[]` but `already_deleted_chunk_ids` for stale shard entries; ran shard cleanup without re-running `gc_execute` |
 | `vault.eviction.tombstone_purged_expired` | desktop | info | `vault_id`, `path` | Tombstone purged after retention horizon (normal — stage 1 housekeeping that runs on every sync pass) |
+| `vault.export.completed` | desktop | info | `vault` (truncated), `bytes` | §6.H3 — wizard's `write_export_bundle` worker returned successfully; bundle is on disk at the picked path |
+| `vault.export.failed` | desktop | warning | `vault` (truncated), `error` (exception class name) | §6.H3 — wizard's `write_export_bundle` worker raised. Atomic-rename pattern means no partial `.dcvault` file is left behind; the temp `.dc-temp-*` sibling may linger and is reaped on next run |
+| `vault.export.shredded` | desktop | info | `vault` (truncated) | §6.H3 — operator hit the post-export "Shred bundle" action and confirmed; the bundle was overwritten + unlinked from this disk via `shred_file` |
+| `vault.export.started` | desktop | info | `vault` (truncated) | §6.H3 — wizard kicked the Argon2id-derive + bundle-write worker after the operator picked a destination and passed the passphrase gate |
+| `vault.export.verified` | desktop | info | `vault` (truncated), `ok` (bool) | §6.H3 — post-write verify ran `read_export_bundle` against the just-written file. `ok=False` means the bundle is suspect even though the write completed (rare disk-corruption class) |
 | `vault.folder.cleared` | desktop | info | `remote_folder_id`, `tombstoned`, `author` | T14.1 bulk-soft-delete published |
 | `vault.folder_upload.cancelled` | desktop | info | `vault`, `files_done`, `total` | F-U03 — folder upload cancelled between files |
 | `vault.folder_upload.cancelled_pre_publish` | desktop | info | `vault`, `files_done` | F-U03 — folder upload cancelled before the batch CAS publish |

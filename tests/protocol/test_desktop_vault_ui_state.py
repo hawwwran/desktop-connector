@@ -86,14 +86,12 @@ class VaultSubmenuTests(unittest.TestCase):
         self.assertEqual(entries, ["create_vault", "import_vault", "join_vault"])
 
     def test_submenu_shows_operating_entries_when_vault_exists(self) -> None:
-        # Review §6.H3: "export" entry removed — the data layer ships,
-        # but no UI launcher exists; pre-fix the menu click fired a
-        # notification telling the user to open a tab that doesn't
-        # exist. Removed pending the wizard build (docs/plans/unfinished.md).
+        # §6.H3 landed: the "export" tray entry returns, alongside
+        # the existing import entry, now that the wizard ships.
         entries = vault_submenu_entries(toggle_active=True, vault_exists=True)
         self.assertEqual(
             entries,
-            ["open_vault", "sync_now", "import", "settings"],
+            ["open_vault", "sync_now", "import", "export", "settings"],
         )
 
 

@@ -139,7 +139,13 @@ Three new surfaces:
 
 ---
 
-## §6.H3 — Export wizard
+## §6.H3 — Export wizard *(landed 2026-05-18)*
+
+**Status:** landed. Subprocess `desktop/src/windows_vault_export.py` (`vault-export`) walks setup → progress → done with optional shred. The setup page validates passphrase length + confirm match before enabling Continue (the data-layer `EXPORT_PASSPHRASE_MIN_LEN=8` is the floor; the wizard nudges towards ≥16 via the inline strength hint). Verify-after-write defaults on — the worker calls `read_export_bundle` against the just-written file before the success screen, catching the rare bit-flip class of failure. Shred uses the existing `shred_file` helper behind an explicit confirmation dialog.
+
+**Wired entry points:** tray submenu's "Export…" entry restored (was pulled when only a notification stub existed); Vault Settings → Recovery tab gains an "Export vault…" button alongside the existing recovery actions. Dispatcher entry `vault-export` registered in `windows.py`.
+
+**Diagnostics:** `vault.export.{started, completed, verified, shredded, failed}` cataloged. Tests: `tests/protocol/test_desktop_vault_export_wizard_source.py`.
 
 **Decision** *(2026-05-18)*: build the GTK export wizard for v1. Reuses the recovery-kit code path's UX shape.
 

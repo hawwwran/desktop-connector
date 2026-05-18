@@ -110,6 +110,11 @@ class VaultSubmenuMixin:
                 visible=lambda _: self._vault_submenu_entry_visible("import"),
             ),
             pystray.MenuItem(
+                "Export…",
+                self._spawn_vault_export,
+                visible=lambda _: self._vault_submenu_entry_visible("export"),
+            ),
+            pystray.MenuItem(
                 "Settings",
                 self._spawn_vault_main,
                 visible=lambda _: self._vault_submenu_entry_visible("settings"),
@@ -456,3 +461,9 @@ class VaultSubmenuMixin:
         # pointing at "Vault Settings → Recovery → Import" — a path
         # that doesn't exist. The wizard subprocess is the real path.
         self._open_gtk4_window("vault-import")
+
+    def _spawn_vault_export(self, *_) -> None:
+        # §6.H3: bundle write + verify + optional shred. The pre-2026-05-18
+        # tray entry was removed when only a notification stub existed;
+        # the wizard subprocess is the real path.
+        self._open_gtk4_window("vault-export")

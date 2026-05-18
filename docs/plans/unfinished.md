@@ -80,12 +80,9 @@ Tracked as a separate v1.x follow-up.
 
 ---
 
-### 6. §6.H3 — Export wizard *(design landed 2026-05-18)*
+### 6. ~~§6.H3 — Export wizard~~ *(landed 2026-05-18)*
 
-**Why this slot:** recovery surface restoration. Recovery kit covers "I lost a device, restore from kit" but not "give me a full vault snapshot to put on a USB stick." `write_export_bundle` is shipped data-layer-ready; only the wizard wraps it. Tray "Export…" entry was removed when it was theatre — this build restores it as a real action.
-
-**Status:** scoped — implementation pending. **Plan:** [`vault-v1-build-items.md#§6.H3`](vault-v1-build-items.md#6h3--export-wizard).
-**Decision:** build the GTK export wizard for v1; restore the tray "Export…" entry. Sized 1–2 days.
+**Status:** landed. New subprocess `desktop/src/windows_vault_export.py` (`vault-export`) wraps `write_export_bundle` with a path picker + passphrase gate + Argon2id-off-main-thread worker + default-on `read_export_bundle` verify + opt-in shred behind a confirmation. Tray "Export…" entry restored; Recovery tab gains an "Export vault…" button. Diagnostics: `vault.export.{started, completed, verified, shredded, failed}`. Tests: `tests/protocol/test_desktop_vault_export_wizard_source.py`.
 
 ---
 
@@ -245,20 +242,20 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 | Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
 |---|---|---|---|---|---|
 | Criticals | 17 | 17 | 0 | 0 | 0 |
-| Highs | 37 | 34 | 2 (§5.H2, §6.H3) | 1 (§6.H1) | 0 |
+| Highs | 37 | 35 | 1 (§5.H2) | 1 (§6.H1) | 0 |
 | Mediums | 35 | 32 | 2 (§4.M1, §5.M2) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **87** | **4** | **2** | **20** |
+| **Total** | **113** | **88** | **3** | **2** | **20** |
 
-§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §5.H3 + §6.H2 all fully landed on 2026-05-18.
+§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §5.H3 + §6.H2 + §6.H3 all fully landed on 2026-05-18.
 
-### Breakdown of the 26 not-fully-fixed-by-code items
+### Breakdown of the 25 not-fully-fixed-by-code items
 
-- **4 design-landed-pending-implementation** (§1 above): 2 Highs (§5.H2, §6.H3), 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
+- **3 design-landed-pending-implementation** (§1 above): 1 High (§5.H2), 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **26 entries are not-yet-fully-fixed-by-code** — 4 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **24 are open work** (4 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **25 entries are not-yet-fully-fixed-by-code** — 3 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **23 are open work** (3 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 
