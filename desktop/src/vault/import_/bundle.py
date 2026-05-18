@@ -143,10 +143,19 @@ def decide_import_action(
     # Same vault_id is necessary but not sufficient — genesis fingerprint
     # is the cryptographic anchor. If both sides report a fingerprint,
     # they must agree.
+    #
+    # Review §2.L1 — compare via ``hmac.compare_digest`` instead of ``!=``.
+    # Python's string compare short-circuits on first mismatch byte; a
+    # network-pacing attacker could theoretically learn how many leading
+    # hex chars match by timing the response. The fingerprint is a public
+    # bind in the §D9 gate, but the compare-equal pattern is the right
+    # one to follow defensively — there's no reason to make this short-
+    # circuit when ``compare_digest`` is one symbol away.
     if active_genesis_fingerprint and bundle_genesis_fingerprint:
+        import hmac
         active_fp = active_genesis_fingerprint.strip().lower()
         bundle_fp = bundle_genesis_fingerprint.strip().lower()
-        if active_fp != bundle_fp:
+        if not hmac.compare_digest(active_fp, bundle_fp):
             return "refuse"
     return "merge"
 

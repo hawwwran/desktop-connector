@@ -62,6 +62,29 @@ class VaultJoinRequestsRepository
     }
 
     /**
+     * Review §1.L4 — defense-in-depth: the SQL itself is vault-scoped
+     * so a stray ``join_request_id`` belonging to a different vault
+     * cannot leak through. Pre-fix the controller's
+     * ``$row['vault_id'] !== $vaultId`` check caught the mismatch
+     * post-fetch, but a future controller that forgot the check would
+     * silently expose another vault's join-request metadata. Repo-
+     * level vault-scope makes the invariant impossible to forget.
+     */
+    public function getScoped(string $joinRequestId, string $vaultId): ?array
+    {
+        $row = $this->db->querySingle(
+            'SELECT join_request_id, vault_id, state, ephemeral_admin_pubkey,
+                    claimant_device_id, claimant_pubkey, device_name,
+                    approved_role, wrapped_vault_grant, granted_by_device_id,
+                    expires_at, created_at, claimed_at, approved_at, rejected_at
+             FROM vault_join_requests
+             WHERE join_request_id = :id AND vault_id = :vault_id',
+            [':id' => $joinRequestId, ':vault_id' => $vaultId]
+        );
+        return $row ?: null;
+    }
+
+    /**
      * Mark expired rows whose expires_at is in the past — called from the
      * controller before serving any join-request endpoint so a stale row
      * gets cleaned up rather than silently rejected.

@@ -247,6 +247,16 @@ def verify_recovery_kit(
     except (OSError, ValueError) as exc:
         return False, f"Could not parse kit file: {exc}"
 
+    # Review §2.L4 — narrowed from a bare ``except Exception`` to the
+    # two specific failure modes that signal "user can't recover":
+    # ``CryptoError`` (Poly1305 tag mismatch → wrong passphrase OR
+    # corrupted kit) and ``KeyError`` (envelope_meta missing a field
+    # the AEAD path needs → caller bug). Pre-fix the bare except also
+    # swallowed real OS errors (disk read failure on the kit file's
+    # subsequent re-read, malloc failure inside Argon2id) as "wrong
+    # passphrase", which left the user staring at a misleading error
+    # while a deeper problem festered.
+    import nacl.exceptions
     try:
         wrap_key = derive_recovery_wrap_key(
             passphrase=passphrase,
@@ -265,10 +275,10 @@ def verify_recovery_kit(
             envelope_meta["nonce"],
             aad,
         )
-    except Exception as exc:
-        # Catches CryptoError (Poly1305 failure → wrong passphrase or
-        # corrupted kit), KeyError on missing envelope_meta fields, etc.
+    except (nacl.exceptions.CryptoError, KeyError) as exc:
         return False, f"Recovery test failed: {type(exc).__name__}"
+    # Everything else (OSError on backing storage, etc.) propagates so
+    # the caller sees the real failure mode.
 
     return True, "kit + passphrase produce the correct master key"
 

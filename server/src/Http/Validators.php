@@ -17,7 +17,11 @@ class Validators
 
     public static function requireNonEmptyString(array $body, string $field): string
     {
-        if (empty($body[$field]) || !is_string($body[$field])) {
+        // Review §1.L1 — ``empty()`` returns true for ``"0"``, which
+        // a strict reading of "non-empty string" should accept. The
+        // explicit form keeps the type check + the literal-empty
+        // rejection while letting falsy-but-present strings through.
+        if (!isset($body[$field]) || !is_string($body[$field]) || $body[$field] === '') {
             throw new ValidationError("Missing $field");
         }
         return $body[$field];

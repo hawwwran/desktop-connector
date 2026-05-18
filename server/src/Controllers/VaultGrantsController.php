@@ -202,8 +202,9 @@ class VaultGrantsController
 
         $repo = new VaultJoinRequestsRepository($db);
         $repo->expirePastDue(time());
-        $row = $repo->get($reqId);
-        if ($row === null || (string)$row['vault_id'] !== $vaultId) {
+        // Review §1.L4 — repo-level vault-scope (defense-in-depth).
+        $row = $repo->getScoped($reqId, $vaultId);
+        if ($row === null) {
             throw new VaultJoinRequestStateError("unknown join-request: {$reqId}");
         }
 
