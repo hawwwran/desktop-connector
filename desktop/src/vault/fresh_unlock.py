@@ -33,7 +33,17 @@ from typing import Callable
 #: for the user to walk through the typed-confirm UI after typing
 #: the passphrase; short enough that an unattended desk doesn't
 #: leave the gate effectively open.
-FRESH_UNLOCK_WINDOW_S: float = 120.0
+#:
+#: Review §2.H3: aligned with ``docs/vault-architecture.md`` §13
+#: ("default unlock timeout is 15 min idle"). Pre-fix the window
+#: was 120 s — chained destructive ops (revoke device → rotate
+#: access secret → schedule purge) past two minutes re-prompted for
+#: the passphrase twice or more, which both irritates the user and
+#: weakens the security signal (the user starts treating the prompt
+#: as noise). The longer window applies to the SAME process only:
+#: a process restart re-locks because ``_last_unlock_at`` is module
+#: state, not persisted.
+FRESH_UNLOCK_WINDOW_S: float = 900.0
 
 _clock: Callable[[], float] = time.monotonic
 _last_unlock_at: float | None = None

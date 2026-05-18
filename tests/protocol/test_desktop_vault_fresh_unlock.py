@@ -40,6 +40,13 @@ class FreshUnlockStampTests(unittest.TestCase):
         fresh_unlock._set_clock_for_tests(self.clock)
         self.addCleanup(fresh_unlock._reset_for_tests)
 
+    def test_window_matches_architecture_doc_15_minutes(self) -> None:
+        """Review §2.H3: pin the window to the spec
+        ``docs/vault-architecture.md`` §13 ("default unlock timeout
+        is 15 min idle"). Pre-fix the constant was 120 s and chained
+        destructive ops re-prompted twice."""
+        self.assertEqual(fresh_unlock.FRESH_UNLOCK_WINDOW_S, 900.0)
+
     def test_no_stamp_initially(self) -> None:
         self.assertFalse(fresh_unlock.is_fresh_unlock_active())
         self.assertEqual(fresh_unlock.seconds_remaining(), 0.0)
