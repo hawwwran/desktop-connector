@@ -406,15 +406,21 @@ Exfiltration: attacker creates `~/Documents/note.txt -> /etc/shadow` in a Docume
 
 **Approach:** Single coarse `threading.Lock` on `WatcherCoordinator` covers all four mutable dicts (pending, debouncer, gate, snapshots). 8-thread × 200-iter smoke test asserts no deadlock + no exception during concurrent observe/tick.
 
-#### §3.H6 — Preflight uses stale manifest snapshot; baseline fetches fresh — diff staleness window
+#### ~~§3.H6~~ — Preflight uses stale manifest snapshot; baseline fetches fresh — diff staleness window
+**Fix landed:** 638cf3d 2026-05-17
 **File:** `desktop/src/vault_folders/dialog_connect_local.py:89` → `folder/runtime.py:241`
+
+**Approach:** Thread preflight `revision` through `on_confirmed` → `run_initial_baseline(expected_root_revision=…)`. New typed `VaultBaselineHeadMovedError` raised when fresh fetch's revision differs; dialog catches it and asks the user to re-preflight.
 
 Dialog opens preflight → snapshot manifest → user clicks Confirm → baseline starts → fetches fresh manifest. User's preflight expectation can be wrong.
 
 **Fix:** pass the preflight manifest into `run_initial_baseline` and require the head not to have moved; force re-preflight on advance.
 
-#### §3.H7 — Two-way `_unique_conflict_path` TOCTOU between `exists()` and `shutil.move`
+#### ~~§3.H7~~ — Two-way `_unique_conflict_path` TOCTOU between `exists()` and `shutil.move`
+**Fix landed:** 7838450 2026-05-17
 **File:** `desktop/src/vault/binding/twoway.py:866-890, 689`
+
+**Approach:** New `_atomic_reserve_path` helper using `os.open(O_CREAT|O_EXCL|O_WRONLY)`. Replaces all three `exists()`-then-return sites in `_unique_conflict_path`. Returned path now exists as a 0-byte sentinel; the caller's `shutil.move` atomically overwrites it.
 
 Loops `if not (local_root / candidate).exists(): return candidate`. Caller does `shutil.move(target, conflict_target)` without `O_EXCL`. Concurrent local create silently overwrites.
 

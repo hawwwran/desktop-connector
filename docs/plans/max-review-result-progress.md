@@ -48,3 +48,5 @@ Continuing autonomously into the High section.
 - 2026-05-17 — fixed §2.H3 (commit b1d2cde): FRESH_UNLOCK_WINDOW_S aligned with spec at 900 s (15 min).
 - 2026-05-17 — fixed §3.H8 (commit f92b664): SQLite WAL + synchronous=NORMAL + busy_timeout=5000 on both local_index + bindings _connect.
 - 2026-05-17 — fixed §3.H9 (commit 7b276bd): ghost-reaper refuses to demote when shard plaintext missing schema header; prevents self-DDoS.
+- 2026-05-17 — fixed §3.H7 (commit 7838450): _unique_conflict_path atomically reserves via O_CREAT|O_EXCL; TOCTOU between exists() and shutil.move closed.
+- 2026-05-17 — fixed §3.H6 (commit 638cf3d): VaultRuntime.run_initial_baseline refuses when fresh head ≠ preflight head; dialog re-prompts user.
