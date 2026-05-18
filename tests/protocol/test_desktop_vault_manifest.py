@@ -12,8 +12,8 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault.manifest import (  # noqa: E402
-    make_manifest,
-    make_remote_folder,
+    assemble_unified_manifest,
+    make_root_manifest,
     normalize_manifest_plaintext,
 )
 
@@ -85,14 +85,15 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
     """
 
     def _manifest_at(self, *, revision: int, parent_revision: int) -> dict:
-        return make_manifest(
+        root = make_root_manifest(
             vault_id=VAULT_ID,
-            revision=revision,
-            parent_revision=parent_revision,
+            root_revision=revision,
+            parent_root_revision=parent_revision,
             created_at="2026-05-04T12:00:00.000Z",
             author_device_id=AUTHOR,
             remote_folders=[],
         )
+        return assemble_unified_manifest(root, {})
 
     def test_assert_publishable_revision_accepts_valid_pairs(self) -> None:
         from src.vault.manifest import assert_publishable_revision
