@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -886,6 +887,18 @@ def _unique_conflict_path(
 
     when = datetime.now(timezone.utc)
     candidate = ""
+    # Review §3.H7: pre-fix this loop did exists() → return; the
+    # caller then ran shutil.move(target, conflict_target) without
+    # O_EXCL. A concurrent local create (file manager, another sync
+    # tool, the user) could land on the chosen path between the
+    # check and the move, silently overwriting it.
+    #
+    # Atomically reserve the candidate via os.open(O_CREAT|O_EXCL|
+    # O_WRONLY). Success closes the race window — only one process
+    # can succeed for a given path. The empty sentinel left behind
+    # is immediately overwritten by the caller's shutil.move, which
+    # uses os.rename (atomic on the same filesystem). On EEXIST
+    # advance to the next attempt's name.
     for attempt in range(1, _MAX_CONFLICT_PATH_ATTEMPTS + 1):
         candidate = make_conflict_path(
             original_path=relative_path,
@@ -894,7 +907,7 @@ def _unique_conflict_path(
             when=when,
             attempt=attempt,
         )
-        if not (local_root / candidate).exists():
+        if _atomic_reserve_path(local_root / candidate):
             return candidate
     log.warning(
         "vault.sync.conflict_naming_attempts_exhausted "
@@ -909,13 +922,37 @@ def _unique_conflict_path(
             when=when,
             random_token=secrets.token_hex(4),
         )
-        if not (local_root / candidate).exists():
+        if _atomic_reserve_path(local_root / candidate):
             return candidate
     raise RuntimeError(
         f"unable to generate unique conflict path for {relative_path!r} "
         f"after {_MAX_CONFLICT_PATH_ATTEMPTS} numeric attempts and "
         f"{_MAX_CONFLICT_PATH_TOKEN_RETRIES} random-token retries"
     )
+
+
+def _atomic_reserve_path(absolute_path: Path) -> bool:
+    """Review §3.H7: race-proof "reserve this filename" primitive.
+
+    Atomically creates ``absolute_path`` (creating parent dirs first
+    so the open doesn't fail with ENOENT). Returns True iff THIS
+    process won the race; False on EEXIST. Any other OSError
+    propagates because it indicates a real I/O fault, not contention.
+    """
+    try:
+        absolute_path.parent.mkdir(parents=True, exist_ok=True)
+        # O_CREAT|O_EXCL is the POSIX race-proof reservation. The
+        # caller will overwrite the empty sentinel via os.rename
+        # within milliseconds.
+        fd = os.open(
+            str(absolute_path),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
 
 
 __all__ = [

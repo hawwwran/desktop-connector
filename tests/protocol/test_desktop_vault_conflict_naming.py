@@ -422,8 +422,19 @@ class ConflictPathExhaustFallbackTests(unittest.TestCase):
                 relative_path="x.txt",
                 device_name="L",
             )
-            # Contract: the returned path must not collide.
-            self.assertFalse((root / out).exists())
+            # Review §3.H7: contract changed — the helper now
+            # atomically reserves the chosen path via O_CREAT|O_EXCL
+            # to close the TOCTOU window between the old exists()
+            # check and the caller's shutil.move. The returned path
+            # therefore DOES exist (as an empty sentinel), but it's
+            # disjoint from the N pre-filled numeric attempts that
+            # had real content. The 4-byte random-token fallback
+            # produced a fresh candidate.
+            self.assertTrue((root / out).is_file())
+            # Sentinel is empty (0 bytes). Pre-filled attempts had
+            # b"x" inside; if the helper returned one of those it
+            # would have non-zero size.
+            self.assertEqual((root / out).stat().st_size, 0)
 
     def test_make_conflict_path_with_random_token(self) -> None:
         """The fallback uses ``random_token=`` to inject a hex

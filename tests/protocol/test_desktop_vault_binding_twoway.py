@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -550,6 +551,68 @@ class TwoWayCycleTests(unittest.TestCase):
     # ------------------------------------------------------------------
     # F-Y20 — ghost local-entries reaping
     # ------------------------------------------------------------------
+
+    def test_unique_conflict_path_atomically_reserves(self) -> None:
+        """Review §3.H7: ``_unique_conflict_path`` must atomically
+        reserve the chosen path (O_CREAT|O_EXCL) so a concurrent
+        local create between the exists() check and the caller's
+        shutil.move can't silently overwrite the conflict copy.
+
+        Drive the race deterministically by patching the
+        ``_atomic_reserve_path`` helper to fail the first attempt
+        (simulating a concurrent winner) and asserting the function
+        advances to the next candidate."""
+        from unittest import mock
+        from src.vault.binding.twoway import _unique_conflict_path
+
+        attempts: list[Path] = []
+
+        def fake_reserve(absolute_path: Path) -> bool:
+            attempts.append(absolute_path)
+            # First attempt loses the race; subsequent attempts win.
+            return len(attempts) > 1
+
+        with mock.patch(
+            "src.vault.binding.twoway._atomic_reserve_path",
+            side_effect=fake_reserve,
+        ):
+            chosen = _unique_conflict_path(
+                local_root=self.local_root,
+                relative_path="shared.txt",
+                device_name="this-device",
+            )
+
+        self.assertEqual(len(attempts), 2)
+        # Candidate names differ — the helper bumped the attempt
+        # counter rather than re-trying the same path.
+        self.assertNotEqual(attempts[0], attempts[1])
+        self.assertTrue(chosen)
+
+    def test_unique_conflict_path_returns_unique_under_concurrent_create(self) -> None:
+        """Review §3.H7 end-to-end: the first numeric candidate's
+        sentinel already exists on disk (simulating a concurrent
+        write). The function must skip that candidate and pick
+        the next."""
+        from src.vault.binding.twoway import _unique_conflict_path, make_conflict_path
+
+        # Pre-create the first numeric candidate so the loop must
+        # advance past attempt=1.
+        when = datetime.now(timezone.utc)
+        first = make_conflict_path(
+            original_path="shared.txt", kind="synced",
+            device_name="this-device", when=when, attempt=1,
+        )
+        (self.local_root / first).parent.mkdir(parents=True, exist_ok=True)
+        (self.local_root / first).write_bytes(b"someone else got here first")
+
+        chosen = _unique_conflict_path(
+            local_root=self.local_root,
+            relative_path="shared.txt",
+            device_name="this-device",
+        )
+        self.assertNotEqual(chosen, first)
+        # The reservation sentinel exists at the chosen path.
+        self.assertTrue((self.local_root / chosen).is_file())
 
     def test_ghost_reaper_skipped_when_shard_schema_missing(self) -> None:
         """Review §3.H9: if the head shard plaintext is corrupt and
