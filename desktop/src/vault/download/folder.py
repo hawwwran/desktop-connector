@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from ..binding.lifecycle import SyncCancelledError
 from ..manifest import normalize_manifest_plaintext
 from .cache import _load_cached_chunk, _store_cached_chunk
 from .chunks import (
@@ -53,8 +54,17 @@ def download_folder(
     existing_policy: ExistingFilePolicy = "fail",
     chunk_cache_dir: Path | None = None,
     progress: Callable[[DownloadProgress], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> Path:
-    """Download a remote folder's current, non-deleted tree."""
+    """Download a remote folder's current, non-deleted tree.
+
+    Review §3.H2: ``should_continue`` is checked between every chunk
+    fetch (and between files) so a folder-restore hitting a missing
+    chunk bails within ~1 chunk's worth of network work instead of
+    burning ``4 × 60 s × N`` retries on each missing chunk in the
+    plan. Matches the single-file download's F-U03 cancellation
+    contract.
+    """
     if vault.master_key is None or vault.vault_access_secret is None:
         raise ValueError("vault is closed")
 
@@ -78,11 +88,32 @@ def download_folder(
     completed = 0
     bytes_written = 0
     for plan in plans:
+        if should_continue is not None and not should_continue():
+            log.info(
+                "vault.download.folder_cancelled vault=%s path=%s "
+                "files_done=%d chunks_done=%d total_chunks=%d",
+                vault.vault_id, path,
+                plans.index(plan), completed, total_chunks,
+            )
+            raise SyncCancelledError(
+                f"folder download cancelled at chunk {completed}/{total_chunks} "
+                f"of {path}",
+            )
         file_path = final_root / plan.relative_path
 
         def plaintext_chunks(plan=plan) -> Iterable[bytes]:
             nonlocal completed, bytes_written
             for chunk in plan.chunks:
+                if should_continue is not None and not should_continue():
+                    log.info(
+                        "vault.download.folder_cancelled vault=%s path=%s "
+                        "chunks_done=%d total_chunks=%d",
+                        vault.vault_id, path, completed, total_chunks,
+                    )
+                    raise SyncCancelledError(
+                        f"folder download cancelled at chunk "
+                        f"{completed}/{total_chunks} of {path}",
+                    )
                 encrypted = _load_cached_chunk(
                     chunk_cache_dir=chunk_cache_dir,
                     vault_id=vault.vault_id,
@@ -95,6 +126,7 @@ def download_folder(
                         vault_id=vault.vault_id,
                         vault_access_secret=vault.vault_access_secret,
                         chunk_id=chunk["chunk_id"],
+                        should_continue=should_continue,
                     )
 
                 plaintext = _decrypt_chunk(

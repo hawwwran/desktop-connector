@@ -425,6 +425,7 @@ relay log (filenames are local-only).
 | `vault.download.chunk_missing_retry` | desktop | info | `vault`, `chunk`/`first_missing`, `missing_count`, `attempt`, `delay_s` | F-D11 — relay reported chunk(s) missing; sleeping before retry |
 | `vault.download.duplicate_path` | desktop | warning | `path` | F-D09 — folder download saw two entries claiming the same relative path |
 | `vault.download.entry_has_no_version` | desktop | warning | `path` | F-D09 — folder download skipped a version-less entry |
+| `vault.download.folder_cancelled` | desktop | info | `vault`, `path`, `chunks_done`, `total_chunks`, optional `files_done` | Review §3.H2 — folder-restore Cancel landed mid-tree; aborts within ~1 chunk of work instead of letting `4 × 60 s × N` retries on each missing chunk burn |
 | `vault.download.skip_unsafe_path` | desktop | warning | `path`, `error` | F-D09 — folder download skipped a manifest path that escapes the root |
 | `vault.eviction.cancelled` | desktop | info | `vault`, `before_stage`, `freed_bytes` | F-U03 — between-stage cancel; coherent state preserved |
 | `vault.eviction.cas_exhausted` | desktop | warning | `vault`, `folder`, `retries` | F-D25 — eviction retry budget exhausted on one folder's shard publish; raised the CAS error to caller |

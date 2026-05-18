@@ -459,6 +459,49 @@ class VaultDownloadTests(unittest.TestCase):
         self.assertEqual(progress[-1].phase, "done")
         self.assertFalse(list(out.rglob("*.dc-temp-*")))
 
+    def test_download_folder_honours_should_continue_mid_run(self) -> None:
+        """Review §3.H2: ``should_continue`` is checked between every
+        chunk fetch, so a Cancel button (or a quit signal) bails
+        within ~1 chunk's worth of work instead of letting the
+        4×60s×N retry loop on a missing chunk burn the user's time.
+        """
+        from src.vault.binding.lifecycle import SyncCancelledError
+
+        files = {
+            f"big/file-{i}.txt": f"payload {i}".encode("utf-8")
+            for i in range(20)
+        }
+        manifest, chunks = _folder_manifest_and_chunks(files)
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        chunks_seen = {"count": 0}
+
+        def should_continue() -> bool:
+            # Flip to False after the 3rd chunk so the cancellation
+            # path fires mid-folder.
+            chunks_seen["count"] += 1
+            return chunks_seen["count"] <= 3
+
+        try:
+            with self.assertRaises(SyncCancelledError):
+                download_folder(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    path="Documents",
+                    destination=self.tmpdir / "Documents",
+                    should_continue=should_continue,
+                )
+        finally:
+            vault.close()
+        # We bailed after at most a handful of chunks — definitely
+        # before all 20 files materialized.
+        materialized = list((self.tmpdir / "Documents").rglob("*.txt"))
+        self.assertLess(
+            len(materialized), len(files),
+            "download_folder must abort partway, not run to completion",
+        )
+
     def test_download_nested_folder_uses_nested_path_as_destination_root(self) -> None:
         manifest, chunks = _folder_manifest_and_chunks({
             "batch/a.txt": b"a",
