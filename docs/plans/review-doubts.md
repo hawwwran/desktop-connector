@@ -157,6 +157,104 @@ the whole import) as a minimal step before the per-folder UI.
 
 ---
 
+## §5.M3 — Cross-subprocess fresh-unlock composition
+
+Status: skipped-needs-design (security/UX tradeoff)
+Date: 2026-05-17
+Verified against: `desktop/src/vault/fresh_unlock.py:38-46`
+(``_last_unlock_at`` is module state, not persisted; docstring
+explicitly notes the per-process scope); architecture doc §13
+promises a unified "single confirm within 15 min idle" window.
+
+Doubt: The current design is *more secure* than the spec implies:
+each subprocess (settings window, import wizard, …) gets its own
+in-memory state, so a user who typed the passphrase in Settings
+must retype in the import wizard subprocess. Across-subprocess
+composition would require persisting the unlock timestamp to disk
+(config-dir file or local-index SQLite row), which exposes a new
+attack surface — a malicious local process that can read the
+config dir can time an attack to fall within the window.
+
+Three resolution paths:
+
+  (a) Persist ``_last_unlock_at`` to ``~/.config/desktop-connector/
+      vault_fresh_unlock.ts``. Every subprocess reads + respects.
+      Implements the spec verbatim but exposes the window to
+      anyone who can read the config dir.
+
+  (b) Use shared memory (POSIX shm + a 5-min TTL). Doesn't touch
+      disk but the shm seg is readable by other processes under
+      the same uid. Same threat model as (a), narrower window.
+
+  (c) Document the per-subprocess scope as an intentional
+      tightening of the spec, and amend the architecture doc to
+      match. Sensitive ops chain only within a single subprocess
+      (e.g. Settings → Danger), and crossing into the import
+      wizard subprocess re-prompts. UX cost: ~1 extra prompt per
+      multi-subprocess session.
+
+Action taken: nothing in code. (c) is the lowest-risk shipping
+path and aligns with the existing implementation.
+
+Need from user: confirm (c) as the v1 contract + amend the
+architecture doc, OR pick (a)/(b) with the threat-model write-up.
+
+---
+
+## §5.M2 — Migration runner shard genesis-insert for rev > 1
+
+Status: conditional on §5.C1 (migration wizard)
+Date: 2026-05-17
+Verified against: `desktop/src/vault/migration/runner.py:476-503`
+(``_bootstrap_target_and_inventory`` has the issue documented in
+its own comment); §5.C1 logged as needs-design (no production
+caller hits the runner today).
+Doubt: Server's ``putShard`` rejects ``new_revision != expected + 1``;
+the migration runner's idempotent re-entry path requires
+``current_hash == shard_hash`` (which fails on "rejected at
+validation"). Real-world impact only when migration is wired into
+the wizard (§5.C1) — until then every callsite is test code that
+arranges its own genesis state.
+
+Conditional fix: bundle this into the §5.C1 migration wizard build.
+The shard-rev>1 bootstrap path either (a) walks the shard chain
+from rev=1 with synthesized envelopes, or (b) the server gets a
+new "accept genesis at arbitrary rev" path gated on the migration
+intent's verified state. Neither is doable as a standalone Medium.
+
+Action taken: nothing in code. Pinned the runner comment block
+referencing this entry so the migration-wizard session has a clear
+TODO.
+
+---
+
+## §5.M6 — Migration record previous_relay_url stale carry
+
+Status: conditional on §5.C1 (migration wizard)
+Date: 2026-05-17
+Verified against: `desktop/src/vault/migration/state.py:172-174`
+(``_record_dict_with_previous_relay`` preserves ``previous_relay_url``
+across migration record overwrites).
+Doubt: A → B then B → C may carry stale ``previous_relay_url=A`` in
+B → C's record if the state file survives. Pre-fix the
+overwrite-protection is over-cautious — it never replaces a non-
+None value. Real-world impact only after the migration wizard
+ships and the user runs a second migration on the same device.
+
+Conditional fix: bundle with the §5.C1 migration wizard build.
+Either (a) explicit ``state.clear_previous_relay()`` call at the
+start of a fresh start/verify/commit cycle, or (b) drop the
+overwrite-protection — A → B → C's intermediate state should mean
+``previous=B`` regardless of what A was. Both are one-line fixes,
+but the right one depends on the wizard's UX (does the user need
+to see "previously migrated from A" indefinitely, or only for
+the rollback window after a commit?).
+
+Action taken: nothing in code. The state-machine comment block
+points at this entry.
+
+---
+
 ## §6.H2 — Revoke-device UI (entire Devices tab)
 
 Status: skipped-needs-design (new feature build)

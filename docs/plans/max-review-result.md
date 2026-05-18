@@ -668,10 +668,12 @@ Passes `chunks_already_on_relay=0` with comment "filled at run-time" — but the
 #### §5.M1 — `state["passphrase"]` lives in plaintext Python dict for entire import-wizard lifetime
 **File:** `desktop/src/windows_vault_import.py:243`. Never zeroed. Python `str` is immutable (residual bytes pinned in the string-intern table). Severity raised if a future refactor reuses the wizard.
 
-#### §5.M2 — Migration runner: `_bootstrap_target_and_inventory` may fail genesis-insert for shards with revision > 1
+#### §5.M2 — Migration runner: `_bootstrap_target_and_inventory` may fail genesis-insert for shards with revision > 1 — *conditional on §5.C1*
+**Status:** logged in `docs/plans/review-doubts.md` §5.M2 — depends on §5.C1 migration wizard; bundle the fix with the wizard build.
 **File:** `desktop/src/vault/migration/runner.py:476-503`. Code comment admits: server's `putShard` rejects `new != expected + 1`; idempotent re-entry path requires `current_hash == shard_hash` (fails on "rejected at validation"). Combined with §5.C1 nobody hits this today, but the moment migration is wired, every non-trivial vault fails this stage.
 
-#### §5.M3 — Fresh-unlock window is per-process; import subprocess gets its own
+#### §5.M3 — Fresh-unlock window is per-process; import subprocess gets its own — *skipped (security/UX tradeoff)*
+**Status:** logged in `docs/plans/review-doubts.md` §5.M3 — current per-subprocess scope is MORE secure than the spec implies; closing the gap requires either disk-persisting the timestamp (new attack surface) or amending the spec to document the per-subprocess invariant.
 **File:** `desktop/src/vault/fresh_unlock.py:38-40`. User who just typed the passphrase in Settings re-types in the import wizard subprocess. Spec UX of "single confirm within 120 s" doesn't compose across subprocesses.
 
 #### §5.M4 — Export bundle decrypt uses brute-force record-type loop
@@ -680,7 +682,8 @@ Passes `chunks_already_on_relay=0` with comment "filled at run-time" — but the
 #### §5.M5 — Export passphrase has no minimum entropy/length check
 **File:** `desktop/src/vault/export/bundle.py:148`. Can export with `"x"`. Architecture invariant "different from recovery passphrase by default" not enforced either.
 
-#### §5.M6 — Migration record `previous_relay_url` overwrite-protection is over-cautious
+#### §5.M6 — Migration record `previous_relay_url` overwrite-protection is over-cautious — *conditional on §5.C1*
+**Status:** logged in `docs/plans/review-doubts.md` §5.M6 — depends on §5.C1 migration wizard UX.
 **File:** `desktop/src/vault/migration/state.py:172-174`. A→B then B→C may carry stale `previous_relay_url=A` in B→C's record if state file survived.
 
 ### Info — verified clean
