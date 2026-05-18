@@ -598,10 +598,9 @@ relay log (filenames are local-only).
 | `vault.sync.watcher_stop_failed` | desktop | warning | `binding` | F-Y13 — observer stop raised |
 | `vault.sync.watcher_tick_failed` | desktop | error | `binding` | F-Y13 — coordinator tick raised |
 | `vault.sync.watchers_started` | desktop | info | `vault`, `count` | F-Y13 — boot-time watcher init |
-| `vault.tray.export.notify_failed` | desktop | error | exception traceback | F-T18 — system notification raised while routing the tray Export click |
-| `vault.tray.export.stub` | desktop | info | — | F-T18 — tray Export click; data-layer export shipped but no UI launcher yet, so the stub still fires a "not-yet-available" notification (was the path-pointer notification pre-2026-05-12) |
+| `vault.tray.sync_now.kick_failed` | desktop | error | exception traceback | Review §6.H3 — `_ensure_vault_watcher_runtime` or `_vault_autosync_kick.set` raised; the click did NOT start a sync. Notification falls back to "couldn't start the sync; check Vault Settings → Folders" |
+| `vault.tray.sync_now.kicked` | desktop | info | — | Review §6.H3 — tray Sync now click forced an immediate autosync tick (was a stub notification pre-fix) |
 | `vault.tray.sync_now.notify_failed` | desktop | error | exception traceback | F-T18 — system notification raised while routing the tray Sync now click |
-| `vault.tray.sync_now.stub` | desktop | info | — | F-T18 — tray Sync now click; user-routed stub fires a notification pointing at Vault Settings → Folders → per-binding Sync now. The tray-side handler that would sync directly is intentionally deferred — see `vault_runtime_watchers` for the in-process equivalent |
 | `vault.upload.batch_cas_exhausted` | desktop | warning | `vault`, `additions`, `retries` | F-D25 — folder-upload batch retry budget exhausted; raised the CAS error to caller |
 | `vault.upload.cas_exhausted` | desktop | warning | `vault`, `path`, `retries` | F-D25 — single-version upload retry budget exhausted; raised the CAS error to caller |
 | `vault.upload.cas_retry` | desktop | info | `attempt`, `path`, `shard_conflict`, `root_conflict` | Phase H — single-version upload shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |

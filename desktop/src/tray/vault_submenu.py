@@ -96,13 +96,8 @@ class VaultSubmenuMixin:
             ),
             pystray.MenuItem(
                 "Sync now",
-                self._vault_sync_now_stub,
+                self._vault_sync_now,
                 visible=lambda _: self._vault_submenu_entry_visible("sync_now"),
-            ),
-            pystray.MenuItem(
-                "Export…",
-                self._vault_export_stub,
-                visible=lambda _: self._vault_submenu_entry_visible("export"),
             ),
             pystray.MenuItem(
                 "Import…",
@@ -135,15 +130,42 @@ class VaultSubmenuMixin:
     def _spawn_vault_browser(self, *_) -> None:
         self._open_gtk4_window("vault-browser")
 
-    def _vault_sync_now_stub(self, *_) -> None:
-        # F-U20: surface where the real "Sync now" lives so the click
-        # doesn't feel like a dead button. The backend is in Vault
-        # settings → Folders → Sync now per binding.
-        log.info("vault.tray.sync_now.stub")
+    def _vault_sync_now(self, *_) -> None:
+        """Tray "Sync now" — kick the in-process autosync loop.
+
+        Review §6.H3: pre-fix this fired a notification telling the
+        user to open Vault Settings → Folders → Sync now per binding.
+        The in-process autosync loop was already capable of doing the
+        work; the kick event just needed to be wired to the menu so
+        the click does what it advertises instead of bouncing the
+        user into another window.
+
+        ``_ensure_vault_watcher_runtime`` is idempotent — it starts
+        the watcher + autosync threads on first call and is a no-op
+        thereafter, so the first click after vault-open starts the
+        pipeline before kicking it.
+        """
+        log.info("vault.tray.sync_now.kicked")
+        try:
+            self._ensure_vault_watcher_runtime()
+            self._vault_autosync_kick.set()
+        except Exception:  # noqa: BLE001
+            log.exception("vault.tray.sync_now.kick_failed")
+            try:
+                self.platform.notifications.notify(
+                    title="Vault — Sync now",
+                    body=(
+                        "Couldn't start the sync. Open Vault Settings "
+                        "→ Folders to check the binding state."
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("vault.tray.sync_now.notify_failed")
+            return
         try:
             self.platform.notifications.notify(
                 title="Vault — Sync now",
-                body="Open Vault Settings → Folders → Sync now per binding.",
+                body="Syncing your bound folders in the background.",
             )
         except Exception:  # noqa: BLE001
             log.exception("vault.tray.sync_now.notify_failed")
@@ -416,25 +438,6 @@ class VaultSubmenuMixin:
                     pending.vault_id_dashed,
                 )
         self._vault_purge_notified = notified
-
-    def _vault_export_stub(self, *_) -> None:
-        # T8 export bundle logic (vault/export/bundle.py) is shipped at
-        # the data layer but no UI launcher is wired yet. The previous
-        # stub message pointed at "Vault Settings → Recovery → Export…"
-        # which does not exist in the Recovery tab. Until the launcher
-        # lands the honest message is "not yet available in the UI".
-        log.info("vault.tray.export.stub")
-        try:
-            self.platform.notifications.notify(
-                title="Vault — Export",
-                body=(
-                    "Vault bundle export is not yet wired to a UI "
-                    "launcher. The data-layer support is in place; the "
-                    "launcher is tracked in the v1 finish-line work."
-                ),
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("vault.tray.export.notify_failed")
 
     def _spawn_vault_import(self, *_) -> None:
         # T8 ships an end-to-end import wizard (windows_vault_import.py)

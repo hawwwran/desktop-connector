@@ -89,16 +89,22 @@ def vault_submenu_entries(
         "create_vault"   → "Create vault…" — launches the wizard
         "import_vault"   → "Import vault…" — launches the wizard
         "open_vault"     → "Open Vault…"
-        "sync_now"       → "Sync now"  (stub in T3)
-        "export"         → "Export…"  (stub in T3)
-        "import"         → "Import…"  (stub in T3)
+        "sync_now"       → "Sync now" — kicks the in-process autosync loop
+        "import"         → "Import…" — launches the import wizard
         "settings"       → "Settings"
+
+    Review §6.H3: the "export" entry was removed. It was a tray
+    notification telling the user to open Vault Settings → Recovery
+    → Export…, but no such launcher exists. The data-layer
+    ``write_export_bundle`` is shipped; the GTK launcher is logged
+    in ``review-doubts.md`` for explicit scoping rather than living
+    as theatre in the tray.
     """
     if not toggle_active:
         return []
     if not vault_exists:
         return ["create_vault", "import_vault"]
-    return ["open_vault", "sync_now", "export", "import", "settings"]
+    return ["open_vault", "sync_now", "import", "settings"]
 
 
 def wizard_cancel_rule() -> CancelRule:

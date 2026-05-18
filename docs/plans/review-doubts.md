@@ -157,6 +157,36 @@ the whole import) as a minimal step before the per-folder UI.
 
 ---
 
+## §6.H3 (partial) — Tray Export entry removed pending wizard build
+
+Status: removed-needs-design (new feature build)
+Date: 2026-05-17
+Verified against: `desktop/src/vault/ui/ui_state.py:101` (tokens list
+no longer includes `"export"`); `desktop/src/tray/vault_submenu.py`
+(the `_vault_export_stub` method is gone, the menu item is gone);
+`desktop/src/vault/export/bundle.py:write_export_bundle` is the
+shipped data-layer entry point with zero non-test callers in
+`desktop/src/`.
+Doubt: Wiring "Sync now" to actually fire the autosync was a one-
+liner — the in-process loop already existed. Wiring "Export…" would
+require a brand-new GTK subprocess (`windows_vault_export.py`):
+path picker, passphrase entry + confirm + strength meter, Argon2id-
+off-main-thread progress with the §6.C* worker pattern, optional
+"shred bundle after copying" toggle, success screen with "Verify
+bundle" action. That's the kind of feature build the per-issue
+protocol says not to do autonomously.
+Action taken: tray entry removed (review §6.H3) so it no longer
+fires theatre notifications. The Sync-now half landed as a real
+fix.
+Need from user: decision on (a) build the export wizard as a
+follow-up PR (sized ~1-2 days; mirrors the import wizard's shape),
+(b) ship v1 with the recovery-kit path as the only recovery surface
+(memory `project_vault_multi_device_story` already says this is
+the v1 multi-device story), or (c) inline a minimal "Export to
+file…" CLI helper as a power-user escape hatch.
+
+---
+
 ## §5.H3 — Access-secret rotation has no client trigger
 
 Status: skipped-needs-design (new feature build)
