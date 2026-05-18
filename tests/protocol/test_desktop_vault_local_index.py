@@ -14,7 +14,12 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.vault.state.local_index import DB_FILENAME, VaultLocalIndex  # noqa: E402
-from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
+)
 
 
 VAULT_ID = "ABCD2345WXYZ"
@@ -24,24 +29,47 @@ PHOTOS_ID = "rf_v1_bbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 def _folder(remote_folder_id: str, name: str, *, created_at: str = "2026-05-03T13:00:00.000Z") -> dict:
-    return make_remote_folder(
-        remote_folder_id=remote_folder_id,
-        display_name_enc=name,
-        created_at=created_at,
-        created_by_device_id=AUTHOR,
-        ignore_patterns=[".git/"] if name == "Documents" else ["*.tmp"],
-    )
+    return {
+        "remote_folder_id": remote_folder_id,
+        "display_name_enc": name,
+        "created_at": created_at,
+        "created_by_device_id": AUTHOR,
+        "ignore_patterns": [".git/"] if name == "Documents" else ["*.tmp"],
+    }
 
 
 def _manifest(revision: int, folders: list[dict]) -> dict:
-    return make_manifest(
+    pointers = [
+        make_root_folder_pointer(
+            remote_folder_id=f["remote_folder_id"],
+            display_name_enc=f["display_name_enc"],
+            created_at=f["created_at"],
+            created_by_device_id=f["created_by_device_id"],
+            ignore_patterns=f.get("ignore_patterns", []),
+        )
+        for f in folders
+    ]
+    shards_by_id = {
+        f["remote_folder_id"]: make_folder_shard(
+            vault_id=VAULT_ID,
+            remote_folder_id=f["remote_folder_id"],
+            shard_revision=revision,
+            parent_shard_revision=revision - 1,
+            created_at=f["created_at"],
+            author_device_id=AUTHOR,
+            entries=[],
+        )
+        for f in folders
+    }
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=revision,
-        parent_revision=revision - 1,
+        root_revision=revision,
+        parent_root_revision=revision - 1,
         created_at=f"2026-05-03T13:{revision:02d}:00.000Z",
         author_device_id=AUTHOR,
-        remote_folders=folders,
+        remote_folders=pointers,
     )
+    return assemble_unified_manifest(root, shards_by_id)
 
 
 class VaultRemoteFoldersCacheTests(unittest.TestCase):
