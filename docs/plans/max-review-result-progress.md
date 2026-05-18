@@ -116,3 +116,10 @@ Continuing into the Medium section.
 - 2026-05-17 — fixed §3.M5 (commit 117c7b5): disconnect_binding force=False refuses pending-ops drop (typed VaultDisconnectHasPendingOpsError); UI gets count + re-call seam.
 
 §3 Mediums complete (6 of 6: M1, M2, M3, M4, M5, M6).
+
+- 2026-05-17 — fixed §4.M3 (commit 19884ad): clear_vault emits vault.vault.clear_started at top of loop; paired with terminal cleared so mid-loop crash has audit trail.
+- 2026-05-17 — fixed §4.M4 (commit 19884ad): schedule_purge enforces MIN_DELAY_SECONDS=60 floor with "cancel window" remediation message; UI restricts dropdown ≥1h separately.
+- 2026-05-17 — fixed §4.M2 (commit 557de31): restore_remote_folder symlink-escape check hoisted above mkdir; no side-effect directories created on the wrong side before skip.
+- 2026-05-17 — skipped §4.M1 (logged to review-doubts.md): orphan-chunk reaper needs new GET /chunks endpoint or server-side KIND_RECLAIM_ORPHAN_CHUNKS GC job; leak is bounded by 30-day retention.
+
+§4 Mediums: 3 fixed (M2, M3, M4), 1 logged as needs-design (M1).
