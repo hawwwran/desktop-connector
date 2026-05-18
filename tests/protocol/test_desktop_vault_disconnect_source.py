@@ -126,12 +126,21 @@ class VaultDisconnectSourceTests(unittest.TestCase):
             code,
         )
 
-    def test_update_recovery_material_is_not_left_as_a_dead_button(self) -> None:
+    def test_update_recovery_material_button_wired_to_rotation_wizard(self) -> None:
+        """§5.H3 landed: the button is sensitive when a vault is
+        loaded and spawns the rotation subprocess on click. The
+        original guard (a force-disabled placeholder) no longer
+        applies — the button is real now."""
         for text in (
             'update_recovery_btn = Gtk.Button(label="Update recovery material"',
-            "update_recovery_btn.set_sensitive(False)",
+            "update_recovery_btn.set_sensitive(bool(vault_id_undashed))",
+            '"vault-rotate"',
         ):
             self.assertIn(text, self.source, msg=f"missing: {text!r}")
+        # The force-disabled placeholder is gone.
+        self.assertNotIn(
+            "update_recovery_btn.set_sensitive(False)", self.source,
+        )
 
     def test_recovery_test_refreshes_open_settings_window(self) -> None:
         for text in (

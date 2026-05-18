@@ -504,6 +504,10 @@ relay log (filenames are local-only).
 | `vault.resume.marker_write_failed` | desktop | error | `vault`, exception traceback | Persisting the `pending_publish` marker raised; the wizard continues but the next session won't see this attempt as resumable |
 | `vault.resume.put_header.ok` | desktop | info | `vault`, `rev` | Resume took the PUT-header path (relay had the orphan; header replaced) |
 | `vault.revoke.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when device-grant revoke logs through this surface (F-510) |
+| `vault.rotate.kit_save_failed` | desktop | warning | `vault` (truncated), optional `reason` (`user_force_close`) | §5.H3 — wizard committed the rotation on the relay but the operator failed to save the new kit (write error or force-close). Recovery is now impossible without the kit + passphrase pair; the next launch should nag for a fresh kit |
+| `vault.rotate.kit_saved` | desktop | info | `vault` (truncated) | §5.H3 — operator wrote the post-rotation kit to disk via the wizard's path picker |
+| `vault.rotate.server_committed` | desktop | info | `vault` (truncated), `rotated_at` | §5.H3 — relay accepted the new access-token hash and committed the rotation; local grant store is being swapped in the same worker thread |
+| `vault.rotate.started` | desktop | info | `vault` (truncated) | §5.H3 — rotation wizard subprocess started; operator passed the two safety checkboxes and is on the verify-kit page |
 | `vault.rotation.completed` | desktop | info | _planned_ — Activity-tab humanizer anchor; emit-site lands when access-secret rotation logs through this surface (F-510) |
 | `vault.security.reminder_read_failed` | desktop | warning | `path`, `error` | T13.6 rotation reminder unreadable; treating as cleared |
 | `vault.sync.autosync.flushed` | desktop | info | `binding`, `ops` | F-LT06 — per-binding flush applied N ops in this tick |

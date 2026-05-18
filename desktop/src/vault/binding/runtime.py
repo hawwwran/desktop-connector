@@ -816,6 +816,51 @@ class VaultHttpRelay:
                 self._extract_error(resp), status_code=resp.status_code,
             )
 
+    # ---- §5.H3 access-secret rotation -------------------------------
+
+    def rotate_access_secret(
+        self, vault_id: str, vault_access_secret: str,
+        *, new_vault_access_token_hash: bytes,
+        triggered_by_revoke_grant_id: str | None = None,
+    ):
+        """POST /api/vaults/{id}/access-secret/rotate — admin-only.
+
+        Server atomically swaps the vault's access-token hash with the
+        supplied 32-byte digest (sha256 of the new plaintext secret),
+        invalidating every device grant on the relay side. Caller
+        must update its own keyring grant + emit a fresh recovery kit
+        with the new secret before the next vault op.
+        """
+        from ..relay_errors import VaultRelayError
+
+        if not isinstance(new_vault_access_token_hash, (bytes, bytearray)) or len(new_vault_access_token_hash) != 32:
+            raise RuntimeError("new_vault_access_token_hash must be 32 bytes")
+        body: dict = {
+            "new_vault_access_token_hash": base64.b64encode(
+                bytes(new_vault_access_token_hash),
+            ).decode("ascii"),
+        }
+        if triggered_by_revoke_grant_id is not None:
+            body["triggered_by_revoke_grant_id"] = str(triggered_by_revoke_grant_id)
+        resp = self._conn.request(
+            "POST",
+            f"/api/vaults/{vault_id}/access-secret/rotate",
+            headers={"X-Vault-Authorization": f"Bearer {vault_access_secret}"},
+            json=body,
+        )
+        if resp is None:
+            raise RuntimeError(
+                "Could not reach the relay while rotating the access secret.",
+            )
+        if resp.status_code != 200:
+            raise VaultRelayError(
+                self._extract_error(resp), status_code=resp.status_code,
+            )
+        try:
+            return resp.json()["data"]
+        except Exception as exc:
+            raise RuntimeError("Relay returned an invalid rotation response.") from exc
+
     # ---- §6.H2 device-grants surface --------------------------------
 
     def list_device_grants(self, vault_id: str, vault_access_secret: str):

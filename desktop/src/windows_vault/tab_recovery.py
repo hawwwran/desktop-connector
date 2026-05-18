@@ -6,6 +6,8 @@ export-reminder banner, and a "Test recovery now" button that opens
 the in-vault recovery test dialog.
 """
 
+import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 
@@ -52,9 +54,31 @@ def build_recovery_tab(ctx: MainContext, win: "Adw.ApplicationWindow") -> "Gtk.B
     recovery.append(actions)
     test_recovery_btn = Gtk.Button(label="Test recovery now", css_classes=["pill"])
     actions.append(test_recovery_btn)
+    # §5.H3: "Update recovery material" opens the rotation wizard
+    # (vault-rotate subprocess) which rotates the access secret +
+    # emits a fresh recovery kit. Disabled when no vault is loaded.
     update_recovery_btn = Gtk.Button(label="Update recovery material", css_classes=["pill"])
-    update_recovery_btn.set_sensitive(False)
-    update_recovery_btn.set_tooltip_text("Recovery-material rotation is not implemented yet")
+    update_recovery_btn.set_sensitive(bool(vault_id_undashed))
+    if vault_id_undashed:
+        update_recovery_btn.set_tooltip_text(
+            "Rotate the vault's access secret. Generates a new recovery "
+            "kit; existing kits and device grants stop working."
+        )
+    else:
+        update_recovery_btn.set_tooltip_text(
+            "Open a vault first — rotation requires a connected vault."
+        )
+
+    def on_update_recovery(_btn) -> None:
+        subprocess.Popen(
+            [
+                sys.executable, "-m", "src.windows", "vault-rotate",
+                f"--config-dir={config_dir}",
+            ],
+            close_fds=True,
+        )
+
+    update_recovery_btn.connect("clicked", on_update_recovery)
     actions.append(update_recovery_btn)
 
     recovery_warning = Gtk.Label(

@@ -74,12 +74,9 @@ Tracked as a separate v1.x follow-up.
 
 ---
 
-### 5. §5.H3 — Access-secret rotation client trigger *(design landed 2026-05-18)*
+### 5. ~~§5.H3 — Access-secret rotation client trigger~~ *(landed 2026-05-18)*
 
-**Why this slot:** preempts a latent bomb. Nothing breaks today *until* rotation happens, at which point all existing recovery kits silently die on the relay side. Building rotation + kit-regeneration prompt together so the bomb never goes off. No urgency today, but ships in v1 to keep the recovery story coherent.
-
-**Status:** scoped — implementation pending. **Plan:** [`vault-v1-build-items.md#§5.H3`](vault-v1-build-items.md#5h3--access-secret-rotation).
-**Decision:** build the rotation flow (UI + server endpoint + kit regeneration) for v1. Sized 2–3 days.
+**Status:** landed. Server endpoint shipped at T13.6 (admin-gated, audit-logged, atomic). New subprocess `desktop/src/windows_vault_rotate.py` (`vault-rotate`) drives the operator through two-checkbox confirm → verify-existing-kit (Argon2id replay) → POST rotate → atomic local-grant swap → save new kit (close blocked until written). Typed client `desktop/src/vault/grant/rotate_client.py`. Recovery tab button no longer force-disabled. Diagnostics: `vault.rotate.{started, server_committed, kit_saved, kit_save_failed}`. Tests: `tests/protocol/test_desktop_vault_rotate_{client,wizard_source}.py`. Closes the latent-bomb gap where rotation would silently invalidate every kit on the relay side.
 
 ---
 
@@ -248,20 +245,20 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 | Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
 |---|---|---|---|---|---|
 | Criticals | 17 | 17 | 0 | 0 | 0 |
-| Highs | 37 | 33 | 3 (§5.H2, §5.H3, §6.H3) | 1 (§6.H1) | 0 |
+| Highs | 37 | 34 | 2 (§5.H2, §6.H3) | 1 (§6.H1) | 0 |
 | Mediums | 35 | 32 | 2 (§4.M1, §5.M2) | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **86** | **5** | **2** | **20** |
+| **Total** | **113** | **87** | **4** | **2** | **20** |
 
-§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §6.H2 all fully landed on 2026-05-18 (see [`vault-eviction-v1.md`](vault-eviction-v1.md) + [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy` + entries 1–4 above).
+§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §5.C1 + §5.C2 + §5.H3 + §6.H2 all fully landed on 2026-05-18.
 
-### Breakdown of the 27 not-fully-fixed-by-code items
+### Breakdown of the 26 not-fully-fixed-by-code items
 
-- **5 design-landed-pending-implementation** (§1 above): 3 Highs (§5.H2, §5.H3, §6.H3), 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
+- **4 design-landed-pending-implementation** (§1 above): 2 Highs (§5.H2, §6.H3), 2 Mediums (§4.M1, §5.M2). Each carries a plan-doc link. Implementation work is what's left.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **27 entries are not-yet-fully-fixed-by-code** — 5 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **25 are open work** (5 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **26 entries are not-yet-fully-fixed-by-code** — 4 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **24 are open work** (4 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

@@ -15,6 +15,7 @@ Usage:
     python3 -m src.windows vault-import --config-dir=~/.config/desktop-connector [--vault-id=ABCD-2345-WXYZ]
     python3 -m src.windows vault-join --config-dir=~/.config/desktop-connector
     python3 -m src.windows vault-migration --config-dir=~/.config/desktop-connector
+    python3 -m src.windows vault-rotate --config-dir=~/.config/desktop-connector
     python3 -m src.windows vault-passphrase-generator --config-dir=~/.config/desktop-connector
 
 ``--vault-id`` (F-U14) is optional and honoured by ``vault-main`` /
@@ -39,6 +40,7 @@ from .windows_vault_browser import show_vault_browser
 from .windows_vault_import import show_vault_import
 from .windows_vault_join import show_vault_join
 from .windows_vault_migration import show_vault_migration
+from .windows_vault_rotate import show_vault_rotate
 from .windows_vault import (
     show_vault_main,
     show_vault_onboard,
@@ -56,6 +58,7 @@ def main():
             "secret-storage-warning",
             "vault-main", "vault-browser", "vault-import", "vault-join",
             "vault-migration", "vault-onboard", "vault-passphrase-generator",
+            "vault-rotate",
         ],
     )
     parser.add_argument("--config-dir", required=True)
@@ -112,6 +115,8 @@ def main():
         show_vault_join(config_dir)
     elif args.window == "vault-migration":
         show_vault_migration(config_dir)
+    elif args.window == "vault-rotate":
+        show_vault_rotate(config_dir)
     elif args.window == "vault-onboard":
         show_vault_onboard(config_dir)
     elif args.window == "vault-passphrase-generator":

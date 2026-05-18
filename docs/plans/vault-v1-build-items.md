@@ -298,7 +298,16 @@ Page contents:
 
 ---
 
-## §5.H3 — Access-secret rotation
+## §5.H3 — Access-secret rotation *(landed 2026-05-18)*
+
+**Status:** landed. Server endpoint was already shipped at T13.6 (`POST /api/vaults/{id}/access-secret/rotate` admin-gated + idempotent + audit-logged). v1 build adds the client surface:
+
+- **Subprocess** `desktop/src/windows_vault_rotate.py` (`vault-rotate`) walks confirm → verify-existing-kit → progress → save-new-kit. Two safety checkboxes gate Continue. Kit pick + passphrase re-verify happens BEFORE the rotation POST so the new kit can carry the same passphrase-derived material. After rotation the local keyring grant is swapped atomically (`VaultGrant.from_bytes(vault_id, master_key, new_secret)`) so the next vault op uses the new bearer. The save-kit page blocks Close until the operator writes the new kit; force-close surfaces an "are you sure?" confirmation explicitly mentioning that recovery is permanently lost.
+- **Typed client** `desktop/src/vault/grant/rotate_client.py` wraps the new `VaultHttpRelay.rotate_access_secret` raw method into `RotationResponse` + `RotationAuthError` / `RotationRateLimitedError` / `RotationNotFoundError`.
+- **Tab wiring** — `windows_vault/tab_recovery.py`'s "Update recovery material" button is no longer force-disabled; clicking it spawns the wizard.
+- **Diagnostics** — `vault.rotate.{started, server_committed, kit_saved, kit_save_failed}` cataloged.
+
+Tests: `tests/protocol/test_desktop_vault_rotate_{client,wizard_source}.py`. Closes the latent-bomb gap where eventual rotation would silently invalidate every kit on the relay side.
 
 **Decision** *(2026-05-18)*: scope a v1 build that bundles (a) "Rotate access secret" button, (b) confirmation dialog, (c) post-rotation kit regeneration, (d) server `/rotate` endpoint + auth hooks. Tooltip drops the "not implemented" copy.
 
