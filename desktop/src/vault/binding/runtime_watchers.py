@@ -66,6 +66,12 @@ class VaultWatcherRuntime:
     bindings: dict[str, _BindingRuntime] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _ransomware_callback: Callable[[str], None] | None = None
+    # Review §3.M3 — runtime-level surface for stability-gate timeouts.
+    # When set (typically by the tray to a system-notification fn), the
+    # coordinator's drop on a stuck file invokes it with ``(binding_id,
+    # path, waited_seconds)``. Pre-fix the dropped path produced only
+    # a ``warning`` log and stayed un-synced silently.
+    _stability_timeout_callback: Callable[[str, str, float], None] | None = None
 
     def start_for_active_bindings(self) -> int:
         """Start observers for every binding currently in ``state="bound"``.
@@ -137,12 +143,32 @@ class VaultWatcherRuntime:
                 binding.binding_id,
             )
         detector = RansomwareDetector(binding_id=binding.binding_id)
+        # Review §3.M3 — thread the per-binding stability-timeout
+        # surface through the coordinator so a stuck file produces a
+        # user-visible signal instead of vanishing from ``_pending``
+        # with only a log line.
+        def _on_stability_timeout(
+            path: str, waited: float,
+            bid: str = binding.binding_id,
+        ) -> None:
+            cb = self._stability_timeout_callback
+            if cb is not None:
+                try:
+                    cb(bid, path, waited)
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "vault.sync.stability_timeout_callback_failed "
+                        "binding=%s path=%s",
+                        bid, path,
+                    )
+
         coordinator = WatcherCoordinator(
             binding_id=binding.binding_id,
             local_root=local_root,
             store=self.store,
             previously_synced=lambda path,
                 bid=binding.binding_id: self._previously_synced(bid, path),
+            on_stability_timeout=_on_stability_timeout,
         )
         wrapped_observe = coordinator.observe
 
@@ -238,6 +264,19 @@ class VaultWatcherRuntime:
     ) -> None:
         """Wire a UI callback that fires once when a binding trips."""
         self._ransomware_callback = callback
+
+    def set_stability_timeout_callback(
+        self, callback: Callable[[str, str, float], None] | None,
+    ) -> None:
+        """Review §3.M3 — wire a UI callback that fires when the
+        stability gate drops a file. Receives
+        ``(binding_id, relative_path, waited_seconds)``. The runtime
+        keeps no per-binding state — the callback is installed at the
+        ``VaultWatcherRuntime`` level so it covers every binding the
+        runtime owns. Tray typically wires this to a desktop
+        notification.
+        """
+        self._stability_timeout_callback = callback
 
     def stop_all(self) -> None:
         """Stop every observer thread; safe to call many times."""

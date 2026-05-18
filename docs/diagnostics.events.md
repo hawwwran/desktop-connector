@@ -530,7 +530,7 @@ relay log (filenames are local-only).
 | `vault.sync.file_moved_to_trash` | desktop | info | `path` | T11.4 trash-on-delete (sync flow, not user-initiated) |
 | `vault.sync.file_skipped_ignored` | desktop | info | `binding`, `path`, `pattern` | T6.4 ignore-pattern match |
 | `vault.sync.file_skipped_too_large` | desktop | warning | `binding`, `path`, `size`, `cap` | T6.4 size cap (default 2 GiB) |
-| `vault.sync.file_stability_hung` | desktop | warning | `path`, `waited` | T10.4 stability gate hung-after cap hit |
+| `vault.sync.file_stability_hung` | desktop | error | `binding`, `path`, `waited` | T10.4 stability gate hung-after cap hit. Review §3.M3 escalated this from warning to error so log scrapers surface it; coordinator now also invokes its optional ``on_stability_timeout`` callback so a UI runtime can notify the user the file was dropped from the watcher queue |
 | `vault.sync.file_walk_error` | desktop | warning | `path`, `errno` | F-D13 — folder walker hit `lstat()` failure (permission, dangling symlink, transient I/O); skipped distinct from special-file class |
 | `vault.sync.flush_skipped_paused` | desktop | info | `binding` | F-Y01 — sync now no-op for paused binding |
 | `vault.sync.ignore_pattern_unsupported_shape` | desktop | warning | `pattern`, `reason`, `hint` | F-D14 — caller-supplied ignore pattern uses `**` or starts with `/`; the v1 fnmatch matcher silently never matches those shapes (emitted once per process per pattern) |
@@ -559,6 +559,8 @@ relay log (filenames are local-only).
 | `vault.sync.scan_skip_missing_root` | desktop | warning | `binding`, `path` | Catch-up scan: binding root vanished |
 | `vault.sync.session_ttl_reaped` | desktop | info | `vault`, `count` | Review §4.H1 — TTL sweep removed stale top-level `<session_id>.json` files (>14 days old); runs once per vault open alongside the batched-stub reaper |
 | `vault.sync.special_file_skipped` | desktop | info | `binding`, `path`, `kind` | T6.4 skipped a symlink/FIFO/socket/device |
+| `vault.sync.stability_timeout_callback_failed` | desktop | error | `binding`, `path`, exception traceback | Review §3.M3 — the runtime-level ``set_stability_timeout_callback`` raised when invoked; coordinator continues so the cycle isn't tripped by a UI failure |
+| `vault.sync.stability_timeout_notify_failed` | desktop | error | `binding`, `path`, exception traceback | Review §3.M3 — the coordinator's per-binding ``on_stability_timeout`` callback raised; the dropped-from-watcher state still landed (only the notification was missed) |
 | `vault.sync.trash_failed` | desktop | warning | `path`, `exit`, `stderr` | `gio trash` returned non-zero |
 | `vault.sync.trash_fallback_unlink_failed` | desktop | error | `path`, `error` | trash fallback `unlink` also failed |
 | `vault.sync.trash_invocation_failed` | desktop | error | `path`, `error` | `gio` could not be invoked at all |

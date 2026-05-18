@@ -393,6 +393,87 @@ class WatcherCoordinatorTests(unittest.TestCase):
         self.assertNotIn("hung.txt", coord.pending_paths())
 
 
+class StabilityTimeoutCallbackTests(unittest.TestCase):
+    """Review §3.M3 — when the stability gate's 5-min cap fires, the
+    coordinator drops the path from ``_pending`` with a log line. Pre-
+    fix that was the only signal; the file stayed un-synced for hours
+    with no UI feedback. ``on_stability_timeout`` is the surface the
+    runtime threads through so the tray can notify the user.
+    """
+
+    def test_stability_timeout_invokes_optional_callback(self) -> None:
+        from src.vault.binding.filesystem_watcher import (
+            STABILITY_HUNG_AFTER_S, WatcherCoordinator,
+        )
+        clock = FakeClock(0.0)
+        store = FakeStore(binding_id="rb_v1_a")
+        # The file keeps growing forever — stability gate never
+        # settles, so the hung-after cap eventually fires.
+        counter = [0]
+
+        def stat_provider(_path: str) -> tuple[int, int]:
+            counter[0] += 1
+            return (counter[0], counter[0] * 1000)
+
+        callback_calls: list[tuple[str, float]] = []
+        coord = WatcherCoordinator(
+            binding_id="rb_v1_a",
+            local_root=Path("/tmp/dummy"),
+            store=store,
+            clock=clock,
+            stat_provider=stat_provider,
+            on_stability_timeout=lambda path, waited: callback_calls.append(
+                (path, waited),
+            ),
+        )
+        coord.observe("growing.bin", kind="modified")
+        # Tick periodically — file is always different (counter
+        # increments per stat call), so stability never settles.
+        # After the hung-after cap, the path is dropped + the
+        # callback fires.
+        for _ in range(STABILITY_HUNG_AFTER_S + 1):
+            clock.advance(1.0)
+            coord.tick()
+
+        # The single callback fires exactly once with the path and
+        # a "waited" value at least equal to the cap.
+        self.assertEqual(len(callback_calls), 1)
+        path, waited = callback_calls[0]
+        self.assertEqual(path, "growing.bin")
+        self.assertGreaterEqual(waited, STABILITY_HUNG_AFTER_S)
+        # No upload op was enqueued — file was dropped from pending.
+        self.assertEqual(store.enqueued, [])
+
+    def test_no_callback_when_unset(self) -> None:
+        """Default behaviour (no callback installed) must not change.
+        Coordinator drops the path silently — same shape as pre-fix.
+        """
+        from src.vault.binding.filesystem_watcher import (
+            STABILITY_HUNG_AFTER_S, WatcherCoordinator,
+        )
+        clock = FakeClock(0.0)
+        store = FakeStore(binding_id="rb_v1_a")
+        counter = [0]
+
+        def stat_provider(_path: str) -> tuple[int, int]:
+            counter[0] += 1
+            return (counter[0], counter[0] * 1000)
+
+        coord = WatcherCoordinator(
+            binding_id="rb_v1_a",
+            local_root=Path("/tmp/dummy"),
+            store=store,
+            clock=clock,
+            stat_provider=stat_provider,
+        )
+        coord.observe("growing.bin", kind="modified")
+        for _ in range(STABILITY_HUNG_AFTER_S + 1):
+            clock.advance(1.0)
+            coord.tick()
+        # No crash, no upload op. The default behaviour is preserved.
+        self.assertEqual(store.enqueued, [])
+
+
 # ---------------------------------------------------------------------------
 # WatcherCoordinator — burst-load coverage (SO-4 from §13)
 # ---------------------------------------------------------------------------

@@ -176,6 +176,7 @@ class WatcherCoordinator:
         clock: Callable[[], float] | None = None,
         stat_provider: Callable[[str], tuple[int, int] | None] | None = None,
         previously_synced: Callable[[str], bool] | None = None,
+        on_stability_timeout: Callable[[str, float], None] | None = None,
     ) -> None:
         self.binding_id = binding_id
         self.local_root = Path(local_root)
@@ -183,6 +184,11 @@ class WatcherCoordinator:
         self._clock = clock or time.monotonic
         self._stat_provider = stat_provider or self._real_stat
         self._previously_synced = previously_synced
+        # Review §3.M3 — optional surface for stability-gate timeouts so
+        # the runtime can notify the user. Pre-fix the dropped path
+        # produced only a ``warning`` log line and the file stayed
+        # un-synced for hours with no UI signal.
+        self._on_stability_timeout = on_stability_timeout
         self._debouncer = EventDebouncer()
         window = (
             STABILITY_WINDOW_NETWORK_S
@@ -297,10 +303,26 @@ class WatcherCoordinator:
                     now=now_t, first_event_at=pending.first_event_at,
                 )
                 if verdict.timed_out:
-                    log.warning(
-                        "vault.sync.file_stability_hung path=%s waited=%.1fs",
-                        path, now_t - pending.first_event_at,
+                    waited = now_t - pending.first_event_at
+                    # Review §3.M3 — escalated to ``error`` (was
+                    # ``warning``) so log scrapers surface it; the
+                    # original log severity was easy to miss in a
+                    # busy session. Notify the runtime so the UI can
+                    # tell the user (the file is otherwise dropped
+                    # silently and stays un-synced).
+                    log.error(
+                        "vault.sync.file_stability_hung binding=%s path=%s waited=%.1fs",
+                        self.binding_id, path, waited,
                     )
+                    if self._on_stability_timeout is not None:
+                        try:
+                            self._on_stability_timeout(path, waited)
+                        except Exception:  # noqa: BLE001
+                            log.exception(
+                                "vault.sync.stability_timeout_notify_failed "
+                                "binding=%s path=%s",
+                                self.binding_id, path,
+                            )
                     self._pending.pop(path, None)
                     self._debouncer.forget(path)
                     self._gate.forget(path)
