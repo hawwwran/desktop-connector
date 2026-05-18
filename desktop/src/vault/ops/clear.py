@@ -95,28 +95,52 @@ def clear_vault(
     earlier folders cleared and later ones untouched; re-running is
     safe — already-tombstoned entries are skipped by
     ``tombstone_files_under_in_shard``.
+
+    Review §4.H3: loop the root fetch until it's stable. A concurrent
+    device that added a folder mid-clear must still get tombstoned;
+    pre-fix the single up-front fetch meant such folders were left
+    live and the audit event under-reported. The loop terminates
+    because (a) any folder we already cleared is idempotent on
+    re-clear, (b) a malicious device that keeps adding folders would
+    eventually hit the relay's create-rate-limit (review §1.H1).
     """
-    root = vault.fetch_root_manifest(relay)
     total = 0
-    for pointer in root.get("remote_folders", []) or []:
-        if not isinstance(pointer, dict):
-            continue
-        folder_id = str(pointer.get("remote_folder_id") or "")
-        if not folder_id:
-            continue
-        _published, tombstoned = delete_folder_contents(
-            vault=vault,
-            relay=relay,
-            manifest={},
-            remote_folder_id=folder_id,
-            path_prefix="",
-            author_device_id=author_device_id,
-            deleted_at=deleted_at,
+    seen_folders: set[str] = set()
+    max_passes = 8  # defensive cap; in practice 1-2 passes suffice
+    for pass_index in range(max_passes):
+        root = vault.fetch_root_manifest(relay)
+        new_folders: list[str] = []
+        for pointer in root.get("remote_folders", []) or []:
+            if not isinstance(pointer, dict):
+                continue
+            folder_id = str(pointer.get("remote_folder_id") or "")
+            if not folder_id or folder_id in seen_folders:
+                continue
+            new_folders.append(folder_id)
+        if not new_folders:
+            break
+        for folder_id in new_folders:
+            seen_folders.add(folder_id)
+            _published, tombstoned = delete_folder_contents(
+                vault=vault,
+                relay=relay,
+                manifest={},
+                remote_folder_id=folder_id,
+                path_prefix="",
+                author_device_id=author_device_id,
+                deleted_at=deleted_at,
+            )
+            total += len(tombstoned)
+    else:
+        # Loop hit the defensive cap. Log so an operator can spot a
+        # device that's racing the clear by spamming folder creates.
+        log.warning(
+            "vault.vault.clear_pass_cap_hit folders_seen=%d cap=%d",
+            len(seen_folders), max_passes,
         )
-        total += len(tombstoned)
     log.info(
-        "vault.vault.cleared total_tombstoned=%d author=%s",
-        total, author_device_id,
+        "vault.vault.cleared total_tombstoned=%d folders=%d author=%s",
+        total, len(seen_folders), author_device_id,
     )
     return total
 

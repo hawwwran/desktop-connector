@@ -606,7 +606,8 @@ relay log (filenames are local-only).
 | `vault.upload.cas_retry` | desktop | info | `attempt`, `path`, `shard_conflict`, `root_conflict` | Phase H — single-version upload shard-with-root CAS retry after 409 (server inlined the conflicting shard / root envelope) |
 | `vault.upload.completed` | desktop | info | `vault`, `revision`, `path` | A single-file upload completed (post-publish) |
 | `vault.usage.malformed_chunk_size_skipped` | desktop | warning | `chunk_id` (truncated) | F-515 — a manifest chunk had no usable `ciphertext_size`; usage rendered as 0 B for it |
-| `vault.vault.cleared` | desktop | info | `total_tombstoned`, `author` | T14.2 whole-vault bulk-soft-delete published |
+| `vault.vault.clear_pass_cap_hit` | desktop | warning | `folders_seen`, `cap` | Review §4.H3 — clear_vault hit its defensive 8-pass cap. A concurrent device is spamming folder creates faster than the clear can tombstone them; operator should investigate |
+| `vault.vault.cleared` | desktop | info | `total_tombstoned`, `folders`, `author` | T14.2 whole-vault bulk-soft-delete published (folder count added for review §4.H3 — the loop now re-fetches root per pass to catch concurrent folder creates) |
 | `vault.vault_access_secret.encode` | desktop | info | — | Access-secret encoding helper invoked |
 
 ---

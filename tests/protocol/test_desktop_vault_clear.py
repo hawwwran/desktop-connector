@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _paths import ensure_desktop_on_path  # noqa: E402
@@ -21,6 +22,69 @@ from src.vault.ops.clear import (  # noqa: E402
     confirm_folder_clear_text_matches,
     confirm_vault_clear_text_matches,
 )
+
+
+class ClearVaultLoopUntilStableTests(unittest.TestCase):
+    """Review §4.H3: ``clear_vault`` must re-fetch the root between
+    passes so a folder added by a concurrent device mid-clear still
+    gets tombstoned. Pre-fix the up-front single fetch left such
+    folders live and the audit event under-reported."""
+
+    def test_clear_vault_picks_up_folder_added_during_clear(self) -> None:
+        from src.vault.ops.clear import clear_vault
+
+        class _FakeVault:
+            def __init__(self, fetches):
+                self._fetches = list(fetches)
+                self.vault_id = "ABCD2345WXYZ"
+
+            def fetch_root_manifest(self, relay):
+                if not self._fetches:
+                    return {"remote_folders": []}
+                return self._fetches.pop(0)
+
+        cleared = []
+
+        def fake_delete_folder_contents(*, vault, relay, manifest,
+                                         remote_folder_id, path_prefix,
+                                         author_device_id, deleted_at):
+            cleared.append(remote_folder_id)
+            return ({}, [f"{remote_folder_id}/file-{i}.txt" for i in range(3)])
+
+        # Pass 1: root has folders A + B. Pass 2: root has A + B + C
+        # (C was added by a concurrent device while we were clearing
+        # A and B). Pass 3 reads stable → exits.
+        fakes = [
+            {"remote_folders": [
+                {"remote_folder_id": "rf_A"},
+                {"remote_folder_id": "rf_B"},
+            ]},
+            {"remote_folders": [
+                {"remote_folder_id": "rf_A"},
+                {"remote_folder_id": "rf_B"},
+                {"remote_folder_id": "rf_C"},
+            ]},
+            {"remote_folders": [
+                {"remote_folder_id": "rf_A"},
+                {"remote_folder_id": "rf_B"},
+                {"remote_folder_id": "rf_C"},
+            ]},
+        ]
+        vault = _FakeVault(fakes)
+        with mock.patch(
+            "src.vault.ops.clear.delete_folder_contents",
+            side_effect=fake_delete_folder_contents,
+        ):
+            total = clear_vault(
+                vault=vault, relay=object(),
+                author_device_id="dev",
+                deleted_at="2026-05-17T00:00:00.000Z",
+            )
+
+        # All three folders cleared exactly once each (idempotency on
+        # already-cleared folders via the seen_folders set).
+        self.assertEqual(sorted(cleared), ["rf_A", "rf_B", "rf_C"])
+        self.assertEqual(total, 9)  # 3 files × 3 folders
 
 
 class ConfirmTextTests(unittest.TestCase):
