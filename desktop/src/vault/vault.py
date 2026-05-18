@@ -52,6 +52,7 @@ from .crypto import (
     VaultCrypto,
     aead_decrypt,
     aead_encrypt,
+    assert_supported_format_version,
     build_header_aad,
     build_header_envelope,
     build_recovery_aad,
@@ -541,10 +542,9 @@ class Vault(RemoteFoldersMixin):
         # inline parse so the two paths stay byte-aligned.
         if len(envelope_bytes) < 1 + 12 + 8 + 24 + 16:
             raise ValueError("header envelope too short")
-        if envelope_bytes[0] != 1:
-            raise ValueError(
-                f"vault_format_version_unsupported: header format_version={envelope_bytes[0]}"
-            )
+        # Review §2.M2 — typed exception so callers can ``except
+        # VaultFormatVersionUnsupported`` instead of substring-grepping.
+        assert_supported_format_version(envelope_bytes, kind="header")
         header_revision = int.from_bytes(envelope_bytes[13:21], "big")
         nonce = envelope_bytes[21:21 + 24]
         header_ct = envelope_bytes[21 + 24:]
@@ -603,10 +603,8 @@ class Vault(RemoteFoldersMixin):
             raise ValueError("vault is closed")
         if len(envelope_bytes) < 85 + 16:
             raise ValueError("root envelope too short")
-        if envelope_bytes[0] != 1:
-            raise ValueError(
-                f"vault_format_version_unsupported: root format_version={envelope_bytes[0]}"
-            )
+        # Review §2.M2 — typed exception.
+        assert_supported_format_version(envelope_bytes, kind="root")
         # Review §2.M1: defense-in-depth — explicit envelope-prefix
         # vault_id check (mirroring fetch_header_plaintext). AEAD alone
         # would catch a vault_id mismatch via tag failure, but the
@@ -733,10 +731,8 @@ class Vault(RemoteFoldersMixin):
             raise ValueError("vault is closed")
         if len(envelope_bytes) < 115 + 16:
             raise ValueError("shard envelope too short")
-        if envelope_bytes[0] != 1:
-            raise ValueError(
-                f"vault_format_version_unsupported: shard format_version={envelope_bytes[0]}"
-            )
+        # Review §2.M2 — typed exception.
+        assert_supported_format_version(envelope_bytes, kind="shard")
         # Review §2.M1: defense-in-depth — explicit envelope-prefix
         # vault_id check before the AAD-bound AEAD decrypt. Mirrors
         # decrypt_root_envelope. AEAD would catch the mismatch via tag

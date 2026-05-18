@@ -56,10 +56,10 @@ def _parse_manifest_envelope_prefix(
     # F-C13 / spec §7: stop before AEAD when the format version is
     # unknown. v2 envelopes must surface as upgrade-prompt material,
     # not silent ciphertext-failure.
-    if envelope[0] != 1:
-        raise ValueError(
-            f"vault_format_version_unsupported: manifest format_version={envelope[0]}"
-        )
+    # Review §2.M2 — typed exception so callers can
+    # ``except VaultFormatVersionUnsupported``.
+    from ..crypto import assert_supported_format_version as _asfv
+    _asfv(envelope, kind="manifest")
     envelope_vault_id = envelope[1:13].decode("ascii")
     expected_vault_id = normalize_vault_id(vault.vault_id)
     if envelope_vault_id != expected_vault_id:

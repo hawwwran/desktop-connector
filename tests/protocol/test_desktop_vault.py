@@ -255,6 +255,33 @@ class DecryptEnvelopeVaultIdSanityTests(unittest.TestCase):
         finally:
             vault.close()
 
+    def test_format_version_check_raises_typed_exception(self) -> None:
+        """Review §2.M2 — inline ``envelope[0] != 1`` checks were
+        replaced with ``assert_supported_format_version`` so callers can
+        ``except VaultFormatVersionUnsupported`` instead of
+        substring-grepping a ``ValueError`` message.
+        """
+        from src.vault.crypto import VaultFormatVersionUnsupported
+
+        relay = FakeRelay()
+        vault = Vault.create_new(
+            relay, recovery_passphrase=self.PASSPHRASE,
+            argon_memory_kib=self.ARGON_KIB, argon_iterations=self.ARGON_ITERS,
+        )
+        try:
+            # Take a real root envelope, flip its format-version byte
+            # to 0x02, and feed it back through decrypt_root_envelope.
+            real_envelope = bytearray(
+                relay.vaults[vault.vault_id]["manifest_envelope_bytes"]
+            )
+            real_envelope[0] = 0x02
+            with self.assertRaises(VaultFormatVersionUnsupported) as ctx:
+                vault.decrypt_root_envelope(bytes(real_envelope))
+            self.assertEqual(ctx.exception.envelope_kind, "root")
+            self.assertEqual(ctx.exception.observed_version, 0x02)
+        finally:
+            vault.close()
+
     def test_decrypt_shard_envelope_rejects_wrong_vault_id(self) -> None:
         relay = FakeRelay()
         vault = Vault.create_new(
