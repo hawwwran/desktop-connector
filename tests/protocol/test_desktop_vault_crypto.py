@@ -346,6 +346,61 @@ class VaultCryptoProtocolTests(unittest.TestCase):
         self.assertIsInstance(fake, VaultCrypto)
 
 
+class RecoveryEnvelopeRoundTripTests(unittest.TestCase):
+    """Review §2.M3 — the §12.4 recovery envelope wire form had no
+    parse counterpart pre-fix, so the byte form was reachable only
+    via test vectors. ``parse_recovery_envelope`` closes the loop so
+    the format is end-to-end round-trippable in code: build → parse →
+    fields match.
+    """
+
+    def test_build_then_parse_round_trip(self) -> None:
+        from src.vault.crypto import (
+            RECOVERY_ENVELOPE_TOTAL_LEN, VaultFormatVersionUnsupported,
+            build_recovery_envelope, parse_recovery_envelope,
+        )
+        vault_id = "ABCD2345WXYZ"
+        envelope_id = "rk_v1_aaaaaaaaaaaaaaaaaaaaaaaa"
+        argon_salt = bytes(range(16))
+        nonce = bytes(range(24))
+        ct = bytes(range(48))  # 32-byte master_key + 16-byte tag
+
+        envelope = build_recovery_envelope(
+            vault_id=vault_id, envelope_id=envelope_id,
+            argon_salt=argon_salt, nonce=nonce, aead_ciphertext_and_tag=ct,
+        )
+        self.assertEqual(len(envelope), RECOVERY_ENVELOPE_TOTAL_LEN)
+
+        parsed = parse_recovery_envelope(envelope)
+        self.assertEqual(parsed["format_version"], 1)
+        self.assertEqual(parsed["vault_id"], vault_id)
+        self.assertEqual(parsed["envelope_id"], envelope_id)
+        self.assertEqual(parsed["argon_salt"], argon_salt)
+        self.assertEqual(parsed["nonce"], nonce)
+        self.assertEqual(parsed["aead_ciphertext_and_tag"], ct)
+
+    def test_parse_rejects_v2_envelope(self) -> None:
+        from src.vault.crypto import (
+            VaultFormatVersionUnsupported, build_recovery_envelope,
+            parse_recovery_envelope,
+        )
+        envelope = bytearray(build_recovery_envelope(
+            vault_id="ABCD2345WXYZ",
+            envelope_id="rk_v1_" + "a" * 24,
+            argon_salt=bytes(16), nonce=bytes(24),
+            aead_ciphertext_and_tag=bytes(48),
+        ))
+        envelope[0] = 0x02
+        with self.assertRaises(VaultFormatVersionUnsupported) as ctx:
+            parse_recovery_envelope(bytes(envelope))
+        self.assertEqual(ctx.exception.envelope_kind, "recovery")
+
+    def test_parse_rejects_wrong_length(self) -> None:
+        from src.vault.crypto import parse_recovery_envelope
+        with self.assertRaises(ValueError):
+            parse_recovery_envelope(b"\x01" + bytes(50))
+
+
 class CrossVaultChunkReplayTests(unittest.TestCase):
     """Review §7.H1: cross-vault chunk replay attacks.
 

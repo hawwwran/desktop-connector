@@ -62,7 +62,7 @@ import base64
 import hashlib
 import hmac
 import unicodedata
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import nacl.bindings
 import nacl.pwhash.argon2id
@@ -849,6 +849,11 @@ def derive_recovery_wrap_key(
     return hkdf.derive(recovery_secret)
 
 
+_RECOVERY_ENVELOPE_FIXED_PREFIX_LEN = 1 + 12 + 30 + ARGON2ID_SALT_BYTES + XCHACHA20_NONCE_BYTES
+_RECOVERY_CIPHERTEXT_PLUS_TAG_LEN = 32 + POLY1305_TAG_BYTES  # 32-byte master_key + tag = 48
+RECOVERY_ENVELOPE_TOTAL_LEN = _RECOVERY_ENVELOPE_FIXED_PREFIX_LEN + _RECOVERY_CIPHERTEXT_PLUS_TAG_LEN
+
+
 def build_recovery_envelope(
     *,
     vault_id: str,
@@ -878,6 +883,48 @@ def build_recovery_envelope(
         + nonce
         + aead_ciphertext_and_tag
     )
+
+
+def parse_recovery_envelope(envelope_bytes: bytes) -> dict[str, Any]:
+    """Parse a recovery envelope (formats §12.4) into its discrete fields.
+
+    Review §2.M3 — pre-fix the §12.4 wire form was build-only:
+    ``build_recovery_envelope`` had no parse counterpart, so the
+    cross-runtime byte format was effectively unreachable end-to-end
+    (the production unwrap path consumed discrete JSON fields from
+    inside the header). Adding the reader closes the loop so byte-form
+    envelopes are round-trippable in code, not just in test vectors.
+
+    Returns ``{vault_id, envelope_id, argon_salt, nonce,
+    aead_ciphertext_and_tag, format_version}``. Raises
+    :class:`VaultFormatVersionUnsupported` on a v2+ envelope and
+    ``ValueError`` for shape problems.
+    """
+    if len(envelope_bytes) != RECOVERY_ENVELOPE_TOTAL_LEN:
+        raise ValueError(
+            f"recovery envelope must be {RECOVERY_ENVELOPE_TOTAL_LEN} bytes; "
+            f"got {len(envelope_bytes)}"
+        )
+    assert_supported_format_version(envelope_bytes, kind="recovery")
+    format_version = envelope_bytes[0]
+    cursor = 1
+    vault_id = envelope_bytes[cursor:cursor + 12].decode("ascii")
+    cursor += 12
+    envelope_id = envelope_bytes[cursor:cursor + 30].decode("ascii")
+    cursor += 30
+    argon_salt = envelope_bytes[cursor:cursor + ARGON2ID_SALT_BYTES]
+    cursor += ARGON2ID_SALT_BYTES
+    nonce = envelope_bytes[cursor:cursor + XCHACHA20_NONCE_BYTES]
+    cursor += XCHACHA20_NONCE_BYTES
+    aead_ciphertext_and_tag = envelope_bytes[cursor:]
+    return {
+        "format_version": format_version,
+        "vault_id": vault_id,
+        "envelope_id": envelope_id,
+        "argon_salt": argon_salt,
+        "nonce": nonce,
+        "aead_ciphertext_and_tag": aead_ciphertext_and_tag,
+    }
 
 
 # ---------------------------------------------------------------- Device grant (formats §6.6, §13, §14)
@@ -1140,6 +1187,8 @@ __all__ = [
     "build_manifest_envelope",
     "build_recovery_aad",
     "build_recovery_envelope",
+    "parse_recovery_envelope",
+    "RECOVERY_ENVELOPE_TOTAL_LEN",
     "build_root_aad",
     "build_root_envelope",
     "build_shard_aad",
