@@ -37,20 +37,15 @@ class ManifestVault(Protocol):
     def master_key(self) -> bytes | None: ...
 
 
-def decrypt_manifest(vault: ManifestVault, ciphertext: bytes | bytearray) -> dict[str, Any]:
-    """Decrypt one manifest-shaped envelope with ``vault``'s in-memory key.
+def _parse_manifest_envelope_prefix(
+    vault: ManifestVault, ciphertext: bytes | bytearray,
+) -> tuple[bytes, str, int, int, str, bytes, bytes]:
+    """Parse the shared 85-byte deterministic prefix of root + legacy
+    manifest envelopes. Returns ``(envelope_bytes, expected_vault_id,
+    revision, parent_revision, author_device_id, nonce, encrypted_body)``.
 
-    Phase D: ``Vault.prepare_new`` now writes a **root** envelope
-    (``dc-vault-root-v1`` schema) into ``_manifest_ciphertext`` and
-    ``Vault.fetch_manifest`` (legacy compat path) still receives a
-    *legacy* manifest envelope (``dc-vault-manifest-v1`` schema) from
-    fake test relays. Both envelope kinds share the byte-shape of
-    their 85-byte deterministic prefix, so this helper tries root
-    decryption first and falls back to manifest decryption on AEAD
-    failure. The returned dict is always in the legacy *unified*
-    shape — root decrypts get passed through
-    ``assemble_unified_manifest`` with an empty shard map, mirroring
-    what callers used to see.
+    Review §2.M4 — extracted so the root-only and legacy-bundle paths
+    can call it without duplicating the shape checks.
     """
     if vault.master_key is None:
         raise ValueError("vault is closed")
@@ -75,13 +70,65 @@ def decrypt_manifest(vault: ManifestVault, ciphertext: bytes | bytearray) -> dic
     author_device_id = envelope[29:61].decode("ascii")
     nonce = envelope[61:85]
     encrypted_body = envelope[85:]
+    return (
+        envelope, expected_vault_id, revision, parent_revision,
+        author_device_id, nonce, encrypted_body,
+    )
 
-    # Try the root subkey + AAD first. New vaults (Phase D+) produce
-    # root envelopes; legacy fake-relay tests store unified-manifest
-    # envelopes. The two schemas use disjoint HKDF labels + disjoint
-    # AAD prefixes ("dc-vault-root-v1" vs "dc-vault-manifest-v1"), so
-    # a wrong-kind decrypt fails closed with a CryptoError that we
-    # catch and retry under the manifest subkey.
+
+def decrypt_manifest(vault: ManifestVault, ciphertext: bytes | bytearray) -> dict[str, Any]:
+    """Decrypt a root envelope (Phase D+, ``dc-vault-root-v1`` schema) and
+    return its plaintext lifted into the legacy *unified* shape via
+    ``assemble_unified_manifest`` with an empty shard map.
+
+    Review §2.M4: split from the pre-fix combined root-or-legacy path.
+    Production callers (``Vault.decrypt_manifest`` over relay-fetched
+    bytes) only ever see root envelopes after sharding shipped — the
+    silent legacy fallback was a maintenance trap. Bundle-decrypt
+    callers (the import wizard) now use
+    :func:`decrypt_bundle_manifest_envelope` explicitly so the legacy
+    HKDF label is reachable only via a deliberately-named path.
+    """
+    (_envelope, expected_vault_id, revision, parent_revision,
+     author_device_id, nonce, encrypted_body) = _parse_manifest_envelope_prefix(
+        vault, ciphertext,
+    )
+    subkey = derive_subkey("dc-vault-v1/root", vault.master_key)
+    aad = build_root_aad(
+        vault_id=expected_vault_id,
+        root_revision=revision,
+        parent_root_revision=parent_revision,
+        author_device_id=author_device_id,
+    )
+    plaintext = aead_decrypt(encrypted_body, subkey, nonce, aad)
+    root = normalize_root_manifest_plaintext(json.loads(plaintext.decode("utf-8")))
+    return assemble_unified_manifest(root, {})
+
+
+def decrypt_bundle_manifest_envelope(
+    vault: ManifestVault, ciphertext: bytes | bytearray,
+) -> dict[str, Any]:
+    """Decrypt the legacy unified-manifest envelope embedded inside
+    export bundles (``dc-vault-manifest-v1`` schema, HKDF label
+    ``dc-vault-v1/manifest``).
+
+    Review §2.M4: the export bundle's RECORD_TYPE_MANIFEST carries the
+    pre-sharding unified-manifest shape — pre-fix the import path
+    silently fell back to this label from ``decrypt_manifest`` after a
+    root decrypt failed, which made it look like ``decrypt_manifest``
+    accepted two shapes when it really shouldn't. Splitting the path
+    makes the legacy compat surface explicit; export bundles are the
+    *only* place this label appears in the production codebase.
+
+    Tries the root subkey + AAD first (a future bundle that carries a
+    root envelope still works) and falls back to the legacy label only
+    on AEAD failure.
+    """
+    (_envelope, expected_vault_id, revision, parent_revision,
+     author_device_id, nonce, encrypted_body) = _parse_manifest_envelope_prefix(
+        vault, ciphertext,
+    )
+
     import nacl.exceptions  # local import to avoid touching module head
     try:
         subkey = derive_subkey("dc-vault-v1/root", vault.master_key)

@@ -369,5 +369,87 @@ class BrowserIndexTests(unittest.TestCase):
         self.assertEqual(bare, via_index)
 
 
+class DecryptManifestSplitTests(unittest.TestCase):
+    """Review §2.M4 — ``decrypt_manifest`` is now root-only; the
+    legacy ``dc-vault-v1/manifest`` HKDF fallback lives in the
+    explicitly-named ``decrypt_bundle_manifest_envelope`` and is the
+    only path that reaches the legacy label. Pre-fix
+    ``decrypt_manifest`` silently fell back to the legacy label on
+    AEAD failure, which conflated relay-fetched and bundle-decoded
+    envelopes — confusing and a maintenance trap.
+    """
+
+    def test_decrypt_manifest_does_not_fall_back_to_legacy_label(self) -> None:
+        import secrets
+        from src.vault.crypto import (
+            aead_encrypt, build_manifest_aad, build_manifest_envelope,
+            derive_subkey, normalize_vault_id,
+        )
+        from src.vault.manifest import (
+            canonical_manifest_json, make_manifest, make_remote_folder,
+            normalize_manifest_plaintext,
+        )
+        from src.vault.ui.browser_model import (
+            decrypt_bundle_manifest_envelope, decrypt_manifest,
+        )
+        import nacl.exceptions
+
+        master_key = bytes([0x42] * 32)
+
+        class _FakeVault:
+            def __init__(self, master_key: bytes) -> None:
+                self.master_key = master_key
+                self.vault_id = "ABCD2345WXYZ"
+
+        manifest = make_manifest(
+            vault_id="ABCD2345WXYZ", revision=1, parent_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id="a" * 32,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id="rf_v1_" + "a" * 24,
+                    display_name_enc="Documents",
+                    created_at="2026-05-04T12:00:00.000Z",
+                    created_by_device_id="a" * 32,
+                    entries=[],
+                )
+            ],
+        )
+        # Build a legacy (dc-vault-manifest-v1) envelope under the
+        # legacy HKDF label — what older export bundles carried.
+        normalized = normalize_manifest_plaintext(manifest)
+        plaintext = canonical_manifest_json(normalized)
+        subkey = derive_subkey("dc-vault-v1/manifest", master_key)
+        nonce = secrets.token_bytes(24)
+        aad = build_manifest_aad(
+            vault_id=str(normalized["vault_id"]),
+            revision=int(normalized["revision"]),
+            parent_revision=int(normalized["parent_revision"]),
+            author_device_id=str(normalized["author_device_id"]),
+        )
+        ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+        legacy_envelope = build_manifest_envelope(
+            vault_id=str(normalized["vault_id"]),
+            revision=int(normalized["revision"]),
+            parent_revision=int(normalized["parent_revision"]),
+            author_device_id=str(normalized["author_device_id"]),
+            nonce=nonce,
+            aead_ciphertext_and_tag=ciphertext,
+        )
+
+        fake = _FakeVault(master_key)
+        # decrypt_manifest (root-only) must REFUSE the legacy envelope
+        # — the AEAD tag check fails since the root subkey + AAD
+        # differ from the legacy seal.
+        with self.assertRaises(nacl.exceptions.CryptoError):
+            decrypt_manifest(fake, legacy_envelope)
+
+        # decrypt_bundle_manifest_envelope is the explicitly-named
+        # legacy-compatible path; it must succeed on the same bytes.
+        out = decrypt_bundle_manifest_envelope(fake, legacy_envelope)
+        self.assertEqual(out["vault_id"], "ABCD2345WXYZ")
+        self.assertEqual(out["revision"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

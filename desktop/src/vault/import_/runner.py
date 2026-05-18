@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from ..binding.lifecycle import SyncCancelledError
-from ..ui.browser_model import decrypt_manifest as decrypt_manifest_envelope
+# Review §2.M4 — bundle decryption goes through the explicitly-named
+# helper that tries root first and falls back to the legacy
+# ``dc-vault-v1/manifest`` HKDF label only for pre-sharding export
+# bundles. ``decrypt_manifest`` in browser_model is now root-only;
+# silently passing it bundle bytes would AEAD-fail for legacy shapes.
+from ..ui.browser_model import (
+    decrypt_bundle_manifest_envelope as decrypt_manifest_envelope,
+)
 from ..crypto import normalize_vault_id
 from ..export.bundle import (
     BundleContents,
