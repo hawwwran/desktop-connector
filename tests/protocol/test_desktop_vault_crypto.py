@@ -346,5 +346,103 @@ class VaultCryptoProtocolTests(unittest.TestCase):
         self.assertIsInstance(fake, VaultCrypto)
 
 
+class CrossVaultChunkReplayTests(unittest.TestCase):
+    """Review §7.H1: cross-vault chunk replay attacks.
+
+    Threat model: an attacker who can read a chunk envelope from
+    vault A's relay (or one who steals a backup) must NOT be able to
+    decrypt that envelope under vault B's master key + AAD. The
+    AAD-binds-vault_id property is the entire security boundary
+    between two vaults that happen to live on the same relay.
+
+    Pre-fix the generic ``test_wrong_aad_fails_closed`` covered
+    "any wrong AAD fails" transitively, but no test was anchored on
+    the specific cross-vault scenario the spec calls out. This
+    file pins the explicit case so a future regression that
+    accidentally drops ``vault_id`` from the chunk AAD (or that
+    derives chunk_subkey from anything except the master key + the
+    chunk label) is caught here rather than silently widening the
+    blast radius from one vault to many.
+    """
+
+    PLAINTEXT = b"sensitive chunk bytes - never to leave vault A"
+
+    VAULT_A_ID = "AAAA2345WXYZ"
+    VAULT_B_ID = "BBBB2345WXYZ"
+    MASTER_KEY_A = bytes([0x42] * 32)
+    MASTER_KEY_B = bytes([0x99] * 32)
+
+    # 30-char base32-lower (file/folder/version ids)
+    FOLDER_ID = "rf_v1_" + "a" * 24
+    FILE_ID = "fi_v1_" + "b" * 24
+    VERSION_ID = "fv_v1_" + "c" * 24
+
+    NONCE = bytes.fromhex("00" * 24)
+    INDEX = 0
+    SIZE = len(PLAINTEXT)
+
+    def _encrypt_for(self, vault_id: str, master_key: bytes) -> bytes:
+        """Return a chunk envelope encrypted under (vault_id, master_key)."""
+        from src.vault.crypto import (
+            aead_encrypt, build_chunk_aad, build_chunk_envelope,
+            derive_subkey,
+        )
+        aad = build_chunk_aad(
+            vault_id, self.FOLDER_ID, self.FILE_ID, self.VERSION_ID,
+            self.INDEX, self.SIZE,
+        )
+        chunk_subkey = derive_subkey("dc-vault-v1/chunk", master_key)
+        ciphertext = aead_encrypt(self.PLAINTEXT, chunk_subkey, self.NONCE, aad)
+        return build_chunk_envelope(
+            nonce=self.NONCE, aead_ciphertext_and_tag=ciphertext,
+        )
+
+    def test_chunk_from_vault_a_does_not_decrypt_under_vault_b_master_key(self) -> None:
+        """An attacker who has master_key_B but a chunk encrypted under
+        master_key_A cannot recover the plaintext (subkey HKDF differs)."""
+        envelope_a = self._encrypt_for(self.VAULT_A_ID, self.MASTER_KEY_A)
+        # Parse the envelope back out — same shape the decrypt path sees.
+        nonce_back = envelope_a[:24]
+        ct_back = envelope_a[24:]
+        chunk_subkey_b = self._chunk_subkey(self.MASTER_KEY_B)
+        aad_a = self._aad(self.VAULT_A_ID)
+        with self.assertRaises(nacl.exceptions.CryptoError):
+            aead_decrypt(ct_back, chunk_subkey_b, nonce_back, aad_a)
+
+    def test_chunk_from_vault_a_does_not_decrypt_with_vault_b_aad(self) -> None:
+        """An attacker who somehow obtained master_key_A still can't
+        decrypt vault_A's chunk if they accidentally bind vault_B's id
+        into the AAD (defense against ``build_chunk_aad`` regressions
+        that drop the vault_id bind)."""
+        envelope_a = self._encrypt_for(self.VAULT_A_ID, self.MASTER_KEY_A)
+        nonce_back = envelope_a[:24]
+        ct_back = envelope_a[24:]
+        chunk_subkey_a = self._chunk_subkey(self.MASTER_KEY_A)
+        aad_b = self._aad(self.VAULT_B_ID)
+        with self.assertRaises(nacl.exceptions.CryptoError):
+            aead_decrypt(ct_back, chunk_subkey_a, nonce_back, aad_b)
+
+    def test_chunk_only_decrypts_with_its_own_vault_id_and_key(self) -> None:
+        """Positive control: with both master_key_A and vault_A id-AAD,
+        the original plaintext comes back. Anchors the negative cases."""
+        envelope_a = self._encrypt_for(self.VAULT_A_ID, self.MASTER_KEY_A)
+        nonce_back = envelope_a[:24]
+        ct_back = envelope_a[24:]
+        chunk_subkey_a = self._chunk_subkey(self.MASTER_KEY_A)
+        aad_a = self._aad(self.VAULT_A_ID)
+        recovered = aead_decrypt(ct_back, chunk_subkey_a, nonce_back, aad_a)
+        self.assertEqual(recovered, self.PLAINTEXT)
+
+    def _chunk_subkey(self, master_key: bytes) -> bytes:
+        return derive_subkey("dc-vault-v1/chunk", master_key)
+
+    def _aad(self, vault_id: str) -> bytes:
+        from src.vault.crypto import build_chunk_aad
+        return build_chunk_aad(
+            vault_id, self.FOLDER_ID, self.FILE_ID, self.VERSION_ID,
+            self.INDEX, self.SIZE,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

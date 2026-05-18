@@ -751,6 +751,151 @@ class VaultImportRunnerTests(unittest.TestCase):
             vault.close()
         self.assertEqual(preview_empty.chunks_already_on_relay, 0)
 
+    def test_open_bundle_for_preview_does_not_write_to_relay(self) -> None:
+        """Review §7.H3: a preview is a read-only operation. The
+        wizard's Open Bundle → Preview round-trip must NEVER
+        produce a put_chunk / publish_shard_with_root call against
+        the relay; only the ``batch_head_chunks`` head-count is
+        allowed. Pre-fix the existing preview tests verified shape
+        but didn't pass a RecordingRelay so a future refactor that
+        accidentally invoked an upload during preview wouldn't be
+        caught here. Memory ``feedback_no_fake_tests`` applies."""
+        from src.vault import Vault
+        from src.vault.crypto import DefaultVaultCrypto
+        from src.vault.export.bundle import write_export_bundle
+        from src.vault.import_.runner import open_bundle_for_preview
+        from src.vault.upload import upload_file
+        from tests.protocol.test_desktop_vault_manifest import (
+            AUTHOR as MASTER_AUTHOR,
+            DOCS_ID as MASTER_DOCS_ID,
+            MASTER_KEY,
+            VAULT_ID as MASTER_VAULT_ID,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay,
+            seed_sharded_state_from_manifest,
+        )
+
+        VAULT_ACCESS_SECRET = "vault-secret"
+
+        def make_vault() -> Vault:
+            return Vault(
+                vault_id=MASTER_VAULT_ID, master_key=MASTER_KEY,
+                recovery_secret=None, vault_access_secret=VAULT_ACCESS_SECRET,
+                header_revision=1, manifest_revision=1,
+                manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+            )
+
+        def encrypt_manifest_envelope(manifest: dict) -> bytes:
+            from src.vault.crypto import (
+                aead_encrypt, build_manifest_aad,
+                build_manifest_envelope, derive_subkey,
+            )
+            from src.vault.manifest import (
+                canonical_manifest_json, normalize_manifest_plaintext,
+            )
+            import secrets as _secrets
+            normalized = normalize_manifest_plaintext(manifest)
+            plaintext = canonical_manifest_json(normalized)
+            subkey = derive_subkey("dc-vault-v1/manifest", bytes(MASTER_KEY))
+            nonce = _secrets.token_bytes(24)
+            aad = build_manifest_aad(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+            )
+            ciphertext = aead_encrypt(plaintext, subkey, nonce, aad)
+            return build_manifest_envelope(
+                vault_id=str(normalized["vault_id"]),
+                revision=int(normalized["revision"]),
+                parent_revision=int(normalized["parent_revision"]),
+                author_device_id=str(normalized["author_device_id"]),
+                nonce=nonce,
+                aead_ciphertext_and_tag=ciphertext,
+            )
+
+        empty = make_manifest(
+            vault_id=MASTER_VAULT_ID, revision=1, parent_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=MASTER_AUTHOR,
+            remote_folders=[
+                make_remote_folder(
+                    remote_folder_id=MASTER_DOCS_ID,
+                    display_name_enc="Documents",
+                    created_at="2026-05-01T10:00:00.000Z",
+                    created_by_device_id=MASTER_AUTHOR,
+                    entries=[],
+                )
+            ],
+        )
+
+        export_relay = FakeUploadRelay()
+        vault = make_vault()
+        try:
+            seed_sharded_state_from_manifest(vault, export_relay, empty)
+            local = self.tmpdir / "exported.txt"
+            local.write_bytes(b"some bytes")
+            uploaded = upload_file(
+                vault=vault, relay=export_relay, manifest=empty,
+                local_path=local, remote_folder_id=MASTER_DOCS_ID,
+                remote_path="exported.txt", author_device_id=MASTER_AUTHOR,
+            )
+            bundle_path = self.tmpdir / "vault.dcvault"
+            write_export_bundle(
+                vault=vault, relay=export_relay,
+                manifest_envelope=encrypt_manifest_envelope(uploaded.manifest),
+                manifest_plaintext=uploaded.manifest,
+                output_path=bundle_path,
+                passphrase="bundle-passphrase",
+                argon_memory_kib=8192, argon_iterations=2,
+                genesis_fingerprint="aa" * 16,
+            )
+        finally:
+            vault.close()
+
+        # Fresh recording relay — empty. The preview must NOT mutate it.
+        recording_relay = FakeUploadRelay()
+        vault = make_vault()
+        try:
+            seed_sharded_state_from_manifest(vault, recording_relay, empty)
+            # Reset counters after the seed so we only see preview activity.
+            put_calls_before = list(recording_relay.put_calls)
+            published_shards_before = list(recording_relay.published_shards)
+            published_roots_before = list(recording_relay.published_roots)
+            chunks_before = dict(recording_relay.chunks)
+            shard_with_root_puts_before = recording_relay.shard_with_root_puts
+            batch_heads_before = len(recording_relay.batch_head_calls)
+
+            open_bundle_for_preview(
+                vault=vault, relay=recording_relay,
+                bundle_path=bundle_path,
+                passphrase="bundle-passphrase",
+                active_manifest=empty,
+                active_genesis_fingerprint="aa" * 16,
+                bundle_genesis_fingerprint="aa" * 16,
+            )
+        finally:
+            vault.close()
+
+        # The head call is the ONLY relay interaction allowed during preview.
+        self.assertGreater(
+            len(recording_relay.batch_head_calls), batch_heads_before,
+            "preview must call batch_head_chunks to compute chunks_already_on_relay",
+        )
+        # Every write surface stays untouched.
+        self.assertEqual(recording_relay.put_calls, put_calls_before,
+                         "preview must not put_chunk")
+        self.assertEqual(recording_relay.chunks, chunks_before,
+                         "preview must not store chunk bytes")
+        self.assertEqual(recording_relay.published_shards, published_shards_before,
+                         "preview must not publish shards")
+        self.assertEqual(recording_relay.published_roots, published_roots_before,
+                         "preview must not publish roots")
+        self.assertEqual(recording_relay.shard_with_root_puts,
+                         shard_with_root_puts_before,
+                         "preview must not call publish_shard_with_root")
+
     def test_run_import_creates_root_pointers_for_bundle_only_folders(self) -> None:
         """Phase H step 7c crash-fix: importing a bundle whose folder set
         is a superset of the active vault's must auto-create the missing

@@ -496,6 +496,19 @@ final class VaultCryptoVectorsTest extends TestCase
             $expected['fingerprint_b64'], $fingerprint,
             "{$name}: fingerprint mismatch — PHP/Python parity break"
         );
+
+        // Review §7.H2: optional ``diverges_from_b64`` field pins that
+        // the computed fingerprint MUST NOT equal the named base64
+        // fingerprint. Used by the "different-master-key" /
+        // "different-plaintext" negative cases to pin the HMAC keying.
+        if (isset($expected['diverges_from_b64'])) {
+            self::assertNotSame(
+                $expected['diverges_from_b64'], $fingerprint,
+                "{$name}: fingerprint must differ from "
+                . "{$expected['diverges_from_b64']} "
+                . "(HMAC keying / plaintext binding regression)"
+            );
+        }
     }
 
     // ---------------------------------------------------------------- export bundle

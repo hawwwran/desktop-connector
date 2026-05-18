@@ -22,5 +22,31 @@
       "subkey": "515d3191fa21e9539a5966a9da97f7af73e73e904858271119b974927809dffd",
       "fingerprint_b64": "YCmW8gBSat09KRJNevcslA6KqDL+sXUc0ZtRI0CuzZc="
     }
+  },
+  {
+    "name": "content-fingerprint-v1-different-master-key-diverges",
+    "description": "Review §7.H2 — same plaintext_sha256 as the happy-path case but a different vault_master_key. The HMAC keying is the entire point: a different master_key MUST produce a different fingerprint (and a different subkey). diverges_from_b64 pins the inequality against the happy-path fingerprint so a future regression that ignored the master_key gets caught here in the cross-runtime parity gate.",
+    "inputs": {
+      "vault_master_key": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "plaintext_sha256": "a7d9485441fe31a3290992bbf439f4735c65b08904379bc0c490d6cb8758e9b4"
+    },
+    "expected": {
+      "subkey": "77c7ce5acdbf783677a80ef74011712867caf0ea13bb4eb8bfc6d3879c4b77a1",
+      "fingerprint_b64": "SNdu0lxz6jx4jknk+X9DUH0utS8phikNqx5WT/SSr3Y=",
+      "diverges_from_b64": "EpEQtDHap4nA5WvCIORKXDHC3n9YnjQ1Okm+pojAFOM="
+    }
+  },
+  {
+    "name": "content-fingerprint-v1-different-plaintext-diverges",
+    "description": "Review §7.H2 — same vault_master_key as the happy-path case but a different plaintext_sha256. The MAC tag MUST mix the plaintext_sha256; without that, two distinct files would collide and §8.4 dedup decisions would be silently wrong.",
+    "inputs": {
+      "vault_master_key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "plaintext_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "expected": {
+      "subkey": "515d3191fa21e9539a5966a9da97f7af73e73e904858271119b974927809dffd",
+      "fingerprint_b64": "+4qxnvlRqC0+8j0auQ1KlYQhMf8o7n8JPP5BFYK0wlg=",
+      "diverges_from_b64": "EpEQtDHap4nA5WvCIORKXDHC3n9YnjQ1Okm+pojAFOM="
+    }
   }
 ]

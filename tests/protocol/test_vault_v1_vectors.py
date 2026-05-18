@@ -526,7 +526,17 @@ def _run_export_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
 
 
 def _run_content_fingerprint_case(test: unittest.TestCase, case: dict[str, Any]) -> None:
-    """Verify a content_fingerprint_v1.json case (formats §10.2)."""
+    """Verify a content_fingerprint_v1.json case (formats §10.2).
+
+    Review §7.H2: optional ``expected.diverges_from_b64`` field pins
+    that the computed fingerprint MUST NOT equal the named
+    base64-encoded fingerprint. Used by the
+    "different-master-key" / "different-plaintext" negative cases to
+    pin that the HMAC keying actually mixes both inputs — a future
+    regression that drops either would silently widen the dedup
+    collision surface, which a single positive-case vector cannot
+    catch.
+    """
     inputs = case["inputs"]
     expected = case["expected"]
     master_key = bytes.fromhex(inputs["vault_master_key"])
@@ -537,6 +547,14 @@ def _run_content_fingerprint_case(test: unittest.TestCase, case: dict[str, Any])
 
     test.assertEqual(subkey.hex(), expected["subkey"])
     test.assertEqual(fingerprint, expected["fingerprint_b64"])
+
+    diverges = expected.get("diverges_from_b64")
+    if diverges is not None:
+        test.assertNotEqual(
+            fingerprint, diverges,
+            f"{case['name']}: fingerprint must differ from {diverges!r} "
+            "(HMAC keying / plaintext binding regression)",
+        )
 
 
 # Map filename → runner. Every primitive file has a runner now; T2.4
@@ -641,6 +659,10 @@ class VaultV1VectorsTests(unittest.TestCase):
     EXPECTED_CONTENT_FINGERPRINT_V1_CASES = frozenset({
         "content-fingerprint-v1-happy-path",
         "content-fingerprint-v1-empty-plaintext",
+        # Review §7.H2 — divergence negatives pin that the HMAC keying
+        # mixes both master_key and plaintext_sha256.
+        "content-fingerprint-v1-different-master-key-diverges",
+        "content-fingerprint-v1-different-plaintext-diverges",
     })
 
     def _assert_case_names(

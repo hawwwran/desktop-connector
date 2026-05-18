@@ -310,6 +310,87 @@ class VaultExportVerifierTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "vault_export_unknown_format")
 
+    def test_chunk_record_reorder_fails_closed(self) -> None:
+        """Review §7.H4: swapping two chunk records' on-disk positions
+        must break decryption. Spec §16: each record's ``record_index``
+        is bound into its AAD via ``build_export_record_aad``, so a
+        record placed at the wrong index AEAD-fails its tag check;
+        the footer's hash chain (which is a sequential digest over
+        all records in order) also drifts. Either failure surfaces as
+        ``vault_export_tampered``.
+
+        Pre-fix the existing tamper tests covered single-byte
+        flips + truncation, which already triggered the AEAD or
+        hash-chain guards. Reorder is a logically distinct attack
+        vector — an adversary swaps two encrypted chunk blobs in the
+        hope that one chunk's plaintext gets misattributed to the
+        other path. Pin it here so a future refactor that removes
+        ``record_index`` from the AAD silently widens the threat
+        surface."""
+        manifest, relay = _populated_relay_with(self.tmpdir, {
+            "a.txt": b"AAAAAAAAAAAAAAAA-record-zero",
+            "b.txt": b"BBBBBBBBBBBBBBBB-record-one-distinct-bytes",
+        })
+        bundle_path = self.tmpdir / "vault.dcvault"
+        manifest_envelope = _build_legacy_manifest_envelope(manifest)
+        vault = _vault()
+        try:
+            write_export_bundle(
+                vault=vault, relay=relay,
+                manifest_envelope=manifest_envelope,
+                manifest_plaintext=manifest,
+                output_path=bundle_path,
+                passphrase=PASSPHRASE,
+                argon_memory_kib=ARGON_MEMORY_KIB,
+                argon_iterations=ARGON_ITERATIONS,
+            )
+        finally:
+            vault.close()
+
+        raw = bytearray(bundle_path.read_bytes())
+        cursor = OUTER_HEADER_BYTES + WRAPPED_KEY_BYTES
+        # Walk records: header (idx 0), manifest (idx 1), chunk (idx 2),
+        # chunk (idx 3), footer. Identify the two chunk records by
+        # ordinal — we need indices 2 and 3.
+        record_offsets: list[tuple[int, int]] = []
+        idx = 0
+        while cursor < len(raw):
+            length = int.from_bytes(
+                raw[cursor:cursor + RECORD_LEN_BYTES], "big",
+            )
+            start = cursor
+            end = cursor + RECORD_LEN_BYTES + length
+            record_offsets.append((start, end))
+            cursor = end
+            idx += 1
+        self.assertGreaterEqual(
+            len(record_offsets), 5,
+            "two chunks must produce at least 5 on-disk records",
+        )
+        chunk_a_start, chunk_a_end = record_offsets[2]
+        chunk_b_start, chunk_b_end = record_offsets[3]
+        chunk_a_bytes = bytes(raw[chunk_a_start:chunk_a_end])
+        chunk_b_bytes = bytes(raw[chunk_b_start:chunk_b_end])
+        # Reassemble bundle with chunk records swapped.
+        tampered = (
+            bytes(raw[:chunk_a_start])
+            + chunk_b_bytes
+            + chunk_a_bytes
+            + bytes(raw[chunk_b_end:])
+        )
+        # Sanity: total length preserved (records are the same on-disk
+        # size structure; just two chunks in different slots).
+        self.assertEqual(len(tampered), len(raw))
+        bundle_path.write_bytes(tampered)
+
+        with self.assertRaises(ExportError) as ctx:
+            read_export_bundle(
+                bundle_path=bundle_path,
+                passphrase=PASSPHRASE,
+                vault_id=VAULT_ID,
+            )
+        self.assertEqual(ctx.exception.code, "vault_export_tampered")
+
     def _build_bundle(self, content: bytes) -> Path:
         manifest, relay = _populated_relay_with(self.tmpdir, {"file.bin": content})
         bundle_path = self.tmpdir / "vault.dcvault"

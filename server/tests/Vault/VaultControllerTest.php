@@ -2035,6 +2035,68 @@ final class VaultControllerTest extends TestCase
         self::assertSame($target, (string)$vault['migrated_to']);
     }
 
+    public function test_getHeader_after_commit_carries_migrated_to(): void
+    {
+        // Review §7.H5: PHP twin of the desktop-side discovery test
+        // (``test_propagate_relay_migration_*``). After /migration/commit
+        // the source relay's GET /header MUST return migrated_to so
+        // other devices (B...N) learn of the migration on their next
+        // header fetch. Pre-existing PHP test only asserted the row's
+        // ``migrated_to`` column was set — it never verified the field
+        // surfaces on the public endpoint. A future refactor that
+        // dropped the field from the JSON response shape would leave
+        // every secondary device silently stranded on the old URL.
+        $target = 'https://target.example.test';
+
+        // Pre-commit baseline: getHeader returns migrated_to=null.
+        $before = $this->invoke(fn() => VaultController::getHeader(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        self::assertSame(200, $before['status']);
+        self::assertNull($before['json']['data']['migrated_to']);
+
+        // Drive the full /start → /verify → /commit sequence.
+        $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        $this->invoke(fn() => VaultController::migrationVerifySource(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        $this->invoke(fn() => VaultController::migrationCommit(
+            $this->db, $this->jctx(
+                'PUT', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+
+        // Post-commit: getHeader now carries migrated_to=<target>. This
+        // is the discovery signal the desktop's propagate_relay_migration
+        // consumes — without it B...N never switch over.
+        $after = $this->invoke(fn() => VaultController::getHeader(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        self::assertSame(200, $after['status']);
+        self::assertSame(
+            $target, $after['json']['data']['migrated_to'],
+            'GET /header must surface migrated_to post-commit so other '
+            . 'devices learn of the migration on their next header fetch'
+        );
+        // Other header fields stay intact — the migration flip doesn't
+        // disturb the data plane until the consumer routes to the new URL.
+        self::assertSame(
+            $before['json']['data']['vault_id'],
+            $after['json']['data']['vault_id'],
+        );
+        self::assertSame(
+            $before['json']['data']['header_revision'],
+            $after['json']['data']['header_revision'],
+        );
+        self::assertNotEmpty($after['json']['data']['encrypted_header']);
+    }
+
     public function test_migrationCommit_repeat_returns_same_committed_at(): void
     {
         $target = 'https://target.example.test';
