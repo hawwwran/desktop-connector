@@ -820,6 +820,113 @@ final class VaultControllerTest extends TestCase
         }
     }
 
+    public function test_putShard_accepts_migration_genesis_at_arbitrary_rev(): void
+    {
+        // §5.M2: migration replicates a source-side shard verbatim
+        // into a fresh target. Body has expected=0 (no shard yet on
+        // target), new_shard_revision=N (whatever the source was at),
+        // parent_shard_revision=N-1. The envelope's deterministic
+        // prefix matches new + parent — same envelope-vs-body
+        // consistency check normal edits satisfy.
+        //
+        // Server already accepts this: the parent==new-1 check passes
+        // (parent=N-1, new=N), and tryCAS sees expected=0 against
+        // current=0 (no row) → succeeds. The previously-claimed "server
+        // rejects new != expected + 1" check doesn't exist — the only
+        // shape constraint on a shard publish is the chain check
+        // (parent == new - 1).
+        $shardHash = str_repeat('a', 64);
+        $body = [
+            'expected_current_shard_revision' => 0,
+            'new_shard_revision'              => 5,
+            'parent_shard_revision'           => 4,
+            'shard_hash'                      => $shardHash,
+            'shard_ciphertext'                => base64_encode(
+                $this->shardEnvelope(self::FOLDER_A, 5, 4),
+            ),
+        ];
+
+        $res = $this->invoke(fn() => VaultController::putShard(
+            $this->db,
+            $this->jctx('PUT', [
+                'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A,
+            ], $body),
+        ));
+
+        self::assertSame(200, $res['status']);
+        self::assertSame(5, $res['json']['data']['shard_revision']);
+        self::assertSame($shardHash, $res['json']['data']['shard_hash']);
+
+        // Target now has rev=5 stored. A second identical migration
+        // POST (idempotent re-entry after a crash) hits the CAS
+        // conflict and the client's runner code treats it as a no-op
+        // when hash + rev match.
+    }
+
+    public function test_putShard_accepts_foreign_envelope_author_on_genesis_insert(): void
+    {
+        // §5.M2 — genesis-insert (expected=0) is the migration
+        // replication path; the envelope is authored by whichever
+        // peer wrote it on the source relay, not the migrating
+        // device. The server skips the
+        // ``env.author_device_id == X-Device-ID`` check here so a
+        // multi-device-vault migration succeeds.
+        //
+        // Non-genesis edits (expected > 0) still enforce the strict
+        // match — see ``test_putShard_rejects_foreign_envelope_author_on_edit``.
+        $foreignAuthor = str_repeat('b', 32);
+        $shardHash = str_repeat('c', 64);
+        $body = [
+            'expected_current_shard_revision' => 0,
+            'new_shard_revision'              => 3,
+            'parent_shard_revision'           => 2,
+            'shard_hash'                      => $shardHash,
+            'shard_ciphertext'                => base64_encode(
+                $this->shardEnvelope(self::FOLDER_A, 3, 2, $foreignAuthor),
+            ),
+        ];
+
+        $res = $this->invoke(fn() => VaultController::putShard(
+            $this->db,
+            $this->jctx('PUT', [
+                'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A,
+            ], $body),
+        ));
+
+        self::assertSame(200, $res['status']);
+        self::assertSame(3, $res['json']['data']['shard_revision']);
+        self::assertSame($shardHash, $res['json']['data']['shard_hash']);
+    }
+
+    public function test_putShard_rejects_foreign_envelope_author_on_edit(): void
+    {
+        // Strict author-match still applies for normal edits
+        // (expected > 0). Only the genesis-insert path is relaxed.
+        $this->seedShard(self::FOLDER_A, 1, 0, 'SEED');
+        $foreignAuthor = str_repeat('b', 32);
+        $body = [
+            'expected_current_shard_revision' => 1,
+            'new_shard_revision'              => 2,
+            'parent_shard_revision'           => 1,
+            'shard_hash'                      => str_repeat('c', 64),
+            'shard_ciphertext'                => base64_encode(
+                $this->shardEnvelope(self::FOLDER_A, 2, 1, $foreignAuthor),
+            ),
+        ];
+
+        try {
+            VaultController::putShard(
+                $this->db,
+                $this->jctx('PUT', [
+                    'vault_id' => self::VAULT_ID, 'folder_id' => self::FOLDER_A,
+                ], $body),
+            );
+            self::fail('expected VaultShardTamperedError on edit-with-foreign-author');
+        } catch (VaultShardTamperedError $e) {
+            self::assertStringContainsString('author_device_id', $e->getMessage());
+        }
+    }
+
     public function test_putShard_409_shard_conflict_per_folder_scoped(): void
     {
         $this->seedShard(self::FOLDER_A, 1, 0, 'CURRENT');

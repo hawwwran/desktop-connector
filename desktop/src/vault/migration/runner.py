@@ -581,10 +581,13 @@ def _bootstrap_target_and_inventory(
         # uses ``expected_current_shard_revision=0`` regardless of the
         # source's revision; the envelope's deterministic prefix on the
         # wire still carries ``shard_revision=N``, so the §10.C hash
-        # chain matches once the bytes land. NOTE: the production
-        # server's ``putShard`` currently rejects ``new != expected + 1``
-        # — a relaxation to allow ``expected=0 && new=N`` for a genesis
-        # insert is required for shards with revision > 1 to migrate.
+        # chain matches once the bytes land. Server's chain check
+        # (``parent == new - 1``) is independent of the CAS check
+        # (``expected == current``), so genesis-insert at any revision
+        # is accepted. §5.M2: server also skips the envelope
+        # author-match check for ``expected=0`` so peer-authored
+        # shards replicate cleanly (the migrating device is not
+        # always the original author).
         try:
             target_relay.put_shard(
                 vault.vault_id,

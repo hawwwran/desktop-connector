@@ -13,9 +13,11 @@ live in ``vault.migration.state``.
 
 The §5.M6 fix (`clear_previous_relay`) is invoked at the start of a
 fresh migration so A → B → C records ``previous=B`` rather than the
-stale A. §5.M2's shard-genesis idempotency limitation is surfaced via
-``MigrationInventory.has_edited_shards``; vaults with any shard at
-revision > 1 see a warning before the operator commits.
+stale A. §5.M2 landed 2026-05-18: the server now accepts genesis-
+insert at any revision and skips the envelope author-match check
+for ``expected=0`` so multi-device + edited-shard vaults migrate
+cleanly. ``MigrationInventory.has_edited_shards`` stays as
+diagnostic data but the wizard no longer warns on it.
 """
 
 from __future__ import annotations
@@ -399,17 +401,13 @@ def show_vault_migration(config_dir: Path) -> None:
                 f"• Folder count: {inventory.remote_folder_count}\n"
                 f"• Cumulative ciphertext: {mb:.2f} MiB"
             )
-            if inventory.has_edited_shards:
-                confirm_warning.set_label(
-                    "⚠ One or more folders have shard_revision > 1. "
-                    "If a previous migration attempt partially completed, "
-                    "the resume path may hit the §5.M2 idempotency gap "
-                    "and fail at the bootstrap step. Fresh migrations "
-                    "succeed regardless."
-                )
-                confirm_warning.set_visible(True)
-            else:
-                confirm_warning.set_visible(False)
+            # §5.M2 landed: edited-shard migrations are no longer
+            # gated. ``has_edited_shards`` stays on the inventory as
+            # diagnostic data; the wizard no longer surfaces a
+            # warning since the server now accepts genesis-insert
+            # for any revision and skips the envelope author-match
+            # check for ``expected=0``.
+            confirm_warning.set_visible(False)
 
         def on_start_migration(_btn) -> None:
             target_url = state["target_url"]

@@ -64,13 +64,13 @@ Closes the v1 multi-device gap; QR-grant is now the primary device-add path, rec
 
 Tests: `tests/protocol/test_desktop_vault_migration_{preflight,wizard_source}.py`. Diagnostic: `vault.migration.commit_callback` added.
 
-### 4b. §5.M2 — Migration runner shard genesis-insert for rev > 1 *(separated from §5.C1, still open)*
+### 4b. ~~§5.M2 — Migration runner shard genesis-insert for rev > 1~~ *(landed 2026-05-18)*
 
-**Status:** still pending. The bundled-into-§5.C1 framing turned out to be heavier than a one-commit fix: server's `putShard` enforces `parent_shard_revision == new_shard_revision - 1`, so resuming a partially-completed migration on a folder where the source's `shard_revision > 1` and the target already accepted some shards needs either server-side relaxation OR client-side synthesized envelopes walking the chain from rev 1.
+**Status:** landed. Root-cause analysis turned out to be different from the build-plan framing: the server's `putShard` chain-check (`parent == new - 1`) was always orthogonal to the CAS check (`expected == current`), so genesis-insert at any revision was always supported on the server. The real bug was the envelope-vs-body author check (`env.author_device_id == X-Device-ID`), which made migrations fail on the first peer-authored shard in any multi-device vault.
 
-Workaround landed alongside §5.C1: the migration wizard's preflight surfaces `has_edited_shards=True` and warns the operator before they commit. Fresh-vault migrations (shard_revision == 1) work end-to-end without the fix.
+**Fix:** server's `validateShardEnvelopeAgainstBody` now takes an `$allowEnvelopeAuthorMismatch` flag. Both `putShard` and `putShardWithRoot` pass `true` when `expected_current_shard_revision === 0` (the migration-replication / first-publish path) so peer-authored envelopes replicate cleanly. Non-genesis edits still enforce the strict match — `test_putShard_rejects_foreign_envelope_author_on_edit` regression-pins that. The `author_device_id` field is metadata, not a security boundary; all paired devices share `master_key` and can already construct any envelope they want, so the relaxation is invisible to the threat model.
 
-Tracked as a separate v1.x follow-up.
+Wizard's `has_edited_shards` warning dropped (kept as inventory diagnostic data only). The `runner.py` comment claiming the server rejected `new != expected + 1` was misleading and got rewritten. Tests: `test_putShard_accepts_migration_genesis_at_arbitrary_rev`, `test_putShard_accepts_foreign_envelope_author_on_genesis_insert`, `test_putShard_rejects_foreign_envelope_author_on_edit`. No desktop code change needed — existing migration runner works against the relaxed server.
 
 ---
 
@@ -239,19 +239,19 @@ Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
 |---|---|---|---|---|---|
 | Criticals | 17 | 17 | 0 | 0 | 0 |
 | Highs | 37 | 36 | 0 | 1 (§6.H1) | 0 |
-| Mediums | 35 | 33 | 1 (§5.M2) | 1 (§5.M3) | 0 |
+| Mediums | 35 | 34 | 0 | 1 (§5.M3) | 0 |
 | Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **90** | **1** | **2** | **20** |
+| **Total** | **113** | **91** | **0** | **2** | **20** |
 
-§5.M6 landed alongside §5.C1 (bundled fix). §5.M2 separated from §5.C1: the wizard surfaces the idempotency-gap warning via `MigrationInventory.has_edited_shards` while the full fix is tracked as its own v1.x follow-up. §3.C1 + §4.M1 + §5.C1 + §5.C2 + §5.H2 + §5.H3 + §6.H2 + §6.H3 all fully landed on 2026-05-18 — every Critical, every High, and all but one Medium is now closed.
+**Every Critical, every High, and every Medium is now closed.** §5.M6 landed alongside §5.C1 (bundled fix). §5.M2 — initially separated from §5.C1 as a server-side blocker — landed 2026-05-18 with a much simpler server-side fix than the build plan envisioned (the genuine root cause was the envelope author-match check, not the chain check the reviewer suspected). §3.C1 + §4.M1 + §5.C1 + §5.C2 + §5.H2 + §5.H3 + §5.M2 + §6.H2 + §6.H3 all fully landed on 2026-05-18.
 
-### Breakdown of the 23 not-fully-fixed-by-code items
+### Breakdown of the 22 not-fully-fixed-by-code items
 
-- **1 design-landed-pending-implementation** (§1 above): 1 Medium (§5.M2 — separated out of §5.C1 because the bundled-fix turned out to need server-side coordination). Plan-doc link in `unfinished.md` §4b.
+- **0 design-landed-pending-implementation** — the queue is empty. Every design-pending entry from the 2026-05-18 scoping pass has landed.
 - **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
 - **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
 
-User-facing math: **23 entries are not-yet-fully-fixed-by-code** — 1 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **21 are open work** (1 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
+User-facing math: **22 entries are not-yet-fully-fixed-by-code** — 0 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **20 are open work** (0 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
 
 ---
 

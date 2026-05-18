@@ -607,8 +607,13 @@ class VaultController
         $shardsRepo = new VaultFolderShardsRepository($db);
         $authorDeviceId = (string)($ctx->deviceId ?? '');
 
+        // §5.M2: genesis insert path (expected=0) is also the
+        // migration-replication path — permit envelopes authored by a
+        // peer device. Normal first-folder publishes are unaffected
+        // because their envelope is authored by this device anyway.
         self::validateShardEnvelopeAgainstBody(
             $shardCipher, $vaultId, $folderId, $newRev, $parentRev, $authorDeviceId,
+            $expected === 0,
         );
 
         $now = time();
@@ -693,8 +698,14 @@ class VaultController
         }
 
         $authorDeviceId = (string)($ctx->deviceId ?? '');
+        // §5.M2: same author-mismatch relaxation for putShardWithRoot's
+        // genesis-insert path — first publish of a new folder may
+        // also arrive via migration replication (atomic publish of a
+        // shard + root pair). Normal first-publishes still pass the
+        // strict check because their envelopes are this-device-authored.
         self::validateShardEnvelopeAgainstBody(
             $shardCipher, $vaultId, $folderId, $newShardRev, $parentShardRev, $authorDeviceId,
+            $expectedShardRev === 0,
         );
         self::validateRootEnvelopeAgainstBody(
             $rootCipher, $vaultId, $newRootRev, $parentRootRev, $authorDeviceId,
@@ -787,6 +798,7 @@ class VaultController
         int $newShardRev,
         int $parentShardRev,
         string $authorDeviceId,
+        bool $allowEnvelopeAuthorMismatch = false,
     ): void {
         try {
             $env = VaultCrypto::parseShardEnvelopeHeader($shardCipher);
@@ -814,7 +826,26 @@ class VaultController
                 'shard envelope parent_shard_revision does not match body parent_shard_revision',
             );
         }
-        if ($authorDeviceId !== '' && $env['author_device_id'] !== $authorDeviceId) {
+        // §5.M2 — Migration replication replays a source-side shard
+        // envelope verbatim onto a fresh target. The envelope's
+        // author_device_id is whichever peer wrote it on the source,
+        // not the migrating device. ``$allowEnvelopeAuthorMismatch``
+        // is set by the genesis-insert call path
+        // (``expected_current_shard_revision === 0``) so the migration
+        // doesn't fail on the first shard authored by a peer.
+        //
+        // For normal first-publishes the envelope's author is this
+        // device anyway, so the relaxation is invisible there. The
+        // server-side access control (vault-bearer + X-Device-ID +
+        // per-role check) is unaffected — ``author_device_id`` is
+        // metadata, not a security boundary (all paired devices
+        // share master_key and can already construct any envelope
+        // they want).
+        if (
+            !$allowEnvelopeAuthorMismatch
+            && $authorDeviceId !== ''
+            && $env['author_device_id'] !== $authorDeviceId
+        ) {
             throw new VaultShardTamperedError(
                 'shard envelope author_device_id does not match X-Device-ID',
             );

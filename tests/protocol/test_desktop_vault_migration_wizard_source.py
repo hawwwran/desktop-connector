@@ -77,12 +77,27 @@ class MigrationWizardSubprocessSourceTests(unittest.TestCase):
         self.assertIn("verify.matches", self.text)
         self.assertIn("verify.mismatches", self.text)
 
-    def test_handles_edited_vault_limitation(self) -> None:
-        """§5.M2: vaults with shard_revision > 1 hit a known idempotency
-        gap; preflight surfaces ``has_edited_shards`` so the wizard
-        warns the operator before the destructive commit."""
-        self.assertIn("has_edited_shards", self.text)
-        self.assertIn("§5.M2", self.text)
+    def test_no_longer_warns_on_edited_shards_after_5m2_fix(self) -> None:
+        """§5.M2 landed 2026-05-18: the server now accepts genesis-
+        insert at any revision and skips the envelope author-match
+        check for ``expected=0``. The wizard's old "edited shards"
+        warning is gone; ``has_edited_shards`` stays on the inventory
+        as diagnostic data only.
+
+        Regression guard: the wizard must NOT re-introduce a warning
+        on the Confirm page that gates the user on shard_revision > 1
+        — fresh and edited migrations are now equivalent."""
+        # The wizard still references the inventory field (it's
+        # diagnostic data), but no longer surfaces a user-visible
+        # warning gated on it. The string "§5.M2" still appears in
+        # the docstring as historical context.
+        self.assertNotIn(
+            "shard_revision > 1", self.text,
+            "Wizard must not warn on shard_revision > 1 — §5.M2 is fixed",
+        )
+        self.assertNotIn(
+            "may hit the §5.M2 idempotency gap", self.text,
+        )
 
     def test_target_url_validated_before_continue(self) -> None:
         """Target URL must be HTTP(S) with a host, and must differ
