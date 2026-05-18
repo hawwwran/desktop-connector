@@ -235,6 +235,67 @@ class VaultFolderPublishTests(unittest.TestCase):
         self.assertEqual(len(cached), 1)
         self.assertEqual(cached[0]["display_name_enc"], "Notes")
 
+    def test_add_remote_folder_rejects_duplicate_name(self) -> None:
+        """Review §6.M2 — adding a folder with a display_name that
+        already exists on an active (non-deleted) folder must be
+        refused at the library layer. Pre-fix two ``"Documents"``
+        folders could silently coexist and the dropdown rendering
+        them by name became ambiguous. Comparison is case-insensitive
+        + whitespace-trimmed.
+        """
+        relay = FakeRootRelay()
+        vault = Vault(
+            vault_id=VAULT_ID,
+            master_key=MASTER_KEY,
+            recovery_secret=None,
+            vault_access_secret="bearer",
+            header_revision=0,
+            manifest_revision=0,
+            manifest_ciphertext=b"",
+            crypto=DefaultVaultCrypto,
+        )
+        tmpdir = tempfile.mkdtemp(prefix="vault_folder_dup_test_")
+        local_index = VaultLocalIndex(Path(tmpdir))
+
+        _seed_empty_root(relay, vault, created_at="2026-05-03T12:00:00.000Z")
+        relay.put_root_calls = []
+
+        # First Documents add succeeds.
+        vault.add_remote_folder(
+            relay, display_name="Documents",
+            ignore_patterns=[],
+            author_device_id=AUTHOR,
+            created_at="2026-05-03T13:00:00.000Z",
+            remote_folder_id=DOCS_ID,
+            local_index=local_index,
+        )
+        publishes_after_first = len(relay.put_root_calls)
+        self.assertEqual(publishes_after_first, 1)
+
+        # Second "Documents" (exact name) raises.
+        with self.assertRaises(ValueError) as ctx:
+            vault.add_remote_folder(
+                relay, display_name="Documents",
+                ignore_patterns=[],
+                author_device_id=AUTHOR,
+                created_at="2026-05-03T14:00:00.000Z",
+                local_index=local_index,
+            )
+        self.assertIn("already exists", str(ctx.exception))
+
+        # Case-insensitive + whitespace-trim variants also rejected.
+        for variant in ("documents", "  DOCUMENTS  ", "Documents"):
+            with self.assertRaises(ValueError):
+                vault.add_remote_folder(
+                    relay, display_name=variant,
+                    ignore_patterns=[],
+                    author_device_id=AUTHOR,
+                    local_index=local_index,
+                )
+
+        # No additional publishes — the collision check is pre-CAS.
+        self.assertEqual(len(relay.put_root_calls), publishes_after_first)
+
     def test_rename_remote_folder_rejects_unknown_id(self) -> None:
         relay = FakeRootRelay()
         vault = Vault(

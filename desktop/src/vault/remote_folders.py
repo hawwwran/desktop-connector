@@ -35,7 +35,18 @@ class RemoteFoldersMixin:
         remote_folder_id: str | None = None,
         local_index=None,
     ) -> dict:
-        """Fetch root, append one remote folder pointer, publish_root_manifest."""
+        """Fetch root, append one remote folder pointer, publish_root_manifest.
+
+        Review §6.M2 — refuse a display_name that collides with an
+        existing active (non-deleted) remote folder. Pre-fix two
+        "Documents" folders could silently coexist; the UI dropdowns
+        rendering them by name became ambiguous (the user couldn't
+        tell which copy they were targeting). Comparison is
+        case-insensitive + whitespace-trimmed to match what the
+        eye sees. ``deleted=True`` pointers don't block — a folder
+        can be tombstoned and a fresh one created under the same
+        name.
+        """
         name = str(display_name).strip()
         if not name:
             raise ValueError("folder name is required")
@@ -49,8 +60,24 @@ class RemoteFoldersMixin:
             ignore_patterns=ignore_patterns,
         )
 
+        normalized_name = name.casefold()
+
         def mutate(root: dict) -> dict:
             out = normalize_root_manifest_plaintext(root)
+            existing_active_names: set[str] = set()
+            for pointer in out["remote_folders"]:
+                if not isinstance(pointer, dict):
+                    continue
+                if pointer.get("deleted"):
+                    continue
+                existing_name = str(pointer.get("display_name_enc", "")).strip()
+                if existing_name:
+                    existing_active_names.add(existing_name.casefold())
+            if normalized_name in existing_active_names:
+                raise ValueError(
+                    f"a remote folder named {name!r} already exists; "
+                    "rename or remove it before adding another."
+                )
             out["remote_folders"] = list(out["remote_folders"]) + [new_pointer]
             return out
 

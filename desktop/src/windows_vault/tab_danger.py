@@ -50,16 +50,26 @@ def build_danger_tab(ctx: MainContext, win) -> "Gtk.Box":
     danger.append(disconnect_btn)
 
     def on_disconnect_vault(_btn):
+        # F-U18: spell out exactly what disconnect removes vs. leaves
+        # alone — "vault will still exist" was technically true but
+        # underplayed the local data wipe.
+        # Review §6.M1: structure the body so the destructive local-
+        # data list is visually distinct from the "relay state is
+        # untouched" paragraph. Pre-fix flat-paragraph copy let the
+        # user skim past "Removes all local vault material" without
+        # registering that downloaded chunks are about to be deleted.
         dlg = Adw.AlertDialog(
             heading="Disconnect vault?",
-            # F-U18: spell out exactly what disconnect removes vs.
-            # leaves alone — "vault will still exist" was technically
-            # true but underplayed the local data wipe.
             body=(
-                "Removes all local vault material from this machine "
-                "(keys, manifests, downloaded chunks, sync state). "
-                "The relay vault is untouched. To reconnect, ask an "
-                "admin device to grant access again."
+                "⚠ This wipes ALL local vault material from this "
+                "machine:\n"
+                "    • Encryption keys (master + access secrets)\n"
+                "    • Manifests + sync state\n"
+                "    • Downloaded chunks (local cache)\n"
+                "    • Folder bindings\n"
+                "\n"
+                "The relay vault is untouched. To reconnect, "
+                "ask an admin device to grant access again."
             ),
         )
         dlg.add_response("cancel", "Cancel")
