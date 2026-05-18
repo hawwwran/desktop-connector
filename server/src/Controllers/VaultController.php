@@ -167,6 +167,47 @@ class VaultController
             );
         }
 
+        // Review §1.H4: every OTHER endpoint that ingests a header or
+        // root envelope parses its deterministic prefix, runs
+        // ``guardFormatVersion`` (refuse v2 envelopes before AEAD
+        // attempt), and confirms the envelope's sealed (vault_id,
+        // revision) matches the request body. ``create`` skipped all
+        // three — a malformed envelope or an envelope/body mismatch
+        // could be persisted, and a v2-bumped envelope wouldn't 422
+        // before storage. Same checks applied here:
+        try {
+            $envHeader = VaultCrypto::parseHeaderEnvelopeHeader($encHeader);
+        } catch (InvalidArgumentException $e) {
+            throw new VaultInvalidRequestError($e->getMessage(), 'encrypted_header');
+        }
+        self::guardFormatVersion('header', (int) $envHeader['format_version']);
+        if ($envHeader['vault_id'] !== $vaultId) {
+            throw new VaultHeaderTamperedError(
+                'encrypted_header envelope vault_id does not match path vault_id',
+            );
+        }
+        if ((int) $envHeader['header_revision'] !== $initialHeaderRevision) {
+            throw new VaultHeaderTamperedError(
+                'encrypted_header envelope header_revision does not match initial_header_revision',
+            );
+        }
+        try {
+            $envRoot = VaultCrypto::parseRootEnvelopeHeader($rootCipher);
+        } catch (InvalidArgumentException $e) {
+            throw new VaultInvalidRequestError($e->getMessage(), 'initial_root_ciphertext');
+        }
+        self::guardFormatVersion('root', (int) $envRoot['format_version']);
+        if ($envRoot['vault_id'] !== $vaultId) {
+            throw new VaultRootTamperedError(
+                'initial_root_ciphertext envelope vault_id does not match path vault_id',
+            );
+        }
+        if ((int) $envRoot['root_revision'] !== $initialRootRevision) {
+            throw new VaultRootTamperedError(
+                'initial_root_ciphertext envelope root_revision does not match initial_root_revision',
+            );
+        }
+
         $vaultsRepo = new VaultsRepository($db);
         if ($vaultsRepo->getById($vaultId) !== null) {
             throw new VaultAlreadyExistsError($vaultId);

@@ -323,12 +323,15 @@ final class VaultControllerTest extends TestCase
         $this->db->execute('DELETE FROM vault_folder_shards');
         $this->db->execute('DELETE FROM vault_folder_shard_heads');
 
+        // §1.H4: create now parses the envelope prefix and enforces
+        // format_version + (vault_id, revision) match. Build proper
+        // envelopes via the existing test helpers.
         $body = [
             'vault_id'                => self::VAULT_ID_DASHED,
             'vault_access_token_hash' => base64_encode(hash('sha256', 'fresh-secret', true)),
-            'encrypted_header'        => base64_encode("\x01\x02header-bytes"),
+            'encrypted_header'        => base64_encode($this->headerEnvelope(1)),
             'header_hash'             => self::HEADER_HASH,
-            'initial_root_ciphertext' => base64_encode("\x03\x04root"),
+            'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
             'initial_root_hash'       => self::ROOT_HASH,
         ];
 
@@ -350,9 +353,9 @@ final class VaultControllerTest extends TestCase
         $body = [
             'vault_id'                => self::VAULT_ID_DASHED,
             'vault_access_token_hash' => base64_encode(hash('sha256', 'x', true)),
-            'encrypted_header'        => base64_encode('h'),
+            'encrypted_header'        => base64_encode($this->headerEnvelope(1)),
             'header_hash'             => self::HEADER_HASH,
-            'initial_root_ciphertext' => base64_encode('r'),
+            'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
             'initial_root_hash'       => self::ROOT_HASH,
         ];
 
@@ -363,6 +366,72 @@ final class VaultControllerTest extends TestCase
             self::assertSame(409, $e->status);
             self::assertSame('vault_already_exists', $e->errorCode);
             self::assertSame(self::VAULT_ID, $e->details['vault_id']);
+        }
+    }
+
+    /**
+     * Review §1.H4: create now refuses an encrypted_header whose
+     * sealed vault_id disagrees with the path vault_id (mirrors
+     * putHeader's check). Pre-fix the mismatched bytes were
+     * persisted into the row.
+     */
+    public function test_create_422_when_header_envelope_vault_id_mismatch(): void
+    {
+        $this->db->execute('DELETE FROM vaults');
+        $this->db->execute('DELETE FROM vault_root_manifests');
+        $this->db->execute('DELETE FROM vault_folder_shards');
+        $this->db->execute('DELETE FROM vault_folder_shard_heads');
+
+        // Envelope sealed to a DIFFERENT vault_id, request body points
+        // at VAULT_ID.
+        $body = [
+            'vault_id'                => self::VAULT_ID_DASHED,
+            'vault_access_token_hash' => base64_encode(hash('sha256', 'fresh', true)),
+            'encrypted_header'        => base64_encode(
+                $this->headerEnvelope(1, vaultId: 'OTHERVAULTABC')
+            ),
+            'header_hash'             => self::HEADER_HASH,
+            'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
+            'initial_root_hash'       => self::ROOT_HASH,
+        ];
+        try {
+            VaultController::create(
+                $this->db, $this->jctx('POST', [], $body)
+            );
+            self::fail('expected VaultHeaderTamperedError');
+        } catch (VaultHeaderTamperedError $e) {
+            self::assertSame(422, $e->status);
+        }
+    }
+
+    /**
+     * Review §1.H4: a v0x02 envelope at create-time must 422 before
+     * the row lands — same gate that already applies on putHeader.
+     */
+    public function test_create_422_on_unsupported_header_format_version(): void
+    {
+        $this->db->execute('DELETE FROM vaults');
+        $this->db->execute('DELETE FROM vault_root_manifests');
+        $this->db->execute('DELETE FROM vault_folder_shards');
+        $this->db->execute('DELETE FROM vault_folder_shard_heads');
+
+        $badHeader = $this->tamperFormatVersion($this->headerEnvelope(1), 0x02);
+        $body = [
+            'vault_id'                => self::VAULT_ID_DASHED,
+            'vault_access_token_hash' => base64_encode(hash('sha256', 'fresh', true)),
+            'encrypted_header'        => base64_encode($badHeader),
+            'header_hash'             => self::HEADER_HASH,
+            'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
+            'initial_root_hash'       => self::ROOT_HASH,
+        ];
+        try {
+            VaultController::create(
+                $this->db, $this->jctx('POST', [], $body)
+            );
+            self::fail('expected VaultFormatVersionUnsupportedError');
+        } catch (VaultFormatVersionUnsupportedError $e) {
+            self::assertSame(422, $e->status);
+            self::assertSame('vault_format_version_unsupported', $e->errorCode);
         }
     }
 
@@ -1590,9 +1659,9 @@ final class VaultControllerTest extends TestCase
         $body = [
             'vault_id'                => self::VAULT_ID_DASHED,
             'vault_access_token_hash' => base64_encode(hash('sha256', 'fresh-secret', true)),
-            'encrypted_header'        => base64_encode('header'),
+            'encrypted_header'        => base64_encode($this->headerEnvelope(1)),
             'header_hash'             => self::HEADER_HASH,
-            'initial_root_ciphertext' => base64_encode('root'),
+            'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
             'initial_root_hash'       => self::ROOT_HASH,
         ];
         $this->invoke(fn() => VaultController::create(
