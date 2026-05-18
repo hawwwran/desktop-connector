@@ -46,6 +46,14 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_DELAY_SECONDS = 24 * 60 * 60  # T14.3: 24-hour default
+
+# Review §4.M4 — a 0-delay purge fires within seconds and the
+# user can't cancel it; that's a footgun for an irreversible op.
+# The minimum lets sub-hour delays through (tests need short
+# windows) but refuses literal 0; the danger-zone UI restricts the
+# user-facing dropdown to ≥1 hour separately.
+MIN_DELAY_SECONDS = 60
+
 PENDING_FILE_NAME = "vault_pending_purges.json"
 
 
@@ -124,6 +132,16 @@ def schedule_purge(
         raise VaultPurgeError("scope='vault' must have scope_target=None")
     if delay_seconds < 0:
         raise VaultPurgeError("delay_seconds must be non-negative")
+    # Review §4.M4 — refuse 0-delay (and anything below MIN). A
+    # zero-second purge fires inside the autosync window and the
+    # user cannot cancel it; that's a footgun. Tests that need short
+    # windows can use ``delay_seconds=MIN_DELAY_SECONDS``.
+    if delay_seconds < MIN_DELAY_SECONDS:
+        raise VaultPurgeError(
+            f"delay_seconds must be at least {MIN_DELAY_SECONDS}; "
+            f"got {delay_seconds}. A near-instant purge is unsafe — "
+            "user has no cancel window."
+        )
 
     now_t = int(time.time() if now is None else now)
     record = PendingPurge(
@@ -305,6 +323,7 @@ def _record_from_dict(raw: dict[str, Any]) -> PendingPurge:
 
 __all__ = [
     "DEFAULT_DELAY_SECONDS",
+    "MIN_DELAY_SECONDS",
     "PENDING_FILE_NAME",
     "PendingPurge",
     "PurgeScope",

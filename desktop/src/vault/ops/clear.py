@@ -104,6 +104,15 @@ def clear_vault(
     re-clear, (b) a malicious device that keeps adding folders would
     eventually hit the relay's create-rate-limit (review §1.H1).
     """
+    # Review §4.M3 — emit a "clear started" event so a mid-loop crash
+    # leaves a paper trail. The terminal ``vault.vault.cleared`` event
+    # only fires on successful completion; without this start event a
+    # truncated audit log shows zero clear activity even after the
+    # bulk-tombstone work has begun.
+    log.info(
+        "vault.vault.clear_started vault=%s author=%s",
+        vault.vault_id, author_device_id,
+    )
     total = 0
     seen_folders: set[str] = set()
     max_passes = 8  # defensive cap; in practice 1-2 passes suffice

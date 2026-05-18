@@ -139,6 +139,36 @@ class ScheduleTests(unittest.TestCase):
                 delay_seconds=-1, now=1.0,
             )
 
+    def test_zero_delay_rejected(self) -> None:
+        """Review §4.M4 — a zero-second purge fires inside the
+        autosync window and the user has no cancel handle. Refused
+        with a clear error pointing at MIN_DELAY_SECONDS.
+        """
+        from src.vault.ops.purge_schedule import MIN_DELAY_SECONDS
+        with self.assertRaises(VaultPurgeError) as ctx:
+            schedule_purge(
+                self.config_dir, vault_id_dashed=VAULT,
+                scope="vault", scope_target=None,
+                scheduled_by_device_id=DEV,
+                delay_seconds=0, now=1.0,
+            )
+        self.assertIn(str(MIN_DELAY_SECONDS), str(ctx.exception))
+        self.assertIn("cancel window", str(ctx.exception))
+
+    def test_min_delay_accepted(self) -> None:
+        """Review §4.M4 — exactly ``MIN_DELAY_SECONDS`` is the floor;
+        tests that need short windows can use this directly without
+        the dialog flow blocking them.
+        """
+        from src.vault.ops.purge_schedule import MIN_DELAY_SECONDS
+        record = schedule_purge(
+            self.config_dir, vault_id_dashed=VAULT,
+            scope="vault", scope_target=None,
+            scheduled_by_device_id=DEV,
+            delay_seconds=MIN_DELAY_SECONDS, now=1.0,
+        )
+        self.assertEqual(record.delay_seconds, MIN_DELAY_SECONDS)
+
     def test_is_due_respects_supplied_now(self) -> None:
         record = schedule_purge(
             self.config_dir, vault_id_dashed=VAULT,

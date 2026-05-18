@@ -613,6 +613,7 @@ relay log (filenames are local-only).
 | `vault.upload.session_tombstone_failed` | desktop | error | `session`, exception traceback | Review §4.H1 — both `clear_session` and the fallback `save_session(complete)` raised. Disk is failing; the JSON stays as it was and the TTL reaper will sweep it after 14 days |
 | `vault.usage.malformed_chunk_size_skipped` | desktop | warning | `chunk_id` (truncated) | F-515 — a manifest chunk had no usable `ciphertext_size`; usage rendered as 0 B for it |
 | `vault.vault.clear_pass_cap_hit` | desktop | warning | `folders_seen`, `cap` | Review §4.H3 — clear_vault hit its defensive 8-pass cap. A concurrent device is spamming folder creates faster than the clear can tombstone them; operator should investigate |
+| `vault.vault.clear_started` | desktop | info | `vault`, `author` | Review §4.M3 — clear_vault loop entered. Paired with the terminal `vault.vault.cleared`; a started-without-cleared sequence in the log indicates a mid-loop crash so an operator can correlate the audit trail |
 | `vault.vault.cleared` | desktop | info | `total_tombstoned`, `folders`, `author` | T14.2 whole-vault bulk-soft-delete published (folder count added for review §4.H3 — the loop now re-fetches root per pass to catch concurrent folder creates) |
 | `vault.vault_access_secret.encode` | desktop | info | — | Access-secret encoding helper invoked |
 
