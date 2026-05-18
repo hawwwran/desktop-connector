@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from ..binding.lifecycle import SyncCancelledError
 from ..ui.browser_model import get_file
@@ -31,6 +31,7 @@ from .manifest import (
 )
 from .paths import (
     _preflight_disk_space,
+    atomic_write_chunks,
     atomic_write_file,
     resolve_download_destination,
 )
@@ -94,63 +95,70 @@ def download_latest_file(
         should_continue=should_continue,
     )
 
-    plaintext_parts: list[bytes] = []
+    # Review §3.H3: stream plaintext through atomic_write_chunks so
+    # peak RAM is ~1 chunk (2 MiB) instead of ``2 × file size``. The
+    # buffer-then-write shape was OOMing the tray subprocess on
+    # multi-GB single-file restores; the folder path was already
+    # streaming, so this brings the two flows in line.
     completed = 0
     bytes_written = 0
-    for chunk in chunks:
-        # F-U03: bail before each chunk fetch so a Cancel button click
-        # lands within ~1 chunk worth of network + decrypt work.
+
+    def plaintext_iter() -> Iterable[bytes]:
+        nonlocal completed, bytes_written
+        for chunk in chunks:
+            # F-U03: bail before each chunk fetch so a Cancel click
+            # lands within ~1 chunk's worth of network+decrypt work.
+            if should_continue is not None and not should_continue():
+                log.info(
+                    "vault.download.cancelled vault=%s path=%s chunks_done=%d total=%d",
+                    vault.vault_id, path, completed, len(chunks),
+                )
+                raise SyncCancelledError(
+                    f"download cancelled at chunk {completed}/{len(chunks)} of {path}"
+                )
+            encrypted = _load_cached_chunk(
+                chunk_cache_dir=chunk_cache_dir,
+                vault_id=vault.vault_id,
+                chunk_id=chunk["chunk_id"],
+                head=heads[chunk["chunk_id"]],
+            )
+            if encrypted is None:
+                encrypted = _get_chunk_with_retry(
+                    relay=relay,
+                    vault_id=vault.vault_id,
+                    vault_access_secret=vault.vault_access_secret,
+                    chunk_id=chunk["chunk_id"],
+                    should_continue=should_continue,
+                )
+
+            plaintext = _decrypt_chunk(
+                vault=vault,
+                remote_folder_id=str(folder["remote_folder_id"]),
+                file_id=str(entry.get("entry_id", "")),
+                version_id=str(version.get("version_id", "")),
+                chunk=chunk,
+                encrypted=encrypted,
+            )
+            _store_cached_chunk(chunk_cache_dir, vault.vault_id, chunk["chunk_id"], encrypted)
+            completed += 1
+            bytes_written += len(plaintext)
+            _report(progress, "downloading", completed, len(chunks), bytes_written)
+            yield plaintext
+
         if should_continue is not None and not should_continue():
             log.info(
-                "vault.download.cancelled vault=%s path=%s chunks_done=%d total=%d",
-                vault.vault_id, path, completed, len(chunks),
+                "vault.download.cancelled_pre_write vault=%s path=%s",
+                vault.vault_id, path,
             )
-            raise SyncCancelledError(
-                f"download cancelled at chunk {completed}/{len(chunks)} of {path}"
-            )
-        encrypted = _load_cached_chunk(
-            chunk_cache_dir=chunk_cache_dir,
-            vault_id=vault.vault_id,
-            chunk_id=chunk["chunk_id"],
-            head=heads[chunk["chunk_id"]],
-        )
-        if encrypted is None:
-            encrypted = _get_chunk_with_retry(
-                relay=relay,
-                vault_id=vault.vault_id,
-                vault_access_secret=vault.vault_access_secret,
-                chunk_id=chunk["chunk_id"],
-                should_continue=should_continue,
-            )
+            raise SyncCancelledError(f"download cancelled before write of {path}")
 
-        plaintext = _decrypt_chunk(
-            vault=vault,
-            remote_folder_id=str(folder["remote_folder_id"]),
-            file_id=str(entry.get("entry_id", "")),
-            version_id=str(version.get("version_id", "")),
-            chunk=chunk,
-            encrypted=encrypted,
-        )
-        _store_cached_chunk(chunk_cache_dir, vault.vault_id, chunk["chunk_id"], encrypted)
-        plaintext_parts.append(plaintext)
-        completed += 1
-        bytes_written += len(plaintext)
-        _report(progress, "downloading", completed, len(chunks), bytes_written)
-
-    if should_continue is not None and not should_continue():
-        log.info(
-            "vault.download.cancelled_pre_write vault=%s path=%s",
-            vault.vault_id, path,
-        )
-        raise SyncCancelledError(f"download cancelled before write of {path}")
-
-    data = b"".join(plaintext_parts)
+    written = atomic_write_chunks(final_path, plaintext_iter())
     expected_size = _int_value(version.get("logical_size"))
-    if expected_size and len(data) != expected_size:
-        raise ValueError(f"downloaded size mismatch: expected {expected_size}, got {len(data)}")
-
-    atomic_write_file(final_path, data)
-    _report(progress, "done", len(chunks), len(chunks), len(data))
+    if expected_size and written != expected_size:
+        raise ValueError(
+            f"downloaded size mismatch: expected {expected_size}, got {written}"
+        )
+    _report(progress, "done", len(chunks), len(chunks), written)
     return final_path
 
 
@@ -206,65 +214,68 @@ def download_version(
         should_continue=should_continue,
     )
 
-    plaintext_parts: list[bytes] = []
+    # Review §3.H3: stream rather than buffer (same OOM concern as
+    # download_latest_file). Multi-GB historical-version restores
+    # otherwise peak at 2× file size.
     completed = 0
     bytes_written = 0
-    for chunk in chunks:
+
+    def plaintext_iter() -> Iterable[bytes]:
+        nonlocal completed, bytes_written
+        for chunk in chunks:
+            if should_continue is not None and not should_continue():
+                log.info(
+                    "vault.download.cancelled vault=%s path=%s version=%s chunks_done=%d total=%d",
+                    vault.vault_id, path, version_id, completed, len(chunks),
+                )
+                raise SyncCancelledError(
+                    f"version download cancelled at chunk {completed}/{len(chunks)} of {path}"
+                )
+            encrypted = _load_cached_chunk(
+                chunk_cache_dir=chunk_cache_dir,
+                vault_id=vault.vault_id,
+                chunk_id=chunk["chunk_id"],
+                head=heads[chunk["chunk_id"]],
+            )
+            if encrypted is None:
+                encrypted = _get_chunk_with_retry(
+                    relay=relay,
+                    vault_id=vault.vault_id,
+                    vault_access_secret=vault.vault_access_secret,
+                    chunk_id=chunk["chunk_id"],
+                    should_continue=should_continue,
+                )
+
+            plaintext = _decrypt_chunk(
+                vault=vault,
+                remote_folder_id=str(folder["remote_folder_id"]),
+                file_id=str(entry.get("entry_id", "")),
+                version_id=str(version.get("version_id", "")),
+                chunk=chunk,
+                encrypted=encrypted,
+            )
+            _store_cached_chunk(chunk_cache_dir, vault.vault_id, chunk["chunk_id"], encrypted)
+            completed += 1
+            bytes_written += len(plaintext)
+            _report(progress, "downloading", completed, len(chunks), bytes_written)
+            yield plaintext
+
         if should_continue is not None and not should_continue():
             log.info(
-                "vault.download.cancelled vault=%s path=%s version=%s chunks_done=%d total=%d",
-                vault.vault_id, path, version_id, completed, len(chunks),
+                "vault.download.cancelled_pre_write vault=%s path=%s version=%s",
+                vault.vault_id, path, version_id,
             )
             raise SyncCancelledError(
-                f"version download cancelled at chunk {completed}/{len(chunks)} of {path}"
-            )
-        encrypted = _load_cached_chunk(
-            chunk_cache_dir=chunk_cache_dir,
-            vault_id=vault.vault_id,
-            chunk_id=chunk["chunk_id"],
-            head=heads[chunk["chunk_id"]],
-        )
-        if encrypted is None:
-            encrypted = _get_chunk_with_retry(
-                relay=relay,
-                vault_id=vault.vault_id,
-                vault_access_secret=vault.vault_access_secret,
-                chunk_id=chunk["chunk_id"],
-                should_continue=should_continue,
+                f"version download cancelled before write of {path}"
             )
 
-        plaintext = _decrypt_chunk(
-            vault=vault,
-            remote_folder_id=str(folder["remote_folder_id"]),
-            file_id=str(entry.get("entry_id", "")),
-            version_id=str(version.get("version_id", "")),
-            chunk=chunk,
-            encrypted=encrypted,
-        )
-        _store_cached_chunk(chunk_cache_dir, vault.vault_id, chunk["chunk_id"], encrypted)
-        plaintext_parts.append(plaintext)
-        completed += 1
-        bytes_written += len(plaintext)
-        _report(progress, "downloading", completed, len(chunks), bytes_written)
-
-    if should_continue is not None and not should_continue():
-        log.info(
-            "vault.download.cancelled_pre_write vault=%s path=%s version=%s",
-            vault.vault_id, path, version_id,
-        )
-        raise SyncCancelledError(
-            f"version download cancelled before write of {path}"
-        )
-
-    data = b"".join(plaintext_parts)
+    written = atomic_write_chunks(final_path, plaintext_iter())
     expected_size = _int_value(version.get("logical_size"))
-    if expected_size and len(data) != expected_size:
+    if expected_size and written != expected_size:
         raise ValueError(
-            f"downloaded size mismatch: expected {expected_size}, got {len(data)}"
+            f"downloaded size mismatch: expected {expected_size}, got {written}"
         )
-
-    atomic_write_file(final_path, data)
-    _report(progress, "done", len(chunks), len(chunks), len(data))
+    _report(progress, "done", len(chunks), len(chunks), written)
     return final_path
 
 

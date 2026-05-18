@@ -37,6 +37,10 @@ from src.vault.download import (  # noqa: E402
     resolve_download_destination,
     vault_chunk_cache_path,
 )
+from src.vault.download.paths import (  # noqa: E402
+    atomic_write_chunks,
+    atomic_write_file,
+)
 from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
@@ -458,6 +462,64 @@ class VaultDownloadTests(unittest.TestCase):
         self.assertEqual(len(relay.downloaded), 10)
         self.assertEqual(progress[-1].phase, "done")
         self.assertFalse(list(out.rglob("*.dc-temp-*")))
+
+    def test_download_latest_file_streams_via_atomic_write_chunks(self) -> None:
+        """Review §3.H3: ``download_latest_file`` and
+        ``download_version`` previously accumulated ``plaintext_parts:
+        list[bytes]`` and called ``atomic_write_file(data)`` — peak
+        RAM was ``2 × file_size`` (the parts list + the joined buffer
+        + the destination temp file's write buffer). Multi-GB
+        restores OOM'd the tray subprocess. Post-fix both paths call
+        ``atomic_write_chunks`` and stream per-chunk to disk; peak
+        RAM is ``~1 chunk``.
+
+        Drive a download with three chunks and assert
+        ``atomic_write_chunks`` is invoked exactly once — not
+        ``atomic_write_file``.
+        """
+        manifest, chunks = _manifest_and_chunks([b"alpha ", b"beta"])
+        relay = FakeChunkRelay(chunks)
+        vault = _vault()
+        atomic_chunks_calls = []
+        atomic_file_calls = []
+
+        real_chunks = atomic_write_chunks
+        real_file = atomic_write_file
+
+        def spy_chunks(destination, parts):
+            atomic_chunks_calls.append(destination)
+            return real_chunks(destination, parts)
+
+        def spy_file(destination, data):
+            atomic_file_calls.append(destination)
+            return real_file(destination, data)
+
+        try:
+            with mock.patch(
+                "src.vault.download.single_file.atomic_write_chunks",
+                side_effect=spy_chunks,
+            ), mock.patch(
+                "src.vault.download.single_file.atomic_write_file",
+                side_effect=spy_file,
+            ):
+                download_latest_file(
+                    vault=vault,
+                    relay=relay,
+                    manifest=manifest,
+                    path="Documents/report.txt",
+                    destination=self.tmpdir / "out.bin",
+                )
+        finally:
+            vault.close()
+
+        self.assertEqual(
+            len(atomic_chunks_calls), 1,
+            "single-file download must stream via atomic_write_chunks",
+        )
+        self.assertEqual(
+            atomic_file_calls, [],
+            "single-file download must NOT buffer into atomic_write_file",
+        )
 
     def test_download_folder_honours_should_continue_mid_run(self) -> None:
         """Review §3.H2: ``should_continue`` is checked between every
