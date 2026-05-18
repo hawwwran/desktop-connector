@@ -227,6 +227,57 @@ file…" CLI helper as a power-user escape hatch.
 
 ---
 
+## §4.M1 — Orphan-chunk stage-0 reaper
+
+Status: skipped-needs-design (requires server-side support)
+Date: 2026-05-17
+Verified against: `desktop/src/vault/upload/folder.py:436-519` (the
+``_publish_batch_with_cas_retry`` exhaust path raises after CAS
+retries, leaving any chunks already uploaded as orphans);
+`desktop/src/vault/ops/eviction.py` (stage 1 only purges chunks
+behind expired tombstones, not active orphans);
+`server/src/Controllers/VaultController.php` (no endpoint exists
+that lists all chunk_ids for a vault, so the desktop can't compute
+the orphan set without enumerating the manifest's chunk references
+against a server-side inventory).
+
+Doubt: The review's suggested fix — a "stage-0 orphan-chunk reaper
+that does ``batch-head × manifest references`` and deletes the
+difference" — requires the desktop to know every chunk currently
+stored against the vault. The only existing endpoint is
+``batch_head_chunks`` which takes a list and returns presence; it
+doesn't enumerate. Building the reaper requires either:
+
+  (a) A new server endpoint ``GET /api/vaults/{id}/chunks`` that
+      lists every stored chunk_id (paginated). Desktop then computes
+      ``set(server_chunks) − set(manifest_chunk_refs)`` and DELETEs
+      the diff. Simple but adds a new API surface that needs auth +
+      pagination + rate-limit thought.
+
+  (b) Move the reaper to the server. The GC job kind already has
+      ``KIND_RECLAIM_AGED_TOMBSTONES`` (or similar); a new
+      ``KIND_RECLAIM_ORPHAN_CHUNKS`` would walk the chunks table,
+      cross-check against the manifest references, and delete. The
+      desktop just triggers the job. Cleaner separation but needs a
+      new state machine + admin gate.
+
+Neither path is a Medium-scope fix. The active-orphan leak is real
+but bounded: each CAS-exhaust event leaks at most one batch's worth
+of chunks (typically <100), and the existing 30-day chunk retention
+policy (server-side) will eventually reap them. The leak's blast
+radius is "wasted ciphertext quota until retention fires".
+
+Action taken: nothing in code. Document the leak shape here so the
+next eviction-pipeline session has a concrete starting point.
+
+Need from user: decision on (a) ship the new ``GET /chunks`` +
+desktop reaper, (b) push the work to a server-side
+``KIND_RECLAIM_ORPHAN_CHUNKS`` GC job, or (c) accept the leak as
+"bounded by retention" and document it in the architecture doc as
+a known v1 limitation.
+
+---
+
 ## §5.H3 — Access-secret rotation has no client trigger
 
 Status: skipped-needs-design (new feature build)

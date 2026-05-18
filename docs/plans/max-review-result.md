@@ -569,19 +569,29 @@ Reads root once, iterates folders. Concurrent device adding a folder mid-clear �
 
 ### Medium
 
-#### §4.M1 — Folder upload CAS-exhaust leaves orphan active chunks the next eviction pass can't reclaim
+#### §4.M1 — Folder upload CAS-exhaust leaves orphan active chunks the next eviction pass can't reclaim — *skipped (requires server-side support)*
+**Status:** logged in `docs/plans/review-doubts.md` §4.M1 — desktop can't enumerate vault chunks (no API); the reaper requires either a new `GET /chunks` endpoint or a server-side `KIND_RECLAIM_ORPHAN_CHUNKS` GC job. The leak is bounded by the existing 30-day chunk retention policy server-side.
 **File:** `desktop/src/vault/upload/folder.py:436-519`. Comment claims orphans cleaned up; eviction stage 1 only purges chunks behind expired tombstones. Active orphan chunks have no reclamation path.
 
 **Fix:** stage-0 orphan-chunk reaper (`batch-head` × manifest references; delete difference).
 
-#### §4.M2 — `restore_remote_folder` symlink-escape check after mkdir(parents=True)
+#### ~~§4.M2~~ — `restore_remote_folder` symlink-escape check after mkdir(parents=True)
+**Fix landed:** 557de31 2026-05-17
 **File:** `desktop/src/vault/ops/restore.py:155-174`. Pre-existing symlink as parent dir → mkdir creates dirs through symlink target before escape check fires.
 
-#### §4.M3 — `clear_vault` audit event missing on mid-loop crash
+**Approach:** Hoisted the resolve+relative_to escape check above `mkdir(parents=True)`. Same logic, opposite order; closes the pre-skip side-effect window. Test plants a real symlink in the destination, asserts skip + no nested directories on the wrong side.
+
+#### ~~§4.M3~~ — `clear_vault` audit event missing on mid-loop crash
+**Fix landed:** 19884ad 2026-05-17
 **File:** `desktop/src/vault/ops/clear.py:107-121`. Emit `vault.vault.clear_started` at top of loop.
 
-#### §4.M4 — `purge_schedule` allows `delay_seconds=0`
+**Approach:** Added `vault.vault.clear_started` log + catalog entry; paired with the terminal `cleared` event so started-without-cleared sequences are spottable in audit logs.
+
+#### ~~§4.M4~~ — `purge_schedule` allows `delay_seconds=0`
+**Fix landed:** 19884ad 2026-05-17
 **File:** `desktop/src/vault/ops/purge_schedule.py:126`. 0-delay purge fires within seconds. Minimum 1 hour, or separate confirmation for sub-hour delays.
+
+**Approach:** Added `MIN_DELAY_SECONDS = 60` floor at the library layer with a clear "cancel window" error message. The danger-zone UI restricts the user-facing dropdown to ≥1 hour separately; this is the bottom-of-the-stack defence.
 
 ### Info
 
