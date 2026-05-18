@@ -168,14 +168,48 @@ class DisconnectDispatcherTests(_ActionsTestBase):
                 binding_id=binding_id, op_type="upload", relative_path=path,
             )
 
+        # Review §3.M5 — without ``confirm_force_drop`` the dispatcher
+        # must refuse to silently drop the queue. The toast surfaces
+        # the pending count for the UI to render.
         toast, err = dispatch_disconnect(
             store=self.store, binding_id=binding_id,
             confirm=lambda: True,
+        )
+        self.assertIsNone(toast)
+        self.assertIn("pending change", err or "")
+        self.assertEqual(self.store.get_binding(binding_id).state, "bound")
+
+        # Confirming the force-drop gate proceeds with the disconnect.
+        toast, err = dispatch_disconnect(
+            store=self.store, binding_id=binding_id,
+            confirm=lambda: True,
+            confirm_force_drop=lambda _count: True,
         )
         self.assertIsNone(err)
         self.assertIn("Disconnected", toast or "")
         self.assertIn("2 pending op(s) dropped", toast or "")
         self.assertEqual(self.store.get_binding(binding_id).state, "unbound")
+
+    def test_disconnect_force_drop_declined_keeps_binding_bound(self) -> None:
+        """Review §3.M5 — when the force-drop gate is declined the
+        binding stays bound and the pending ops survive for the next
+        sync cycle."""
+        binding_id = self._bound()
+        self.store.coalesce_op(
+            binding_id=binding_id, op_type="upload", relative_path="x.txt",
+        )
+
+        toast, err = dispatch_disconnect(
+            store=self.store, binding_id=binding_id,
+            confirm=lambda: True,
+            confirm_force_drop=lambda _count: False,
+        )
+        self.assertIsNone(toast)
+        self.assertIn("pending change", err or "")
+        self.assertEqual(self.store.get_binding(binding_id).state, "bound")
+        self.assertEqual(
+            len(self.store.list_pending_ops(binding_id)), 1,
+        )
 
     def test_disconnect_cancels_inflight_cycle_via_registry(self) -> None:
         binding_id = self._bound()

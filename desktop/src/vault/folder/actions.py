@@ -29,6 +29,7 @@ from ..binding.lifecycle import (
     DisconnectResult,
     PauseResult,
     ResumeResult,
+    VaultDisconnectHasPendingOpsError,
     disconnect_binding,
     pause_binding,
     resume_binding,
@@ -89,6 +90,7 @@ def dispatch_disconnect(
     binding_id: str,
     confirm: Callable[[], bool],
     cancellation: BindingCancellationRegistry | None = None,
+    confirm_force_drop: Callable[[int], bool] | None = None,
 ) -> tuple[str | None, str | None]:
     """Disconnect (unbind) a binding after the caller's ``confirm`` gate.
 
@@ -96,6 +98,15 @@ def dispatch_disconnect(
     user has confirmed the destructive action. The GTK side passes a
     closure that runs ``Adw.AlertDialog`` modally; tests pass
     ``lambda: True`` / ``lambda: False`` directly.
+
+    Review §3.M5 — ``confirm_force_drop`` is the second-stage gate that
+    fires when the binding still has pending ops the user might want
+    flushed first. ``disconnect_binding`` raises
+    :class:`VaultDisconnectHasPendingOpsError` on that case; we catch,
+    invoke ``confirm_force_drop(pending_count)``, and re-call with
+    ``force=True`` only when the user confirms. If the kwarg is not
+    provided, the dispatch returns an error tuple naming the count so
+    the caller can decide what to do.
     """
     if not confirm():
         return "Disconnect cancelled.", None
@@ -103,6 +114,23 @@ def dispatch_disconnect(
         result: DisconnectResult = disconnect_binding(
             store, binding_id, cancellation=cancellation,
         )
+    except VaultDisconnectHasPendingOpsError as pending_exc:
+        if confirm_force_drop is None or not confirm_force_drop(
+            pending_exc.pending_count,
+        ):
+            return (
+                None,
+                f"Disconnect cancelled: {pending_exc.pending_count} "
+                "pending change(s) would be dropped. Flush first or "
+                "confirm dropping them.",
+            )
+        try:
+            result = disconnect_binding(
+                store, binding_id,
+                cancellation=cancellation, force=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return None, f"Disconnect failed: {humanize(exc)}"
     except Exception as exc:  # noqa: BLE001
         return None, f"Disconnect failed: {humanize(exc)}"
     bits: list[str] = []

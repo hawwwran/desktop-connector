@@ -245,7 +245,9 @@ class DisconnectTests(unittest.TestCase):
 
     def test_disconnect_marks_unbound_preserves_local_entries(self) -> None:
         bid = self._make_bound_with_state()
-        result = disconnect_binding(self.store, bid)
+        # Review §3.M5 — pass force=True so the existing pending op
+        # (created in setup) is dropped without raising the new gate.
+        result = disconnect_binding(self.store, bid, force=True)
 
         self.assertIsInstance(result, DisconnectResult)
         self.assertEqual(result.binding_id, bid)
@@ -266,7 +268,7 @@ class DisconnectTests(unittest.TestCase):
     def test_disconnect_leaves_local_filesystem_untouched(self) -> None:
         bid = self._make_bound_with_state()
         before = sorted(p.name for p in self.local_root.iterdir())
-        disconnect_binding(self.store, bid)
+        disconnect_binding(self.store, bid, force=True)
         after = sorted(p.name for p in self.local_root.iterdir())
         self.assertEqual(before, after)
 
@@ -274,7 +276,7 @@ class DisconnectTests(unittest.TestCase):
         from src.vault.binding.twoway import run_two_way_cycle
 
         bid = self._make_bound_with_state()
-        disconnect_binding(self.store, bid)
+        disconnect_binding(self.store, bid, force=True)
         binding = self.store.get_binding(bid)
         with self.assertRaises(ValueError):
             run_two_way_cycle(
@@ -286,7 +288,7 @@ class DisconnectTests(unittest.TestCase):
 
     def test_disconnect_idempotent_on_already_unbound(self) -> None:
         bid = self._make_bound_with_state()
-        disconnect_binding(self.store, bid)
+        disconnect_binding(self.store, bid, force=True)
         result = disconnect_binding(self.store, bid)
         self.assertEqual(result.pending_ops_dropped, 0)
         # Local-entries count unchanged from the second pass.
@@ -295,6 +297,24 @@ class DisconnectTests(unittest.TestCase):
     def test_disconnect_unknown_binding_raises(self) -> None:
         with self.assertRaises(KeyError):
             disconnect_binding(self.store, "rb_v1_nope")
+
+    def test_disconnect_refuses_when_pending_ops_without_force(self) -> None:
+        """Review §3.M5 — silent drop of pending ops is gone. Calling
+        ``disconnect_binding`` without ``force=True`` while a pending
+        op exists raises the typed ``VaultDisconnectHasPendingOpsError``
+        and leaves the binding state untouched.
+        """
+        from src.vault.binding.lifecycle import VaultDisconnectHasPendingOpsError
+        bid = self._make_bound_with_state()
+        # Sanity: setup arranged one pending op.
+        self.assertEqual(len(self.store.list_pending_ops(bid)), 1)
+        with self.assertRaises(VaultDisconnectHasPendingOpsError) as ctx:
+            disconnect_binding(self.store, bid)
+        self.assertEqual(ctx.exception.pending_count, 1)
+        self.assertEqual(ctx.exception.binding_id, bid)
+        # Binding state untouched, pending op survives for the next cycle.
+        self.assertEqual(self.store.get_binding(bid).state, "bound")
+        self.assertEqual(len(self.store.list_pending_ops(bid)), 1)
 
     def test_disconnect_then_reconnect_revives_unbound_row_in_place(self) -> None:
         """Reconnecting after disconnect reuses the tombstone row.
@@ -306,7 +326,7 @@ class DisconnectTests(unittest.TestCase):
         hitting the schema's UNIQUE constraint.
         """
         bid = self._make_bound_with_state()
-        disconnect_binding(self.store, bid)
+        disconnect_binding(self.store, bid, force=True)
         revived = self.store.create_binding(
             vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
             local_path=str(self.local_root),
@@ -395,7 +415,7 @@ class CatalogConsistencyTests(unittest.TestCase):
     def test_disconnect_noop_log_line_has_only_binding_field(self) -> None:
         bid = self._make_binding(state="unbound")
         with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
-            disconnect_binding(self.store, bid)
+            disconnect_binding(self.store, bid, force=True)
         noop = [ln for ln in cm.output if "binding_disconnect_noop" in ln]
         self.assertEqual(len(noop), 1, cm.output)
         self.assertNotIn("already_unbound", noop[0])
@@ -445,7 +465,7 @@ class DisconnectAuditTrailTests(unittest.TestCase):
     def test_each_pending_op_logs_an_audit_line(self) -> None:
         bid = self._make_bound_with_pending(n_ops=3)
         with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
-            disconnect_binding(self.store, bid)
+            disconnect_binding(self.store, bid, force=True)
 
         audit = [
             ln for ln in cm.output
@@ -468,7 +488,7 @@ class DisconnectAuditTrailTests(unittest.TestCase):
         n = DISCONNECT_AUDIT_LOG_CAP + 5
         bid = self._make_bound_with_pending(n_ops=n)
         with self.assertLogs("src.vault.binding.lifecycle", level="INFO") as cm:
-            disconnect_binding(self.store, bid)
+            disconnect_binding(self.store, bid, force=True)
 
         audit = [
             ln for ln in cm.output

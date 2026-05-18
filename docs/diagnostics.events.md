@@ -513,6 +513,7 @@ relay log (filenames are local-only).
 | `vault.sync.binding_disconnect_dropping_op_truncated` | desktop | info | `binding`, `logged`, `total` | F-Y30 — per-op audit log capped; summary follows on `binding_disconnected` |
 | `vault.sync.binding_disconnect_noop` | desktop | info | `binding` | Disconnect on already-unbound binding |
 | `vault.sync.binding_disconnect_reaped_batch_stubs` | desktop | info | `binding`, `count` | SO-3 — disconnect reaped batched-upload stubs whose pending-ops were just dropped, preventing `<cache_dir>/batched/` growth across disconnect+reconnect churn |
+| `vault.sync.binding_disconnect_refused_pending` | desktop | info | `binding`, `pending` | Review §3.M5 — caller invoked `disconnect_binding` without `force=True` while pending ops still exist. Raises `VaultDisconnectHasPendingOpsError`; the UI catches it, prompts the user with the count, and re-calls with `force=True` only if they confirm dropping the queue |
 | `vault.sync.binding_disconnect_stub_reap_failed` | desktop | error | `binding`, `path`, exception traceback | SO-3 — per-path stub reap raised during disconnect; one stub stays on disk, the TTL reaper will catch it on next vault open |
 | `vault.sync.binding_disconnected` | desktop | info | `binding`, `sync_mode`, `local_entries_preserved`, `pending_ops_dropped` | T12.5 disconnect |
 | `vault.sync.binding_pause_cancelled_inflight_cycle` | desktop | info | `binding` | F-Y08 — pause cancelled an in-flight cycle via the registry |

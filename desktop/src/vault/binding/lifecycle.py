@@ -57,6 +57,31 @@ class SyncCancelledError(RuntimeError):
     """
 
 
+class VaultDisconnectHasPendingOpsError(RuntimeError):
+    """Raised by :func:`disconnect_binding` when the binding has unsynced
+    pending ops and ``force=False``.
+
+    Review §3.M5 — pre-fix disconnect silently dropped every pending op
+    (with per-op audit logs, but no user-facing surface). A user
+    disconnecting a binding mid-burst would lose the queued uploads
+    without any indication. The UI now catches this typed error, shows
+    the pending count, and offers "Sync first" / "Disconnect anyway"
+    so the drop is deliberate.
+
+    Carries ``pending_count`` so the UI can render
+    "N changes will be dropped" without re-querying the store.
+    """
+
+    def __init__(self, *, binding_id: str, pending_count: int) -> None:
+        self.binding_id = str(binding_id)
+        self.pending_count = int(pending_count)
+        super().__init__(
+            f"binding {self.binding_id!r} has {self.pending_count} pending "
+            "ops; pass force=True to disconnect and drop them, or flush "
+            "the sync queue first"
+        )
+
+
 class BindingCancellationRegistry:
     """Thread-safe map of ``binding_id -> threading.Event`` used to
     coordinate Pause / Disconnect with in-flight sync cycles (F-Y08).
@@ -243,6 +268,7 @@ def disconnect_binding(
     binding_id: str,
     *,
     cancellation: BindingCancellationRegistry | None = None,
+    force: bool = False,
 ) -> DisconnectResult:
     """Flip ``state="unbound"``; preserve ``vault_local_entries`` (T12.5).
 
@@ -255,6 +281,15 @@ def disconnect_binding(
     so no traffic leaves the device. Pending ops are dropped — without
     an active binding nothing will flush them, and stale entries would
     re-fire on a future re-connect.
+
+    Review §3.M5: refuse to disconnect when pending ops exist UNLESS
+    the caller passes ``force=True``. Pre-fix any disconnect silently
+    dropped the queue; a user disconnecting mid-burst would lose
+    queued uploads with no indication. Now the typed
+    :class:`VaultDisconnectHasPendingOpsError` is raised; the UI
+    catches it, shows the count, and either flushes the queue first
+    or re-calls with ``force=True`` after explicit user confirmation.
+    The audit-log + stub-reap shape is unchanged when force is True.
 
     F-Y08: ``cancellation`` (if provided) signals any in-flight cycle
     on this binding to stop before the state flip lands; otherwise the
@@ -287,6 +322,18 @@ def disconnect_binding(
             )
     local_count = len(store.list_local_entries(binding_id))
     pending = store.list_pending_ops(binding_id)
+    if pending and not force:
+        # Review §3.M5 — refuse silently dropping the queue. Caller
+        # must explicitly opt in via ``force=True`` so the data loss
+        # is deliberate.
+        log.info(
+            "vault.sync.binding_disconnect_refused_pending binding=%s "
+            "pending=%d",
+            binding_id, len(pending),
+        )
+        raise VaultDisconnectHasPendingOpsError(
+            binding_id=binding_id, pending_count=len(pending),
+        )
     # F-Y30: per-op audit trail for what disconnect drops. With a 200-op
     # queue this prints 200 lines into the rotating local log — that's
     # acceptable; the alternative is a "dropped 200 ops" summary that
