@@ -2187,6 +2187,64 @@ final class VaultControllerTest extends TestCase
         self::assertNotEmpty($after['json']['data']['encrypted_header']);
     }
 
+    public function test_migrationVerifySource_post_commit_does_not_stamp_new_verified_at(): void
+    {
+        // Review §1.M7 — verify-source after /commit must NOT acquire a
+        // brand-new verified_at. Verification is a pre-commit primitive;
+        // the field should only ever record when the pre-commit state
+        // was attested. Pre-fix the behaviour was correct by accident
+        // (COALESCE preserved any pre-commit timestamp), but a vault
+        // whose verified_at was reset to NULL post-commit (or never
+        // stamped because /commit ran via some other code path) would
+        // silently acquire a post-commit verified_at on the next
+        // /verify-source call.
+        $target = 'https://target.example.test';
+        $this->invoke(fn() => VaultController::migrationStart(
+            $this->db, $this->jctx(
+                'POST', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+        // Verify once + commit — happy path.
+        $this->invoke(fn() => VaultController::migrationVerifySource(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        $this->invoke(fn() => VaultController::migrationCommit(
+            $this->db, $this->jctx(
+                'PUT', ['vault_id' => self::VAULT_ID],
+                ['target_relay_url' => $target],
+            ),
+        ));
+
+        // Simulate the pathological state: post-commit with
+        // verified_at scrubbed (e.g. a future code path that resets
+        // the field, or a manual operator intervention). The vault's
+        // migrated_to is set; verified_at is NULL.
+        $this->db->execute(
+            'UPDATE vault_migration_intents SET verified_at = NULL WHERE vault_id = :id',
+            [':id' => self::VAULT_ID],
+        );
+
+        // Call /verify-source again — the explicit state guard must
+        // refuse to stamp a new timestamp because the vault is
+        // already migrated_to. The endpoint still succeeds (it's
+        // deliberately read-only after commit so other devices can
+        // verify the pre-commit state didn't drift), but the response
+        // must reflect that verified_at was NOT freshly stamped.
+        $after = $this->invoke(fn() => VaultController::migrationVerifySource(
+            $this->db, $this->ctx('GET', ['vault_id' => self::VAULT_ID]),
+        ));
+        self::assertSame(200, $after['status']);
+        // verified_at in the DB row should still be NULL.
+        $intent = (new VaultMigrationIntentsRepository($this->db))->getIntent(
+            self::VAULT_ID,
+        );
+        self::assertNull(
+            $intent['verified_at'],
+            'verify-source after /commit must NOT stamp verified_at',
+        );
+    }
+
     public function test_migrationCommit_repeat_returns_same_committed_at(): void
     {
         $target = 'https://target.example.test';

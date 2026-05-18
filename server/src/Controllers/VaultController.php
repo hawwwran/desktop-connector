@@ -1725,7 +1725,26 @@ class VaultController
 
         // F-S05: stamp verified_at idempotently. Subsequent verify-source
         // calls return the same timestamp.
-        $intentsRepo->markVerified($vaultId, time());
+        //
+        // Review §1.M7 — explicit state guard so the semantics don't
+        // rely on transitive COALESCE behaviour. A vault that already
+        // committed (``migrated_to`` set) must NOT acquire a brand-new
+        // ``verified_at`` after the commit point — verification is a
+        // pre-commit primitive and the field should only ever record
+        // when the pre-commit state was attested. Reading a verified_at
+        // that was stamped post-commit would mislead the client about
+        // the time-order of the migration phases. Pre-fix the behaviour
+        // happened to be correct because COALESCE preserved any
+        // pre-commit timestamp, but a vault with no prior verify that
+        // then committed (e.g. via /commit's read-only auto-verify path
+        // or any future code that skips verify) would still have
+        // ``verified_at = NULL`` and the next /verify-source call would
+        // stamp it AFTER the commit. The explicit guard makes the
+        // invariant readable in one place.
+        $alreadyCommitted = $vault['migrated_to'] !== null;
+        if (!$alreadyCommitted) {
+            $intentsRepo->markVerified($vaultId, time());
+        }
         $persistedIntent = $intentsRepo->getIntent($vaultId);
         $verifiedAt = $persistedIntent !== null && $persistedIntent['verified_at'] !== null
             ? (int)$persistedIntent['verified_at']
