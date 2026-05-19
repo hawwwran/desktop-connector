@@ -22,10 +22,10 @@ from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.download import download_latest_file  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    find_file_entry,
     find_file_entry_in_shard,
-    make_manifest,
-    make_remote_folder,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
 )
 from src.vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError  # noqa: E402
 from src.vault.upload import (  # noqa: E402
@@ -117,7 +117,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         )
 
         # 1. Direct entry lookup hits the new file with the right version_id.
-        entry = find_file_entry(unified, DOCS_ID, "guarded.txt")
+        entry = _entry_in_unified(unified, DOCS_ID, "guarded.txt")
         self.assertIsNotNone(entry, "unified manifest is missing the uploaded entry")
         self.assertEqual(entry["latest_version_id"], result.version_id)
 
@@ -125,7 +125,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         # (caller can swap it in without worrying about shared state).
         self.assertIsNot(unified, manifest)
         # The pre-upload manifest must not be mutated under the caller's feet.
-        self.assertIsNone(find_file_entry(manifest, DOCS_ID, "guarded.txt"))
+        self.assertIsNone(_entry_in_unified(manifest, DOCS_ID, "guarded.txt"))
 
         # 3. list_folder — the call the browser's render_file_list runs —
         # surfaces the file row at the requested folder display name.
@@ -176,7 +176,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
         )
         for rel in ("batch/top.txt", "batch/sub/leaf.txt"):
             self.assertIsNotNone(
-                find_file_entry(unified, DOCS_ID, rel),
+                _entry_in_unified(unified, DOCS_ID, rel),
                 f"folder upload published manifest is missing {rel}",
             )
         self.assertIsNot(unified, manifest)
@@ -217,7 +217,7 @@ class VaultUploadRoundTripTests(unittest.TestCase):
                 chunk_size=8 * 1024,
             )
             new_manifest = assemble_unified_manifest(result.root, {result.remote_folder_id: result.shard})
-            entry = find_file_entry(new_manifest, DOCS_ID, "report.txt")
+            entry = _entry_in_unified(new_manifest, DOCS_ID, "report.txt")
             self.assertIsNotNone(entry)
             self.assertEqual(entry["latest_version_id"], result.version_id)
 
@@ -1018,23 +1018,30 @@ class VaultUploadRoundTripTests(unittest.TestCase):
 
         # Use a remote folder with the §gaps §7 default ignore subset.
         ignore = [".git/", "node_modules/", "*.pyc"]
-        manifest = make_manifest(
+        root_manifest = make_root_manifest(
             vault_id=VAULT_ID,
-            revision=1,
-            parent_revision=0,
+            root_revision=1,
+            parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z",
             author_device_id=AUTHOR,
             remote_folders=[
-                make_remote_folder(
+                make_root_folder_pointer(
                     remote_folder_id=DOCS_ID,
                     display_name_enc="Documents",
                     created_at="2026-05-04T12:00:00.000Z",
                     created_by_device_id=AUTHOR,
                     ignore_patterns=ignore,
-                    entries=[],
                 )
             ],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root_manifest, {DOCS_ID: shard})
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -2401,26 +2408,44 @@ def _vault() -> Vault:
 
 
 def _empty_manifest() -> dict:
-    return make_manifest(
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=1,
-        parent_revision=0,
+        root_revision=1,
+        parent_root_revision=0,
         created_at="2026-05-04T12:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             )
         ],
     )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=[],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
+
+
+def _entry_in_unified(manifest: dict, remote_folder_id: str, path: str) -> dict | None:
+    """Look up a file entry inside the unified-shape manifest's folder."""
+    folder = next(
+        (f for f in manifest.get("remote_folders", []) or [] if f.get("remote_folder_id") == remote_folder_id),
+        None,
+    )
+    if folder is None:
+        return None
+    return find_file_entry_in_shard(folder, path)
 
 
 def _latest_chunk_list(manifest: dict, remote_folder_id: str, path: str) -> list[dict]:
-    entry = find_file_entry(manifest, remote_folder_id, path)
+    entry = _entry_in_unified(manifest, remote_folder_id, path)
     if entry is None:
         return []
     latest = next(
