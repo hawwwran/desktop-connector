@@ -45,7 +45,32 @@ Detailed evidence: [`temp/automation-tests-results/0007/test-B4/result.md`](../.
 
 ---
 
-## 4. Source of truth references
+## 4. Debug bundle is missing 2 of 5 advertised entries (Maintenance tab caller bug)
+
+Suite 0007 Test B2 (2026-05-19) ran the live debug-bundle leak scan. The redaction layer works — auth_token, private_key:pem body, vault_grant, Bearer pattern, base64-32-byte runs all returned 0 matches in the produced bundle. But the bundle itself is **producer-side incomplete**.
+
+The Maintenance tab's own description label (visible in the UI) promises: "Packages a redacted snapshot of vault config, local index schema, **binding states**, and the tail of the vault.log file into a ZIP." So this isn't just a docstring drift — the user-facing copy advertises `binding_states` and the bundle doesn't deliver them.
+
+`vault/diagnostics/debug_bundle.py:219-272` (`build_debug_bundle_bytes`) accepts 5 optional named inputs — `config`, `db_path`, `binding_states`, `activity_log_path`, `manifest_summary` — and the module docstring (lines 12-22) lists all 5 as the intended outputs. The builder skips each input if `None`, so a caller omitting an input gets a silently-smaller bundle.
+
+The only UI caller (`windows_vault/tab_maintenance.py:92-99`) passes only 3 — `config`, `db_path`, `activity_log_path`. `binding_states` and `manifest_summary` aren't computed or threaded through, so every bundle a user can produce is missing those two entries:
+
+```python
+out = write_debug_bundle(
+    destination,
+    config=config_dump,
+    db_path=local_index.db_path,
+    activity_log_path=(activity_log if activity_log.exists() else None),
+)
+```
+
+No error or diagnostic fires; the bundle is just smaller than the docstring claims it should be. Impact: a support engineer reading the bundle gets no visibility into per-binding state (binding_id / state / sync_mode / last_synced_revision) — so "why isn't this folder syncing?" requires a separate state dump — and no visibility into per-vault revision + chunk_count + retained-history totals.
+
+Resolution: ~25 lines in `tab_maintenance.py:worker()` to compute `binding_states` via `VaultBindingsStore.list_bindings()` and `manifest_summary` by opening the local vault from grant (gracefully handle the locked-vault case). Detailed sketch in [`temp/automation-tests-results/0007/test-B2/result.md`](../../temp/automation-tests-results/0007/test-B2/result.md) Finding 1.
+
+---
+
+## 5. Source of truth references
 
 - **Max-effort review fixes landed:** [`temp/finished-plans/max-review-result.md`](../../temp/finished-plans/max-review-result.md) — every fixed item has a strikethrough heading + commit SHA + Approach paragraph.
 - **Max-effort review fix log:** [`temp/finished-plans/max-review-result-progress.md`](../../temp/finished-plans/max-review-result-progress.md).
