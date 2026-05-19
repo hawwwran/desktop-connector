@@ -119,6 +119,47 @@ def build_op_log_entry(
     return entry
 
 
+def maybe_genesis_followup_entries(
+    parent_root: dict[str, Any] | None,
+    *,
+    new_revision: int,
+    device_id: str,
+    ts: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return ``[vault.create entry]`` iff this root publish is the
+    first follow-up after genesis; ``[]`` otherwise.
+
+    The check passes when (a) the parent root's ``root_revision`` is 1
+    (genesis published at revision 1 per ``Vault.prepare``) AND (b) the
+    parent tail carries no prior ``vault.create`` entry. Plan D5 defers
+    the genesis row to the first follow-up rather than mutating the
+    genesis envelope itself — patching genesis would be a
+    schema-version concern.
+
+    Idempotent across CAS retries: once a ``vault.create`` entry has
+    landed in any prior tail, subsequent calls return ``[]`` so a retry
+    against a server-side tail that already carries the entry doesn't
+    duplicate it. (At the parent_revision==1 check this would only fire
+    if a concurrent device raced us to revision 2 with the entry; we
+    won't be that device, but the entry will still land on the
+    eventual winning publish through one of the contending devices.)
+    """
+    if not isinstance(parent_root, dict):
+        return []
+    if int(parent_root.get("root_revision", 0)) != 1:
+        return []
+    prior_tail = parent_root.get("operation_log_tail") or []
+    for entry in prior_tail:
+        if isinstance(entry, dict) and entry.get("type") == "vault.create":
+            return []
+    return [build_op_log_entry(
+        event_type="vault.create",
+        device_id=device_id,
+        revision=int(new_revision),
+        ts=ts,
+    )]
+
+
 def append_op_log_entries(
     prior_tail: Iterable[dict[str, Any]] | None,
     new_entries: Iterable[dict[str, Any]] | None,
@@ -158,4 +199,5 @@ __all__ = [
     "MAX_OP_LOG_TAIL",
     "append_op_log_entries",
     "build_op_log_entry",
+    "maybe_genesis_followup_entries",
 ]

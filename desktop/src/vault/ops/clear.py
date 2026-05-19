@@ -31,7 +31,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..relay_errors import VaultCASConflictError
-from ..state.op_log import append_op_log_entries, build_op_log_entry
+from ..state.op_log import (
+    append_op_log_entries,
+    build_op_log_entry,
+    maybe_genesis_followup_entries,
+)
 from .delete import DeleteVault, delete_folder_contents
 
 
@@ -244,9 +248,18 @@ def _publish_root_op_log_entry(
             candidate["parent_root_revision"] = parent_revision
             candidate["created_at"] = timestamp
             candidate["author_device_id"] = str(device_id)
+            # Plan D5: if this audit publish is the first follow-up
+            # after genesis, prepend a vault.create row so a brand-new
+            # vault that has clear-vault as its first op still gets
+            # the create entry on its timeline.
+            create_entries = maybe_genesis_followup_entries(
+                current_root,
+                new_revision=new_revision,
+                device_id=device_id,
+            )
             candidate["operation_log_tail"] = append_op_log_entries(
                 candidate.get("operation_log_tail"),
-                [build_op_log_entry(
+                [*create_entries, build_op_log_entry(
                     event_type=event_type,
                     device_id=device_id,
                     revision=new_revision,

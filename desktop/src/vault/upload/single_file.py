@@ -41,7 +41,11 @@ from ..manifest import (
     normalize_shard_plaintext,
 )
 from ..relay_errors import VaultCASConflictError
-from ..state.op_log import append_op_log_entries, build_op_log_entry
+from ..state.op_log import (
+    append_op_log_entries,
+    build_op_log_entry,
+    maybe_genesis_followup_entries,
+)
 from .constants import CAS_MAX_RETRIES, CHUNK_SIZE, MAX_FILE_BYTES_DEFAULT, UploadMode
 from .folder_state import (
     FolderState,
@@ -904,14 +908,28 @@ def _bumped_root_for_shard_publish(
     ``publish_shard_with_root`` patches the matching folder pointer's
     ``shard_hash`` + ``shard_revision`` internally before sealing —
     this helper only owns the vault-wide revision bump.
+
+    Plan D5: prepend a ``vault.create`` op-log entry on the first
+    follow-up root publish after genesis. Idempotent across CAS retries.
     """
     parent_n = normalize_root_manifest_plaintext(parent_root)
     parent_revision = int(parent_n.get("root_revision", 0))
+    new_revision = parent_revision + 1
     candidate = dict(parent_n)
-    candidate["root_revision"] = parent_revision + 1
+    candidate["root_revision"] = new_revision
     candidate["parent_root_revision"] = parent_revision
     candidate["created_at"] = created_at
     candidate["author_device_id"] = str(author_device_id)
+    create_entries = maybe_genesis_followup_entries(
+        parent_n,
+        new_revision=new_revision,
+        device_id=author_device_id,
+    )
+    if create_entries:
+        candidate["operation_log_tail"] = append_op_log_entries(
+            candidate.get("operation_log_tail"),
+            create_entries,
+        )
     return candidate
 
 

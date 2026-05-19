@@ -21,6 +21,7 @@ from .manifest import (
 )
 from .canonical import _now_rfc3339
 from .protocols import RelayProtocol
+from .state.op_log import append_op_log_entries, maybe_genesis_followup_entries
 
 
 class RemoteFoldersMixin:
@@ -265,11 +266,28 @@ class RemoteFoldersMixin:
         """
         current_root = self.fetch_root_manifest(relay, local_index=local_index)
         parent_root_revision = int(current_root.get("root_revision", 0))
+        new_root_revision = parent_root_revision + 1
         candidate = mutate(current_root)
-        candidate["root_revision"] = parent_root_revision + 1
+        candidate["root_revision"] = new_root_revision
         candidate["parent_root_revision"] = parent_root_revision
         candidate["created_at"] = timestamp
         candidate["author_device_id"] = str(author_device_id)
+        # Plan D5: the genesis envelope is built with operation_log_tail=[];
+        # the vault.create row lands on the first follow-up root publish.
+        # `_mutate_root_and_publish` is the common first-followup path
+        # (binding a folder during vault-onboard) so the row reliably
+        # appears on the second revision rather than waiting until an
+        # upload eventually fires.
+        create_entries = maybe_genesis_followup_entries(
+            current_root,
+            new_revision=new_root_revision,
+            device_id=author_device_id,
+        )
+        if create_entries:
+            candidate["operation_log_tail"] = append_op_log_entries(
+                candidate.get("operation_log_tail"),
+                create_entries,
+            )
 
         published_root = self.publish_root_manifest(relay, candidate, local_index=local_index)
         unified = assemble_unified_manifest(published_root, {})
