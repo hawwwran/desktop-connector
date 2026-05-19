@@ -182,7 +182,7 @@ The 10 verified-clean / correction entries (§6.L1–L9) require no action.
 
 Carried over from [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/finished-plans/vault-manifest-sharding.md). Phases A → 7e shipped; step 7f did the heavy lifting (legacy `Vault.fetch_manifest` / `publish_manifest`, server `vault_manifests` table + `/manifest` endpoints, `FakeUploadRelay.put_manifest` / `get_manifest`, migration script + legacy fixture all gone).
 
-**Status (verified 2026-05-18):** the sharded surface IS the production path. Steps §3.1–§3.6 below all landed; the only residual is a ~140-site test-fixture migration documented under §3.5 as a separate refactor (the kept-as-fixture helpers are intentional, not a regression). No functional gaps remain.
+**Status (verified 2026-05-19):** every step §3.1–§3.6 has landed. The §3.5 test-fixture sweep that was the only remaining residual closed 2026-05-19 across 22 commits; production + tests both use sharded primitives + `assemble_unified_manifest` exclusively now. No functional gaps remain.
 
 ### ~~3.1 — Result-shape rename + `assemble_unified_manifest` callers~~ *(landed 878af94)*
 
@@ -204,13 +204,13 @@ The plan's "Recommended sequencing" item 2 ("compat synthesizer has no callers o
 
 `upload/conflict.py` + `import_/bundle.py` now use the shard-aware `_in_shard` variants. No production code outside `manifest.py` itself references the legacy helpers (verified by grep: `desktop/src/vault/upload/` and `desktop/src/vault/import_/` are clean).
 
-### 3.5 — Legacy helpers in `desktop/src/vault/manifest.py` *(production-clean; test-fixture sweep deferred)*
+### ~~3.5 — Legacy helpers in `desktop/src/vault/manifest.py`~~ *(complete 2026-05-19)*
 
 **Landed (9617d22 + earlier):** `add_remote_folder` (manifest-level), `rename_remote_folder` (manifest-level), `add_or_append_file_version`, `merge_with_remote_head` all dropped.
 
-**Still present (test-fixture only, intentional):** `make_manifest`, `make_remote_folder`, `tombstone_file_entry`, `find_file_entry` — kept because ~140 test sites still build/inspect unified manifests with them. Migrating the tests to a pure-sharded fixture vocabulary is a separate refactor and is the **only remaining open item** in §3.
+**Landed 2026-05-19 (22-commit autonomous sweep):** `make_manifest`, `make_remote_folder`, `tombstone_file_entry`, `find_file_entry` all dropped. The 22 test files that built/inspected unified manifests through these helpers now compose root + shard primitives and call `assemble_unified_manifest` for the unified-shape dict; legacy entry lookups route through `find_file_entry_in_shard` against the per-folder dict the assembled view exposes. The two redundant unit tests for `tombstone_file_entry` in `test_desktop_vault_delete.py` were removed (already covered by the shard equivalents in `test_desktop_vault_manifest_sharded.py`); the missing-path KeyError case migrated to `tombstone_file_entry_in_shard`. Full vault suite: 1112/1112 green (was 1114; the 2-test delta is the deletions above).
 
-`normalize_manifest_plaintext`, `canonical_manifest_json` stay — they shape envelope-serialization paths in production.
+`normalize_manifest_plaintext`, `canonical_manifest_json` stay — they shape envelope-serialization paths in production. `tombstone_files_under` and `restore_file_entry` (unified-shape) also stay; they're test-only today but not on the explicit drop list.
 
 ### ~~3.6 — Test-helper migration (`seed_sharded_state`)~~ *(landed 87b1ccb)*
 
@@ -227,7 +227,7 @@ Items 1–6 from the original sequencing all landed in the order shown:
 5. ~~§3.6 — Test-helper mechanical sweep (`seed_sharded_state`)~~ — `87b1ccb`
 6. ~~§3.5 — Drop unused legacy manifest helpers~~ — `9617d22` (production-side only; ~140-site test-fixture migration left as a separate refactor)
 
-**Open:** the ~140-site test-fixture sweep that would let `make_manifest` / `make_remote_folder` / `tombstone_file_entry` / `find_file_entry` drop from `manifest.py`. Mechanical, non-blocking, ships independently.
+**Open:** none — the test-fixture sweep landed 2026-05-19; all four legacy helpers are gone from `manifest.py`.
 
 ---
 

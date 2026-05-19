@@ -32,63 +32,6 @@ _DEVICE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _BASE32_LOWER = "abcdefghijklmnopqrstuvwxyz234567"
 
 
-def make_manifest(
-    *,
-    vault_id: str,
-    revision: int,
-    parent_revision: int,
-    created_at: str,
-    author_device_id: str,
-    remote_folders: list[dict[str, Any]] | None = None,
-    operation_log_tail: list[dict[str, Any]] | None = None,
-    archived_op_segments: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Build a normalized v1 manifest plaintext object."""
-    manifest = {
-        "schema": MANIFEST_SCHEMA,
-        "vault_id": normalize_vault_id(vault_id),
-        "revision": int(revision),
-        "parent_revision": int(parent_revision),
-        "created_at": str(created_at),
-        "author_device_id": str(author_device_id),
-        "manifest_format_version": MANIFEST_FORMAT_VERSION,
-        "remote_folders": list(remote_folders or []),
-        "operation_log_tail": list(operation_log_tail or []),
-        "archived_op_segments": list(archived_op_segments or []),
-    }
-    return normalize_manifest_plaintext(manifest)
-
-
-def make_remote_folder(
-    *,
-    remote_folder_id: str,
-    display_name_enc: str,
-    created_at: str,
-    created_by_device_id: str,
-    retention_policy: dict[str, int] | None = None,
-    ignore_patterns: list[str] | None = None,
-    state: str = "active",
-    entries: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Build a normalized remote-folder manifest entry.
-
-    ``display_name_enc`` is an opaque client string inside the encrypted
-    manifest. T4.5 renames mutate only this field.
-    """
-    folder: dict[str, Any] = {
-        "remote_folder_id": remote_folder_id,
-        "display_name_enc": unicodedata.normalize("NFC", display_name_enc),
-        "created_at": created_at,
-        "created_by_device_id": created_by_device_id,
-        "retention_policy": copy.deepcopy(retention_policy or DEFAULT_RETENTION_POLICY),
-        "ignore_patterns": list(ignore_patterns or []),
-        "state": state,
-    }
-    if entries is not None:
-        folder["entries"] = list(entries)
-    return normalize_remote_folder(folder)
-
-
 def generate_remote_folder_id() -> str:
     """Generate ``rf_v1_<24 lowercase base32>`` remote folder ids."""
     raw = secrets.token_bytes(15)
@@ -334,34 +277,6 @@ def normalize_manifest_path(path: str) -> str:
     return "/".join(parts)
 
 
-def find_file_entry(
-    manifest: dict[str, Any],
-    remote_folder_id: str,
-    path: str,
-) -> dict[str, Any] | None:
-    """Return the file entry at ``path`` inside ``remote_folder_id``, or None.
-
-    Match is on the normalized path. Deleted entries are returned too —
-    callers wanting to ignore tombstones should check ``entry["deleted"]``
-    themselves; T7 needs to find tombstones to restore.
-    """
-    normalized_path = normalize_manifest_path(path)
-    for folder in manifest.get("remote_folders", []) or []:
-        if not isinstance(folder, dict):
-            continue
-        if folder.get("remote_folder_id") != remote_folder_id:
-            continue
-        for entry in folder.get("entries", []) or []:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("type", "file")) != "file":
-                continue
-            entry_path = unicodedata.normalize("NFC", str(entry.get("path", "")))
-            if entry_path == normalized_path:
-                return entry
-    return None
-
-
 def compute_recoverable_until(deleted_at: str, keep_deleted_days: int) -> str:
     """T7.6: ``deleted_at + keep_deleted_days * 86400`` formatted as RFC 3339.
 
@@ -388,58 +303,6 @@ def compute_recoverable_until(deleted_at: str, keep_deleted_days: int) -> str:
     when = when.astimezone(timezone.utc)
     horizon = when + timedelta(days=max(0, int(keep_deleted_days)))
     return horizon.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def tombstone_file_entry(
-    manifest: dict[str, Any],
-    *,
-    remote_folder_id: str,
-    path: str,
-    deleted_at: str,
-    author_device_id: str,
-) -> dict[str, Any]:
-    """Mark the file entry at ``(remote_folder_id, path)`` as soft-deleted.
-
-    Per §D5/§A8 the manifest carries a client-supplied ``deleted_at`` for
-    display only; the server computes ``recoverable_until`` from its own
-    clock at GC plan time so a clock-skewed client cannot accelerate or
-    delay purge. Versions and chunks stay in place — the tombstone just
-    flips ``deleted=True`` and stamps the deletion's authoring device.
-
-    Raises ``KeyError`` if the entry doesn't exist; tombstoning an
-    already-deleted entry refreshes ``deleted_at`` (re-deleting is a
-    no-op semantically but updates the audit fields).
-    """
-    out = normalize_manifest_plaintext(manifest)
-    normalized_path = normalize_manifest_path(path)
-    folder = None
-    for candidate in out["remote_folders"]:
-        if candidate.get("remote_folder_id") == remote_folder_id:
-            folder = candidate
-            break
-    if folder is None:
-        raise KeyError(f"remote folder not found: {remote_folder_id}")
-
-    target = None
-    for entry in folder.get("entries", []) or []:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("type", "file")) != "file":
-            continue
-        if unicodedata.normalize("NFC", str(entry.get("path", ""))) == normalized_path:
-            target = entry
-            break
-    if target is None:
-        raise KeyError(f"file not found: {path}")
-
-    target["deleted"] = True
-    target["deleted_at"] = str(deleted_at)
-    target["deleted_by_device_id"] = str(author_device_id)
-    keep_days = _retention_keep_days(folder)
-    horizon = compute_recoverable_until(str(deleted_at), keep_days)
-    if horizon:
-        target["recoverable_until"] = horizon
-    return out
 
 
 def _retention_keep_days(folder: dict[str, Any]) -> int:
@@ -755,13 +618,12 @@ def _normalize_string_list(value: Any, field_name: str) -> list[str]:
 # envelope per remote folder. The helpers below are the in-memory dict
 # shape that mirrors the new envelopes.
 #
-# Phase H step 7f: production now uses the sharded helpers below
-# exclusively. The remaining legacy unified-shape helpers above
-# (``make_manifest``, ``make_remote_folder``, ``tombstone_file_entry``,
-# ``find_file_entry``) are kept as **test fixtures only** — call sites
-# in production code were retired earlier. A future cleanup will
-# migrate the last test scaffolding to the sharded shape and drop
-# these helpers entirely.
+# Phase H step 7f: production code uses the sharded helpers below
+# exclusively. The legacy unified-shape builders (``make_manifest``,
+# ``make_remote_folder``, ``tombstone_file_entry``, ``find_file_entry``)
+# were dropped 2026-05-19; ``assemble_unified_manifest`` remains the
+# bridge for any test or read-only call site that still wants the
+# legacy single-envelope dict shape from the sharded primitives.
 #
 # Spec: docs/protocol/vault-v1.md §6.4–§6.8,
 #       docs/protocol/vault-v1-formats.md §10.A / §10.B.
