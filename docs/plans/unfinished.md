@@ -24,7 +24,15 @@ Threat-model decision is the user's; the leak is real either way. Tracked here s
 
 ---
 
-## 3. §A15 ransomware banner is dead code in the UI
+## ~~3. §A15 ransomware banner is dead code in the UI~~ — FIXED 2026-05-19
+
+Wired the notify-send toast in `tray/vault_submenu.py` so a detector trip surfaces a `dialog-warning` notification with the §A15 banner title + body. Verified live via `dbus-monitor` — the notification daemon receives the call ~25 ms after the trip. Unit tests pin the callback contract (fires once on trip, idempotent on re-trip, runtime survives a throwing callback). The fuller §A15 four-action affordance (Review / Rollback / Resume / Keep paused as an Adw.Banner) is deferred — the notify-send path closes the practical "user has no idea their vault is paused for a reason" gap.
+
+Resolution writeup: [`temp/automation-tests-results/0007/test-fixes/result.md`](../../temp/automation-tests-results/0007/test-fixes/result.md).
+
+Original finding follows for context.
+
+---
 
 Suite 0007 Test B4 (2026-05-19) ran the live ransomware-detector trip and found that the detector + pause core work as designed (binding flips to `state=paused` within ~1 s of a 100-file rename burst, no tombstone bleed during the paused window), but **none of the §A15 banner copy reaches the user**.
 
@@ -45,7 +53,15 @@ Detailed evidence: [`temp/automation-tests-results/0007/test-B4/result.md`](../.
 
 ---
 
-## 4. Debug bundle is missing 2 of 5 advertised entries (Maintenance tab caller bug)
+## ~~4. Debug bundle is missing 2 of 5 advertised entries (Maintenance tab caller bug)~~ — FIXED 2026-05-19
+
+Extracted `collect_bundle_inputs(config_data, config_dir, vault_id_undashed)` as a module-level helper in `windows_vault/tab_maintenance.py`; the worker now passes all 5 inputs to `write_debug_bundle`. Both new entries use local-DB-only sources (no relay calls, no AEAD decryption), so the bundle stays generatable on a locked vault. 7 unit tests pin the helper's contract. Live re-bundle confirmed all 5 entries present, leak scan still clean.
+
+Resolution writeup: [`temp/automation-tests-results/0007/test-fixes/result.md`](../../temp/automation-tests-results/0007/test-fixes/result.md).
+
+Original finding follows for context.
+
+---
 
 Suite 0007 Test B2 (2026-05-19) ran the live debug-bundle leak scan. The redaction layer works — auth_token, private_key:pem body, vault_grant, Bearer pattern, base64-32-byte runs all returned 0 matches in the produced bundle. But the bundle itself is **producer-side incomplete**.
 

@@ -128,6 +128,73 @@ class WatcherRuntimeCancellationTests(unittest.TestCase):
             "follow-up trip on already-paused binding must not re-cancel",
         )
 
+    def test_on_tripped_invokes_set_ransomware_callback(self) -> None:
+        """Suite 0007 B4 — the §A15 banner callback must fire on trip.
+
+        Without this, the user-facing surface is identical to a manual
+        pause: a generic "paused" subtitle + Resume button, no toast,
+        no banner. The fix wired ``set_ransomware_callback`` from the
+        tray's :class:`VaultSubmenuMixin._ensure_vault_watcher_runtime`
+        — this test pins the contract that ``_on_tripped`` fans out to
+        the callback once per trip with the binding id.
+        """
+        binding_id = self._make_bound_binding()
+        registry = BindingCancellationRegistry()
+        runtime = VaultWatcherRuntime(
+            vault_id=VAULT_ID,
+            store=self.store,
+            cancellation_registry=registry,
+        )
+        runtime.bindings[binding_id] = _BindingStub(binding_id)
+
+        calls: list[str] = []
+        runtime.set_ransomware_callback(calls.append)
+
+        runtime._on_tripped(binding_id)
+        self.assertEqual(
+            calls, [binding_id],
+            "trip must fire the wired callback exactly once with the "
+            "tripped binding id",
+        )
+
+        # Idempotency: a second trip on the already-paused binding
+        # must not re-fire the callback (the paused_for_ransomware
+        # latch short-circuits before the callback dispatch).
+        runtime._on_tripped(binding_id)
+        self.assertEqual(
+            calls, [binding_id],
+            "follow-up trip must not re-fire the callback",
+        )
+
+    def test_ransomware_callback_failure_does_not_crash_runtime(self) -> None:
+        """A misbehaving notify-send wrapper must not propagate out of
+        ``_on_tripped`` — runtime_watchers.py wraps the dispatch in
+        try/except, logs ``vault.sync.ransomware_callback_failed``, and
+        keeps the binding paused.
+        """
+        binding_id = self._make_bound_binding()
+        registry = BindingCancellationRegistry()
+        runtime = VaultWatcherRuntime(
+            vault_id=VAULT_ID,
+            store=self.store,
+            cancellation_registry=registry,
+        )
+        runtime.bindings[binding_id] = _BindingStub(binding_id)
+
+        def boom(_bid: str) -> None:
+            raise RuntimeError("notify-send simulated failure")
+
+        runtime.set_ransomware_callback(boom)
+        # Should not raise; pause should still land.
+        runtime._on_tripped(binding_id)
+
+        rebound = self.store.get_binding(binding_id)
+        self.assertIsNotNone(rebound)
+        self.assertEqual(
+            rebound.state, "paused",
+            "pause must land even when the user-callback throws",
+        )
+
 
 class ScanSymlinkSafetyTests(unittest.TestCase):
     def setUp(self) -> None:

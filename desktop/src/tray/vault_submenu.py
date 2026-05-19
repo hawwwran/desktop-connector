@@ -230,6 +230,25 @@ class VaultSubmenuMixin:
                         store=store,
                         cancellation_registry=self._vault_cancellation_registry,
                     )
+                    # §A15 surface: notify-send toast when the detector
+                    # trips. Without this the user sees only a generic
+                    # "paused" state on the Folders tab — indistinguishable
+                    # from a manual pause — and is likely to click Resume
+                    # without realising encrypted payloads are about to
+                    # flow up. Suite 0007 B4 caught the dead callback.
+                    from ..vault.diagnostics.ransomware_detector import (
+                        BANNER_BODY, BANNER_TITLE,
+                    )
+
+                    def _ransomware_notify(_binding_id: str) -> None:
+                        self.platform.notifications.notify(
+                            BANNER_TITLE, BANNER_BODY,
+                            icon="dialog-warning",
+                        )
+
+                    self._vault_watcher_runtime.set_ransomware_callback(
+                        _ransomware_notify,
+                    )
                     # F-LT06: hold the GTK-free VaultRuntime alongside
                     # the watcher runtime so the autosync loop can call
                     # flush_and_sync_binding without re-deriving the

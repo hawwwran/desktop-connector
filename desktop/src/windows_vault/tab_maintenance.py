@@ -14,6 +14,63 @@ from ..vault.error_messages import humanize
 from ._main_context import MainContext
 
 
+def collect_bundle_inputs(
+    config_data: dict,
+    config_dir: Path,
+    vault_id_undashed: str,
+) -> dict:
+    """Compute the kwargs passed to :func:`write_debug_bundle`.
+
+    Pure, GTK-free, no relay calls, no AEAD decryption — so the bundle
+    stays generatable on a locked vault and the call site is
+    unit-testable without a live tray. Suite 0007 B2 caught a producer
+    gap where the call site only passed 3 of the 5 inputs the builder
+    accepts; this helper threads all 5 so the bundle's "binding states"
+    and "manifest summary" promises actually land in the ZIP.
+    """
+    from ..vault.binding.bindings import VaultBindingsStore
+    from ..vault.state.local_index import VaultLocalIndex
+
+    local_index = VaultLocalIndex(config_dir)
+    activity_log = config_dir / "logs" / "vault.log"
+    store = VaultBindingsStore(local_index.db_path)
+    binding_states = [
+        {
+            "binding_id": b.binding_id,
+            "vault_id": b.vault_id,
+            "remote_folder_id": b.remote_folder_id,
+            "state": b.state,
+            "sync_mode": b.sync_mode,
+            "last_synced_revision": b.last_synced_revision,
+            # local_path is userspace metadata — not in bundle.
+        }
+        for b in store.list_bindings()
+    ]
+    manifest_summary: dict | None = None
+    if vault_id_undashed:
+        manifest_summary = {
+            "vault_id": vault_id_undashed,
+            "manifest_revision_floor": (
+                local_index.get_manifest_revision_floor(vault_id_undashed)
+            ),
+            "cached_folder_count": len(
+                local_index.list_remote_folders(vault_id_undashed),
+            ),
+            "pending_ops_count": store.count_pending_ops_for_vault(
+                vault_id_undashed,
+            ),
+        }
+    return {
+        "config": dict(config_data),
+        "db_path": local_index.db_path,
+        "binding_states": binding_states,
+        "activity_log_path": (
+            activity_log if activity_log.exists() else None
+        ),
+        "manifest_summary": manifest_summary,
+    }
+
+
 def build_maintenance_tab(ctx: MainContext, win) -> "Gtk.Box":
     config = ctx.config
     config_dir = ctx.config_dir
@@ -85,18 +142,10 @@ def build_maintenance_tab(ctx: MainContext, win) -> "Gtk.Box":
         def worker() -> None:
             try:
                 config.reload()
-                config_dump = dict(config._data)
-                from ..vault.state.local_index import VaultLocalIndex
-                local_index = VaultLocalIndex(config_dir)
-                activity_log = config_dir / "logs" / "vault.log"
-                out = write_debug_bundle(
-                    destination,
-                    config=config_dump,
-                    db_path=local_index.db_path,
-                    activity_log_path=(
-                        activity_log if activity_log.exists() else None
-                    ),
+                inputs = collect_bundle_inputs(
+                    config._data, config_dir, vault_id_undashed,
                 )
+                out = write_debug_bundle(destination, **inputs)
             except DebugBundleError as exc:
                 msg = str(exc)
 
