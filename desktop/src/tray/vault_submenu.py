@@ -515,7 +515,17 @@ class VaultSubmenuMixin:
                 pass
 
     def _handle_due_purges_for_tick(self) -> None:
-        """Notify on any due scheduled-purge (review §6.H1)."""
+        """Notify on any due scheduled-purge (review §6.H1).
+
+        Suite 0007 B1 (2026-05-19) caught this firing
+        ``AttributeError: 'PendingPurge' object has no attribute
+        'vault_id_dashed'`` — the dataclass field is ``vault_id``,
+        which holds the dashed form per the docstring at
+        ``purge_schedule.py:74``. The autosync wrapper caught it as
+        ``vault.sync.autosync_purge_check_failed`` so the loop survived,
+        but the user-facing notification never fired and the §6.H1
+        wiring was silently dead.
+        """
         from ..vault.ops.purge_schedule import list_due_purges
         notified = getattr(self, "_vault_purge_notified", set())
         if not isinstance(notified, set):
@@ -524,13 +534,13 @@ class VaultSubmenuMixin:
         if not due:
             return
         for pending in due:
-            key = (pending.vault_id_dashed, pending.job_id)
+            key = (pending.vault_id, pending.job_id)
             if key in notified:
                 continue
             notified.add(key)
             log.warning(
                 "vault.purge.due_awaiting_user vault=%s job_id=%s scheduled_for=%s",
-                pending.vault_id_dashed, pending.job_id,
+                pending.vault_id, pending.job_id,
                 pending.scheduled_for_epoch,
             )
             try:
@@ -547,7 +557,7 @@ class VaultSubmenuMixin:
             except Exception:  # noqa: BLE001
                 log.exception(
                     "vault.purge.notify_failed vault=%s",
-                    pending.vault_id_dashed,
+                    pending.vault_id,
                 )
         self._vault_purge_notified = notified
 
