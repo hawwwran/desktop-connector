@@ -41,9 +41,13 @@ writer get clobbered.
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Iterable
+
+from ..relay_errors import VaultCASConflictError
 
 
 log = logging.getLogger(__name__)
@@ -195,9 +199,105 @@ def append_op_log_entries(
     return combined[len(combined) - max_tail:]
 
 
+_DEFAULT_AUDIT_PUBLISH_RETRIES = 3
+
+
+def publish_root_audit_entry(
+    *,
+    vault: Any,
+    relay: Any,
+    event_type: str,
+    author_device_id: str,
+    extra: dict[str, Any] | None = None,
+    summary: str = "",
+    max_retries: int = _DEFAULT_AUDIT_PUBLISH_RETRIES,
+    log_event_prefix: str = "vault.audit_publish",
+) -> bool:
+    """Fetch root → bump → append one op-log entry → CAS-publish.
+
+    The single shared shape behind every "best-effort post-op audit
+    row" caller in Phase 3.1 (``ops/clear.py``, ``ops/eviction.py``,
+    ``migration/runner.py``, ``grant/audit.py``). Each call landed a
+    duplicate of the same ~50-line fetch/bump/append/retry block;
+    this helper holds the single source of truth.
+
+    Behaviour:
+
+    - Skips silently with ``False`` if ``author_device_id`` is empty
+      so unattributed rows can't sneak onto the timeline.
+    - Rides ``maybe_genesis_followup_entries`` so a first-follow-up
+      audit publish also stamps the deferred ``vault.create`` row.
+    - On ``VaultCASConflictError`` retries up to ``max_retries``
+      times, re-fetching the server head each attempt so a
+      concurrent writer's tail entries survive.
+    - Best-effort: any other exception is caught, logged at WARN
+      with ``log_event_prefix``, and the function returns ``False``.
+
+    ``log_event_prefix`` names the dot-vocabulary used for telemetry —
+    e.g. ``"vault.eviction.alarm_audit"`` emits
+    ``"vault.eviction.alarm_audit.cas_retry"`` and
+    ``"vault.eviction.alarm_audit.failed"``. Keep call-site prefixes
+    stable so existing log queries continue to match.
+    """
+    if not author_device_id:
+        return False
+    last_exc: Exception | None = None
+    vault_id = getattr(vault, "vault_id", "?")
+    for attempt in range(max_retries):
+        try:
+            current_root = vault.fetch_root_manifest(relay)
+            parent_revision = int(current_root.get("root_revision", 0))
+            new_revision = parent_revision + 1
+            timestamp = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z",
+            )
+            candidate = copy.deepcopy(current_root)
+            candidate["root_revision"] = new_revision
+            candidate["parent_root_revision"] = parent_revision
+            candidate["created_at"] = timestamp
+            candidate["author_device_id"] = str(author_device_id)
+            create_entries = maybe_genesis_followup_entries(
+                current_root,
+                new_revision=new_revision,
+                device_id=author_device_id,
+            )
+            candidate["operation_log_tail"] = append_op_log_entries(
+                candidate.get("operation_log_tail"),
+                [
+                    *create_entries,
+                    build_op_log_entry(
+                        event_type=event_type,
+                        device_id=author_device_id,
+                        revision=new_revision,
+                        summary=summary,
+                        extra=extra,
+                    ),
+                ],
+            )
+            vault.publish_root_manifest(relay, candidate)
+            return True
+        except VaultCASConflictError as exc:
+            last_exc = exc
+            log.info(
+                "%s.cas_retry vault=%s event=%s attempt=%d/%d",
+                log_event_prefix, vault_id, event_type,
+                attempt + 1, max_retries,
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            break
+    log.warning(
+        "%s.failed vault=%s event=%s last_error=%r",
+        log_event_prefix, vault_id, event_type, last_exc,
+    )
+    return False
+
+
 __all__ = [
     "MAX_OP_LOG_TAIL",
     "append_op_log_entries",
     "build_op_log_entry",
     "maybe_genesis_followup_entries",
+    "publish_root_audit_entry",
 ]

@@ -124,10 +124,12 @@ class T17DiagnosticsWiringTests(unittest.TestCase):
     # entries via ``build_op_log_entry``.
     # ------------------------------------------------------------------
     def test_producer_side_wires_op_log_append(self) -> None:
-        # ``append_op_log_entries`` is the universal indicator that a
-        # producer site lands entries on the next manifest publish —
-        # every site uses it, whether they call ``build_op_log_entry``
-        # directly or go through a wrapper like ``_upload_op_log_entry``.
+        # Every shard-publishing site lands entries on the next
+        # manifest publish either by calling ``append_op_log_entries``
+        # directly OR by delegating to the shared
+        # ``publish_root_audit_entry`` helper added in Phase 3.1's
+        # consolidation (single source of truth for the four
+        # best-effort root-audit publish flows).
         producer_files = [
             SRC_ROOT / "vault" / "binding" / "sync.py",
             SRC_ROOT / "vault" / "upload" / "single_file.py",
@@ -139,9 +141,13 @@ class T17DiagnosticsWiringTests(unittest.TestCase):
         for path in producer_files:
             with self.subTest(path=str(path.relative_to(SRC_ROOT))):
                 source = path.read_text(encoding="utf-8")
-                self.assertIn(
-                    "append_op_log_entries", source,
-                    f"{path.name} must wire append_op_log_entries — "
+                wires_directly = "append_op_log_entries" in source
+                wires_via_helper = "publish_root_audit_entry" in source
+                self.assertTrue(
+                    wires_directly or wires_via_helper,
+                    f"{path.name} must wire either "
+                    "append_op_log_entries directly or the shared "
+                    "publish_root_audit_entry helper — "
                     "Phase 2/3 of docs/plans/activity-timeline.md",
                 )
 
@@ -164,6 +170,41 @@ class T17DiagnosticsWiringTests(unittest.TestCase):
         self.assertIn(
             "vault_export_reminder_last_dismissed_at", self.windows_vault,
         )
+
+    # ------------------------------------------------------------------
+    # Phase 3.1 Wire 4: the three GTK4 callers must invoke the grant
+    # audit helper after their respective grant ops. Source-pinned
+    # because driving these UIs against the live D-Bus needs a paired
+    # vault + admin device, which the unit suite can't easily set up.
+    # ------------------------------------------------------------------
+    def test_grant_lifecycle_audit_wired_in_gtk_callers(self) -> None:
+        callers = {
+            "grant_device_dialog (approve)": (
+                SRC_ROOT / "windows_vault" / "grant_device_dialog.py",
+                "vault.grant.created",
+            ),
+            "tab_devices (revoke)": (
+                SRC_ROOT / "windows_vault" / "tab_devices.py",
+                "vault.revoke.completed",
+            ),
+            "windows_vault_rotate (rotate)": (
+                SRC_ROOT / "windows_vault_rotate.py",
+                "vault.rotation.completed",
+            ),
+        }
+        for label, (path, event_type) in callers.items():
+            with self.subTest(caller=label):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn(
+                    "publish_grant_lifecycle_audit", source,
+                    f"{label}: must call publish_grant_lifecycle_audit "
+                    "after the grant op (Phase 3.1 Wire 4)",
+                )
+                self.assertIn(
+                    event_type, source,
+                    f"{label}: must reference its event_type "
+                    f"({event_type!r}) when invoking the audit helper",
+                )
 
 
 if __name__ == "__main__":

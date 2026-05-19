@@ -43,12 +43,7 @@ from ..crypto import (
     build_chunk_aad,
     derive_subkey,
 )
-from ..relay_errors import VaultCASConflictError
-from ..state.op_log import (
-    append_op_log_entries,
-    build_op_log_entry,
-    maybe_genesis_followup_entries,
-)
+from ..state.op_log import publish_root_audit_entry
 from .state import (
     MigrationRecord,
     clear_state,
@@ -1029,9 +1024,6 @@ def _now_rfc3339() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-_MIGRATION_AUDIT_PUBLISH_RETRIES = 3
-
-
 def _publish_migration_committed_audit(
     *,
     vault: MigrationVault,
@@ -1046,66 +1038,22 @@ def _publish_migration_committed_audit(
     The post-bootstrap target's root envelope is a verbatim copy of
     the source's last-published root; this helper bumps it by one
     revision and appends the audit entry on every device's behalf.
-    Mirrors ``ops/clear.py`` 's ``_publish_root_op_log_entry``
-    best-effort shape — the source has already sealed, so a publish
+    Best-effort — the source has already sealed, so a publish
     failure here is cosmetic.
 
     Returns ``True`` if the publish landed, ``False`` if every retry
     attempt failed.
     """
-    import copy
-    last_exc: Exception | None = None
-    for attempt in range(_MIGRATION_AUDIT_PUBLISH_RETRIES):
-        try:
-            current_root = vault.fetch_root_manifest(target_relay)
-            parent_revision = int(current_root.get("root_revision", 0))
-            new_revision = parent_revision + 1
-            timestamp = _now_rfc3339()
-            candidate = copy.deepcopy(current_root)
-            candidate["root_revision"] = new_revision
-            candidate["parent_root_revision"] = parent_revision
-            candidate["created_at"] = timestamp
-            candidate["author_device_id"] = str(author_device_id)
-            create_entries = maybe_genesis_followup_entries(
-                current_root,
-                new_revision=new_revision,
-                device_id=author_device_id,
-            )
-            candidate["operation_log_tail"] = append_op_log_entries(
-                candidate.get("operation_log_tail"),
-                [
-                    *create_entries,
-                    build_op_log_entry(
-                        event_type="vault.migration.committed",
-                        device_id=author_device_id,
-                        revision=new_revision,
-                        extra={
-                            "source": str(source_relay_url),
-                            "target": str(target_relay_url),
-                        },
-                    ),
-                ],
-            )
-            vault.publish_root_manifest(target_relay, candidate)
-            return True
-        except VaultCASConflictError as exc:
-            last_exc = exc
-            log.info(
-                "vault.migration.audit_publish.cas_retry "
-                "vault=%s attempt=%d/%d",
-                vault.vault_id, attempt + 1,
-                _MIGRATION_AUDIT_PUBLISH_RETRIES,
-            )
-            continue
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            break
-    log.warning(
-        "vault.migration.audit_publish.failed vault=%s "
-        "target=%s last_error=%r",
-        vault.vault_id, target_relay_url, last_exc,
+    return publish_root_audit_entry(
+        vault=vault, relay=target_relay,
+        event_type="vault.migration.committed",
+        author_device_id=author_device_id,
+        extra={
+            "source": str(source_relay_url),
+            "target": str(target_relay_url),
+        },
+        log_event_prefix="vault.migration.audit_publish",
     )
-    return False
 
 
 __all__ = [

@@ -60,6 +60,7 @@ from ..state.op_log import (
     append_op_log_entries,
     build_op_log_entry,
     maybe_genesis_followup_entries,
+    publish_root_audit_entry,
 )
 from ..upload.folder_state import (
     FolderState,
@@ -562,11 +563,27 @@ def _build_candidate(
 
     root_n = normalize_root_manifest_plaintext(state.root)
     parent_root_revision = int(root_n.get("root_revision", 0))
+    new_root_revision = parent_root_revision + 1
     candidate_root = dict(root_n)
-    candidate_root["root_revision"] = parent_root_revision + 1
+    candidate_root["root_revision"] = new_root_revision
     candidate_root["parent_root_revision"] = parent_root_revision
     candidate_root["created_at"] = created_at
     candidate_root["author_device_id"] = str(author_device_id)
+    # Plan D5: every other root-bump site stamps a vault.create row on
+    # the first follow-up after genesis; eviction is unlikely to be the
+    # first op (the vault needs files to evict) but the detector is
+    # idempotent and keeping the wire symmetric across all root-bump
+    # call sites prevents future drift.
+    create_entries = maybe_genesis_followup_entries(
+        root_n,
+        new_revision=new_root_revision,
+        device_id=author_device_id,
+    )
+    if create_entries:
+        candidate_root["operation_log_tail"] = append_op_log_entries(
+            candidate_root.get("operation_log_tail"),
+            create_entries,
+        )
     return mutated, candidate_root
 
 
@@ -985,9 +1002,6 @@ def reap_orphan_chunks(
     )
 
 
-_ALARM_AUDIT_PUBLISH_RETRIES = 3
-
-
 def publish_alarm_used_exceeds_quota_audit(
     *,
     vault: EvictionVault,
@@ -1006,60 +1020,18 @@ def publish_alarm_used_exceeds_quota_audit(
     the Activity tab can render the exact numbers.
 
     Best-effort: returns ``True`` if the publish landed, ``False`` if
-    every retry attempt failed. Mirrors ``clear.py``'s
-    ``_publish_root_op_log_entry`` pattern.
+    every retry attempt failed.
     """
-    import copy
-    last_exc: Exception | None = None
-    for attempt in range(_ALARM_AUDIT_PUBLISH_RETRIES):
-        try:
-            current_root = vault.fetch_root_manifest(relay)
-            parent_revision = int(current_root.get("root_revision", 0))
-            new_revision = parent_revision + 1
-            timestamp = _now_rfc3339()
-            candidate = copy.deepcopy(current_root)
-            candidate["root_revision"] = new_revision
-            candidate["parent_root_revision"] = parent_revision
-            candidate["created_at"] = timestamp
-            candidate["author_device_id"] = str(author_device_id)
-            create_entries = maybe_genesis_followup_entries(
-                current_root,
-                new_revision=new_revision,
-                device_id=author_device_id,
-            )
-            candidate["operation_log_tail"] = append_op_log_entries(
-                candidate.get("operation_log_tail"),
-                [
-                    *create_entries,
-                    build_op_log_entry(
-                        event_type="vault.eviction.alarm_used_exceeds_quota",
-                        device_id=author_device_id,
-                        revision=new_revision,
-                        extra={
-                            "used": int(used_bytes),
-                            "quota": int(quota_bytes),
-                        },
-                    ),
-                ],
-            )
-            vault.publish_root_manifest(relay, candidate)
-            return True
-        except VaultCASConflictError as exc:
-            last_exc = exc
-            log.info(
-                "vault.eviction.alarm_audit.cas_retry vault=%s "
-                "attempt=%d/%d",
-                vault.vault_id, attempt + 1, _ALARM_AUDIT_PUBLISH_RETRIES,
-            )
-            continue
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            break
-    log.warning(
-        "vault.eviction.alarm_audit.failed vault=%s last_error=%r",
-        vault.vault_id, last_exc,
+    return publish_root_audit_entry(
+        vault=vault, relay=relay,
+        event_type="vault.eviction.alarm_used_exceeds_quota",
+        author_device_id=author_device_id,
+        extra={
+            "used": int(used_bytes),
+            "quota": int(quota_bytes),
+        },
+        log_event_prefix="vault.eviction.alarm_audit",
     )
-    return False
 
 
 __all__ = [

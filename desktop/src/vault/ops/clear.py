@@ -25,32 +25,14 @@ the dialog can't silently slip through.
 
 from __future__ import annotations
 
-import copy
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
-from ..relay_errors import VaultCASConflictError
-from ..state.op_log import (
-    append_op_log_entries,
-    build_op_log_entry,
-    maybe_genesis_followup_entries,
-)
+from ..state.op_log import publish_root_audit_entry
 from .delete import DeleteVault, delete_folder_contents
 
 
 log = logging.getLogger(__name__)
-
-
-# How many times ``_publish_root_op_log_entry`` retries after a 409.
-# Bounded small — the audit publish is best-effort and the caller
-# log line surfaces the missed-row state, so an extended retry storm
-# isn't worth the latency on a destructive op the user is watching.
-_AUDIT_PUBLISH_RETRIES = 3
-
-
-def _now_rfc3339() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 class VaultClearDangerError(ValueError):
@@ -220,69 +202,19 @@ def _publish_root_op_log_entry(
     """Append one root-scoped op-log entry via a no-mutation root publish.
 
     Used for vault-wide audit events that don't otherwise change the
-    root's folder set (e.g., ``vault.vault.cleared``). Bumps the root
-    revision so the entry is durably anchored to a CAS-stable point in
-    the manifest chain.
-
-    Best-effort: the destructive work the caller did before this is
-    already landed; the audit row is a nice-to-have, not a correctness
-    requirement. Returns ``True`` if the publish landed,
-    ``False`` if every retry attempt failed. The caller surfaces the
-    distinction in its log line so an operator can see when the audit
-    row went missing instead of relying on absence-of-warning.
-
-    Retries up to ``_AUDIT_PUBLISH_RETRIES`` times on
-    :class:`VaultCASConflictError` (a concurrent device bumped the
-    root between our fetch and publish). Other exceptions also fail
-    closed — logged with ``exc_info`` and ``False`` returned.
+    root's folder set (e.g., ``vault.vault.cleared``). Delegates to
+    ``state.op_log.publish_root_audit_entry`` so the
+    fetch/bump/append/retry shape stays in one place across the four
+    Phase 3.1 producer wires. Best-effort: the destructive work the
+    caller did before this is already landed.
     """
-    last_exc: Exception | None = None
-    for attempt in range(_AUDIT_PUBLISH_RETRIES):
-        try:
-            current_root = vault.fetch_root_manifest(relay)
-            parent_revision = int(current_root.get("root_revision", 0))
-            new_revision = parent_revision + 1
-            timestamp = _now_rfc3339()
-            candidate = copy.deepcopy(current_root)
-            candidate["root_revision"] = new_revision
-            candidate["parent_root_revision"] = parent_revision
-            candidate["created_at"] = timestamp
-            candidate["author_device_id"] = str(device_id)
-            # Plan D5: if this audit publish is the first follow-up
-            # after genesis, prepend a vault.create row so a brand-new
-            # vault that has clear-vault as its first op still gets
-            # the create entry on its timeline.
-            create_entries = maybe_genesis_followup_entries(
-                current_root,
-                new_revision=new_revision,
-                device_id=device_id,
-            )
-            candidate["operation_log_tail"] = append_op_log_entries(
-                candidate.get("operation_log_tail"),
-                [*create_entries, build_op_log_entry(
-                    event_type=event_type,
-                    device_id=device_id,
-                    revision=new_revision,
-                    summary=summary,
-                )],
-            )
-            vault.publish_root_manifest(relay, candidate)
-            return True
-        except VaultCASConflictError as exc:
-            last_exc = exc
-            log.info(
-                "vault.audit_publish.cas_retry vault=%s event=%s attempt=%d/%d",
-                vault.vault_id, event_type, attempt + 1, _AUDIT_PUBLISH_RETRIES,
-            )
-            continue
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            break
-    log.warning(
-        "vault.audit_publish.failed vault=%s event=%s last_error=%r",
-        vault.vault_id, event_type, last_exc,
+    return publish_root_audit_entry(
+        vault=vault, relay=relay,
+        event_type=event_type,
+        author_device_id=device_id,
+        summary=summary,
+        log_event_prefix="vault.audit_publish",
     )
-    return False
 
 
 __all__ = [

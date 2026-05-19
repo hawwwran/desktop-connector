@@ -566,6 +566,16 @@ def show_vault_rotate(config_dir: Path) -> None:
                     # secret), publish, close. Failure is logged but
                     # never blocks the wizard — the rotation itself is
                     # already committed by this point.
+                    #
+                    # Race assumption: between ``store.save`` above and
+                    # the re-open here, a concurrent rotation from
+                    # another wizard instance is the only way the
+                    # keyring grant could become stale. The relay's
+                    # 1-rotation-per-24h cap (RotationRateLimitedError)
+                    # makes that effectively impossible in practice.
+                    # On the off chance it does happen, the audit
+                    # publish will 401 and fall into the WARN log path
+                    # — the destructive rotation is unaffected.
                     try:
                         from .vault.grant.audit import (
                             publish_grant_lifecycle_audit,

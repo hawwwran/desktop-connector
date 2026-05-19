@@ -25,6 +25,7 @@ from src.vault.state.op_log import (  # noqa: E402
     append_op_log_entries,
     build_op_log_entry,
     maybe_genesis_followup_entries,
+    publish_root_audit_entry,
 )
 
 
@@ -385,6 +386,201 @@ class AlarmUsedExceedsQuotaAuditTests(unittest.TestCase):
             used_bytes=200_000, quota_bytes=100_000,
         )
         self.assertFalse(ok)
+
+
+class PublishRootAuditEntryTests(unittest.TestCase):
+    """Direct tests for the consolidated publish helper.
+
+    The four Phase-3.1 producer wires (clear / eviction / migration /
+    grant) all delegate here; tests for individual wires assert
+    end-to-end shape, while these tests pin the helper's contract:
+    retry behaviour, empty-device skip, log prefix, non-CAS bail.
+    """
+
+    def _build(self):
+        from tests.protocol.test_desktop_vault_folders import (  # noqa: E402
+            FakeRootRelay, _seed_empty_root,
+        )
+        from src.vault import Vault  # noqa: E402
+        from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
+
+        relay = FakeRootRelay()
+        vault = Vault(
+            vault_id="ABCD2345WXYZ",
+            master_key=bytes.fromhex(
+                "0102030405060708090a0b0c0d0e0f10"
+                "1112131415161718191a1b1c1d1e1f20"
+            ),
+            recovery_secret=None,
+            vault_access_secret="bearer",
+            header_revision=0,
+            manifest_revision=0,
+            manifest_ciphertext=b"",
+            crypto=DefaultVaultCrypto,
+        )
+        _seed_empty_root(relay, vault, created_at="2026-05-19T12:00:00.000Z")
+        return vault, relay
+
+    def test_happy_path_publishes_row(self) -> None:
+        vault, relay = self._build()
+        ok = publish_root_audit_entry(
+            vault=vault, relay=relay,
+            event_type="vault.vault.cleared",
+            author_device_id=DEVICE_A,
+            summary="audit test",
+        )
+        self.assertTrue(ok)
+        tail = vault.fetch_root_manifest(relay).get(
+            "operation_log_tail",
+        ) or []
+        cleared = [
+            e for e in tail
+            if isinstance(e, dict) and e.get("type") == "vault.vault.cleared"
+        ]
+        self.assertEqual(len(cleared), 1)
+        self.assertEqual(cleared[0]["summary"], "audit test")
+
+    def test_empty_author_device_id_returns_false_silently(self) -> None:
+        vault, relay = self._build()
+        rev_before = relay.root_revision
+        ok = publish_root_audit_entry(
+            vault=vault, relay=relay,
+            event_type="vault.vault.cleared",
+            author_device_id="",
+        )
+        self.assertFalse(ok)
+        # No publish attempted.
+        self.assertEqual(relay.root_revision, rev_before)
+
+    def test_cas_conflict_retries_and_lands_on_second_attempt(self) -> None:
+        """First put_root raises CAS conflict, helper re-fetches, retries,
+        and the row lands on the second attempt."""
+        from src.vault.relay_errors import VaultCASConflictError  # noqa: E402
+
+        vault, relay = self._build()
+
+        # Wrap the relay's put_root to raise CAS once, then delegate.
+        real_put = relay.put_root
+        call_count = {"n": 0}
+
+        def flaky_put(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                import base64
+                raise VaultCASConflictError({
+                    "code": "vault_root_conflict",
+                    "message": "synthetic CAS conflict for test",
+                    "details": {
+                        "current_root_revision": relay.root_revision,
+                        "current_root_hash": relay.root_hash,
+                        "current_root_ciphertext":
+                            base64.b64encode(relay.root_envelope).decode("ascii"),
+                        "current_root_size": len(relay.root_envelope),
+                    },
+                })
+            return real_put(*args, **kwargs)
+        relay.put_root = flaky_put  # type: ignore[method-assign]
+
+        with self.assertLogs(
+            "src.vault.state.op_log", level=logging.INFO,
+        ) as captured:
+            ok = publish_root_audit_entry(
+                vault=vault, relay=relay,
+                event_type="vault.eviction.alarm_used_exceeds_quota",
+                author_device_id=DEVICE_A,
+                extra={"used": 100, "quota": 50},
+                log_event_prefix="vault.eviction.alarm_audit",
+            )
+        self.assertTrue(ok)
+        # Two put_root attempts: first conflict, second success.
+        self.assertEqual(call_count["n"], 2)
+        # CAS-retry log line uses the caller's prefix.
+        self.assertTrue(
+            any(
+                "vault.eviction.alarm_audit.cas_retry" in line
+                for line in captured.output
+            ),
+            captured.output,
+        )
+        # Row landed on the eventual winning publish.
+        tail = vault.fetch_root_manifest(relay).get(
+            "operation_log_tail",
+        ) or []
+        alarm_rows = [
+            e for e in tail
+            if isinstance(e, dict)
+            and e.get("type") == "vault.eviction.alarm_used_exceeds_quota"
+        ]
+        self.assertEqual(len(alarm_rows), 1)
+
+    def test_exhausted_cas_retries_returns_false(self) -> None:
+        from src.vault.relay_errors import VaultCASConflictError  # noqa: E402
+        vault, relay = self._build()
+
+        def always_cas(*args, **kwargs):
+            import base64
+            raise VaultCASConflictError({
+                "code": "vault_root_conflict",
+                "message": "synthetic permanent CAS",
+                "details": {
+                    "current_root_revision": relay.root_revision,
+                    "current_root_hash": relay.root_hash,
+                    "current_root_ciphertext":
+                        base64.b64encode(relay.root_envelope).decode("ascii"),
+                    "current_root_size": len(relay.root_envelope),
+                },
+            })
+        relay.put_root = always_cas  # type: ignore[method-assign]
+
+        with self.assertLogs(
+            "src.vault.state.op_log", level=logging.WARNING,
+        ) as captured:
+            ok = publish_root_audit_entry(
+                vault=vault, relay=relay,
+                event_type="vault.vault.cleared",
+                author_device_id=DEVICE_A,
+                max_retries=2,
+            )
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("vault.audit_publish.failed" in line for line in captured.output),
+            captured.output,
+        )
+
+    def test_non_cas_exception_breaks_immediately(self) -> None:
+        """A non-CAS exception (network, auth) bails the loop without
+        retrying — retries only help against contention, not actual
+        failures."""
+        from src.vault import Vault  # noqa: E402
+        from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
+
+        vault = Vault(
+            vault_id="ABCD2345WXYZ",
+            master_key=bytes.fromhex(
+                "0102030405060708090a0b0c0d0e0f10"
+                "1112131415161718191a1b1c1d1e1f20"
+            ),
+            recovery_secret=None, vault_access_secret="bearer",
+            header_revision=0, manifest_revision=0,
+            manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
+        )
+
+        call_count = {"n": 0}
+
+        class HardFailRelay:
+            def get_root(self, *_args, **_kwargs):
+                call_count["n"] += 1
+                raise RuntimeError("network down")
+
+        ok = publish_root_audit_entry(
+            vault=vault, relay=HardFailRelay(),
+            event_type="vault.vault.cleared",
+            author_device_id=DEVICE_A,
+            max_retries=5,
+        )
+        self.assertFalse(ok)
+        # Just one fetch attempt — no retry on non-CAS exceptions.
+        self.assertEqual(call_count["n"], 1)
 
 
 class GenesisFollowupIntegrationTests(unittest.TestCase):

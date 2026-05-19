@@ -162,8 +162,10 @@ class GrantAuditEdgeCasesTests(unittest.TestCase):
             def get_root(self, *_args, **_kwargs):
                 raise RuntimeError("boom")
 
+        # The grant audit module delegates to publish_root_audit_entry
+        # in vault.state.op_log; that's where the WARN logger lives.
         with self.assertLogs(
-            "src.vault.grant.audit", level=logging.WARNING,
+            "src.vault.state.op_log", level=logging.WARNING,
         ) as captured:
             ok = publish_grant_lifecycle_audit(
                 vault=vault, relay=BrokenRelay(),
