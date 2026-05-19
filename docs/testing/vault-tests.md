@@ -68,6 +68,21 @@ echo $! > /tmp/dc-test-php.pid
 rm -rf ~/.config/desktop-connector-dev
 ```
 
+### Clear stale keyring entries (suite-start)
+
+```bash
+python3 -c "
+import keyring
+for k in ('auth_token', 'private_key:pem', 'public_key:pem'):
+    try: keyring.delete_password('desktop-connector-dev', k)
+    except keyring.errors.PasswordDeleteError: pass
+"
+```
+
+Wiping `~/.config/desktop-connector-dev/` is **not enough** if a prior suite's `auth_token` / `private_key:pem` survive in libsecret service `desktop-connector-dev`. Fresh server DB + stale keyring = the twin boots with "Already registered as …" against a server that doesn't know that device, then hammers the relay with 401s on `/api/transfers/pending`. Suite 0006 (2026-05-19) hit this; the clear-keys snippet above prevents it.
+
+Vault-grant entries (`vault_grant:<vault_id>`) are vault-specific — leave them in place unless wiping the relay-side vault row too; the suite reuses or replaces them per Test 04.
+
 ### Common dev-instance command (used by tests 2+)
 
 ```bash
@@ -480,10 +495,12 @@ unlock flow that doesn't match the real design — see
    `vault_grant.backend.keyring service=desktop-connector-dev`.
 
 **Assertions**:
-- Both boots emit `vault_grant.backend.keyring service=desktop-connector-dev`
+- Both boots emit `config.secrets.using_keyring service=desktop-connector-dev`
   on stderr — proof the per-config service derivation kicks in (and
   proof the dev twin isn't reading from the canonical user's
-  keyring).
+  keyring). (An older draft of this guide asserted on
+  `vault_grant.backend.keyring`; that event name is stale — Suite 0006
+  caught the drift.)
 - `python3 -c "import keyring; print(keyring.get_password('desktop-connector-dev', 'vault_grant:QRJCRIE7AXEU') is not None)"`
   returns `True` after the first boot AND survives the kill+restart.
 - `python3 -c "import keyring; print(keyring.get_password('desktop-connector', 'vault_grant:QRJCRIE7AXEU'))"`
@@ -502,19 +519,29 @@ line + keyring probe output.
 
 **Goal**: first state-creating action against an unlocked vault.
 
-**Preconditions**: Test 06 PASS. Restart the headless dev instance
-(test 06 step 1) so the keyring grant is loaded into the runtime;
-no passphrase prompt expected.
+**Preconditions**: Test 06 PASS.
+
+> ⚠️ **Stop the headless dev twin before this test.** The setup
+> section's "vault UI tests run without the headless dev twin" rule
+> applies here: the wizard's manifest PUT queues behind the twin's
+> 25 s long-poll on the single-threaded `php -S` and the "Adding
+> folder..." spinner stalls. `pkill -f "src.main.*desktop-connector-dev"`
+> before launching `vault-main`. Restart the twin only when Test 08
+> needs the watcher.
 
 **Steps**:
-1. Create a temp source folder:
-   `mkdir -p /tmp/dc-vault-test-A && touch /tmp/dc-vault-test-A/.keep`.
+1. Create a temp source folder **under `$HOME`** so the
+   `xdg-desktop-portal-gnome` file picker can navigate to it
+   directly. `/tmp/` paths don't appear in the picker's Home
+   shortcuts and Ctrl+L (location-bar) doesn't work reliably under
+   AT-SPI on Wayland.
+   `mkdir -p ~/dc-vault-test-A && touch ~/dc-vault-test-A/.keep`.
 2. Open `vault-main`. Switch to the **Folders** tab (built by
    `vault_folders_tab.py` per `windows_vault.py:512`).
 3. Screenshot `01-folders-tab-empty.png`.
 4. Drive the "Add folder" / "Bind folder" action via AT-SPI. The
    exact label needs to come from the dump tree at runtime.
-5. Pick `/tmp/dc-vault-test-A`. Confirm.
+5. Pick `~/dc-vault-test-A`. Confirm.
 6. Wait up to 10 s for the binding to land. Poll the tree for the
    path string.
 7. Screenshot `02-folders-tab-bound.png`.
@@ -535,17 +562,33 @@ no passphrase prompt expected.
 
 **Goal**: end-to-end encrypted write reaches the relay.
 
-**Preconditions**: Test 07 PASS. Headless dev instance running and
-unlocked (the watcher lives in the receiver process —
-`vault_filesystem_watcher.py`, `vault_runtime_watchers.py`).
+**Preconditions**: Test 07 PASS. Vault is unlocked (grant in keyring).
+
+> The vault filesystem watcher lives in the **tray subprocess**
+> (`tray/vault_submenu.py:209` instantiates `VaultWatcherRuntime`),
+> not in the headless receiver — an older draft of this guide
+> claimed otherwise. Suite 0006 caught the drift. Two working
+> options for this test:
+>
+> 1. **(easier) Manual sync.** Keep `vault-main` open. After
+>    dropping the file, click the per-binding **Sync now** button
+>    on the Folders tab. The publish path is identical to what the
+>    watcher would trigger.
+> 2. **(closer to production) Full tray.** Run `python3 -m
+>    src.main` without `--headless` so the tray (and its watcher)
+>    boots. Costs more isolation discipline and conflicts with
+>    Test 07's "stop the twin" rule.
+>
+> Suite 0006 used option 1.
 
 **Steps**:
 1. Snapshot baseline: `sqlite3 server/data/connector.db
    'SELECT count(*) FROM vault_chunks'`.
 2. Drop a small file into the bound folder:
-   `printf 'hello vault\n' > /tmp/dc-vault-test-A/hello.txt`.
-3. Wait up to 15 s. Poll the chunks count every 2 s; expect it to
-   increase.
+   `printf 'hello vault\n' > ~/dc-vault-test-A/hello.txt`.
+3. Click **Sync now** in the Folders tab (option 1 above), or wait
+   up to 15 s if running the full tray (option 2). Poll the chunks
+   count every 2 s; expect it to increase.
 4. Open `vault-browser` window. Sleep 1.5 s. Screenshot
    `01-browser-with-hello.png`.
 5. Dump tree → save as `02-attree.txt`.
@@ -570,6 +613,17 @@ should remain visible after a lock event.
 **Preconditions**: Test 08 PASS. Browser is open showing
 `hello.txt`. Vault is unlocked.
 
+> ⚠️ **Do NOT delete the vault grant from keyring as the lock
+> trigger.** That path is destructive: the master key cannot be
+> re-derived without the recovery kit file, and Test 04 in this
+> guide stops before the user is allowed to export it
+> (`feedback_security_ux.md` Done-button gate). Suite 0006 hit
+> this — recovery required wiping the local config and creating a
+> fresh vault. If the goal is testing the lock-state UI, use trigger
+> (a) or (b) below. If a future variant of this test needs grant
+> deletion, extend Test 04 to drive the export-and-verify-kit flow
+> first.
+
 **Steps**:
 1. Screenshot `01-browser-pre-lock.png` for baseline.
 2. Trigger a lock. Two acceptable triggers (the test uses whichever
@@ -589,6 +643,13 @@ should remain visible after a lock event.
 - No tracebacks on browser stderr.
 - If trigger (a) was used, dev server log shows no further upload
   events after the lock.
+- **Threat-model note** (Suite 0006 finding): folder *display
+  names* render from `vault_remote_folders_cache.display_name` in
+  the local index DB, which is decrypted plaintext on disk. Lock
+  doesn't wipe that cache. File contents + filenames are the
+  protected invariant; folder names are cached-for-fast-list by
+  design. See `docs/plans/unfinished.md` §2 for the open
+  question on whether to wipe the cache.
 
 **Capture**: 2 screenshots + post-lock tree dump.
 

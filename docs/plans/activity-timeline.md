@@ -124,7 +124,13 @@ These items were named in Phase 3 but require structural changes (an extra root 
 14. Integration test against the `FakeShardedRelay` harness: upload → fetch_unified_manifest → assert presence. **Landed** — `FetchUnifiedManifestIntegrationTests` in `tests/protocol/test_desktop_vault_binding_batched_publish.py`.
 15. T17 producer-side source-pin update. **Landed** — `test_producer_side_wires_op_log_append` + `test_unified_merge_includes_shard_tails` in `tests/protocol/test_desktop_vault_t17_wired_source.py`.
 16. ADR entry. **Landed** — `docs/architecture-decisions.md` 2026-05-19 entry recording D1–D8.
-17. Live-twin smoke test: drive a few uploads + a delete + a grant on the dev twin, open the Activity tab, screenshot the populated timeline. **Recipe landed** — `docs/testing/vault-tests.md` Test 10. Run interactively via the existing chained-test pattern when ready.
+17. Live-twin smoke test: drive a few uploads + a delete + a grant on the dev twin, open the Activity tab, screenshot the populated timeline. **Landed + executed** — Suite 0006 ran the full chain 2026-05-19 (9 PASS + 1 PARTIAL out of 10). Recipe at `docs/testing/vault-tests.md` Test 10; results at `temp/automation-tests-results/0006/SUITE.md`.
+
+### Phase 4 follow-ups (live-test findings)
+
+- **Consumer-side dedup bug — fixed inline.** Suite 0006 Test 10 caught a 2-file batch upload rendering as one row. Root cause: `state/activity.py:212` dedup key was `(ts, event_type, device_id)` — F-509 dropped `display_path` so an audit-event row (no path) could merge with a richer op-log entry, but F-S16 retired the server-side audit table. Fix: include `display_path` in the key. Landed as commit `997739a` (2026-05-19). All 1154 vault tests still green; the existing `test_dedup_prefers_richer_plaintext` exercises the richer-row case unchanged.
+- **Folder display-name cache leak after lock — filed for follow-up.** Suite 0006 Test 09 found that deleting the keyring vault grant doesn't invalidate `vault_remote_folders_cache.display_name` in the local index DB. File contents + filenames are intact (encrypted shard, decrypted lazily), but folder display names render from cache in plaintext post-lock. Recommend either (a) clarify the doc's threat-model wording, or (b) wipe the cache on grant deletion. Tracked in `docs/plans/unfinished.md` §2.
+- **Test guide doc-process drift — filed.** Six items where `docs/testing/vault-tests.md` Tests 02 / 06 / 07 / 08 / 09 diverge from current code; folded into the guide directly via the same commit that landed this section. See `temp/automation-tests-results/0006/SUITE.md` for the full list.
 
 ## Verification
 
