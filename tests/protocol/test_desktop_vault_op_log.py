@@ -280,6 +280,113 @@ class MaybeGenesisFollowupEntriesTests(unittest.TestCase):
         self.assertEqual(entries[0]["ts"], 1_700_000_000)
 
 
+class AlarmUsedExceedsQuotaAuditTests(unittest.TestCase):
+    """Wire 2: alarm cleanup stamps an audit row on the root before
+    the destructive pass starts.
+
+    Tests drive ``publish_alarm_used_exceeds_quota_audit`` directly
+    against a ``FakeRootRelay`` (no GTK4 dependency); the worker-side
+    plumbing in ``windows_vault_browser/quota.py`` is exercised by the
+    live AT-SPI suites under ``docs/testing/vault-tests.md``.
+    """
+
+    def _build(self):
+        from tests.protocol.test_desktop_vault_folders import (  # noqa: E402
+            FakeRootRelay, _seed_empty_root,
+        )
+        from src.vault import Vault  # noqa: E402
+        from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
+
+        relay = FakeRootRelay()
+        vault = Vault(
+            vault_id="ABCD2345WXYZ",
+            master_key=bytes.fromhex(
+                "0102030405060708090a0b0c0d0e0f10"
+                "1112131415161718191a1b1c1d1e1f20"
+            ),
+            recovery_secret=None,
+            vault_access_secret="bearer",
+            header_revision=0,
+            manifest_revision=0,
+            manifest_ciphertext=b"",
+            crypto=DefaultVaultCrypto,
+        )
+        _seed_empty_root(relay, vault, created_at="2026-05-19T12:00:00.000Z")
+        return vault, relay
+
+    def _last_published_root(self, vault):
+        # FakeRootRelay's `get_root` returns the latest envelope; decrypt.
+        return vault.fetch_root_manifest(self._relay)
+
+    def test_publishes_audit_row_with_used_quota_extras(self) -> None:
+        from src.vault.ops.eviction import (  # noqa: E402
+            publish_alarm_used_exceeds_quota_audit,
+        )
+
+        vault, relay = self._build()
+        self._relay = relay
+        ok = publish_alarm_used_exceeds_quota_audit(
+            vault=vault, relay=relay,
+            author_device_id=DEVICE_A,
+            used_bytes=200_000,
+            quota_bytes=100_000,
+        )
+        self.assertTrue(ok)
+        fetched = vault.fetch_root_manifest(relay)
+        # Genesis was rev 1; helper publishes rev 2.
+        self.assertEqual(fetched["root_revision"], 2)
+        tail = fetched.get("operation_log_tail") or []
+        alarm_rows = [
+            e for e in tail
+            if isinstance(e, dict)
+            and e.get("type") == "vault.eviction.alarm_used_exceeds_quota"
+        ]
+        self.assertEqual(len(alarm_rows), 1)
+        row = alarm_rows[0]
+        self.assertEqual(row["used"], 200_000)
+        self.assertEqual(row["quota"], 100_000)
+        self.assertEqual(row["device_id"], DEVICE_A)
+        self.assertEqual(row["revision"], 2)
+        # vault.create rides alongside since this is a first-follow-up.
+        create_rows = [
+            e for e in tail
+            if isinstance(e, dict) and e.get("type") == "vault.create"
+        ]
+        self.assertEqual(len(create_rows), 1)
+
+    def test_returns_false_on_publish_failure(self) -> None:
+        from src.vault.ops.eviction import (  # noqa: E402
+            publish_alarm_used_exceeds_quota_audit,
+        )
+
+        class BrokenRelay:
+            def get_root(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+        from src.vault import Vault  # noqa: E402
+        from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
+
+        vault = Vault(
+            vault_id="ABCD2345WXYZ",
+            master_key=bytes.fromhex(
+                "0102030405060708090a0b0c0d0e0f10"
+                "1112131415161718191a1b1c1d1e1f20"
+            ),
+            recovery_secret=None,
+            vault_access_secret="bearer",
+            header_revision=0,
+            manifest_revision=0,
+            manifest_ciphertext=b"",
+            crypto=DefaultVaultCrypto,
+        )
+        ok = publish_alarm_used_exceeds_quota_audit(
+            vault=vault, relay=BrokenRelay(),
+            author_device_id=DEVICE_A,
+            used_bytes=200_000, quota_bytes=100_000,
+        )
+        self.assertFalse(ok)
+
+
 class GenesisFollowupIntegrationTests(unittest.TestCase):
     """End-to-end: drive ``add_remote_folder`` from a genesis vault and
     confirm the published root carries a ``vault.create`` op-log row.

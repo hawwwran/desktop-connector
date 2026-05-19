@@ -118,10 +118,18 @@ class QuotaMixin:
         # sweep; the destructive iterator stops as soon as it crosses
         # that line, so over-purges are bounded to one candidate.
         delta = max(1, info["used_bytes"] - info["quota_bytes"] + 1)
+        # F-510 Phase 3.1: capture the over-quota numbers so the cleanup
+        # worker can stamp a `vault.eviction.alarm_used_exceeds_quota`
+        # audit row on the root before the destructive pass starts. A
+        # crashed cleanup still leaves the row in the timeline.
+        alarm_used_bytes = int(info["used_bytes"])
+        alarm_quota_bytes = int(info["quota_bytes"])
 
         def on_success() -> None:
             self._run_eviction_pass(
                 action=action, target_bytes=delta, mode="alarm",
+                alarm_used_bytes=alarm_used_bytes,
+                alarm_quota_bytes=alarm_quota_bytes,
             )
 
         def on_cancel() -> None:
@@ -142,6 +150,8 @@ class QuotaMixin:
 
     def _run_eviction_pass(
         self, *, action: str, target_bytes: int, mode: str = "auto",
+        alarm_used_bytes: int | None = None,
+        alarm_quota_bytes: int | None = None,
     ) -> None:
         """Run the eviction pipeline in a worker thread.
 
@@ -149,6 +159,12 @@ class QuotaMixin:
         :func:`desktop.src.vault.ops.eviction.eviction_pass` so the
         audit log distinguishes ``vault.eviction.auto_purged_oldest``
         from ``vault.eviction.alarm_purged_oldest``.
+
+        ``alarm_used_bytes`` / ``alarm_quota_bytes`` are only set when
+        ``mode == "alarm"``; the worker stamps a
+        ``vault.eviction.alarm_used_exceeds_quota`` audit row on the
+        root before the destructive pass starts so a crashed cleanup
+        still leaves the row in the timeline (F-510 Phase 3.1).
         """
         vault_id = self._resolve_vault_id()
         if not vault_id:
@@ -174,7 +190,10 @@ class QuotaMixin:
 
         def worker() -> None:
             try:
-                from ..vault.ops.eviction import eviction_pass
+                from ..vault.ops.eviction import (
+                    eviction_pass,
+                    publish_alarm_used_exceeds_quota_audit,
+                )
 
                 self.config.reload()
                 relay = create_vault_relay(self.config)
@@ -186,6 +205,20 @@ class QuotaMixin:
                         relay, local_index=self.local_index,
                     )
                     device_id = str(getattr(self.config, "device_id", "") or "0" * 32)
+                    # Stamp the over-quota audit row on the root BEFORE
+                    # the destructive pass so the timeline reflects the
+                    # alarm even if cleanup crashes mid-flight.
+                    if (
+                        mode == "alarm"
+                        and alarm_used_bytes is not None
+                        and alarm_quota_bytes is not None
+                    ):
+                        publish_alarm_used_exceeds_quota_audit(
+                            vault=vault, relay=relay,
+                            author_device_id=device_id,
+                            used_bytes=alarm_used_bytes,
+                            quota_bytes=alarm_quota_bytes,
+                        )
                     result = eviction_pass(
                         vault=vault, relay=relay,
                         manifest=current_manifest,

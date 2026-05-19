@@ -56,7 +56,11 @@ from ..manifest import (
     DEFAULT_RETENTION_POLICY,
 )
 from ..relay_errors import VaultCASConflictError
-from ..state.op_log import append_op_log_entries, build_op_log_entry
+from ..state.op_log import (
+    append_op_log_entries,
+    build_op_log_entry,
+    maybe_genesis_followup_entries,
+)
 from ..upload.folder_state import (
     FolderState,
     fetch_folder_state,
@@ -981,11 +985,89 @@ def reap_orphan_chunks(
     )
 
 
+_ALARM_AUDIT_PUBLISH_RETRIES = 3
+
+
+def publish_alarm_used_exceeds_quota_audit(
+    *,
+    vault: EvictionVault,
+    relay: Any,
+    author_device_id: str,
+    used_bytes: int,
+    quota_bytes: int,
+) -> bool:
+    """Append a ``vault.eviction.alarm_used_exceeds_quota`` op-log row to
+    the root by bumping a fresh revision.
+
+    Called once at the start of an alarm cleanup pass (``mode="alarm"``
+    in the GTK4 ``QuotaMixin._run_eviction_pass`` worker) so the audit
+    row is durable even if the destructive work that follows crashes
+    mid-pass. ``extra={"used": used_bytes, "quota": quota_bytes}`` so
+    the Activity tab can render the exact numbers.
+
+    Best-effort: returns ``True`` if the publish landed, ``False`` if
+    every retry attempt failed. Mirrors ``clear.py``'s
+    ``_publish_root_op_log_entry`` pattern.
+    """
+    import copy
+    last_exc: Exception | None = None
+    for attempt in range(_ALARM_AUDIT_PUBLISH_RETRIES):
+        try:
+            current_root = vault.fetch_root_manifest(relay)
+            parent_revision = int(current_root.get("root_revision", 0))
+            new_revision = parent_revision + 1
+            timestamp = _now_rfc3339()
+            candidate = copy.deepcopy(current_root)
+            candidate["root_revision"] = new_revision
+            candidate["parent_root_revision"] = parent_revision
+            candidate["created_at"] = timestamp
+            candidate["author_device_id"] = str(author_device_id)
+            create_entries = maybe_genesis_followup_entries(
+                current_root,
+                new_revision=new_revision,
+                device_id=author_device_id,
+            )
+            candidate["operation_log_tail"] = append_op_log_entries(
+                candidate.get("operation_log_tail"),
+                [
+                    *create_entries,
+                    build_op_log_entry(
+                        event_type="vault.eviction.alarm_used_exceeds_quota",
+                        device_id=author_device_id,
+                        revision=new_revision,
+                        extra={
+                            "used": int(used_bytes),
+                            "quota": int(quota_bytes),
+                        },
+                    ),
+                ],
+            )
+            vault.publish_root_manifest(relay, candidate)
+            return True
+        except VaultCASConflictError as exc:
+            last_exc = exc
+            log.info(
+                "vault.eviction.alarm_audit.cas_retry vault=%s "
+                "attempt=%d/%d",
+                vault.vault_id, attempt + 1, _ALARM_AUDIT_PUBLISH_RETRIES,
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            break
+    log.warning(
+        "vault.eviction.alarm_audit.failed vault=%s last_error=%r",
+        vault.vault_id, last_exc,
+    )
+    return False
+
+
 __all__ = [
     "EvictionMode",
     "EvictionResult",
     "EvictionStageResult",
     "OrphanReapResult",
     "eviction_pass",
+    "publish_alarm_used_exceeds_quota_audit",
     "reap_orphan_chunks",
 ]

@@ -210,7 +210,14 @@ class VaultBrowserGtkSourceTests(unittest.TestCase):
         source = _read_browser_source()
 
         for text in (
-            "from ..vault.ops.eviction import eviction_pass",
+            # Phase 3.1 Wire 2 expanded the import to also pull in
+            # publish_alarm_used_exceeds_quota_audit so the alarm
+            # cleanup worker can stamp the audit row before the
+            # destructive pass starts. The import is now multi-line;
+            # pin the module path + both names.
+            "from ..vault.ops.eviction import",
+            "eviction_pass",
+            "publish_alarm_used_exceeds_quota_audit",
             "_run_eviction_pass",
             "no_more_candidates",
             "Open vault settings",
