@@ -26,8 +26,9 @@ from src.vault.crypto import (  # noqa: E402
 )
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    make_manifest,
-    make_remote_folder,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
 )
 from src.vault.upload import upload_file  # noqa: E402
 
@@ -109,21 +110,28 @@ class TwoWayCycleTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _empty_remote(self) -> tuple[FakeUploadRelay, dict]:
-        manifest = make_manifest(
+        root = make_root_manifest(
             vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
+            root_revision=1, parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z",
             author_device_id=AUTHOR,
             remote_folders=[
-                make_remote_folder(
+                make_root_folder_pointer(
                     remote_folder_id=DOCS_ID,
                     display_name_enc="Documents",
                     created_at="2026-05-04T12:00:00.000Z",
                     created_by_device_id=AUTHOR,
-                    entries=[],
                 ),
             ],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: shard})
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -168,14 +176,29 @@ class TwoWayCycleTests(unittest.TestCase):
         path: str,
     ) -> dict:
         from src.vault.manifest import (
-            normalize_manifest_path, tombstone_file_entry,
+            normalize_manifest_path, tombstone_file_entry_in_shard,
         )
         normalized = normalize_manifest_path(path)
-        next_manifest = tombstone_file_entry(
-            manifest, remote_folder_id=DOCS_ID, path=normalized,
+        folder = next(f for f in manifest["remote_folders"] if f["remote_folder_id"] == DOCS_ID)
+        tombstoned = tombstone_file_entry_in_shard(
+            make_folder_shard(
+                vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+                shard_revision=1, parent_shard_revision=0,
+                created_at=folder["created_at"],
+                author_device_id=AUTHOR,
+                entries=folder["entries"],
+            ),
+            path=normalized,
             deleted_at="2026-05-04T13:00:00.000Z",
             author_device_id=AUTHOR,
+            folder_retention_policy=folder.get("retention_policy"),
         )
+        # Splice the tombstoned shard entries back into the unified view.
+        import copy as _copy
+        next_manifest = _copy.deepcopy(manifest)
+        for nf in next_manifest["remote_folders"]:
+            if nf["remote_folder_id"] == DOCS_ID:
+                nf["entries"] = tombstoned["entries"]
         next_manifest["revision"] = int(manifest.get("revision", 0)) + 1
         next_manifest["parent_revision"] = int(manifest.get("revision", 0))
         next_manifest["created_at"] = "2026-05-04T13:00:00.000Z"
@@ -671,7 +694,6 @@ class TwoWayCycleTests(unittest.TestCase):
         """
         from unittest import mock
         from src.vault.binding.twoway import _apply_remote_to_local, _BindingFolderState
-        from src.vault.manifest import make_remote_folder
 
         relay, manifest = self._empty_remote()
         binding = self._make_two_way_binding(
@@ -953,21 +975,28 @@ class TwoWayFetchManifestPerOpTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _empty_remote(self) -> "_CountingTwoWayRelay":
-        manifest = make_manifest(
+        root = make_root_manifest(
             vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
+            root_revision=1, parent_root_revision=0,
             created_at="2026-05-16T12:00:00.000Z",
             author_device_id=AUTHOR,
             remote_folders=[
-                make_remote_folder(
+                make_root_folder_pointer(
                     remote_folder_id=DOCS_ID,
                     display_name_enc="Documents",
                     created_at="2026-05-16T12:00:00.000Z",
                     created_by_device_id=AUTHOR,
-                    entries=[],
                 ),
             ],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-16T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: shard})
         relay = _CountingTwoWayRelay()
         vault = _vault()
         try:
@@ -1068,21 +1097,28 @@ class TwoWayBatchedPhaseBTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _empty_remote(self) -> "_TwoWayBatchProbeRelay":
-        manifest = make_manifest(
+        root = make_root_manifest(
             vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
+            root_revision=1, parent_root_revision=0,
             created_at="2026-05-16T12:00:00.000Z",
             author_device_id=AUTHOR,
             remote_folders=[
-                make_remote_folder(
+                make_root_folder_pointer(
                     remote_folder_id=DOCS_ID,
                     display_name_enc="Documents",
                     created_at="2026-05-16T12:00:00.000Z",
                     created_by_device_id=AUTHOR,
-                    entries=[],
                 ),
             ],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-16T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: shard})
         relay = _TwoWayBatchProbeRelay()
         vault = _vault()
         try:
