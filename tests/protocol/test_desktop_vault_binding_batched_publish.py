@@ -1201,5 +1201,111 @@ class EvictionOpLogTests(unittest.TestCase):
         self.assertEqual(evictions[0]["device_id"], AUTHOR)
 
 
+class FetchUnifiedManifestIntegrationTests(unittest.TestCase):
+    """Phase 4 of docs/plans/activity-timeline.md — closes the
+    producer→consumer loop with the same fetch path the Activity tab
+    uses at runtime.
+
+    Phase 1's assemble_unified_manifest tests proved the synthetic
+    merge; Phase 2/3's producer tests decrypted shards directly. This
+    test runs the real Vault.fetch_unified_manifest (fetch root + N
+    shards from relay + assemble) so a regression in either side of
+    the merge surfaces here — e.g., a future refactor that drops
+    shard tails on assemble, or a publish path that forgets to bump
+    the shard hash.
+    """
+
+    def test_upload_delete_and_clear_round_trip_via_fetch_unified(self) -> None:
+        from src.vault.ops.clear import clear_vault
+        from src.vault.ops.delete import delete_file
+        from src.vault.upload import upload_file
+        from tests.protocol.test_desktop_vault_delete import (
+            _seeded_manifest, _vault as _delete_vault,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay, seed_sharded_state,
+        )
+        from tests.protocol.test_desktop_vault_manifest import (
+            AUTHOR, DOCS_ID,
+        )
+
+        # Seed: one folder, one file (seed already publishes one upload entry).
+        manifest = _seeded_manifest([("seed.txt", "seed")])
+        relay = FakeUploadRelay()
+        vault = _delete_vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest["vault_id"],
+                remote_folders=manifest["remote_folders"],
+                created_at=manifest["created_at"],
+                author_device_id=manifest["author_device_id"],
+            )
+        finally:
+            vault.close()
+
+        # Drive a fresh upload through the real upload_file producer.
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            suffix=".txt", delete=False, mode="w",
+        ) as tmp:
+            tmp.write("hello")
+            tmp_path = tmp.name
+        vault = _delete_vault()
+        try:
+            upload_file(
+                vault=vault, relay=relay, manifest={},
+                local_path=Path(tmp_path), remote_folder_id=DOCS_ID,
+                remote_path="hello.txt", author_device_id=AUTHOR,
+            )
+            delete_file(
+                vault=vault, relay=relay, manifest={},
+                remote_folder_id=DOCS_ID, remote_path="seed.txt",
+                author_device_id=AUTHOR,
+            )
+            clear_vault(
+                vault=vault, relay=relay, author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+            os.unlink(tmp_path)
+
+        # The Activity tab's fetch path — exactly what tab_activity.py
+        # uses at runtime to populate the timeline.
+        observer = _delete_vault()
+        try:
+            unified = observer.fetch_unified_manifest(relay)
+        finally:
+            observer.close()
+
+        tail = unified.get("operation_log_tail") or []
+        types = sorted(e["type"] for e in tail)
+        # Expected timeline:
+        #   - vault.upload.completed × 1 (seed) — from seed_sharded_state
+        #   - vault.upload.completed × 1 (hello.txt)
+        #   - vault.delete.completed × 1 (seed.txt)
+        #   - vault.vault.cleared × 1 (root publish from clear_vault)
+        #   - vault.folder.cleared × 1 (summary entry from clear_vault's
+        #     internal delete_folder_contents call)
+        #   - vault.delete.completed × 1 (hello.txt being tombstoned by clear_vault)
+        # The exact upload counts depend on whether seed_sharded_state's
+        # baseline publish stamped an entry; assert the event-types set
+        # without pinning multiplicity.
+        self.assertIn("vault.upload.completed", types)
+        self.assertIn("vault.delete.completed", types)
+        self.assertIn("vault.vault.cleared", types)
+        self.assertIn("vault.folder.cleared", types)
+
+        # Sort by ts is deterministic per D2 (tie-break on device_id, revision).
+        timestamps = [int(e.get("ts", 0)) for e in tail]
+        self.assertEqual(timestamps, sorted(timestamps),
+                         "merged tail must be sorted ascending by ts")
+
+        # Every entry carries the AUTHOR device_id from this single-device
+        # session.
+        for entry in tail:
+            self.assertEqual(entry.get("device_id"), AUTHOR)
+
+
 if __name__ == "__main__":
     unittest.main()

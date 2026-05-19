@@ -594,14 +594,71 @@ should remain visible after a lock event.
 
 ---
 
+## Test 10 — Activity tab populates with producer events
+
+**Goal**: Phase 4 stabilization of `docs/plans/activity-timeline.md`.
+Verify the producer side actually lands op-log entries that the
+Activity tab consumes — the live counterpart of
+`FetchUnifiedManifestIntegrationTests`. Catches a regression that
+unit tests against fakes would miss (real AEAD round-trip, real
+relay state, real GTK render).
+
+**Preconditions**: Test 08 PASS. Vault is unlocked and contains
+`hello.txt` from Test 08. The Test 08 upload itself should have
+written one `vault.upload.completed` entry to the shard's
+`operation_log_tail` (Phase 2 wiring).
+
+**Steps**:
+1. Drive a second small upload so the timeline has > 1 entry:
+   - `echo "second line" > <local_bound_folder>/world.txt`
+   - Wait up to 5 s for the sync cycle to publish.
+2. Open the Vault Settings window:
+   - `python3 -m src.windows vault-main --config-dir=~/.config/desktop-connector-dev`
+   - (Or activate it via the running tray, depending on whether the
+     headless twin's tray is up.)
+3. Switch to the **Activity** tab.
+4. Screenshot `01-activity-tab.png`. Dump tree → `02-attree.txt`.
+5. Press the **Refresh** button (or trigger a re-render).
+6. Trigger a delete: in the Vault Browser window, delete
+   `hello.txt`. Wait ≤ 5 s, return to Activity tab.
+7. Press **Refresh**. Screenshot `03-activity-after-delete.png`.
+
+**Assertions**:
+- Activity tab shows at least 3 rows (Test 08 upload + step 1 upload
+  + step 6 delete), labelled per `state/activity._EVENT_TYPE_LABELS`:
+  - "Uploaded" rows for `hello.txt` and `world.txt`
+  - "Deleted" row for `hello.txt`
+- Each row carries a timestamp within the test window.
+- Each row carries the truncated device-id (no `device_name` yet —
+  that's the Phase 3.1 follow-up).
+- The status label reads "N event(s)." with N matching the visible
+  row count.
+- No tracebacks on either dev-desktop stderr or the Activity tab
+  worker thread (check `~/.config/desktop-connector-dev/logs/vault.log`).
+- The dev server log shows `shard-with-root` publishes corresponding
+  to each of the three operations.
+
+**Capture**: 2 screenshots + 1 tree dump + tail of `vault.log`
+(`tail -50 ~/.config/desktop-connector-dev/logs/vault.log >
+04-vault-log-tail.txt`).
+
+**Why this matters**: Phase 1–3 of `docs/plans/activity-timeline.md`
+wired the producer side; this test is the live equivalent of
+`tests/protocol/test_desktop_vault_binding_batched_publish.py::FetchUnifiedManifestIntegrationTests`.
+A regression that drops shard-tail merge in `assemble_unified_manifest`
+or breaks producer wiring at any of the publish sites surfaces as
+an empty Activity tab here even though unit tests pass.
+
+---
+
 ## End of suite
 
-After test 09 (or whenever the user says "stop"):
+After test 10 (or whenever the user says "stop"):
 
 1. Run the **Teardown** commands.
 2. Write `temp/automation-tests-results/<NNNN>/SUITE.md` summarising
    pass/fail per test plus any cross-test observations.
-3. Confirm to the user: "Suite NNNN complete: X/9 pass. Results in
+3. Confirm to the user: "Suite NNNN complete: X/10 pass. Results in
    temp/automation-tests-results/NNNN/."
 
 The dev config dir and dev server DB are **left in place** so the

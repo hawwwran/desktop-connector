@@ -121,10 +121,10 @@ These items were named in Phase 3 but require structural changes (an extra root 
 - **`vault.purge.*` op-log entries.** The scheduled-purge feature is fire-on-attended per ADR 2026-05-18 and `mark_purge_executed` has no current callers in the desktop tree. Wire op-log when the scheduled-purge auto-executor lands (currently out of scope).
 
 ### Phase 4 — Stabilization
-14. Integration test against the `FakeShardedRelay` harness: upload → fetch_unified_manifest → assert presence.
-15. T17 producer-side source-pin update.
-16. ADR entry.
-17. Live-twin smoke test: drive a few uploads + a delete + a grant on the dev twin, open the Activity tab, screenshot the populated timeline.
+14. Integration test against the `FakeShardedRelay` harness: upload → fetch_unified_manifest → assert presence. **Landed** — `FetchUnifiedManifestIntegrationTests` in `tests/protocol/test_desktop_vault_binding_batched_publish.py`.
+15. T17 producer-side source-pin update. **Landed** — `test_producer_side_wires_op_log_append` + `test_unified_merge_includes_shard_tails` in `tests/protocol/test_desktop_vault_t17_wired_source.py`.
+16. ADR entry. **Landed** — `docs/architecture-decisions.md` 2026-05-19 entry recording D1–D8.
+17. Live-twin smoke test: drive a few uploads + a delete + a grant on the dev twin, open the Activity tab, screenshot the populated timeline. **Recipe landed** — `docs/testing/vault-tests.md` Test 10. Run interactively via the existing chained-test pattern when ready.
 
 ## Verification
 

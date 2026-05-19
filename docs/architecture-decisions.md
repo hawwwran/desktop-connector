@@ -74,6 +74,105 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-19 — Vault activity timeline producer side + unified-manifest tail merge
+
+**Status:** landed Phases 1–3 (Phase 4 stabilization in progress); Phase 3.1 follow-up tracked in [`docs/plans/activity-timeline.md`](plans/activity-timeline.md).
+
+**Context.** F-501 built the Activity-tab UI + the consumer-side parser
+in `desktop/src/vault/state/activity.py` (which reads
+`manifest.operation_log_tail`) but no code anywhere appended to that
+field. The tab rendered "No activity yet" forever even on a vault with
+heavy churn. The server-side `vault_audit_events` table that originally
+fed it was retired in F-S16 (`Database.php:169` does `DROP TABLE IF
+EXISTS`), leaving the encrypted op-log as the only intended source.
+
+**Decision.** Wire the producer side at every shard- and root-publish
+call site with eight binding decisions (D1–D8 in the plan doc):
+
+1. **D1 — Shard/root split.** File ops (upload/delete/restore/eviction/
+   folder.cleared) append to the per-folder shard's
+   `operation_log_tail`; vault-wide ops (vault.cleared, future
+   grant/revoke/rotation, migration, eviction.alarm_used_exceeds_quota,
+   vault.create) append to the root's tail. The schema split was already
+   in place at `manifest.py:527/598`; Phase 2 wired the producers.
+
+2. **D2 — Unified-merge fix.** `assemble_unified_manifest`
+   (`manifest.py:783-831`) previously dropped shard tails on assembly,
+   so the Activity tab would never see shard-scoped entries. Phase 1
+   added a merge step that concatenates root + every shard tail, sorted
+   by `(ts, device_id, revision)` for deterministic re-fetch order
+   (burst uploads from one device share a wall-clock second).
+
+3. **D3 — `MAX_OP_LOG_TAIL = 200`, drop-oldest.** Cap pinned at
+   ≥ 4 × `PUBLISH_BATCH_SIZE` so a single full batch fills 25 % of the
+   tail — comfortable headroom. ~230 B/entry × 200 ≈ 46 KB plaintext.
+   No `archived_op_segments` rotation in v1; archived segments are a
+   v1.1 follow-up.
+
+4. **D4 — Truncation observability.** When the cap drops entries,
+   `append_op_log_entries` emits a
+   `vault.activity.tail_truncated_evicted_oldest count=N` INFO log,
+   and the Activity tab's status label surfaces "showing most recent
+   200." so users know the timeline rolls.
+
+5. **D5 — Genesis defer.** `Vault.prepare`'s genesis publish
+   intentionally lands an empty `operation_log_tail`; a vault's first
+   timeline row is the second root revision (first folder add or
+   first upload). Wiring `vault.create` on first-follow-up is deferred
+   to Phase 3.1.
+
+6. **D6 — Skip on no-op replay.** When CAS retries replay a tombstone
+   onto an already-tombstoned entry (`tombstone_file_entry_in_shard`
+   raises `KeyError`), the corresponding op-log entry is skipped —
+   otherwise the retry would double-record ops that did no real work.
+
+7. **D7 — CAS-retry server-tail preservation.** Both
+   `_merge_batch_into_shard_with_bump` (`binding/sync.py:1134`) and
+   `_publish_folder_purge_with_retry` (`ops/eviction.py:451`) use the
+   *server-side* shard's tail (`server_n.get("operation_log_tail")`)
+   as the `prior_tail` on every retry attempt — that's what preserves
+   concurrent producer entries from another writer across a 409 rebase.
+
+8. **D8 — Purge scoping.** `vault.purge.executed` is shard-scoped
+   (one entry per affected folder shard); `vault.purge.scheduled` and
+   `vault.purge.cancelled` stay local — they never commit to the relay.
+   Producer wiring deferred to Phase 3.1 because the scheduled-purge
+   auto-executor itself is deferred per the 2026-05-18 ADR below.
+
+**Alternatives.** (a) Root-only scoping (rejected — file ops would
+force a root manifest revision on every batch already paid for by
+`publish_shard_with_root` atomicity, but a device with a per-folder
+grant could only ever see root-tail events, not the per-folder file
+audit; the split lets a folder-scoped device see its own audit
+without admin access). (b) Tying the tail to a separate ciphertext
+segment from day one (rejected for v1 — costs an extra fetch on
+every Activity-tab open; bounded tail is sufficient until usage
+data shows real demand for deep history). (c) Server-side audit
+table reintroduction (rejected — `vault_audit_events` was retired
+because the encrypted op-log preserves the blind-relay invariant;
+re-introducing it would re-expose event metadata to the relay).
+
+**Anchor.**
+
+- Helper module: `desktop/src/vault/state/op_log.py`
+  (`build_op_log_entry`, `append_op_log_entries`, `MAX_OP_LOG_TAIL`).
+- Consumer-side merge: `desktop/src/vault/manifest.py:783-831`
+  `assemble_unified_manifest` + `_op_log_sort_key`.
+- Producer sites: `desktop/src/vault/binding/sync.py`
+  (`_apply_batch_to_shard` + `_merge_batch_into_shard_with_bump`),
+  `desktop/src/vault/upload/{single_file,folder}.py`,
+  `desktop/src/vault/ops/{delete,eviction,clear}.py`.
+- UI truncation hint: `desktop/src/windows_vault/tab_activity.py`.
+- Tests: `tests/protocol/test_desktop_vault_op_log.py` (producer-side
+  unit), `tests/protocol/test_desktop_vault_manifest.py`
+  (`AssembleUnifiedManifestOpLogMergeTests`),
+  `tests/protocol/test_desktop_vault_binding_batched_publish.py`
+  (`BatchOpLogProducerTests`, `DeleteAndRestoreOpLogTests`,
+  `ClearFolderOpLogTests`, `EvictionOpLogTests`,
+  `FetchUnifiedManifestIntegrationTests`),
+  `tests/protocol/test_desktop_vault_clear.py`
+  (`ClearVaultRootOpLogTests`).
+
 ### 2026-05-19 — Vault config knobs: `vaultQuotaBytes` + floor-protected `vaultAuthLimit`
 
 **Status:** landed.

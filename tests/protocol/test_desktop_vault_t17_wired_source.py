@@ -110,6 +110,50 @@ class T17DiagnosticsWiringTests(unittest.TestCase):
         self.assertIn('"operation_log_tail"', self.windows_vault)
         # Filter widgets.
         self.assertIn("Gtk.SearchEntry", self.windows_vault)
+        # Phase 3 truncation observability (D4): when the rendered tail is
+        # at the cap the status label surfaces it.
+        self.assertIn("MAX_OP_LOG_TAIL", self.windows_vault)
+        self.assertIn("showing most recent", self.windows_vault)
+
+    # ------------------------------------------------------------------
+    # Activity-timeline plan (docs/plans/activity-timeline.md):
+    # producer-side anchor. Phase 1's wiring tests grep the consumer
+    # side; this catches a regression that drops the *producer* side
+    # — every shard-publishing site (binding sync, single-file upload,
+    # folder upload, ops/delete, ops/eviction, ops/clear) must build
+    # entries via ``build_op_log_entry``.
+    # ------------------------------------------------------------------
+    def test_producer_side_wires_op_log_append(self) -> None:
+        # ``append_op_log_entries`` is the universal indicator that a
+        # producer site lands entries on the next manifest publish —
+        # every site uses it, whether they call ``build_op_log_entry``
+        # directly or go through a wrapper like ``_upload_op_log_entry``.
+        producer_files = [
+            SRC_ROOT / "vault" / "binding" / "sync.py",
+            SRC_ROOT / "vault" / "upload" / "single_file.py",
+            SRC_ROOT / "vault" / "upload" / "folder.py",
+            SRC_ROOT / "vault" / "ops" / "delete.py",
+            SRC_ROOT / "vault" / "ops" / "eviction.py",
+            SRC_ROOT / "vault" / "ops" / "clear.py",
+        ]
+        for path in producer_files:
+            with self.subTest(path=str(path.relative_to(SRC_ROOT))):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn(
+                    "append_op_log_entries", source,
+                    f"{path.name} must wire append_op_log_entries — "
+                    "Phase 2/3 of docs/plans/activity-timeline.md",
+                )
+
+    def test_unified_merge_includes_shard_tails(self) -> None:
+        # Phase 1 D2: assemble_unified_manifest must merge shard tails
+        # — without this the Activity tab never sees shard-scoped
+        # events even if producers wire them.
+        manifest_src = (SRC_ROOT / "vault" / "manifest.py").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn("merged_tail", manifest_src)
+        self.assertIn("_op_log_sort_key", manifest_src)
 
     # ------------------------------------------------------------------
     # F-501.5: Export reminder banner in Recovery tab
