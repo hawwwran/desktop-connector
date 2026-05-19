@@ -396,13 +396,31 @@ def build_devices_tab(ctx: MainContext, win) -> "Gtk.Box":
                     config_dir, config, vault_id_undashed,
                 )
                 try:
-                    revoke_device_grant(
+                    revoke_result = revoke_device_grant(
                         relay, vault.vault_id, vault.vault_access_secret,
                         grant.device_id,
                     )
                     log.info(
                         "vault.device.revoked device_id=%s",
                         grant.device_id[:12],
+                    )
+                    # F-510 Phase 3.1 Wire 4: best-effort audit row on
+                    # the encrypted manifest so every device's Activity
+                    # tab sees this revoke.
+                    from ..vault.grant.audit import (
+                        publish_grant_lifecycle_audit,
+                    )
+                    publish_grant_lifecycle_audit(
+                        vault=vault, relay=relay,
+                        event_type="vault.revoke.completed",
+                        author_device_id=str(config.device_id or ""),
+                        extra={
+                            "target_device_id": str(grant.device_id),
+                            "revoked_at": str(revoke_result.revoked_at or ""),
+                            "already_revoked": bool(
+                                revoke_result.already_revoked
+                            ),
+                        },
                     )
                 finally:
                     vault.close()

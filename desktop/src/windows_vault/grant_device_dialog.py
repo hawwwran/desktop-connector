@@ -486,6 +486,21 @@ def build_grant_device_dialog(
                         "vault.grant.approved role=%s claimant=%s",
                         role_token, claimant_device_id[:12],
                     )
+                    # F-510 Phase 3.1 Wire 4: best-effort audit row on
+                    # the encrypted manifest so every device's Activity
+                    # tab sees this grant.
+                    from ..vault.grant.audit import (
+                        publish_grant_lifecycle_audit,
+                    )
+                    publish_grant_lifecycle_audit(
+                        vault=vault, relay=relay,
+                        event_type="vault.grant.created",
+                        author_device_id=str(config.device_id or ""),
+                        extra={
+                            "approved_role": role_token,
+                            "claimant_device_id": str(claimant_device_id),
+                        },
+                    )
                 finally:
                     vault.close()
             except Exception as exc:  # noqa: BLE001

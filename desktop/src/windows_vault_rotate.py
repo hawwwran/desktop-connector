@@ -559,6 +559,39 @@ def show_vault_rotate(config_dir: Path) -> None:
                             "vault.rotate.marker_clear_failed vault=%s",
                             vault_id_undashed[:12],
                         )
+
+                    # F-510 Phase 3.1 Wire 4: best-effort audit row on
+                    # the encrypted manifest. Open a fresh vault from
+                    # the keyring grant we just saved (carries the new
+                    # secret), publish, close. Failure is logged but
+                    # never blocks the wizard — the rotation itself is
+                    # already committed by this point.
+                    try:
+                        from .vault.grant.audit import (
+                            publish_grant_lifecycle_audit,
+                        )
+                        audit_vault = open_local_vault_from_grant(
+                            config_dir, config, vault_id_undashed,
+                        )
+                        try:
+                            publish_grant_lifecycle_audit(
+                                vault=audit_vault, relay=relay,
+                                event_type="vault.rotation.completed",
+                                author_device_id=str(
+                                    config.device_id or "",
+                                ),
+                                extra={
+                                    "rotated_at": str(rotated_at or ""),
+                                },
+                            )
+                        finally:
+                            audit_vault.close()
+                    except Exception:  # noqa: BLE001
+                        log.warning(
+                            "vault.rotate.audit_publish_failed vault=%s",
+                            vault_id_undashed[:12],
+                            exc_info=True,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     err = exc
                     # B1: if rotation never reached the server (POST
