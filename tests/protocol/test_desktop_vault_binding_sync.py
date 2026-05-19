@@ -31,6 +31,7 @@ from src.vault.manifest import (  # noqa: E402
     make_root_folder_pointer,
     make_root_manifest,
 )
+from _vault_helpers import empty_single_folder_unified  # noqa: E402
 from src.vault.upload import upload_file  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
@@ -835,29 +836,10 @@ class CountingRelay(FakeUploadRelay):
 
 
 def _empty_unified(*, created_at: str) -> dict:
-    """Build an empty single-folder unified manifest via sharded primitives."""
-    root = make_root_manifest(
-        vault_id=VAULT_ID,
-        root_revision=1, parent_root_revision=0,
-        created_at=created_at,
-        author_device_id=AUTHOR,
-        remote_folders=[
-            make_root_folder_pointer(
-                remote_folder_id=DOCS_ID,
-                display_name_enc="Documents",
-                created_at=created_at,
-                created_by_device_id=AUTHOR,
-            ),
-        ],
-    )
-    shard = make_folder_shard(
+    return empty_single_folder_unified(
         vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
-        shard_revision=1, parent_shard_revision=0,
-        created_at=created_at,
-        author_device_id=AUTHOR,
-        entries=[],
+        author_device_id=AUTHOR, created_at=created_at,
     )
-    return assemble_unified_manifest(root, {DOCS_ID: shard})
 
 
 if __name__ == "__main__":

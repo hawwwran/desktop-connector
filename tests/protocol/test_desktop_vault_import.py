@@ -24,11 +24,11 @@ from src.vault.import_.bundle import (  # noqa: E402
 )
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    find_file_entry_in_shard,
     make_folder_shard,
     make_root_folder_pointer,
     make_root_manifest,
 )
+from _vault_helpers import entry_in_unified as _entry_in_unified  # noqa: E402
 
 
 VAULT_ID = "ABCD2345WXYZ"
@@ -432,17 +432,6 @@ def _empty_unified_for(
         remote_folders=pointers,
     )
     return assemble_unified_manifest(root, shards_by_id)
-
-
-def _entry_in_unified(manifest: dict, remote_folder_id: str, path: str) -> dict | None:
-    """Look up a file entry in the unified manifest's folder."""
-    folder = next(
-        (f for f in manifest.get("remote_folders", []) or [] if f.get("remote_folder_id") == remote_folder_id),
-        None,
-    )
-    if folder is None:
-        return None
-    return find_file_entry_in_shard(folder, path)
 
 
 class VaultImportRunnerTests(unittest.TestCase):

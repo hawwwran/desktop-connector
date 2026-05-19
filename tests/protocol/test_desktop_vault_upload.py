@@ -27,6 +27,7 @@ from src.vault.manifest import (  # noqa: E402
     make_root_folder_pointer,
     make_root_manifest,
 )
+from _vault_helpers import entry_in_unified as _entry_in_unified  # noqa: E402
 from src.vault.relay_errors import VaultCASConflictError, VaultQuotaExceededError  # noqa: E402
 from src.vault.upload import (  # noqa: E402
     FileSkipped,
@@ -2431,17 +2432,6 @@ def _empty_manifest() -> dict:
         entries=[],
     )
     return assemble_unified_manifest(root, {DOCS_ID: shard})
-
-
-def _entry_in_unified(manifest: dict, remote_folder_id: str, path: str) -> dict | None:
-    """Look up a file entry inside the unified-shape manifest's folder."""
-    folder = next(
-        (f for f in manifest.get("remote_folders", []) or [] if f.get("remote_folder_id") == remote_folder_id),
-        None,
-    )
-    if folder is None:
-        return None
-    return find_file_entry_in_shard(folder, path)
 
 
 def _latest_chunk_list(manifest: dict, remote_folder_id: str, path: str) -> list[dict]:
