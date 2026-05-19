@@ -405,7 +405,7 @@ class VaultBindingsSchemaTests(unittest.TestCase):
 class CountPendingOpsForVaultTests(unittest.TestCase):
     """``count_pending_ops_for_vault`` feeds the Vault Browser's ambient
     "Vault sync K/N" indicator. Phase 1.5 of
-    ``docs/plans/vault-large-folder-perf.md``.
+    ``temp/finished-plans/vault-large-folder-perf.md``.
     """
 
     def setUp(self) -> None:

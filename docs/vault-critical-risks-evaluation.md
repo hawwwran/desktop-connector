@@ -2,7 +2,7 @@
 
 **Date stamped:** 2026-05-15
 **Input doc:** [`temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-critical-risks-and-weaknesses.md`](../temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-critical-risks-and-weaknesses.md)
-**Plan that opened this gate:** [`plans/vault-open-items.md`](plans/vault-open-items.md)
+**Plan that opened this gate:** [`vault-open-items.md`](../temp/finished-plans/vault-open-items.md) (archived 2026-05-19)
 **Architecture reference:** [`vault-architecture.md`](vault-architecture.md)
 
 The archived risks doc catalogued 20 risk areas (§3.1–§3.20) plus 8
@@ -49,7 +49,7 @@ Label vocabulary (per the opening plan):
 a named caveat (§3.3 — revocation UX wording missing + per-role
 server write gates partial; both deferred to the post-v1 Devices
 tab work). §3.7 closed via
-[`plans/live-testing-followup.md`](plans/live-testing-followup.md)
+[`live-testing-followup.partly.md`](../temp/finished-plans/live-testing-followup.partly.md)
 §10 (manifest revision floor + banner); §3.9 + §3.11 closed via
 §11 (per-process fresh-unlock stamp + inline mini-prompt at the
 import-merge / clear-folder / clear-vault / schedule-purge gates).
@@ -275,7 +275,7 @@ remaining folders" checkbox. Test coverage:
 `tests/protocol/test_desktop_vault_import.py` (identity refuse,
 preview rendering, three-mode merge, per-folder batching).
 **Notes:** Fresh-unlock now enforced in the import path via
-[`plans/live-testing-followup.md`](plans/live-testing-followup.md)
+[`live-testing-followup.partly.md`](../temp/finished-plans/live-testing-followup.partly.md)
 §11 — `on_import` in `windows_vault_import.py` funnels through
 `require_fresh_unlock_or_prompt`; the inline mini-prompt
 (`desktop/src/windows_vault/fresh_unlock_prompt.py`) re-runs
@@ -343,7 +343,7 @@ order. Test coverage: `tests/protocol/test_desktop_vault_clear.py`
 backend wiring).
 **Notes:** Fresh-unlock now enforced in all three destructive
 handlers via
-[`plans/live-testing-followup.md`](plans/live-testing-followup.md)
+[`live-testing-followup.partly.md`](../temp/finished-plans/live-testing-followup.partly.md)
 §11 — `on_clear_folder`, `on_clear_vault`, and `on_schedule_purge`
 in `tab_danger.py` funnel through `require_fresh_unlock_or_prompt`
 before opening their typed-confirm dialog; the same gate is
@@ -488,7 +488,7 @@ and export / import wizards (`desktop/src/vault/export/bundle.py`,
 land. Temp files clean up on failure; downloads stage to `.part`
 files and rename only on success so existing files are never
 overwritten before the full download succeeds.
-**Notes:** None. (Live-test sessions in the §10+ backlog of
+**Notes:** None. (B5 in the un-driven flow backlog of
 [`plans/live-testing-followup.md`](plans/live-testing-followup.md)
 will exercise the under-quota and full-disk paths directly.)
 
@@ -526,7 +526,7 @@ bundle has `scan_for_forbidden` leak scan with redaction; bundle
 write aborts if a base32-of-32-bytes shape leaks through.
 Coverage: `tests/protocol/test_desktop_vault_debug_bundle.py`. The
 narrow URL-safe-base64 / token-field-name gap was closed in
-[`plans/live-testing-followup.md`](plans/live-testing-followup.md) §9.
+[`live-testing-followup.partly.md`](../temp/finished-plans/live-testing-followup.partly.md) §9.
 **Notes:** None.
 
 ---
@@ -537,10 +537,10 @@ narrow URL-safe-base64 / token-field-name gap was closed in
   `docs/architecture-decisions.md` as dated entries, not into
   another evaluation pass.
 - The two **Open / Mitigated-with-fix** items (§3.7 rollback
-  detection; §3.9 + §3.11 fresh-unlock enforcement) are tracked
-  in [`plans/live-testing-followup.md`](plans/live-testing-followup.md)
-  §10 and §11 respectively. When both ship, edit this doc's
-  summary table to flip them to Resolved + remove this paragraph.
+  detection; §3.9 + §3.11 fresh-unlock enforcement) landed at
+  [`live-testing-followup.partly.md`](../temp/finished-plans/live-testing-followup.partly.md)
+  §10 and §11 respectively; the summary table above carries the
+  flipped status.
 - The "Resolved (structural)" label on §3.16–§3.20 reflects that
   these risks resolve by *feature exists* — they are listed in
   the original input doc but not deep code-review items. They do

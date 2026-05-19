@@ -303,7 +303,7 @@ def _present_slow_bind_confirm(
     the user clicks **Start sync**; the **Cancel** path returns
     silently with no binding row created.
 
-    Spec: ``docs/plans/vault-large-folder-perf.md`` Phase 1.
+    Spec: ``temp/finished-plans/vault-large-folder-perf.md`` Phase 1.
     """
     files = summary.local_existing_files
     size_text = _format_bytes(summary.local_existing_bytes)

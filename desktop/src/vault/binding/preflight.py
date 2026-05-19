@@ -10,7 +10,7 @@ Suite 0004 measured the bind cliff (rate decay 8.5 → 1.3 ops/s as the
 encrypted manifest grew during a 10 000-file backup-only drain). The
 estimator uses a linear-in-manifest-size fit of that data so the
 Connect dialog can warn before the user kicks off a multi-hour
-initial sync. Plan: ``docs/plans/vault-large-folder-perf.md``.
+initial sync. Plan: ``temp/finished-plans/vault-large-folder-perf.md``.
 """
 
 from __future__ import annotations

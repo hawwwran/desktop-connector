@@ -424,7 +424,7 @@ class FetchManifestPerOpTests(unittest.TestCase):
     Pre-SO-2 each successful op was followed by ``vault.fetch_manifest``,
     which on a 10k-file initial bind ships the full encrypted manifest
     envelope ~once per file = O(N²) bytes total (see
-    ``docs/plans/vault-large-folder-perf.md``). The fix is to thread the
+    ``temp/finished-plans/vault-large-folder-perf.md``). The fix is to thread the
     manifest dict ``publish_manifest`` already returned through the
     cycle. The re-fetch stays on the failure path because a CAS conflict
     legitimately means "the world moved, refresh."
@@ -516,7 +516,7 @@ class FetchManifestPerOpTests(unittest.TestCase):
             "expected exactly one cycle-driven fetch_manifest "
             f"(initial head); saw {relay.state_fetch_count}. "
             "Per-op manifest GET regressed — see "
-            "docs/plans/vault-large-folder-perf.md SO-2.",
+            "temp/finished-plans/vault-large-folder-perf.md SO-2.",
         )
 
     def test_backup_only_cycle_does_one_root_fetch_per_cycle(self) -> None:

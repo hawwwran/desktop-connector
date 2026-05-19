@@ -216,7 +216,7 @@ class PreflightTextTests(unittest.TestCase):
 
 
 class BindDurationEstimatorTests(unittest.TestCase):
-    """Phase 1 of ``docs/plans/vault-large-folder-perf.md``.
+    """Phase 1 of ``temp/finished-plans/vault-large-folder-perf.md``.
 
     The estimator is calibrated against suite 0004 / 2026-05-16 data
     (the B7 step-ladder run). The tests anchor:

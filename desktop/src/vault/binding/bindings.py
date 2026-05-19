@@ -415,7 +415,7 @@ class VaultBindingsStore:
         """Count pending ops across **all bindings** of one vault.
 
         Feeds the Vault Browser's ambient "Vault sync K/N" indicator
-        (`vault-large-folder-perf.md` Phase 1.5). The browser shows
+        (`temp/finished-plans/vault-large-folder-perf.md` Phase 1.5). The browser shows
         files for one vault at a time; the count is joined against
         `vault_bindings` so a sync running on a different vault's
         binding (multi-vault future) doesn't leak into the visible

@@ -18,10 +18,10 @@ current set). Protocol reference docs under
 
 | Plan | Intent | Status |
 |------|--------|--------|
-| [vault-open-items.md](plans/vault-open-items.md) | Vault v1 unblocked 2026-05-15. Evaluation gate at [`vault-critical-risks-evaluation.md`](vault-critical-risks-evaluation.md) reads 0 Open / 1 Mitigated after the two follow-ups landed: §3.7 (rollback detection) via [`plans/live-testing-followup.md`](plans/live-testing-followup.md) §10 + §3.9 / §3.11 (fresh-unlock enforcement) via §11. Remaining Mitigated entry (§3.3 — Devices tab UX + per-role server gates) is deferred post-v1. Architecture overview at [`vault-architecture.md`](vault-architecture.md). | Done |
-| [live-testing-followup.md](plans/live-testing-followup.md) | Rolling backlog of UX/correctness items surfaced while driving the dev twin. Items 1–9 shipped; items 10+ accept new findings from the Backlog section's un-driven vault flows (eviction, resume-after-kill, cross-device grant, concurrent edits, large folder bind, migration switch-back, ransomware detector, scheduled purge, debug bundle on a real install). | Open (continuous) |
+| [unfinished.md](plans/unfinished.md) | Vault v1 follow-up index — open items the max-effort review pass didn't close. After the 2026-05-19 reconciliation just §3.L4 (permanent-failure UI for sync ops) and §3.8 (residual unified-shape helpers in `manifest.py`) remain. | Open |
+| [live-testing-followup.md](plans/live-testing-followup.md) | Un-driven flow backlog from the chained `docs/testing/vault-tests.md` suite: B6 (concurrent edits), B5 (eviction), B4 (ransomware), B2 (debug bundle), B1 (schedule purge), plus B3 full switch-back leg. Pickup recipes live in [`skipped-while-autonomous.md`](plans/skipped-while-autonomous.md). Completed items §1–§14 archived at [`live-testing-followup.partly.md`](../temp/finished-plans/live-testing-followup.partly.md). | Open (continuous) |
+| [skipped-while-autonomous.md](plans/skipped-while-autonomous.md) | Register of items skipped during unattended sessions because they need user input or design decisions: §3.L4 permanent-failure UI, §6.L5 subprocess crash detection, B6 concurrent edits, Android radio tail cost (awaits dumpsys), webcam QR scanning, live tests B2/B5/B4/B1, migration wizard dogtail drive. | Open |
 | [android-radio-tail-cost.md](plans/android-radio-tail-cost.md) | Android battery investigation: cellular-radio tail driven by phantom delivery-tracker rows. Fix A (absent-row stall safeguard) + Fix B (12 h orphan sweep) shipped 2026-05-13; awaiting `android_logs_10.txt` dumpsys to confirm `mobile_radio ≤ 70 mAh / 10 h`. | Open (awaiting empirical validation) |
-| [vault-large-folder-perf.md](plans/vault-large-folder-perf.md) | Two-phase fix for the B7 cliff (suite 0004, 10k files = 2 h 11 min). Phase 1: pre-bind warning + estimate so users aren't surprised. Phase 2: SO-2 drop redundant per-op `fetch_manifest` (~2× win) + SO-3 batched manifest publish (~50× win combined). | Open |
 
 The canonical Vault reference now lives at [`vault-architecture.md`](vault-architecture.md);
 it replaces the 16-file `desktop-connector-vault-plan-md/` directory
@@ -31,10 +31,7 @@ archived under
 [`../temp/finished-plans/desktop-connector-vault-plan-md/`](../temp/finished-plans/desktop-connector-vault-plan-md/)
 for decision rationale; read the architecture doc first.
 
-Older finished plans (brand-rollout, desktop-multi-device-support,
-readme_changes, desktop-file-size-breakup, vault-browser-chrome-redesign,
-post-breakup-followups, and the pre-vault batch) are archived under
-[`temp/finished-plans/`](../temp/finished-plans/).
+Older finished plans archived under [`temp/finished-plans/`](../temp/finished-plans/) — the 2026-05-19 sweep moved `vault-open-items.md`, `vault-eviction-v1.md`, `vault-large-folder-perf.md`, and `vault-v1-build-items.md` (all four fully done), plus split off the completed halves of `live-testing-followup.md` and `skipped-while-autonomous.md` as `.partly.md` companions.
 
 ## Protocol reference (living docs)
 

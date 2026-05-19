@@ -1,6 +1,6 @@
 """SO-3: batched manifest publish in ``run_backup_only_cycle``.
 
-The plan: ``docs/plans/vault-large-folder-perf.md`` §Phase 2 SO-3.
+The plan: ``temp/finished-plans/vault-large-folder-perf.md`` §Phase 2 SO-3.
 
 Pre-SO-3 each pending op got its own CAS-published manifest revision —
 ten thousand small files = ten thousand publishes, each shipping the

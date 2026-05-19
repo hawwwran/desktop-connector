@@ -45,7 +45,7 @@ Last updated: 2026-05-18.
 
 ### B6 — Concurrent edits with binding sync (Tier 2)
 
-**Source:** `docs/plans/live-testing-followup.md` Backlog.
+**Source:** `docs/plans/live-testing-followup.md` un-driven backlog.
 
 **Why skipped:** Needs multi-device harness scaffolding. Current `docs/testing/vault-tests.md` is single-twin only; lines 129–142 forbid running the headless dev twin in parallel against `php -S` because the long-poll blocks UI traffic. Building the second-twin scaffolding is itself substantive work (separate keyring service, separate config dir, separate pairing, second relay-or-coordinated-pairing).
 
@@ -70,7 +70,7 @@ Last updated: 2026-05-18.
 
 ### Webcam QR scanning for `windows_vault_join.py`
 
-**Source:** `docs/plans/vault-v1-build-items.md` §5.C2 follow-up; `docs/plans/unfinished.md` cross-reference.
+**Source:** [`temp/finished-plans/vault-v1-build-items.md`](../../temp/finished-plans/vault-v1-build-items.md) §5.C2 follow-up; `docs/plans/unfinished.md` cross-reference.
 
 **Why skipped:** v1.x feature, needs design choices that exceed autonomous scope.
 
@@ -91,45 +91,11 @@ Last updated: 2026-05-18.
 
 ## Partial work / time-budget overruns
 
-### Live tests B3, B2, B5, B4, B1 — deferred from the plan's Step 2–6
+### Live tests B2, B5, B4, B1 — deferred from the plan's Step 2–6
 
-**Why skipped:** Step 1 (the §3.5 test-fixture sweep across 22 files + final helper drop = 23 commits) consumed the bulk of the session budget. Doing five live tests across the remainder reliably enough to write up trustworthy findings was a higher risk than skipping them cleanly with concrete pickup recipes.
+**Why skipped:** Step 1 (the §3.5 test-fixture sweep across 22 files + final helper drop = 23 commits) consumed the bulk of the session budget. Doing five live tests across the remainder reliably enough to write up trustworthy findings was a higher risk than skipping them cleanly with concrete pickup recipes. (B3 already landed 2026-05-19 — see [`temp/finished-plans/skipped-while-autonomous.partly.md`](../../temp/finished-plans/skipped-while-autonomous.partly.md).)
 
-Each live test below has a self-contained run recipe so a follow-up 1–2-hour session can pick it up without re-deriving context. Order is the original plan order (B3 → B2 → B5 → B4 → B1).
-
-#### B3 — Migration switch-back live test
-
-**Status:** not run. The §5.C1 migration wizard (commit `f6b04feXX` series, 2026-05-18) is pinned by source tests (`tests/protocol/test_desktop_vault_migration_wizard_source.py`) and engine tests (`tests/protocol/test_desktop_vault_migration_runner.py`); the live drive against two real PHP relays remains the only thing not exercised.
-
-**Setup recipe:**
-```bash
-cd /home/mhavranek/git/desktop-connector
-
-# Wipe + start relay A on 4441 (canonical dev relay).
-rm -f server/data/connector.db
-rm -rf server/storage/* server/data/logs
-mkdir -p server/data/logs server/storage
-php -S 127.0.0.1:4441 -t server/public/ > server/data/logs/relay-a.log 2>&1 &
-echo $! > /tmp/relay-a.pid
-
-# Spin a second relay on 4442 with an isolated storage tree.
-mkdir -p /tmp/dc-relay-b/data/logs /tmp/dc-relay-b/storage
-cp -r server/public /tmp/dc-relay-b/
-# Reuse the same schema; relay B starts empty.
-php -S 127.0.0.1:4442 -t /tmp/dc-relay-b/public/ > /tmp/dc-relay-b/data/logs/relay-b.log 2>&1 &
-echo $! > /tmp/relay-b.pid
-```
-
-**Test flow:**
-1. Spin dev twin against relay A: `cd desktop && DC_ALLOW_MULTI_INSTANCE=1 python3 -m src.main --config-dir=~/.config/desktop-connector-dev --server-url=http://127.0.0.1:4441`.
-2. Onboard a fresh vault. Add the `~/Documents/dc-dev-test-folder/` binding with 3 test files. Wait for upload to land (Activity tab shows green).
-3. Open Vault Settings → Migration → "Migrate to another relay…". Enter `http://127.0.0.1:4442`. Drive setup → confirm → progress → done.
-4. Verify all 3 files landed on relay B: `sqlite3 /tmp/dc-relay-b/data/connector.db "SELECT vault_id, root_revision FROM vault_roots"`. Should show the same root_revision as relay A had at the end of step 2.
-5. Verify the Migration tab in Vault Settings shows the "switch back to relay A" affordance (visible during the post-commit grace window).
-6. Click "Switch back". Drive the wizard back. Verify A's root_revision is one higher than B's (the switch-back republishes).
-7. To verify the §5.M6 grace-window cleanup: edit `~/.config/desktop-connector-dev/config.json`, set `vault_previous_relay_expires_at` to a past RFC3339 timestamp, reopen the Migration tab. The switch-back affordance should be gone.
-
-**Write up findings as §14 in `docs/plans/live-testing-followup.md`** using the Symptom / Cause / Fix shape / Acceptance / Status template (matches §1–§13).
+Each live test below has a self-contained run recipe so a follow-up 1–2-hour session can pick it up without re-deriving context. Order is the original plan order (B2 → B5 → B4 → B1).
 
 #### B2 — Debug bundle leak scan on a real install
 
@@ -157,7 +123,7 @@ DC_ALLOW_MULTI_INSTANCE=1 python3 -m src.main --config-dir=~/.config/desktop-con
    - `grep -rE "[A-Za-z0-9+/]{43,44}={0,2}" /tmp/bundle-inspect/` — base64-shaped 32-byte runs; manually verify any hit isn't a real secret.
 5. Verify ZIP contents: should include `config.redacted.json`, `index_schema.txt`, `binding_states.json`, `activity_tail.txt`, `manifest_summary.json`. No `keys/`, `history.json`, `recovery_kit.bin`, or raw `config.json`.
 
-**Write up as §15 in `live-testing-followup.md`.** Status field: `done` if zero real-secret leaks, `partial — leaks at <file>` otherwise (then file follow-up entries here).
+**Write up as the next §N in [`temp/finished-plans/live-testing-followup.partly.md`](../../temp/finished-plans/live-testing-followup.partly.md).** Status field: `done` if zero real-secret leaks, `partial — leaks at <file>` otherwise (then file follow-up entries here).
 
 #### B5 — Eviction under quota pressure live test
 
@@ -183,7 +149,7 @@ echo $! > /tmp/relay-a.pid
 5. Use Vault Browser → "Show deleted" toggle to verify the evicted file surfaces as a tombstone.
 6. Confirm restore works: pick a tombstone → Restore → file content reappears (chunk dedup means no re-upload).
 
-**Write up as §16 in `live-testing-followup.md`.**
+**Write up as the next §N in [`temp/finished-plans/live-testing-followup.partly.md`](../../temp/finished-plans/live-testing-followup.partly.md).**
 
 #### B4 — Ransomware detector trip live test
 
@@ -211,7 +177,7 @@ done
 4. Verify the UI surfaces the warning (likely a banner in Vault Settings → Folders tab on the affected binding's row).
 5. Click "Review changes" / "Resume" and verify the unwind flow handles the 100 renames sensibly (either uploads them as new files, or surfaces a per-file conflict UI).
 
-**Write up as §17 in `live-testing-followup.md`.**
+**Write up as the next §N in [`temp/finished-plans/live-testing-followup.partly.md`](../../temp/finished-plans/live-testing-followup.partly.md).**
 
 #### B1 — Schedule purge live test
 
@@ -229,7 +195,7 @@ done
 - `faketime` isn't installed (needs sudo to install — user-driven).
 - The dev twin doesn't load purges from disk on startup (then the test requires staying within one process).
 
-**Write up as §18 in `live-testing-followup.md`.**
+**Write up as the next §N in [`temp/finished-plans/live-testing-followup.partly.md`](../../temp/finished-plans/live-testing-followup.partly.md).**
 
 ### Migration wizard UI dogtail drive — needs human supervision
 

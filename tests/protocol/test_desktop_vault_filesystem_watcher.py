@@ -480,7 +480,7 @@ class StabilityTimeoutCallbackTests(unittest.TestCase):
 
 
 class WatcherBurstLoadTests(unittest.TestCase):
-    """SO-4 from ``docs/plans/live-testing-followup.md`` §13.
+    """SO-4 from ``temp/finished-plans/live-testing-followup.partly.md`` §13.
 
     The B7 test drove the catch-up scan + Sync-now path. SO-4 is the
     coverage gap: when a watcher is actually running and 10 000 files

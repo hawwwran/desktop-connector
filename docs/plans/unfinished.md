@@ -1,277 +1,35 @@
 # Vault v1 — outstanding follow-ups
 
-Single source of truth for every plan item that did NOT land as a code fix. Detail-per-entry inlined here so you don't have to cross-reference the archives.
+Tracks plan items that did not land as a code fix. The Critical / High / Medium queue closed in the 2026-05-18 max-effort review pass; everything below is residue. Detail inlined so you don't have to cross-reference the archives.
 
-Three sections:
-
-1. **Max-effort review needs-design** (§1) — fix scope requires explicit user decision before any code lands. Each has 2–3 resolution paths.
-2. **Deferred Low** (§2) — review items reviewer-classified as polish-tier, acceptable for v1, or operator-deployment caveats.
-3. **Manifest-sharding step 7f cleanup** (§3) — mechanical legacy-API removal still pending from `temp/finished-plans/vault-manifest-sharding.md`. The sharded surface is the production path; the legacy unified-manifest helpers are kept as compat shims while last call sites migrate.
-4. **Summary count** (§4) — verified by grepping the archived trackers.
-
-Last reconciled on 2026-05-19 (after the §3.5 test-fixture sweep closed end-to-end).
+Last reconciled 2026-05-19.
 
 ---
 
-## 1. Decided 2026-05-18 — implementation pending, ordered by priority
+## 1. §3.L4 — Permanent-failure UI for retry-exhausted sync ops
 
-All 12 entries from the original "needs-design" bucket have agreed designs as of the 2026-05-18 scoping pass. Six are substantial v1 builds with detailed plans in [`vault-v1-build-items.md`](vault-v1-build-items.md); one is the eviction algorithm in [`vault-eviction-v1.md`](vault-eviction-v1.md) (**landed 2026-05-18** — see entry 1 below); two are documentation-only decisions captured as ADR entries; the remaining two (§5.M2, §5.M6) are subordinate fixes bundled into the §5.C1 migration wizard build.
-
-**Ordering criteria.** Entries below are sorted **by risk + dependency**, not by review section number, severity bucket, or implementation cost:
-
-- **Top of list (priorities 1–2)**: production-risk closer (entry 1, now landed) and the biggest v1 UX gap — ship these first.
-- **Middle (3–7)**: missing-capability v1 builds. Internal dependencies pin the order (e.g. §6.H2 Devices tab must land before §5.C2 QR-grant ships, because granting devices without an in-app revoke path is worse than no grants).
-- **Lower middle (8)**: housekeeping that's bounded but visible.
-- **Tail (9–10)**: resolved-by-ADR decisions with no code work left.
-- **Bottom (11–12)**: subordinate fixes that land alongside their parent build (§5.C1).
-
-A separate "smallest-first" implementation order lives in [`vault-v1-build-items.md`'s suggested implementation order](vault-v1-build-items.md#suggested-implementation-order) — that's a different lens on the same set.
+`MAX_OP_ATTEMPTS=10` ops sit in the queue forever; no permanent-failure UI surface today. Needs UI scoping (banner + per-op detail row + queue inspector). Reviewer flagged it as a UX rough edge rather than a v1 blocker on 2026-05-18; skipped autonomously.
 
 ---
 
-### 1. ~~§3.C1 — Eviction stages 2/3 hard-purge: `purge_secret` UI~~ *(landed 2026-05-18)*
+## 2. Manifest-sharding §3.8 — Residual unified-shape helpers in `manifest.py`
 
-**Status:** landed. Stages 2 + 3 merged into a single age-ordered destructive iterator in `desktop/src/vault/ops/eviction.py`; the new alarm gate in `desktop/src/windows_vault_browser/quota.py` opens a passphrase prompt when the relay reports `used > quota`. Audit-log signal split: `vault.eviction.auto_purged_oldest` (silent auto-purge to fit an upload) vs `vault.eviction.alarm_purged_oldest` (post-shrink approved cleanup). Stage 1 housekeeping (`vault.eviction.tombstone_purged_expired`) unchanged.
-
-**Plan doc:** [`vault-eviction-v1.md`](vault-eviction-v1.md) — algorithm + threat model + UX comparison + test coverage; commit references in [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Eviction policy`. Admin-role gate (`KIND_FORCED_EVICTION`, `purpose='forced_eviction'`) stays exactly as it landed in `f621dc1`. The pre-existing `used_bytes` / `used_ciphertext_bytes` key-name mismatch in `VaultQuotaExceededError` was fixed to read both — the alarm gate depends on the values being read correctly.
-
----
-
-### 2. ~~§6.H2 — Devices tab + revoke-device UI~~ *(landed 2026-05-18)*
-
-**Status:** landed. The placeholder Devices tab in `desktop/src/windows_vault/main_window.py` is replaced by `tab_devices.py` — card-per-row layout listing every grant from `GET /api/vaults/{id}/device-grants`, with Revoke gated behind fresh-unlock → admin-role check (via `relay.get_header().caller_role`) → typed-confirm dialog with the §14 locked copy ("Revoking this device prevents future Vault access. It cannot erase data already copied to that device."). Typed client in `desktop/src/vault/grant/client.py` parses responses into `DeviceGrant` / `RevokeResult` dataclasses and maps server errors (HTTP 400 self-revoke → `CannotRevokeSelfError`; 404 → `DeviceGrantNotFoundError`; 401/403 → `DeviceGrantsAuthError`). Diagnostic event `vault.device.revoked` cataloged. Tab polls every 30 s while visible, clears the timer on unmap. Closes the v1 lost-laptop gap.
-
-Locked-copy + admin-gate + 30 s poll wiring pinned by `tests/protocol/test_desktop_vault_devices_tab_source.py`; client error mapping pinned by `tests/protocol/test_desktop_vault_devices_client.py`.
-
----
-
-### 3. ~~§5.C2 — QR-join + grant approval UI~~ *(landed 2026-05-18)*
-
-**Status:** landed. Both ends of the QR-grant flow now have GTK surfaces:
-
-- **Admin (in-process modal):** `desktop/src/windows_vault/grant_device_dialog.py` — "Grant a new device…" button at the top of the Devices tab opens a wizard dialog that mints an ephemeral X25519 keypair + POST `createJoinRequest`, renders the join URL as a QR code + plaintext entry, polls `getJoinRequest` every 2 s until `state="claimed"`, shows the 6-digit verification code derived locally from the X25519 shared secret, lets the operator pick a role (`read-only`/`browse-upload`/`sync`/`admin`), wraps a `GrantPayload` via `wrap_grant_for_claimant`, posts `approveJoinRequest`. Cancel triggers best-effort DELETE so abandoned rows don't sit in the per-vault 5-pending budget.
-- **Claimant (new subprocess):** `desktop/src/windows_vault_join.py` invokable as `python3 -m src.windows vault-join`, surfaced via the tray submenu's new "Add this device to a vault…" entry (visible when `vault_active=True` and no local vault exists). Paste-URL flow only — webcam scanning deferred to v1.x with `pyzbar` + Wayland portal plumbing. Steps: paste URL → `parse_join_url` + expiry check → fresh X25519 keypair → `claim_join_request` → show verification code + poll for `state="approved"` → AEAD-unwrap via `unwrap_grant_for_claimant` with `expected_vault_id` + `expected_claimant_device_id` pins → persist `VaultGrant` + `config.vault.last_known_id`.
-- **Typed client:** `desktop/src/vault/grant/join_client.py` parses raw HTTP into `JoinRequest` dataclass + maps server status codes to `JoinRequestNotFoundError` (404 + `vault_join_request_state`), `JoinRequestStateError` (409 same code), `JoinRequestRateLimitedError` (429 — F-S08 5-pending cap), `JoinRequestAuthError` (401/403). New methods `create_join_request` / `get_join_request` / `claim_join_request` / `approve_join_request` / `reject_join_request` on `VaultHttpRelay`.
-- **Diagnostics:** 11 new `vault.grant.*` events cataloged covering both flows' audit anchors + transient/terminal failure modes.
-
-Closes the v1 multi-device gap; QR-grant is now the primary device-add path, recovery kit stays as secondary recovery surface. Pinned by `tests/protocol/test_desktop_vault_join_{client,flow_source}.py`.
-
----
-
-### 4. ~~§5.C1 — Migration wizard UI~~ *(landed 2026-05-18)*
-
-**Status:** landed. Multi-page subprocess `desktop/src/windows_vault_migration.py` (`vault-migration`) walks setup → confirm → progress → done; the engine's `run_migration` drives transitions, the wizard marshals callbacks + persists `previous_relay_url` post-commit. Migration-tab placeholder button now spawns the wizard. **§5.M6 fix bundled** via `clear_previous_relay()` in `vault/migration/state.py`. **§5.M2 NOT bundled** — the idempotency gap for `shard_revision > 1` resume paths is surfaced via `MigrationInventory.has_edited_shards` instead; the wizard warns operators before destructive commit. Full §5.M2 fix tracked as its own follow-up — see §5.M2 entry below.
-
-Tests: `tests/protocol/test_desktop_vault_migration_{preflight,wizard_source}.py`. Diagnostic: `vault.migration.commit_callback` added.
-
-### 4b. ~~§5.M2 — Migration runner shard genesis-insert for rev > 1~~ *(landed 2026-05-18)*
-
-**Status:** landed. Root-cause analysis turned out to be different from the build-plan framing: the server's `putShard` chain-check (`parent == new - 1`) was always orthogonal to the CAS check (`expected == current`), so genesis-insert at any revision was always supported on the server. The real bug was the envelope-vs-body author check (`env.author_device_id == X-Device-ID`), which made migrations fail on the first peer-authored shard in any multi-device vault.
-
-**Fix:** server's `validateShardEnvelopeAgainstBody` now takes an `$allowEnvelopeAuthorMismatch` flag. Both `putShard` and `putShardWithRoot` pass `true` when `expected_current_shard_revision === 0` (the migration-replication / first-publish path) so peer-authored envelopes replicate cleanly. Non-genesis edits still enforce the strict match — `test_putShard_rejects_foreign_envelope_author_on_edit` regression-pins that. The `author_device_id` field is metadata, not a security boundary; all paired devices share `master_key` and can already construct any envelope they want, so the relaxation is invisible to the threat model.
-
-Wizard's `has_edited_shards` warning dropped (kept as inventory diagnostic data only). The `runner.py` comment claiming the server rejected `new != expected + 1` was misleading and got rewritten. Tests: `test_putShard_accepts_migration_genesis_at_arbitrary_rev`, `test_putShard_accepts_foreign_envelope_author_on_genesis_insert`, `test_putShard_rejects_foreign_envelope_author_on_edit`. No desktop code change needed — existing migration runner works against the relaxed server.
-
----
-
-### 5. ~~§5.H3 — Access-secret rotation client trigger~~ *(landed 2026-05-18)*
-
-**Status:** landed. Server endpoint shipped at T13.6 (admin-gated, audit-logged, atomic). New subprocess `desktop/src/windows_vault_rotate.py` (`vault-rotate`) drives the operator through two-checkbox confirm → verify-existing-kit (Argon2id replay) → POST rotate → atomic local-grant swap → save new kit (close blocked until written). Typed client `desktop/src/vault/grant/rotate_client.py`. Recovery tab button no longer force-disabled. Diagnostics: `vault.rotate.{started, server_committed, kit_saved, kit_save_failed}`. Tests: `tests/protocol/test_desktop_vault_rotate_{client,wizard_source}.py`. Closes the latent-bomb gap where rotation would silently invalidate every kit on the relay side.
-
----
-
-### 6. ~~§6.H3 — Export wizard~~ *(landed 2026-05-18)*
-
-**Status:** landed. New subprocess `desktop/src/windows_vault_export.py` (`vault-export`) wraps `write_export_bundle` with a path picker + passphrase gate + Argon2id-off-main-thread worker + default-on `read_export_bundle` verify + opt-in shred behind a confirmation. Tray "Export…" entry restored; Recovery tab gains an "Export vault…" button. Diagnostics: `vault.export.{started, completed, verified, shredded, failed}`. Tests: `tests/protocol/test_desktop_vault_export_wizard_source.py`.
-
----
-
-### 7. ~~§5.H2 — Per-folder import conflict resolution UI~~ *(landed 2026-05-18)*
-
-**Status:** landed. New "conflicts" page inserted between Preview and Progress in `desktop/src/windows_vault_import.py` — only shown when `find_conflict_batches` returns non-empty. Card-per-folder layout with three radio modes (rename / overwrite / skip — spec §17 contract), an "Apply to remaining" affordance that only fills undecided folders, and Continue gated on every folder having a pick. Hard-coded `ImportMergeResolution(per_folder={})` replaced by `dict(state["resolution"] or {})` threaded into `run_import`. Tests: `tests/protocol/test_desktop_vault_import_conflicts_source.py`.
-
----
-
-### 8. ~~§4.M1 — Orphan-chunk reaper~~ *(landed 2026-05-18)*
-
-**Status:** landed. Server-side: new `VaultChunksRepository::listIds(vault_id, cursor, limit)` + `VaultController::listChunks` action wired at `GET /api/vaults/{id}/chunks?cursor=…&limit=…`. Only `active` + `retained` rows surface (matches `batchHead`'s `isUserVisibleChunkState` filter); cursor is the last chunk_id from the previous page; limit clamped to [1, 1024]. Desktop-side: new `reap_orphan_chunks()` in `desktop/src/vault/ops/eviction.py` paginates the server endpoint, walks the unified manifest's chunk references, computes `set(server) − set(referenced)`, and DELETEs the diff via the existing `gc/plan` + `gc/execute` plumbing with `purpose='sync'` (no admin gate — orphans aren't user data by definition). `max_orphans_per_pass=4096` caps the diff so a single tick can't blow its budget on an unbounded cleanup.
-
-**Wiring:** `_reap_orphans_for_tick` runs from the tray autosync loop, throttled to once per `VAULT_ORPHAN_REAP_INTERVAL_S=3600` (hourly). Hourly cadence catches the typical CAS-exhaust leak rate (~<100 chunks per event) long before the relay's 30-day retention sweep does.
-
-**Tests:** `tests/protocol/test_desktop_vault_orphan_reap.py` (no-op when sync, empty vault no-op, unreferenced chunks deleted, purpose=sync not admin-gated, max_orphans_per_pass cap) + `server/tests/Vault/VaultChunksRepositoryTest.php` (sorted output, gc_pending/purged excluded, cursor pagination, limit validation). Diagnostics: 6 new events covering normal flow + failure modes.
-
----
-
-### 9. §6.H1 — Scheduled-purge auto-executor *(decided 2026-05-18 — fire-on-attended retained)*
-
-**Why this slot:** resolved by ADR; no code work left. The decision *is* the fix. Listed here so the original review entry has visible disposition.
-
-**Status:** resolved as documented decision. **ADR:** see [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Scheduled-purge auto-executor stays fire-on-attended`.
-**Decision:** keep the current fire-on-attended behaviour. Autosync notifies on due purges; user reopens Vault Settings → Danger zone and completes with the recovery kit. No new at-rest secret class (rejected option a), no new server scheduler infra (rejected option b). The partial fix already landed in `0b836aa` covers the user-facing half.
-
----
-
-### 10. §5.M3 — Cross-subprocess fresh-unlock composition *(decided 2026-05-18 — per-subprocess scope is the v1 contract)*
-
-**Why this slot:** resolved by ADR; no code work left. The decision *is* the fix. Listed here so the original review entry has visible disposition. Architecture doc / spec §13 will be amended to record the v1 tightening as a doc-only follow-up.
-
-**Status:** resolved as documented decision. **ADR:** see [`architecture-decisions.md`](../architecture-decisions.md) `2026-05-18 — Fresh-unlock state is per-subprocess by design`.
-**Decision:** per-subprocess state stays; sensitive ops chain only within a single subprocess. Cross-subprocess re-prompts are the intentional v1 tightening of spec §13. Rejected: on-disk timestamp file (option a) and POSIX shm (option b) — both broaden the read surface for local-process attacks under the same uid.
-
----
-
-### 11. ~~§5.M2~~ — Migration runner shard genesis-insert for rev > 1 *(bundled into §5.C1)*
-
-**Why this slot:** subordinate fix; ships with its parent build. No independent landing point.
-
-**Status:** subordinate fix in §5.C1 migration wizard build. Implementation detail captured in [`vault-v1-build-items.md#§5.C1`](vault-v1-build-items.md#5c1--migration-wizard) under "Subordinate fixes bundled in this build."
-
----
-
-### 12. ~~§5.M6~~ — Migration record `previous_relay_url` stale carry *(bundled into §5.C1)*
-
-**Why this slot:** subordinate fix; ships with its parent build. No independent landing point.
-
-**Status:** subordinate fix in §5.C1 migration wizard build. The chosen approach is option (a) — explicit `state.clear_previous_relay()` call at the start of every fresh start/verify/commit cycle. Implementation detail captured in [`vault-v1-build-items.md#§5.C1`](vault-v1-build-items.md#5c1--migration-wizard) under "Subordinate fixes bundled in this build."
-
----
-
-## 2. Deferred Lows (polish-tier or verified-clean by reviewer)
-
-The reviewer explicitly classified the rest of the Low section as acceptable-for-v1 or operator-deployment caveats. Listed here so they're not lost; not actively tracked as blockers.
-
-### §1 (server) — operator caveats
-- ~~**§1.L2**~~ — *(landed)* `guardMigrationTargetRelayUrl` rejects loopback / RFC 1918 / link-local hosts by default; operators opt in via `migrationAllowPrivateUrls` in `server/data/config.json`.
-- ~~**§1.L3**~~ — *(landed as docstring)* shared-host PHP-FPM caveat captured in `VaultStorage::ensureDir`.
-
-### §2 (desktop crypto / sync engine) — polish
-- ~~**§2.L2**~~ — *(landed)* 50 ms × attempt backoff between CAS retries in `binding/sync.py`.
-- ~~**§2.L3**~~ — *(landed as docstring)* `_imported_rename`'s 10_000 cap explained alongside the limit.
-
-### §3 (sync engine internals)
-- ~~**§3.L1**~~ — *(landed as docstring)* documented that pause deliberately preserves stubs; only disconnect orphans them.
-- ~~**§3.L2**~~ — *(landed)* `baseline._walk_local` honours `ignore_dotfiles=True` to match `scan` / `preflight`; covered by `test_dotfiles_skipped_by_default_matches_scan_and_preflight`.
-- **§3.L3** — Conflict-path random token is 32 bits; spec-compliant. *Reviewer noted as acceptable.*
-- **§3.L4** — `MAX_OP_ATTEMPTS=10` ops sit in the queue forever; no permanent-failure UI surface. *Needs UI scoping (banner + per-op detail row + queue inspector); skipped autonomously.*
-
-### §6 (desktop UI) — reviewer marked verified-clean
-All eight §6 Lows below are pure verified-clean acknowledgements — listed for completeness, not action items:
-- **§6.L1** — AT-SPI label includes plaintext filenames. *Acceptable; same sensitivity as visible card title.*
-- **§6.L2** — Rollback banner copy correctly mentions fresh-device limitation. *Spec satisfied.*
-- **§6.L3** — Activity tab renders destructive events with humanised labels. *Spec satisfied.*
-- **§6.L4** — Cross-window state sync is implicit-via-reload, no inotify. *Acceptable for v1.*
-- **§6.L5** — No subprocess crash detection; tray doesn't offer to re-open. *UX rough edge.*
-- **§6.L6** — `confirm_vault_clear_text_matches` uses `.strip().upper()`. *Matches spec.*
-- **§6.L7** — Adw 1.4 fallback gate present via `dependency_check.py`. *Spec satisfied.*
-- **§6.L8** — Wizard cancellation correctly preserves toggle. *Memory `feedback_respect_user_intent` satisfied.*
-
-(§6.L9 is a "correction" note that wasn't a real issue — listed in the archive for completeness only.)
-
-### §7 (test polish)
-- ~~**§7.L1**~~ — *(landed)* `test_two_distinct_claimants_one_join_request_yields_200_and_409` pins the F-S13 CAS-on-pending shape with two distinct claimant devices + pubkeys.
-- ~~**§7.L2**~~ — *(landed)* `test_case_distinct_paths_materialize_as_separate_files_on_linux` pins the case-sensitive contract; the case-insensitive-mount limitation is documented in the test body.
-- ~~**§7.L3**~~ — *(landed)* negative-case `tamper` block schema documented in `tests/protocol/vault-v1/README.md`.
-
-**Status of the actionable polish-tier entries:** 9 of 11 landed in this session (§1.L2, §1.L3, §2.L2, §2.L3, §3.L1, §3.L2, §7.L1, §7.L2, §7.L3). The two still-open: §3.L3 (reviewer-marked acceptable) and §3.L4 (needs UI scoping — banner + queue inspector for permanently-failed ops).
-
-The 10 verified-clean / correction entries (§6.L1–L9) require no action.
-
----
-
-## 3. Manifest-sharding step 7f cleanup *(complete except test-fixture sweep)*
-
-Carried over from [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/finished-plans/vault-manifest-sharding.md). Phases A → 7e shipped; step 7f did the heavy lifting (legacy `Vault.fetch_manifest` / `publish_manifest`, server `vault_manifests` table + `/manifest` endpoints, `FakeUploadRelay.put_manifest` / `get_manifest`, migration script + legacy fixture all gone).
-
-**Status (verified 2026-05-19):** every step §3.1–§3.6 has landed. The §3.5 test-fixture sweep that was the only remaining residual closed 2026-05-19 across 22 commits; production + tests both use sharded primitives + `assemble_unified_manifest` exclusively now. No functional gaps remain.
-
-### ~~3.1 — Result-shape rename + `assemble_unified_manifest` callers~~ *(landed 878af94)*
-
-Upload-result dataclasses now carry the sharded `(root, shard, remote_folder_id)` triple; the 7 upload-result-populating callers in `upload/folder.py` (4), `upload/single_file.py` (2), `upload/resume.py` (1) no longer call `assemble_unified_manifest`. Browser consumers synthesize at the `state.manifest =` assignment.
-
-Remaining `assemble_unified_manifest` production callers (ops/delete.py 4 sites, remote_folders.py 1 site, binding/twoway.py 1 site, browser_model.py 2 sites) are not result-shape concerns — they are decode-only paths kept until `BrowserIndex` is shard-aware.
-
-### ~~3.2 — Drop `Vault.fetch_unified_manifest`~~ *(skipped — premise invalidated, rationale in 77a2de4)*
-
-The plan's "Recommended sequencing" item 2 ("compat synthesizer has no callers once §3.1 lands") was **wrong**: a fresh audit (2026-05-18) finds **17 production callers** spanning eviction, integrity, browser refresh, import wizard, folder runtime, remote-folders bootstrap. Most genuinely need the multi-folder unified view (browser state.manifest, eviction stage walks, sidebar refresh, …) — migrating each to inline `fetch_root_manifest + per-folder fetch_folder_shard + assemble_unified_manifest` would just **clone the method's body 17 times** with no benefit.
-
-**Conclusion:** `Vault.fetch_unified_manifest` is a legitimate convenience method that assembles the multi-folder unified view from the sharded relay surface. It stays. Its docstring's "Phase H removes this method" line was amended, not removed.
-
-### ~~3.3 — Protocol narrowing (`IntegrityVault`)~~ *(landed 62ce7a4)*
-
-`IntegrityVault` Protocol slot trimmed to `(fetch_root_manifest, fetch_folder_shard)`. `_safe_fetch_manifest` in `desktop/src/vault/ops/integrity.py:322` reads root + each folder's shard and assembles a unified view inline so the existing chunk/version walks keep working against the assembled dict. `UploadVault` / `DeleteVault` Protocols already narrowed.
-
-### ~~3.4 — Migrate last `find_file_entry` / `add_or_append_file_version` production callers~~ *(landed dad7297)*
-
-`upload/conflict.py` + `import_/bundle.py` now use the shard-aware `_in_shard` variants. No production code outside `manifest.py` itself references the legacy helpers (verified by grep: `desktop/src/vault/upload/` and `desktop/src/vault/import_/` are clean).
-
-### ~~3.5 — Legacy helpers in `desktop/src/vault/manifest.py`~~ *(complete 2026-05-19)*
-
-**Landed (9617d22 + earlier):** `add_remote_folder` (manifest-level), `rename_remote_folder` (manifest-level), `add_or_append_file_version`, `merge_with_remote_head` all dropped.
-
-**Landed 2026-05-19 (22-commit autonomous sweep):** `make_manifest`, `make_remote_folder`, `tombstone_file_entry`, `find_file_entry` all dropped. The 22 test files that built/inspected unified manifests through these helpers now compose root + shard primitives and call `assemble_unified_manifest` for the unified-shape dict; legacy entry lookups route through `find_file_entry_in_shard` against the per-folder dict the assembled view exposes. The two redundant unit tests for `tombstone_file_entry` in `test_desktop_vault_delete.py` were removed (already covered by the shard equivalents in `test_desktop_vault_manifest_sharded.py`); the missing-path KeyError case migrated to `tombstone_file_entry_in_shard`. Full vault suite: 1112/1112 green (was 1114; the 2-test delta is the deletions above).
-
-`normalize_manifest_plaintext`, `canonical_manifest_json` stay — they shape envelope-serialization paths in production. `tombstone_files_under` and `restore_file_entry` (unified-shape) also stay; they're test-only today but not on the explicit drop list.
-
-### ~~3.6 — Test-helper migration (`seed_sharded_state`)~~ *(landed 87b1ccb)*
-
-`seed_sharded_state_from_manifest` and `mirror_legacy_from_sharded` replaced across the suite by the pure sharded `seed_sharded_state(vault, relay, *, vault_id=, remote_folders=, created_at=, author_device_id=)`. The "mirror" half is gone with the legacy `Vault.fetch_manifest` / `publish_manifest` declarations. Two surviving call-site mentions are pure documentation references (`tests/protocol/test_desktop_vault_upload.py:2165`, `tests/protocol/test_desktop_vault_delete.py:275`).
-
-### 3.8 — Residual unified-shape helpers in `manifest.py` *(post-sweep follow-up)*
-
-After §3.5 dropped `make_manifest` / `make_remote_folder` / `find_file_entry` / `tombstone_file_entry`, two unified-shape helpers in `manifest.py` remain with **zero production callers**:
+The 7f cleanup sweep on 2026-05-19 dropped `make_manifest` / `make_remote_folder` / `find_file_entry` / `tombstone_file_entry` (see [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/finished-plans/vault-manifest-sharding.md) §3.5). Two unified-shape helpers in `manifest.py` survived with **zero production callers**:
 
 - `tombstone_files_under(manifest, *, remote_folder_id, path_prefix, deleted_at, author_device_id)` — bulk soft-delete on the unified manifest. Shard equivalent `tombstone_files_under_in_shard` (line 1208 of `manifest.py`) is the production path; the legacy variant is exercised only by `test_desktop_vault_delete.py:test_tombstone_files_under_*`.
 - `restore_file_entry(manifest, *, remote_folder_id, path, new_version, author_device_id)` — single-entry restore on the unified manifest. Shard equivalent `restore_file_entry_in_shard` is at `manifest.py:1379`; only `test_desktop_vault_delete.py:test_restore_file_entry_*` calls the legacy form.
 
-Both helpers shipped before the sharded migration completed and the unified-shape `tombstone_files_under` / `restore_file_entry` were left alone because the §3.5 drop list was kept narrow (review feedback: don't expand scope mid-sweep). Following the same migration shape that §3.5 used — extract the legacy helpers from their two test files via the shard variant + entry-splicing — would let `manifest.py` drop both functions cleanly.
+Both helpers shipped before the sharded migration completed; the §3.5 drop list was kept narrow (review feedback: don't expand scope mid-sweep). Following the same migration shape — extract the legacy helpers from their two test files via the shard variant + entry-splicing — would let `manifest.py` drop both functions cleanly.
 
 **Why this is a follow-up, not a §3.5 sub-item**: the migration is mechanical (each test file has at most 4 callsites) but `tombstone_files_under` returns a `tuple[dict, list[str]]` (manifest + list of tombstoned paths), and the shard variant `tombstone_files_under_in_shard` returns the same shape against a shard. The test-side splice needs to reflect the entries change back into the unified dict — same pattern as `_apply_tombstone_in_unified` in `test_desktop_vault_delete.py` but for bulk paths. Single-commit refactor; ~80 lines of test code change + ~60 lines of `manifest.py` removed.
 
-**Suggested resolution**: extract once into a shared helper (`tests/protocol/_vault_helpers.py:apply_tombstone_files_under_in_unified` and `restore_in_unified`), migrate the two test files, drop the unified-shape helpers from `manifest.py`. The reviewer estimated the residue is "not high priority but should be filed rather than left dangling" — this is the file.
-
-### 3.7 — Sequencing log
-
-Items 1–6 from the original sequencing all landed in the order shown:
-
-1. ~~§3.1 — `UploadResult.manifest` → `.root` + `.shard` + caller fanout~~ — `878af94`
-2. ~~§3.2 — Drop `Vault.fetch_unified_manifest`~~ — skipped (`77a2de4`, rationale above)
-3. ~~§3.3 — Narrow `IntegrityVault` Protocol~~ — `62ce7a4`
-4. ~~§3.4 — Migrate `find_file_entry` / `add_or_append_file_version` production callers~~ — `dad7297`
-5. ~~§3.6 — Test-helper mechanical sweep (`seed_sharded_state`)~~ — `87b1ccb`
-6. ~~§3.5 — Drop unused legacy manifest helpers~~ — `9617d22` (production-side only; ~140-site test-fixture migration left as a separate refactor)
-
-**Open:** none — the test-fixture sweep landed 2026-05-19; all four legacy helpers are gone from `manifest.py`.
+**Suggested resolution**: extract once into a shared helper (`tests/protocol/_vault_helpers.py:apply_tombstone_files_under_in_unified` and `restore_in_unified`), migrate the two test files, drop the unified-shape helpers from `manifest.py`.
 
 ---
 
-## 4. Summary count
-
-Reconciled 2026-05-18 after the design pass closed every "needs-design" item.
-
-| Bucket | Total | Fully fixed | Design landed, impl pending | Doc decision (resolved) | Deferred Lows |
-|---|---|---|---|---|---|
-| Criticals | 17 | 17 | 0 | 0 | 0 |
-| Highs | 37 | 36 | 0 | 1 (§6.H1) | 0 |
-| Mediums | 35 | 34 | 0 | 1 (§5.M3) | 0 |
-| Lows | 24 | 4 | 0 | 0 | 20 |
-| **Total** | **113** | **91** | **0** | **2** | **20** |
-
-**Every Critical, every High, and every Medium is now closed.** §5.M6 landed alongside §5.C1 (bundled fix). §5.M2 — initially separated from §5.C1 as a server-side blocker — landed 2026-05-18 with a much simpler server-side fix than the build plan envisioned (the genuine root cause was the envelope author-match check, not the chain check the reviewer suspected). §3.C1 + §4.M1 + §5.C1 + §5.C2 + §5.H2 + §5.H3 + §5.M2 + §6.H2 + §6.H3 all fully landed on 2026-05-18.
-
-### Breakdown of the 22 not-fully-fixed-by-code items
-
-- **0 design-landed-pending-implementation** — the queue is empty. Every design-pending entry from the 2026-05-18 scoping pass has landed.
-- **2 doc-decision-resolved** (§1 above): §6.H1 (fire-on-attended), §5.M3 (per-subprocess fresh-unlock) — both captured in [`architecture-decisions.md`](../architecture-decisions.md) 2026-05-18 entries. No code needed; these are resolved by the decision itself.
-- **20 deferred Lows** (§2 above): 2 §1 + 2 §2 + 4 §3 + 8 §6 verified-clean + 1 §6.L9 correction + 3 §7. Of these, the **11 actionable** items are §1.L2–L3 + §2.L2–L3 + §3.L1–L4 + §7.L1–L3.
-
-User-facing math: **22 entries are not-yet-fully-fixed-by-code** — 0 design-pending + 2 doc-resolved + 20 deferred Lows. Of those, **20 are open work** (0 implementation + 20 deferred Lows); the 2 doc-decisions are effectively resolved.
-
----
-
-## 5. Source of truth references
+## 3. Source of truth references
 
 - **Max-effort review fixes landed:** [`temp/finished-plans/max-review-result.md`](../../temp/finished-plans/max-review-result.md) — every fixed item has a strikethrough heading + commit SHA + Approach paragraph.
 - **Max-effort review fix log:** [`temp/finished-plans/max-review-result-progress.md`](../../temp/finished-plans/max-review-result-progress.md).
-- **Historical doubts snapshot:** [`temp/finished-plans/review-doubts.md`](../../temp/finished-plans/review-doubts.md) — superseded by §1 of this file; kept for context strings that some code comments reference.
-- **Manifest-sharding plan:** [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/finished-plans/vault-manifest-sharding.md) — phases A → 7e + the bulk of 7f done; §3 of this file tracks the remaining cleanup.
-- **This file:** the single live open-item index, kept in `docs/plans/` so it surfaces alongside active planning docs.
+- **Manifest-sharding plan:** [`temp/finished-plans/vault-manifest-sharding.md`](../../temp/finished-plans/vault-manifest-sharding.md) — phases A → 7f done; §2 of this file is the last residue.
+- **Architecture decisions:** [`docs/architecture-decisions.md`](../architecture-decisions.md) — 2026-05-18 entries for §6.H1 (scheduled-purge auto-executor stays fire-on-attended) and §5.M3 (per-subprocess fresh-unlock is the v1 contract) record the two "decided, no code work" closures.

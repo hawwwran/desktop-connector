@@ -1192,9 +1192,10 @@ When you need more detail than this doc, look here.
   §1–§22, error-code list, capability bits). Authoritative spec
   when there is any ambiguity between this doc and the wire / code.
 - `temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-critical-risks-and-weaknesses.md`
-  — the 20-risk catalogue + 8 acknowledged weaknesses. Drives the
-  "critical-risks evaluation gate" still open per
-  `docs/plans/vault-open-items.md`.
+  — the 20-risk catalogue + 8 acknowledged weaknesses. Drove the
+  "critical-risks evaluation gate"; closed 2026-05-15 (see
+  `temp/finished-plans/vault-open-items.md` for the final
+  reconciliation that stamped v1).
 - `temp/finished-plans/desktop-connector-vault-plan-md/desktop-connector-vault-{01..11}-*.md`
   — the original per-phase plans. Read these only when you need
   the *why* behind a specific choice; the *what* is here.
@@ -1226,12 +1227,14 @@ The vault implementation is concentrated in three trees:
 
 ### Live work
 
-- `docs/plans/vault-open-items.md` — what remains before v1 is
-  fully labelled (the critical-risks evaluation gate + four UI
-  wire-up holes).
-- `docs/plans/live-testing-followup.md` — rolling backlog of
-  live-driver findings; the un-driven flows backlog
-  (eviction, resume-after-kill, cross-device grant,
-  concurrent edits, large folder bind, migration switch-back,
-  ransomware detector, scheduled purge, debug bundle on a real
-  install) feeds this doc's items 10+.
+- `docs/plans/unfinished.md` — the v1 follow-up index; after the
+  2026-05-19 reconciliation only §3.L4 (permanent-failure UI for
+  sync ops) and §3.8 (residual unified-shape helpers in
+  `manifest.py`) remain.
+- `docs/plans/live-testing-followup.md` — un-driven flow backlog
+  (B6 concurrent edits, B5 eviction, B4 ransomware, B2 debug
+  bundle, B1 scheduled purge, plus the B3 full switch-back leg).
+  Completed items §1–§14 archived at
+  `temp/finished-plans/live-testing-followup.partly.md`.
+- `docs/plans/skipped-while-autonomous.md` — pickup recipes for the
+  items above plus the deferred design decisions.

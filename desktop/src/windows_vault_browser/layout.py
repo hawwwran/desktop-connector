@@ -267,7 +267,7 @@ class LayoutMixin:
         # Ambient "Vault sync K/N" banner above the resume banner.
         # Driven by SyncStatusBannerMixin's GLib poll; hidden when the
         # pending-ops queue is empty. Spec:
-        # docs/plans/vault-large-folder-perf.md Phase 1.5.
+        # temp/finished-plans/vault-large-folder-perf.md Phase 1.5.
         self.sync_status_banner_box = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=8,

@@ -15,8 +15,8 @@ The widget is constructed by ``LayoutMixin._build_breadcrumb_and_status``
 alongside the resume banner; this mixin owns the GLib polling + label
 refresh.
 
-Spec: ``docs/plans/vault-large-folder-perf.md`` Phase 1.5 / SO-3 from
-``live-testing-followup.md`` §13.
+Spec: ``temp/finished-plans/vault-large-folder-perf.md`` Phase 1.5 /
+SO-3 from ``temp/finished-plans/live-testing-followup.partly.md`` §13.
 """
 
 from __future__ import annotations
