@@ -27,8 +27,9 @@ from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    make_manifest,
-    make_remote_folder,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
 )
 from src.vault.upload import upload_file  # noqa: E402
 
@@ -71,21 +72,7 @@ class BackupOnlySyncTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _empty_remote(self) -> tuple[FakeUploadRelay, dict]:
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-04T12:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-04T12:00:00.000Z",
-                    created_by_device_id=AUTHOR,
-                    entries=[],
-                ),
-            ],
-        )
+        manifest = _empty_unified(created_at="2026-05-04T12:00:00.000Z")
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -460,21 +447,7 @@ class FetchManifestPerOpTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _empty_remote(self) -> "CountingRelay":
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-16T12:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-16T12:00:00.000Z",
-                    created_by_device_id=AUTHOR,
-                    entries=[],
-                ),
-            ],
-        )
+        manifest = _empty_unified(created_at="2026-05-16T12:00:00.000Z")
         relay = CountingRelay()
         vault = _vault()
         try:
@@ -685,21 +658,7 @@ class FlushAndSyncTests(unittest.TestCase):
 
     def test_flush_calls_watcher_tick_then_runs_cycle(self) -> None:
         # Build empty remote + bound binding.
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-04T12:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-04T12:00:00.000Z",
-                    created_by_device_id=AUTHOR,
-                    entries=[],
-                ),
-            ],
-        )
+        manifest = _empty_unified(created_at="2026-05-04T12:00:00.000Z")
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -760,18 +719,7 @@ class FlushAndSyncTests(unittest.TestCase):
 
     def test_flush_swallows_watcher_errors(self) -> None:
         """A broken watcher must not block the manual sync."""
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-04T12:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[make_remote_folder(
-                remote_folder_id=DOCS_ID,
-                display_name_enc="Documents",
-                created_at="2026-05-04T12:00:00.000Z",
-                created_by_device_id=AUTHOR, entries=[],
-            )],
-        )
+        manifest = _empty_unified(created_at="2026-05-04T12:00:00.000Z")
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -813,18 +761,7 @@ class FlushAndSyncTests(unittest.TestCase):
         self.assertEqual(result.outcomes, [])
 
     def test_flush_without_watcher_runs_cycle_directly(self) -> None:
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-04T12:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[make_remote_folder(
-                remote_folder_id=DOCS_ID,
-                display_name_enc="Documents",
-                created_at="2026-05-04T12:00:00.000Z",
-                created_by_device_id=AUTHOR, entries=[],
-            )],
-        )
+        manifest = _empty_unified(created_at="2026-05-04T12:00:00.000Z")
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -895,6 +832,32 @@ class CountingRelay(FakeUploadRelay):
     def get_root(self, vault_id, vault_access_secret):
         self.state_fetch_count += 1
         return super().get_root(vault_id, vault_access_secret)
+
+
+def _empty_unified(*, created_at: str) -> dict:
+    """Build an empty single-folder unified manifest via sharded primitives."""
+    root = make_root_manifest(
+        vault_id=VAULT_ID,
+        root_revision=1, parent_root_revision=0,
+        created_at=created_at,
+        author_device_id=AUTHOR,
+        remote_folders=[
+            make_root_folder_pointer(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at=created_at,
+                created_by_device_id=AUTHOR,
+            ),
+        ],
+    )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at=created_at,
+        author_device_id=AUTHOR,
+        entries=[],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
 
 
 if __name__ == "__main__":
