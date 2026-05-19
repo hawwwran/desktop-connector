@@ -19,9 +19,10 @@ from src.vault import Vault  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    make_manifest,
-    make_remote_folder,
-    tombstone_file_entry,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
+    tombstone_file_entry_in_shard,
 )
 from src.vault.ops.restore import (  # noqa: E402
     RestoreResult,
@@ -63,21 +64,7 @@ class RestoreRemoteFolderTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _seed_remote(self, files: dict[str, bytes], *, with_tombstone: str | None = None) -> tuple[FakeUploadRelay, dict]:
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-04T12:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-04T12:00:00.000Z",
-                    created_by_device_id=AUTHOR,
-                    entries=[],
-                ),
-            ],
-        )
+        manifest = _empty_unified(created_at="2026-05-04T12:00:00.000Z")
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -100,15 +87,11 @@ class RestoreRemoteFolderTests(unittest.TestCase):
                 )
                 current = assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
             if with_tombstone is not None:
-                current = tombstone_file_entry(
+                current = _tombstone_in_unified(
                     current,
-                    remote_folder_id=DOCS_ID,
                     path=with_tombstone,
                     deleted_at="2026-05-04T13:00:00.000Z",
-                    author_device_id=AUTHOR,
                 )
-                current["revision"] = int(current["revision"]) + 1
-                current["parent_revision"] = current["revision"] - 1
                 seed_sharded_state(
                     vault, relay,
                     vault_id=current['vault_id'],
@@ -388,21 +371,7 @@ class RestoreAtDateTests(unittest.TestCase):
         - 2026-02-01: beta  v1 = b"beta-v1"
         - 2026-03-01: alpha v2 = b"alpha-v2-current"
         """
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-01-01T00:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-01-01T00:00:00.000Z",
-                    created_by_device_id=AUTHOR,
-                    entries=[],
-                ),
-            ],
-        )
+        manifest = _empty_unified(created_at="2026-01-01T00:00:00.000Z")
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -508,18 +477,7 @@ class RestoreAtDateTests(unittest.TestCase):
 
     def test_tombstoned_before_cutoff_is_skipped(self) -> None:
         # Build a remote with alpha.txt then tombstone it.
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-01-01T00:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[make_remote_folder(
-                remote_folder_id=DOCS_ID,
-                display_name_enc="Documents",
-                created_at="2026-01-01T00:00:00.000Z",
-                created_by_device_id=AUTHOR, entries=[],
-            )],
-        )
+        manifest = _empty_unified(created_at="2026-01-01T00:00:00.000Z")
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -538,12 +496,11 @@ class RestoreAtDateTests(unittest.TestCase):
                 remote_path="alpha.txt", author_device_id=AUTHOR,
                 created_at="2026-01-01T12:00:00.000Z",
             )
-            current = tombstone_file_entry(
-                assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard}), remote_folder_id=DOCS_ID, path="alpha.txt",
-                deleted_at="2026-02-01T12:00:00.000Z", author_device_id=AUTHOR,
+            current = _tombstone_in_unified(
+                assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard}),
+                path="alpha.txt",
+                deleted_at="2026-02-01T12:00:00.000Z",
             )
-            current["revision"] = int(current["revision"]) + 1
-            current["parent_revision"] = current["revision"] - 1
             seed_sharded_state(
                 vault, relay,
                 vault_id=current['vault_id'],
@@ -656,6 +613,60 @@ def _vault() -> Vault:
         header_revision=1, manifest_revision=1,
         manifest_ciphertext=b"", crypto=DefaultVaultCrypto,
     )
+
+
+def _empty_unified(*, created_at: str) -> dict:
+    """Build an empty single-folder unified manifest via sharded primitives."""
+    root = make_root_manifest(
+        vault_id=VAULT_ID,
+        root_revision=1, parent_root_revision=0,
+        created_at=created_at,
+        author_device_id=AUTHOR,
+        remote_folders=[
+            make_root_folder_pointer(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Documents",
+                created_at=created_at,
+                created_by_device_id=AUTHOR,
+            ),
+        ],
+    )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at=created_at,
+        author_device_id=AUTHOR,
+        entries=[],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
+
+
+def _tombstone_in_unified(
+    unified: dict, *, path: str, deleted_at: str,
+) -> dict:
+    """Apply tombstone via shard helper, splice entries back into unified view, bump revision."""
+    import copy as _copy
+    folder = next(f for f in unified["remote_folders"] if f["remote_folder_id"] == DOCS_ID)
+    tombstoned = tombstone_file_entry_in_shard(
+        make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at=folder["created_at"],
+            author_device_id=AUTHOR,
+            entries=folder["entries"],
+        ),
+        path=path,
+        deleted_at=deleted_at,
+        author_device_id=AUTHOR,
+        folder_retention_policy=folder.get("retention_policy"),
+    )
+    out = _copy.deepcopy(unified)
+    for nf in out["remote_folders"]:
+        if nf["remote_folder_id"] == DOCS_ID:
+            nf["entries"] = tombstoned["entries"]
+    out["revision"] = int(unified["revision"]) + 1
+    out["parent_revision"] = int(unified["revision"])
+    return out
 
 
 if __name__ == "__main__":
