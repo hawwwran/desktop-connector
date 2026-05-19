@@ -216,6 +216,19 @@ The plan's "Recommended sequencing" item 2 ("compat synthesizer has no callers o
 
 `seed_sharded_state_from_manifest` and `mirror_legacy_from_sharded` replaced across the suite by the pure sharded `seed_sharded_state(vault, relay, *, vault_id=, remote_folders=, created_at=, author_device_id=)`. The "mirror" half is gone with the legacy `Vault.fetch_manifest` / `publish_manifest` declarations. Two surviving call-site mentions are pure documentation references (`tests/protocol/test_desktop_vault_upload.py:2165`, `tests/protocol/test_desktop_vault_delete.py:275`).
 
+### 3.8 — Residual unified-shape helpers in `manifest.py` *(post-sweep follow-up)*
+
+After §3.5 dropped `make_manifest` / `make_remote_folder` / `find_file_entry` / `tombstone_file_entry`, two unified-shape helpers in `manifest.py` remain with **zero production callers**:
+
+- `tombstone_files_under(manifest, *, remote_folder_id, path_prefix, deleted_at, author_device_id)` — bulk soft-delete on the unified manifest. Shard equivalent `tombstone_files_under_in_shard` (line 1208 of `manifest.py`) is the production path; the legacy variant is exercised only by `test_desktop_vault_delete.py:test_tombstone_files_under_*`.
+- `restore_file_entry(manifest, *, remote_folder_id, path, new_version, author_device_id)` — single-entry restore on the unified manifest. Shard equivalent `restore_file_entry_in_shard` is at `manifest.py:1379`; only `test_desktop_vault_delete.py:test_restore_file_entry_*` calls the legacy form.
+
+Both helpers shipped before the sharded migration completed and the unified-shape `tombstone_files_under` / `restore_file_entry` were left alone because the §3.5 drop list was kept narrow (review feedback: don't expand scope mid-sweep). Following the same migration shape that §3.5 used — extract the legacy helpers from their two test files via the shard variant + entry-splicing — would let `manifest.py` drop both functions cleanly.
+
+**Why this is a follow-up, not a §3.5 sub-item**: the migration is mechanical (each test file has at most 4 callsites) but `tombstone_files_under` returns a `tuple[dict, list[str]]` (manifest + list of tombstoned paths), and the shard variant `tombstone_files_under_in_shard` returns the same shape against a shard. The test-side splice needs to reflect the entries change back into the unified dict — same pattern as `_apply_tombstone_in_unified` in `test_desktop_vault_delete.py` but for bulk paths. Single-commit refactor; ~80 lines of test code change + ~60 lines of `manifest.py` removed.
+
+**Suggested resolution**: extract once into a shared helper (`tests/protocol/_vault_helpers.py:apply_tombstone_files_under_in_unified` and `restore_in_unified`), migrate the two test files, drop the unified-shape helpers from `manifest.py`. The reviewer estimated the residue is "not high priority but should be filed rather than left dangling" — this is the file.
+
 ### 3.7 — Sequencing log
 
 Items 1–6 from the original sequencing all landed in the order shown:
