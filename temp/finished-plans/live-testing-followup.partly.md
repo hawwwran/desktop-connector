@@ -1017,3 +1017,80 @@ follow-up. The §15 GUI eviction dialog drive (alarm + passphrase
 prompt) is still un-driven, but that's an AT-SPI concern, not an
 algorithm one; the destructive purge logic is now proven correct
 against the real HTTP relay.
+
+---
+
+## 17. Migration switch-back leg works — round-trip A→B then B→A (was B3 follow-up)
+
+**Symptom**: §14 (2026-05-19) landed the genesis-leg live migration
+test (A→B) but explicitly deferred the switch-back leg (B→A back-to-back)
+because two consecutive legs on the same ``(device, vault)`` pair brushed
+up against the hardcoded ``VaultAuthService::AUTH_LIMIT=10/minute``. The
+2026-05-19 ADR added the ``vaultAuthLimit`` config knob (server-side
+floor 10, no ceiling), and `live-testing-followup.md` flagged this leg
+as "now unblocked".
+
+**Cause**: gap in coverage, not a bug. The switch-back path stresses the
+engine's idempotent re-entry into the target-side bootstrap (the target
+relay still has the vault row from a previous lifecycle — on leg 2 the
+"target" is the original genesis relay), plus the §H2 7-day grace
+``previous_relay_url`` propagation on the SECOND leg.
+
+**Fix shape**: new ``VaultMigrationLiveSwitchBackTests`` class
+alongside the existing genesis class in
+``test_desktop_vault_migration_live.py``. The class bumps
+``vaultAuthLimit`` to 30 via ``_ServerHarness`` config_overrides
+(well above the ~5 auth-billed calls per leg per pair, with headroom
+for verify-step retries under HTTP flake). Distinct ``setUpClass``
+from the genesis class — re-using the same harnesses would leak the
+bumped limit into the genesis test, weakening its "we fit under
+floor=10" assertion.
+
+The test runs A→B then immediately B→A on the same in-memory
+``Vault`` object (the ``vault_id`` + ``master_key`` +
+``vault_access_secret`` are stable; only relay orientation flips).
+Each leg writes its own ``vault_migration.json`` to a dedicated
+config dir so a post-mortem failure can distinguish leg-1 (cleared)
+from leg-2 (final state).
+
+**Acceptance**:
+- ``leg1.verify.matches`` and ``leg2.verify.matches`` both ``True``.
+- Root revision parity on both relays after each commit.
+- ``get_header`` resolves on BOTH relays post-round-trip (the row
+  stays on both sides — marked migrated, not deleted — so the
+  §H2 switch-back UI affordance is reachable).
+- Engine's ``vault_already_exists`` idempotent re-entry handles the
+  leg-2 target-side existing row gracefully (A had the vault from
+  ``Vault.create_new``; on leg 2 the engine re-encounters it as
+  migration target and must not crash).
+- ``vault.sync.migration_propagation_applied`` log line inverts on
+  the second hop: leg 1 records ``previous=A_url``, leg 2 records
+  ``previous=B_url`` (asserted via ``assertLogs`` capture around
+  each post-commit ``get_header`` call, which is where the
+  propagation handler at ``runtime.py:213-255`` actually runs).
+
+**Scope statement (not an engine invariant)**:
+- ``leg1.chunks_copied`` and ``leg2.chunks_copied`` are both ``0``
+  in this test because the test creates a genesis vault — no folder
+  publishes, no file uploads. The engine doesn't *guarantee* zero
+  chunks; the scope was chosen to keep wall-clock low and avoid
+  retesting the chunk-copy contract that
+  ``test_desktop_vault_migration_runner.py``'s ``FakeMigrationRelay``
+  suite already covers exhaustively.
+
+**Status (2026-05-19): done** on ``tresor-vault``. Total wall-clock
+~500ms for the new test (on top of the genesis test's ~440ms).
+``vault.sync.migration_propagation_applied`` fires twice — once per
+leg with the right ``new``/``previous`` URLs:
+
+```
+leg 1: new=B, previous=A, expires=2026-05-26T…
+leg 2: new=A, previous=B, expires=2026-05-26T…
+```
+
+Full vault suite holds 1170/1170 green with the new test added (+1
+over §14's 1169 count).
+
+Closes the B3 follow-up bullet from `live-testing-followup.md`. No
+new findings — both the engine's idempotent re-entry and the
+propagation side-effect work symmetrically on the second hop.
