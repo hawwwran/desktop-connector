@@ -41,7 +41,12 @@ from src.vault.download.paths import (  # noqa: E402
     atomic_write_chunks,
     atomic_write_file,
 )
-from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
+)
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,
@@ -927,22 +932,7 @@ def _manifest_and_chunks(parts: list[bytes]) -> tuple[dict, dict[str, bytes]]:
         "deleted": False,
         "versions": [version],
     }
-    manifest = make_manifest(
-        vault_id=VAULT_ID,
-        revision=20,
-        parent_revision=19,
-        created_at="2026-05-04T12:00:00.000Z",
-        author_device_id=AUTHOR,
-        remote_folders=[
-            make_remote_folder(
-                remote_folder_id=DOCS_ID,
-                display_name_enc="Documents",
-                created_at="2026-05-04T12:00:00.000Z",
-                created_by_device_id=AUTHOR,
-                entries=[entry],
-            )
-        ],
-    )
+    manifest = _assemble_single_folder_manifest(revision=20, entries=[entry])
     return manifest, chunks
 
 
@@ -988,22 +978,7 @@ def _folder_manifest_and_chunks(files: dict[str, bytes]) -> tuple[dict, dict[str
             "versions": [version],
         })
 
-    manifest = make_manifest(
-        vault_id=VAULT_ID,
-        revision=20,
-        parent_revision=19,
-        created_at="2026-05-04T12:00:00.000Z",
-        author_device_id=AUTHOR,
-        remote_folders=[
-            make_remote_folder(
-                remote_folder_id=DOCS_ID,
-                display_name_enc="Documents",
-                created_at="2026-05-04T12:00:00.000Z",
-                created_by_device_id=AUTHOR,
-                entries=entries,
-            )
-        ],
-    )
+    manifest = _assemble_single_folder_manifest(revision=20, entries=entries)
     return manifest, chunks
 
 
@@ -1043,23 +1018,37 @@ def _multi_version_manifest_and_chunks(
         "deleted": False,
         "versions": version_records,
     }
-    manifest = make_manifest(
+    manifest = _assemble_single_folder_manifest(revision=20, entries=[entry])
+    return manifest, chunks, version_records
+
+
+def _assemble_single_folder_manifest(*, revision: int, entries: list[dict]) -> dict:
+    """Shared sharded-build helper used by the per-fixture manifest functions."""
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=20,
-        parent_revision=19,
+        root_revision=revision,
+        parent_root_revision=revision - 1,
         created_at="2026-05-04T12:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[entry],
             )
         ],
     )
-    return manifest, chunks, version_records
+    shard = make_folder_shard(
+        vault_id=VAULT_ID,
+        remote_folder_id=DOCS_ID,
+        shard_revision=revision,
+        parent_shard_revision=revision - 1,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=entries,
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
 
 
 def _encrypt_chunk_for(plaintext: bytes, index: int, file_id: str, version_id: str) -> bytes:
