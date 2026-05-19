@@ -9,7 +9,7 @@ Three sections:
 3. **Manifest-sharding step 7f cleanup** (§3) — mechanical legacy-API removal still pending from `temp/finished-plans/vault-manifest-sharding.md`. The sharded surface is the production path; the legacy unified-manifest helpers are kept as compat shims while last call sites migrate.
 4. **Summary count** (§4) — verified by grepping the archived trackers.
 
-Last reconciled on 2026-05-18.
+Last reconciled on 2026-05-19 (after the §3.5 test-fixture sweep closed end-to-end).
 
 ---
 
