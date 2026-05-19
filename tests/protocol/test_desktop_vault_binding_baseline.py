@@ -24,9 +24,10 @@ from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    make_manifest,
-    make_remote_folder,
-    tombstone_file_entry,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
+    tombstone_file_entry_in_shard,
 )
 from src.vault.upload import upload_file  # noqa: E402
 
@@ -64,21 +65,29 @@ class VaultBaselineTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _seed_remote(self, files: dict[str, bytes], *, with_tombstone: str | None = None) -> tuple[FakeUploadRelay, dict]:
-        manifest = make_manifest(
+        root = make_root_manifest(
             vault_id=VAULT_ID,
-            revision=1, parent_revision=0,
+            root_revision=1, parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z",
             author_device_id=AUTHOR,
             remote_folders=[
-                make_remote_folder(
+                make_root_folder_pointer(
                     remote_folder_id=DOCS_ID,
                     display_name_enc="Documents",
                     created_at="2026-05-04T12:00:00.000Z",
                     created_by_device_id=AUTHOR,
-                    entries=[],
                 )
             ],
         )
+        empty_shard = make_folder_shard(
+            vault_id=VAULT_ID,
+            remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: empty_shard})
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -101,13 +110,22 @@ class VaultBaselineTests(unittest.TestCase):
                 )
                 current = assemble_unified_manifest(res.root, {res.remote_folder_id: res.shard})
             if with_tombstone is not None:
-                current = tombstone_file_entry(
-                    current,
-                    remote_folder_id=DOCS_ID,
+                folder = next(f for f in current["remote_folders"] if f["remote_folder_id"] == DOCS_ID)
+                tombstoned_shard = tombstone_file_entry_in_shard(
+                    make_folder_shard(
+                        vault_id=VAULT_ID,
+                        remote_folder_id=DOCS_ID,
+                        shard_revision=1, parent_shard_revision=0,
+                        created_at=folder["created_at"],
+                        author_device_id=AUTHOR,
+                        entries=folder["entries"],
+                    ),
                     path=with_tombstone,
                     deleted_at="2026-05-04T13:00:00.000Z",
                     author_device_id=AUTHOR,
+                    folder_retention_policy=folder.get("retention_policy"),
                 )
+                folder["entries"] = tombstoned_shard["entries"]
                 current["revision"] = int(current["revision"]) + 1
                 current["parent_revision"] = current["revision"] - 1
                 seed_sharded_state(
