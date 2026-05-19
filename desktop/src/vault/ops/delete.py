@@ -23,6 +23,7 @@ from ..manifest import (
     tombstone_files_under_in_shard,
 )
 from ..relay_errors import VaultCASConflictError
+from ..state.op_log import append_op_log_entries, build_op_log_entry
 from ..upload.folder_state import (
     FolderState,
     fetch_folder_state,
@@ -31,6 +32,14 @@ from ..upload.folder_state import (
 
 
 CAS_MAX_RETRIES = 5
+
+
+# Signature: given the candidate's new shard revision (parent + 1),
+# return the list of op-log entries to append to the shard's tail.
+# Called once per CAS attempt — after the op closure runs, so any
+# captured-per-attempt state (e.g., the list of paths tombstoned by
+# ``delete_folder_contents``) is fresh.
+OpLogEntriesBuilder = Callable[[int], list[dict[str, Any]]]
 
 
 class DeleteVault(Protocol):
@@ -90,12 +99,21 @@ def delete_file(
             folder_retention_policy=retention,
         )
 
+    def op_log_entries(new_revision: int) -> list[dict[str, Any]]:
+        return [build_op_log_entry(
+            type="vault.delete.completed",
+            device_id=author_device_id,
+            revision=new_revision,
+            path=normalize_manifest_path(remote_path),
+        )]
+
     published_state = _publish_shard_with_retry(
         vault=vault,
         relay=relay,
         remote_folder_id=remote_folder_id,
         author_device_id=author_device_id,
         op=op,
+        op_log_entries=op_log_entries,
     )
     # F-510: anchor the Activity tab "Deleted" timeline row.
     log.info(
@@ -120,11 +138,20 @@ def delete_folder_contents(
     author_device_id: str,
     deleted_at: str | None = None,
     local_index: Any = None,
+    summary_op_log_event: str | None = None,
+    summary_op_log_path: str = "",
 ) -> tuple[dict[str, Any], list[str]]:
     """Soft-delete every file at or under ``path_prefix`` in one revision (T7.2).
 
     Returns ``(published_manifest, paths_tombstoned_locally)`` so the
     UI can show how many files were affected.
+
+    ``summary_op_log_event`` lets a caller (e.g., ``clear_folder``)
+    request an extra summary entry on the same shard revision —
+    typically ``"vault.folder.cleared"`` — alongside the per-file
+    ``vault.delete.completed`` entries. ``summary_op_log_path`` is
+    forwarded into that entry's ``path`` field (use the folder's
+    display name or the path prefix for a UI label).
     """
     deleted_at_str = str(deleted_at or _now_rfc3339())
     captured: list[list[str]] = []
@@ -140,12 +167,37 @@ def delete_folder_contents(
         captured.append(tombstoned)
         return mutated
 
+    def op_log_entries(new_revision: int) -> list[dict[str, Any]]:
+        last = captured[-1] if captured else []
+        entries = [
+            build_op_log_entry(
+                type="vault.delete.completed",
+                device_id=author_device_id,
+                revision=new_revision,
+                path=p,
+            )
+            for p in last
+        ]
+        if summary_op_log_event and last:
+            # Lands on the same shard revision as the per-file
+            # delete entries — Activity tab shows the user's intent
+            # ("Folder cleared: Docs") alongside the per-file
+            # audit trail.
+            entries.append(build_op_log_entry(
+                type=summary_op_log_event,
+                device_id=author_device_id,
+                revision=new_revision,
+                path=summary_op_log_path,
+            ))
+        return entries
+
     published_state = _publish_shard_with_retry(
         vault=vault,
         relay=relay,
         remote_folder_id=remote_folder_id,
         author_device_id=author_device_id,
         op=op,
+        op_log_entries=op_log_entries,
     )
     # F-D08: return the tombstone list from the *winning* CAS attempt
     # so the UI count reflects what actually landed.
@@ -223,12 +275,22 @@ def restore_version_to_current(
             author_device_id=author_device_id,
         )
 
+    def op_log_entries(new_revision: int) -> list[dict[str, Any]]:
+        return [build_op_log_entry(
+            type="vault.restore.completed",
+            device_id=author_device_id,
+            revision=new_revision,
+            path=normalize_manifest_path(remote_path),
+            extra={"source_version_id": str(source_version_id)},
+        )]
+
     published_state = _publish_shard_with_retry(
         vault=vault,
         relay=relay,
         remote_folder_id=remote_folder_id,
         author_device_id=author_device_id,
         op=op,
+        op_log_entries=op_log_entries,
     )
     log.info(
         "vault.restore.completed vault=%s revision=%d remote_folder_id=%s "
@@ -349,15 +411,32 @@ def restore_folder_contents(
         captured.append(restored)
         return out
 
+    def op_log_entries(new_revision: int) -> list[dict[str, Any]]:
+        last = captured[-1] if captured else []
+        return [
+            build_op_log_entry(
+                type="vault.restore.completed",
+                device_id=author_device_id,
+                revision=new_revision,
+                path=p,
+            )
+            for p in last
+        ]
+
     published_state = _publish_shard_with_retry(
         vault=vault, relay=relay,
         remote_folder_id=remote_folder_id,
         author_device_id=author_device_id,
         op=op,
+        op_log_entries=op_log_entries,
     )
     last_restored = captured[-1] if captured else []
+    # Collateral fix per docs/plans/activity-timeline.md: align the log
+    # event with the ``vault.restore.completed`` label in
+    # ``state/activity.py:_EVENT_TYPE_LABELS``. The pre-rename event
+    # rendered as the raw machine string in the Activity tab.
     log.info(
-        "vault.restore.folder_completed vault=%s revision=%d "
+        "vault.restore.completed vault=%s revision=%d "
         "remote_folder_id=%s path_prefix=%s restored=%d",
         vault.vault_id,
         int(published_state.root.get("root_revision", 0)),
@@ -380,6 +459,7 @@ def _publish_shard_with_retry(
     remote_folder_id: str,
     author_device_id: str,
     op: Callable[[dict[str, Any], dict[str, int] | None], dict[str, Any]],
+    op_log_entries: OpLogEntriesBuilder | None = None,
     max_retries: int = CAS_MAX_RETRIES,
 ) -> FolderState:
     """Publish ``op(shard, folder_retention_policy)`` with §D4 CAS retry.
@@ -388,11 +468,17 @@ def _publish_shard_with_retry(
     head: just call ``op`` again with the new shard. The op is
     idempotent under repeated application as long as the
     file/version is still locatable.
+
+    ``op_log_entries`` (Phase 2 activity-timeline wiring) is invoked
+    once per CAS attempt, after ``op``, so any captured-per-attempt
+    state in the caller's closure (e.g., ``captured[-1]`` in
+    ``delete_folder_contents``) reflects this attempt's mutation.
     """
     current_state = fetch_folder_state(vault, relay, remote_folder_id, author_device_id)
     for attempt in range(max_retries):
         candidate_shard, candidate_root = _build_candidate(
             current_state, remote_folder_id, author_device_id, op,
+            op_log_entries=op_log_entries,
         )
         try:
             shard_out, root_out = vault.publish_shard_with_root(
@@ -435,6 +521,8 @@ def _build_candidate(
     remote_folder_id: str,
     author_device_id: str,
     op: Callable[[dict[str, Any], dict[str, int] | None], dict[str, Any]],
+    *,
+    op_log_entries: OpLogEntriesBuilder | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     pointer = find_root_folder_pointer(state.root, remote_folder_id)
     folder_retention = (
@@ -445,12 +533,21 @@ def _build_candidate(
     created_at = _now_rfc3339()
     parent_n = normalize_shard_plaintext(state.shard)
     parent_revision = int(parent_n.get("shard_revision", 0))
+    next_revision = parent_revision + 1
     mutated = op(parent_n, folder_retention)
-    mutated["shard_revision"] = parent_revision + 1
+    mutated["shard_revision"] = next_revision
     mutated["parent_shard_revision"] = parent_revision
     mutated["created_at"] = created_at
     mutated["author_device_id"] = str(author_device_id)
     mutated["remote_folder_id"] = remote_folder_id
+    if op_log_entries is not None:
+        # D7: prior tail comes from the just-fetched state.shard so a
+        # concurrent writer's entries (rolled in by a 409 refetch)
+        # survive the candidate rebuild.
+        mutated["operation_log_tail"] = append_op_log_entries(
+            parent_n.get("operation_log_tail"),
+            op_log_entries(next_revision),
+        )
 
     root_n = normalize_root_manifest_plaintext(state.root)
     parent_root_revision = int(root_n.get("root_revision", 0))

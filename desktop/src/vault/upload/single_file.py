@@ -40,6 +40,7 @@ from ..manifest import (
     normalize_shard_plaintext,
 )
 from ..relay_errors import VaultCASConflictError
+from ..state.op_log import append_op_log_entries, build_op_log_entry
 from .constants import CAS_MAX_RETRIES, CHUNK_SIZE, MAX_FILE_BYTES_DEFAULT, UploadMode
 from .folder_state import (
     FolderState,
@@ -791,14 +792,22 @@ def _apply_version_to_shard(
     """
     parent_n = normalize_shard_plaintext(parent_shard)
     parent_revision = int(parent_n.get("shard_revision", 0))
+    next_revision = parent_revision + 1
     candidate = add_or_append_file_version_in_shard(
         parent_n, path=path, version=version, entry_id=entry_id,
     )
-    candidate["shard_revision"] = parent_revision + 1
+    candidate["shard_revision"] = next_revision
     candidate["parent_shard_revision"] = parent_revision
     candidate["created_at"] = created_at
     candidate["author_device_id"] = str(author_device_id)
     candidate["remote_folder_id"] = remote_folder_id
+    candidate["operation_log_tail"] = append_op_log_entries(
+        parent_n.get("operation_log_tail"),
+        [_upload_op_log_entry(
+            path=path, device_id=author_device_id,
+            revision=next_revision, created_at=created_at,
+        )],
+    )
     return candidate
 
 
@@ -819,6 +828,7 @@ def _merge_local_version_into_shard_with_bump(
     """
     server_n = normalize_shard_plaintext(server_shard)
     parent_revision = int(server_n.get("shard_revision", 0))
+    next_revision = parent_revision + 1
     merged = merge_local_version_into_shard(
         server_n,
         parent_shard=parent_shard,
@@ -826,12 +836,51 @@ def _merge_local_version_into_shard_with_bump(
         path=path,
         version=version,
     )
-    merged["shard_revision"] = parent_revision + 1
+    merged["shard_revision"] = next_revision
     merged["parent_shard_revision"] = parent_revision
     merged["created_at"] = created_at
     merged["author_device_id"] = str(author_device_id)
     merged["remote_folder_id"] = remote_folder_id
+    # D7: prior tail comes from server_n so concurrent writers' entries
+    # survive the CAS-retry replay.
+    merged["operation_log_tail"] = append_op_log_entries(
+        server_n.get("operation_log_tail"),
+        [_upload_op_log_entry(
+            path=path, device_id=author_device_id,
+            revision=next_revision, created_at=created_at,
+        )],
+    )
     return merged
+
+
+def _upload_op_log_entry(
+    *,
+    path: str,
+    device_id: str,
+    revision: int,
+    created_at: str,
+) -> dict[str, Any]:
+    """Build the vault.upload.completed op-log entry for this publish.
+
+    ``created_at`` is the RFC3339 string already stamped on the
+    candidate shard; we parse it back to epoch seconds so the entry's
+    ``ts`` agrees with the manifest's ``created_at`` within
+    sub-second precision.
+    """
+    from datetime import datetime, timezone
+    try:
+        ts = int(datetime.strptime(
+            created_at, "%Y-%m-%dT%H:%M:%S.000Z",
+        ).replace(tzinfo=timezone.utc).timestamp())
+    except (TypeError, ValueError):
+        ts = None  # build_op_log_entry falls back to time.time()
+    return build_op_log_entry(
+        type="vault.upload.completed",
+        device_id=device_id,
+        revision=revision,
+        path=path,
+        ts=ts,
+    )
 
 
 def _bumped_root_for_shard_publish(

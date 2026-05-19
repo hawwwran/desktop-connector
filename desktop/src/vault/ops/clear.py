@@ -70,7 +70,7 @@ def clear_folder(
     second element is the list of paths that were actually tombstoned
     in the winning CAS attempt — useful for the UI count.
     """
-    return delete_folder_contents(
+    result = delete_folder_contents(
         vault=vault,
         relay=relay,
         manifest={},  # ignored on the sharded path
@@ -78,7 +78,21 @@ def clear_folder(
         path_prefix="",
         author_device_id=author_device_id,
         deleted_at=deleted_at,
+        summary_op_log_event="vault.folder.cleared",
     )
+    _published, tombstoned = result
+    # Collateral fix per docs/plans/activity-timeline.md: the per-folder
+    # clear path had no log line at all; the consumer side
+    # (``state/activity.py:_EVENT_TYPE_LABELS``) already labels this
+    # event "Folder cleared" — without the emission the Activity tab
+    # could never show it.
+    log.info(
+        "vault.folder.cleared vault=%s remote_folder_id=%s "
+        "tombstoned=%d author=%s",
+        vault.vault_id, remote_folder_id,
+        len(tombstoned), author_device_id,
+    )
+    return result
 
 
 def clear_vault(
@@ -138,6 +152,13 @@ def clear_vault(
                 path_prefix="",
                 author_device_id=author_device_id,
                 deleted_at=deleted_at,
+                summary_op_log_event="vault.folder.cleared",
+            )
+            log.info(
+                "vault.folder.cleared vault=%s remote_folder_id=%s "
+                "tombstoned=%d author=%s",
+                vault.vault_id, folder_id,
+                len(tombstoned), author_device_id,
             )
             total += len(tombstoned)
     else:

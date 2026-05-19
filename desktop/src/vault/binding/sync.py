@@ -90,6 +90,7 @@ from ..manifest import (
     tombstone_file_entry_in_shard,
 )
 from ..relay_errors import VaultCASConflictError, VaultQuotaExceededError
+from ..state.op_log import append_op_log_entries, build_op_log_entry
 from ..upload import (
     CAS_MAX_RETRIES,
     PreparedUpload,
@@ -953,7 +954,8 @@ def _apply_batch_to_shard(
     next_revision = parent_revision + 1
 
     candidate = parent_n
-    for entry in batch:
+    skipped_indices: set[int] = set()
+    for idx, entry in enumerate(batch):
         if entry.kind == "upload":
             assert entry.prepared is not None
             candidate = add_or_append_file_version_in_shard(
@@ -975,8 +977,10 @@ def _apply_batch_to_shard(
             except KeyError:
                 # Entry already gone — fine for a batched tombstone
                 # (likely a CAS-conflict replay landing after another
-                # writer tombstoned the same path).
-                pass
+                # writer tombstoned the same path). Skip the op-log
+                # append for this slot (D6) so the CAS retry doesn't
+                # duplicate entries for ops that did no real work.
+                skipped_indices.add(idx)
 
     candidate["shard_revision"] = next_revision
     candidate["parent_shard_revision"] = parent_revision
@@ -986,7 +990,62 @@ def _apply_batch_to_shard(
     # (no schema/vault_id set yet) becomes publishable after the first
     # batch mutation.
     candidate["remote_folder_id"] = remote_folder_id
+    candidate["operation_log_tail"] = append_op_log_entries(
+        parent_n.get("operation_log_tail"),
+        _op_log_entries_for_batch(
+            batch=batch,
+            skip_indices=skipped_indices,
+            revision=next_revision,
+            device_id=author_device_id,
+            ts=int(time.time()),
+        ),
+    )
     return candidate
+
+
+def _op_log_entries_for_batch(
+    *,
+    batch: list[_BatchEntry],
+    skip_indices: set[int],
+    revision: int,
+    device_id: str,
+    ts: int,
+) -> list[dict[str, Any]]:
+    """Build per-op vault.{upload,delete}.completed entries.
+
+    ``skip_indices`` are batch slots whose shard mutation was a no-op
+    (e.g., tombstone replay against an already-tombstoned entry). They
+    are omitted from the op-log so a CAS retry doesn't double-record
+    work that wasn't done (D6).
+
+    ``revision`` is the shard's NEW revision (i.e., parent + 1) that
+    these mutations will land at on the publish. ``device_id`` is the
+    author's 32-hex id; ``device_name`` is not threaded yet — Phase 3
+    will plumb it. The consumer-side falls back to the truncated
+    ``device_id`` when ``device_name`` is absent.
+    """
+    entries: list[dict[str, Any]] = []
+    for idx, batch_entry in enumerate(batch):
+        if idx in skip_indices:
+            continue
+        if batch_entry.kind == "upload":
+            assert batch_entry.prepared is not None
+            entries.append(build_op_log_entry(
+                type="vault.upload.completed",
+                device_id=device_id,
+                revision=revision,
+                path=batch_entry.prepared.normalized_remote_path,
+                ts=ts,
+            ))
+        elif batch_entry.kind == "delete":
+            entries.append(build_op_log_entry(
+                type="vault.delete.completed",
+                device_id=device_id,
+                revision=revision,
+                path=normalize_manifest_path(batch_entry.op.relative_path),
+                ts=ts,
+            ))
+    return entries
 
 
 def _bumped_root_for_shard_publish(
@@ -1154,8 +1213,10 @@ def _merge_batch_into_shard_with_bump(
 
     server_n = normalize_shard_plaintext(server_shard)
     parent_revision = int(server_n.get("shard_revision", 0))
+    next_revision = parent_revision + 1
     merged = server_n
-    for entry in batch:
+    skipped_indices: set[int] = set()
+    for idx, entry in enumerate(batch):
         if entry.kind == "upload":
             assert entry.prepared is not None
             merged = merge_local_version_into_shard(
@@ -1176,12 +1237,26 @@ def _merge_batch_into_shard_with_bump(
                     folder_retention_policy=folder_retention_policy,
                 )
             except KeyError:
-                pass
-    merged["shard_revision"] = parent_revision + 1
+                # Already tombstoned by a concurrent writer — D6 skip.
+                skipped_indices.add(idx)
+    merged["shard_revision"] = next_revision
     merged["parent_shard_revision"] = parent_revision
     merged["created_at"] = created_at
     merged["author_device_id"] = str(author_device_id)
     merged["remote_folder_id"] = remote_folder_id
+    # D7: prior tail comes from the server-side shard (server_n) so
+    # concurrent producer entries from the other writer survive the
+    # CAS-retry replay.
+    merged["operation_log_tail"] = append_op_log_entries(
+        server_n.get("operation_log_tail"),
+        _op_log_entries_for_batch(
+            batch=batch,
+            skip_indices=skipped_indices,
+            revision=next_revision,
+            device_id=author_device_id,
+            ts=int(time.time()),
+        ),
+    )
     return merged
 
 

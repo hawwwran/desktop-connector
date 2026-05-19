@@ -56,6 +56,7 @@ from ..manifest import (
     DEFAULT_RETENTION_POLICY,
 )
 from ..relay_errors import VaultCASConflictError
+from ..state.op_log import append_op_log_entries, build_op_log_entry
 from ..upload.folder_state import (
     FolderState,
     fetch_folder_state,
@@ -333,6 +334,11 @@ class _StageBatch:
     # Per-folder shard mutations: folder_id → callable that takes the
     # current shard plaintext and returns the post-purge shard plaintext.
     per_folder_mutations: dict[str, Callable[[dict[str, Any], set[str]], dict[str, Any]]]
+    # Per-folder path lists for op-log entry construction. Each folder's
+    # paths are the entries whose tombstones / versions are being purged
+    # in this stage — one op-log row per path lands on that folder's
+    # shard tail when the publish succeeds.
+    per_folder_paths: dict[str, list[str]] = field(default_factory=dict)
 
 
 CandidatesFn = Callable[[dict[str, Any]], _StageBatch | None]
@@ -417,6 +423,8 @@ def _run_stage(
             mutate=mutate,
             purged=purged,
             author_device_id=author_device_id,
+            op_log_event=event,
+            op_log_paths=batch.per_folder_paths.get(folder_id, []),
         )
 
     # Re-assemble a unified manifest from the post-publish state so the
@@ -456,15 +464,25 @@ def _publish_folder_purge_with_retry(
     mutate: Callable[[dict[str, Any], set[str]], dict[str, Any]],
     purged: set[str],
     author_device_id: str,
+    op_log_event: str | None = None,
+    op_log_paths: list[str] | None = None,
     max_retries: int = CAS_MAX_RETRIES,
 ) -> FolderState:
     """Fetch one folder's state, apply the purge mutation, publish via
     ``publish_shard_with_root``. CAS retries decrypt the conflict
-    envelope and re-apply ``mutate`` on the rebased shard."""
+    envelope and re-apply ``mutate`` on the rebased shard.
+
+    ``op_log_event`` (Phase 2 activity-timeline wiring) is the
+    ``vault.eviction.*`` event type that lands on the shard's tail; one
+    op-log entry per ``op_log_paths`` is appended on each CAS attempt
+    so a retry against a freshly-rebased shard re-records the work.
+    """
     state = fetch_folder_state(vault, relay, remote_folder_id, author_device_id)
     for attempt in range(max_retries):
         candidate_shard, candidate_root = _build_candidate(
             state, remote_folder_id, author_device_id, mutate, purged,
+            op_log_event=op_log_event,
+            op_log_paths=op_log_paths or [],
         )
         try:
             shard_out, root_out = vault.publish_shard_with_root(
@@ -507,16 +525,36 @@ def _build_candidate(
     author_device_id: str,
     mutate: Callable[[dict[str, Any], set[str]], dict[str, Any]],
     purged: set[str],
+    *,
+    op_log_event: str | None = None,
+    op_log_paths: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     created_at = _now_rfc3339()
     parent_n = normalize_shard_plaintext(state.shard)
     parent_revision = int(parent_n.get("shard_revision", 0))
+    next_revision = parent_revision + 1
     mutated = mutate(parent_n, purged)
-    mutated["shard_revision"] = parent_revision + 1
+    mutated["shard_revision"] = next_revision
     mutated["parent_shard_revision"] = parent_revision
     mutated["created_at"] = created_at
     mutated["author_device_id"] = str(author_device_id)
     mutated["remote_folder_id"] = remote_folder_id
+    if op_log_event and op_log_paths:
+        # D7: prior tail from the just-fetched state.shard so a CAS
+        # retry against a different server head preserves concurrent
+        # writers' entries.
+        mutated["operation_log_tail"] = append_op_log_entries(
+            parent_n.get("operation_log_tail"),
+            [
+                build_op_log_entry(
+                    type=op_log_event,
+                    device_id=author_device_id,
+                    revision=next_revision,
+                    path=p,
+                )
+                for p in op_log_paths
+            ],
+        )
 
     root_n = normalize_root_manifest_plaintext(state.root)
     parent_root_revision = int(root_n.get("root_revision", 0))
@@ -583,6 +621,10 @@ def _expired_tombstone_candidates(
         affected_paths=paths,
         chunk_sizes=sizes,
         per_folder_mutations=per_folder_mutations,
+        per_folder_paths={
+            folder_id: sorted(target_paths)
+            for folder_id, target_paths in targets_by_folder.items()
+        },
     )
 
 
@@ -672,6 +714,7 @@ def _next_destructive_candidate(manifest: dict[str, Any]) -> _StageBatch | None:
             affected_paths=[path],
             chunk_sizes=sizes,
             per_folder_mutations={folder_id: _make_drop_tombstoned_mutation({path})},
+            per_folder_paths={folder_id: [path]},
         )
 
     # kind == "version"
@@ -697,6 +740,7 @@ def _next_destructive_candidate(manifest: dict[str, Any]) -> _StageBatch | None:
         per_folder_mutations={
             folder_id: _make_drop_version_mutation(path, version_id),
         },
+        per_folder_paths={folder_id: [path]},
     )
 
 

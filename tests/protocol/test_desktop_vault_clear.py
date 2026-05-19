@@ -47,7 +47,9 @@ class ClearVaultLoopUntilStableTests(unittest.TestCase):
 
         def fake_delete_folder_contents(*, vault, relay, manifest,
                                          remote_folder_id, path_prefix,
-                                         author_device_id, deleted_at):
+                                         author_device_id, deleted_at,
+                                         summary_op_log_event=None,
+                                         summary_op_log_path=""):
             cleared.append(remote_folder_id)
             return ({}, [f"{remote_folder_id}/file-{i}.txt" for i in range(3)])
 

@@ -840,5 +840,366 @@ class BatchProbeRelay(FakeUploadRelay):
         )
 
 
+class BatchOpLogProducerTests(_BatchTestBase):
+    """Phase 2 of docs/plans/activity-timeline.md — assert that the
+    batch publish path actually appends entries to the shard's
+    ``operation_log_tail``.
+
+    Each test decrypts the post-publish shard and inspects the tail
+    directly; that's the same surface the consumer side
+    (``state/activity.normalize_op_log_entry``) parses.
+    """
+
+    def _decrypt_shard(self, relay: "BatchProbeRelay") -> dict:
+        observer = _vault()
+        try:
+            return observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
+        finally:
+            observer.close()
+
+    def test_upload_batch_lands_upload_completed_entries(self) -> None:
+        relay, manifest = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
+        paths = [f"u{i}.txt" for i in range(3)]
+        for path in paths:
+            (self.local_root / path).write_bytes(b"x")
+            self.store.coalesce_op(
+                binding_id=binding.binding_id,
+                op_type="upload",
+                relative_path=path,
+            )
+
+        vault = _vault()
+        try:
+            run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=3,
+            )
+        finally:
+            vault.close()
+
+        shard = self._decrypt_shard(relay)
+        tail = shard.get("operation_log_tail") or []
+        upload_entries = [e for e in tail if e.get("type") == "vault.upload.completed"]
+        self.assertEqual(len(upload_entries), 3)
+        self.assertEqual(
+            sorted(e["path"] for e in upload_entries),
+            sorted(normalize_manifest_path(p) for p in paths),
+        )
+        # Every entry carries the publish revision + author + epoch ts.
+        for entry in upload_entries:
+            self.assertEqual(entry["device_id"], OTHER_DEVICE)
+            self.assertEqual(entry["revision"], int(shard["shard_revision"]))
+            self.assertIsInstance(entry["ts"], int)
+            self.assertGreater(entry["ts"], 0)
+
+    def test_mixed_batch_lands_both_event_types(self) -> None:
+        relay, manifest = self._empty_remote()
+        manifest = self._seed_remote_file(
+            relay, manifest, path="goner.txt", content=b"please go",
+        )
+        relay.publish_attempt_count = 0
+        relay.published_shards = []
+        relay.published_roots = []
+        relay.shard_with_root_puts = 0
+
+        binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
+        self.store.upsert_local_entry(VaultLocalEntry(
+            binding_id=binding.binding_id,
+            relative_path="goner.txt",
+            content_fingerprint="seed",
+            size_bytes=8, mtime_ns=1_000_000_000,
+            last_synced_revision=int(manifest["revision"]),
+        ))
+
+        (self.local_root / "fresh.txt").write_bytes(b"fresh")
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="upload",
+            relative_path="fresh.txt",
+        )
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="delete",
+            relative_path="goner.txt",
+        )
+
+        vault = _vault()
+        try:
+            run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=10,
+            )
+        finally:
+            vault.close()
+
+        shard = self._decrypt_shard(relay)
+        tail = shard.get("operation_log_tail") or []
+        # Upload entries from the seed publish stayed put; this publish
+        # added one upload + one delete entry from OTHER_DEVICE.
+        own_entries = [e for e in tail if e.get("device_id") == OTHER_DEVICE]
+        types = sorted(e["type"] for e in own_entries)
+        self.assertEqual(
+            types, ["vault.delete.completed", "vault.upload.completed"],
+        )
+        delete = next(e for e in own_entries if e["type"] == "vault.delete.completed")
+        self.assertEqual(delete["path"], "goner.txt")
+        upload = next(e for e in own_entries if e["type"] == "vault.upload.completed")
+        self.assertEqual(upload["path"], "fresh.txt")
+
+    def test_cas_retry_preserves_server_tail(self) -> None:
+        """D7: when a 409 fires the CAS-merge path, the retry's tail
+        must preserve the server-side tail (which already contains the
+        concurrent writer's entry) instead of starting from the local
+        attempt's tail."""
+        relay, manifest = self._empty_remote()
+        binding = self._make_bound_binding(last_revision=int(manifest["revision"]))
+
+        (self.local_root / "ours.txt").write_bytes(b"ours")
+        self.store.coalesce_op(
+            binding_id=binding.binding_id,
+            op_type="upload",
+            relative_path="ours.txt",
+        )
+
+        # Inject one 409 so the next publish hits the merge path.
+        relay.cas_conflicts_to_inject = 1
+        vault = _vault()
+        try:
+            run_backup_only_cycle(
+                vault=vault, relay=relay, store=self.store,
+                binding=binding, author_device_id=OTHER_DEVICE,
+                batch_size=1,
+            )
+        finally:
+            vault.close()
+
+        # Two attempts (one 409, one success) on the same logical mutation.
+        self.assertEqual(relay.publish_attempt_count, 2)
+        shard = self._decrypt_shard(relay)
+        tail = shard.get("operation_log_tail") or []
+        # Exactly one entry — the merge path didn't double-record on retry.
+        own = [e for e in tail if e.get("device_id") == OTHER_DEVICE]
+        self.assertEqual(len(own), 1)
+        self.assertEqual(own[0]["type"], "vault.upload.completed")
+        self.assertEqual(own[0]["path"], "ours.txt")
+
+
+class DeleteAndRestoreOpLogTests(unittest.TestCase):
+    """Phase 2 — single-file delete/restore land op-log entries.
+
+    Re-uses the seeded-fake-relay scaffolding from
+    ``test_desktop_vault_delete``; these tests verify the
+    ``_publish_shard_with_retry`` op_log_entries hook lands the
+    correct entry on the resulting shard.
+    """
+
+    def _decrypt_docs_shard(self, relay) -> dict:
+        observer = _vault()
+        try:
+            return observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
+        finally:
+            observer.close()
+
+    def test_delete_file_lands_entry(self) -> None:
+        from src.vault.ops.delete import delete_file
+        from tests.protocol.test_desktop_vault_delete import (
+            _empty_manifest, _seeded_manifest, _vault as _delete_vault,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay, seed_sharded_state,
+        )
+        manifest = _seeded_manifest([("alpha.txt", "hello")])
+        relay = FakeUploadRelay()
+        vault = _delete_vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest["vault_id"],
+                remote_folders=manifest["remote_folders"],
+                created_at=manifest["created_at"],
+                author_device_id=manifest["author_device_id"],
+            )
+            delete_file(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, remote_path="alpha.txt",
+                author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+        shard = self._decrypt_docs_shard(relay)
+        tail = shard.get("operation_log_tail") or []
+        deletes = [e for e in tail if e.get("type") == "vault.delete.completed"]
+        self.assertEqual(len(deletes), 1)
+        self.assertEqual(deletes[0]["path"], "alpha.txt")
+        self.assertEqual(deletes[0]["device_id"], AUTHOR)
+        self.assertEqual(deletes[0]["revision"], int(shard["shard_revision"]))
+
+    def test_restore_version_lands_entry_with_source_version_id(self) -> None:
+        # Build a history: seed → delete → restore-from-original-version.
+        from src.vault.ops.delete import delete_file, restore_version_to_current
+        from tests.protocol.test_desktop_vault_delete import (
+            _seeded_manifest, _vault as _delete_vault,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay, seed_sharded_state,
+        )
+        manifest = _seeded_manifest([("alpha.txt", "hello")])
+        relay = FakeUploadRelay()
+        vault = _delete_vault()
+        original_version_id = ""
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest["vault_id"],
+                remote_folders=manifest["remote_folders"],
+                created_at=manifest["created_at"],
+                author_device_id=manifest["author_device_id"],
+            )
+            # Find the seeded file's version_id.
+            for folder in manifest["remote_folders"]:
+                for entry in folder.get("entries", []):
+                    if entry.get("path") == "alpha.txt":
+                        original_version_id = entry["versions"][0]["version_id"]
+            self.assertNotEqual(original_version_id, "")
+            delete_file(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, remote_path="alpha.txt",
+                author_device_id=AUTHOR,
+            )
+            restore_version_to_current(
+                vault=vault, relay=relay, manifest=manifest,
+                remote_folder_id=DOCS_ID, remote_path="alpha.txt",
+                source_version_id=original_version_id,
+                author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+        shard = self._decrypt_docs_shard(relay)
+        tail = shard.get("operation_log_tail") or []
+        restores = [e for e in tail if e.get("type") == "vault.restore.completed"]
+        self.assertEqual(len(restores), 1)
+        self.assertEqual(restores[0]["path"], "alpha.txt")
+        self.assertEqual(restores[0]["source_version_id"], original_version_id)
+
+
+class ClearFolderOpLogTests(unittest.TestCase):
+    """Phase 2 — clear_folder lands per-file delete entries AND a
+    summary ``vault.folder.cleared`` entry on the same shard revision.
+    """
+
+    def test_clear_folder_lands_summary_alongside_per_file_deletes(self) -> None:
+        from src.vault.ops.clear import clear_folder
+        from tests.protocol.test_desktop_vault_delete import (
+            _seeded_manifest, _vault as _delete_vault,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay, seed_sharded_state,
+        )
+        manifest = _seeded_manifest([
+            ("a.txt", "a"), ("b.txt", "b"), ("c.txt", "c"),
+        ])
+        relay = FakeUploadRelay()
+        vault = _delete_vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest["vault_id"],
+                remote_folders=manifest["remote_folders"],
+                created_at=manifest["created_at"],
+                author_device_id=manifest["author_device_id"],
+            )
+            clear_folder(
+                vault=vault, relay=relay,
+                remote_folder_id=DOCS_ID, author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        observer = _vault()
+        try:
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
+        finally:
+            observer.close()
+        tail = shard.get("operation_log_tail") or []
+        types = sorted(e["type"] for e in tail)
+        # 3 per-file deletes + 1 folder-cleared summary.
+        self.assertEqual(types, [
+            "vault.delete.completed",
+            "vault.delete.completed",
+            "vault.delete.completed",
+            "vault.folder.cleared",
+        ])
+        # All entries share the publish revision.
+        revisions = {e["revision"] for e in tail}
+        self.assertEqual(revisions, {int(shard["shard_revision"])})
+
+
+class EvictionOpLogTests(unittest.TestCase):
+    """Phase 2 — eviction stages land vault.eviction.* entries on the
+    shard tail. The per-folder publish path runs through
+    ``_publish_folder_purge_with_retry`` which receives
+    ``op_log_event`` + ``op_log_paths`` from ``_run_stage``.
+    """
+
+    def test_run_stage_lands_event_entry_per_affected_path(self) -> None:
+        # Drive _publish_folder_purge_with_retry directly with a no-op
+        # mutate closure — verifies the op-log wiring without needing
+        # the full eviction pipeline + gc_plan plumbing.
+        from src.vault.ops.eviction import _publish_folder_purge_with_retry
+        from tests.protocol.test_desktop_vault_delete import (
+            _seeded_manifest, _vault as _delete_vault,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay, seed_sharded_state,
+        )
+        manifest = _seeded_manifest([("doomed.txt", "x")])
+        relay = FakeUploadRelay()
+        vault = _delete_vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest["vault_id"],
+                remote_folders=manifest["remote_folders"],
+                created_at=manifest["created_at"],
+                author_device_id=manifest["author_device_id"],
+            )
+            _publish_folder_purge_with_retry(
+                vault=vault, relay=relay,
+                remote_folder_id=DOCS_ID,
+                mutate=lambda shard, _purged: shard,  # no entry change
+                purged=set(),
+                author_device_id=AUTHOR,
+                op_log_event="vault.eviction.auto_purged_oldest",
+                op_log_paths=["doomed.txt"],
+            )
+        finally:
+            vault.close()
+
+        observer = _vault()
+        try:
+            shard = observer.decrypt_shard_envelope(
+                relay.shards[DOCS_ID]["envelope"], DOCS_ID,
+            )
+        finally:
+            observer.close()
+        tail = shard.get("operation_log_tail") or []
+        evictions = [
+            e for e in tail
+            if e.get("type") == "vault.eviction.auto_purged_oldest"
+        ]
+        self.assertEqual(len(evictions), 1)
+        self.assertEqual(evictions[0]["path"], "doomed.txt")
+        self.assertEqual(evictions[0]["device_id"], AUTHOR)
+
+
 if __name__ == "__main__":
     unittest.main()
