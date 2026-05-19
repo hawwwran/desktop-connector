@@ -123,8 +123,14 @@ def build_grant_device_dialog(
     stack.add_named(gen_page, "generating")
 
     # ----- share page ------------------------------------------------
-    share_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-    share_page.append(Gtk.Label(
+    # Wrap in a ScrolledWindow so a Settings window narrower than the
+    # dialog's preferred 560×520 stays usable: the QR + URL entry +
+    # hint can scroll even when the dialog gets clipped by an
+    # unusually small parent. Adw.Dialog adapts to its parent, so
+    # without this the share-step contents could fall below the
+    # action row.
+    share_page_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    share_page_inner.append(Gtk.Label(
         label=(
             "On the new device, open the tray menu → Vault → "
             "Add this device to a vault…, then paste the URL below "
@@ -133,24 +139,36 @@ def build_grant_device_dialog(
         xalign=0, wrap=True, css_classes=["dim-label"],
     ))
     qr_image = Gtk.Picture()
-    qr_image.set_size_request(220, 220)
-    qr_image.set_can_shrink(False)
-    qr_image.set_halign(Gtk.Align.START)
-    share_page.append(qr_image)
+    # The QR's natural size depends on the URL length (~200 px wide with
+    # the box_size=5 / border=2 settings in ``_qr_to_paintable``); let it
+    # shrink to fit narrow parent windows but never scale UP past natural
+    # — at 1× the modules are crisp; an enlarged copy would just blur.
+    qr_image.set_can_shrink(True)
+    qr_image.set_content_fit(Gtk.ContentFit.SCALE_DOWN)
+    qr_image.set_size_request(200, 200)
+    qr_image.set_halign(Gtk.Align.CENTER)
+    share_page_inner.append(qr_image)
     url_view = Gtk.Entry(editable=False)
     url_view.set_hexpand(True)
     url_view.add_css_class("monospace")
-    share_page.append(url_view)
+    share_page_inner.append(url_view)
     share_hint = Gtk.Label(
         label="Waiting for the new device to claim this URL…",
         xalign=0, wrap=True, css_classes=["dim-label"],
     )
-    share_page.append(share_hint)
+    share_page_inner.append(share_hint)
+    share_page = Gtk.ScrolledWindow()
+    share_page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    share_page.set_child(share_page_inner)
+    share_page.set_vexpand(True)
     stack.add_named(share_page, "share")
 
     # ----- verify page -----------------------------------------------
-    verify_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-    verify_page.append(Gtk.Label(
+    # Same scroll safety net as the share page — the role dropdown +
+    # status line below the code label can otherwise fall under the
+    # action row on a tight Settings window.
+    verify_page_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    verify_page_inner.append(Gtk.Label(
         label=(
             "Compare this 6-digit code with the new device's screen. "
             "If they match exactly, the link is secure — proceed with "
@@ -163,24 +181,28 @@ def build_grant_device_dialog(
         css_classes=["title-1", "monospace"],
     )
     code_label.set_hexpand(True)
-    verify_page.append(code_label)
+    verify_page_inner.append(code_label)
 
     claimant_meta = Gtk.Label(
         label="", xalign=0, wrap=True, css_classes=["dim-label"],
     )
-    verify_page.append(claimant_meta)
+    verify_page_inner.append(claimant_meta)
 
     role_label = Gtk.Label(
         label="Role to grant:", xalign=0, css_classes=["heading"],
     )
-    verify_page.append(role_label)
+    verify_page_inner.append(role_label)
     role_combo = Gtk.DropDown.new_from_strings([label for _r, label in ROLE_CHOICES])
     role_combo.set_halign(Gtk.Align.START)
-    verify_page.append(role_combo)
+    verify_page_inner.append(role_combo)
     verify_status = Gtk.Label(
         label="", xalign=0, wrap=True, css_classes=["dim-label"],
     )
-    verify_page.append(verify_status)
+    verify_page_inner.append(verify_status)
+    verify_page = Gtk.ScrolledWindow()
+    verify_page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    verify_page.set_child(verify_page_inner)
+    verify_page.set_vexpand(True)
     stack.add_named(verify_page, "verify")
 
     # ----- done page -------------------------------------------------
@@ -607,7 +629,13 @@ def _qr_to_paintable(url: str):
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=8, border=4,
+        # box_size=5 + border=2 keeps the natural QR ~200 px wide for a
+        # typical join URL, comfortable inside the 560×520 dialog and
+        # easily scannable on a phone camera at 1:1 scale. The previous
+        # box_size=8 / border=4 produced ~420 px QRs that overflowed
+        # the dialog's content height and got clipped by the parent
+        # window (Vault Settings).
+        box_size=5, border=2,
     )
     qr.add_data(url)
     qr.make(fit=True)
