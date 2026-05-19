@@ -101,6 +101,26 @@ class MergeTimelineTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn("12 KB", rows[0].summary)
 
+    def test_dedup_keeps_distinct_paths_at_same_ts(self) -> None:
+        # Regression: Suite 0006 caught the dedup key dropping ``path``,
+        # which collapsed two sibling file uploads from one batch (same
+        # ts, same author, same event_type) into a single Activity row.
+        # The fix at state/activity.py:212 includes display_path in the
+        # key; this test pins it so a future refactor that re-drops
+        # path doesn't regress the producer→consumer loop.
+        op_log = [
+            {"ts": 1_000_000, "type": "vault.upload.completed",
+             "path": "Docs/hello.txt", "device_id": "a"*32,
+             "revision": 7},
+            {"ts": 1_000_000, "type": "vault.upload.completed",
+             "path": "Docs/world.txt", "device_id": "a"*32,
+             "revision": 7},
+        ]
+        rows = merge_timeline(op_log_entries=op_log)
+        self.assertEqual(len(rows), 2, "distinct paths must NOT collapse")
+        paths = sorted(r.display_path for r in rows)
+        self.assertEqual(paths, ["Docs/hello.txt", "Docs/world.txt"])
+
     def test_empty_inputs_return_empty(self) -> None:
         self.assertEqual(merge_timeline(), [])
         self.assertEqual(merge_timeline(audit_rows=[], op_log_entries=[]), [])

@@ -35,7 +35,7 @@ class BuildOpLogEntryTests(unittest.TestCase):
     def test_minimal_required_fields(self) -> None:
         before = int(time.time())
         entry = build_op_log_entry(
-            type="vault.upload.completed",
+            event_type="vault.upload.completed",
             device_id=DEVICE_A,
             revision=3,
         )
@@ -53,7 +53,7 @@ class BuildOpLogEntryTests(unittest.TestCase):
 
     def test_optional_fields_included_when_set(self) -> None:
         entry = build_op_log_entry(
-            type="vault.delete.completed",
+            event_type="vault.delete.completed",
             device_id=DEVICE_A,
             revision=5,
             path="Documents/old.txt",
@@ -66,7 +66,7 @@ class BuildOpLogEntryTests(unittest.TestCase):
 
     def test_explicit_ts_overrides_clock(self) -> None:
         entry = build_op_log_entry(
-            type="vault.restore.completed",
+            event_type="vault.restore.completed",
             device_id=DEVICE_A,
             revision=7,
             ts=1_700_000_000,
@@ -75,7 +75,7 @@ class BuildOpLogEntryTests(unittest.TestCase):
 
     def test_extras_are_merged_alongside_reserved_fields(self) -> None:
         entry = build_op_log_entry(
-            type="vault.restore.completed",
+            event_type="vault.restore.completed",
             device_id=DEVICE_A,
             revision=11,
             extra={"source_version_id": "vfa1b2c3"},
@@ -88,21 +88,21 @@ class BuildOpLogEntryTests(unittest.TestCase):
             with self.subTest(field=reserved):
                 with self.assertRaises(ValueError):
                     build_op_log_entry(
-                        type="vault.upload.completed",
+                        event_type="vault.upload.completed",
                         device_id=DEVICE_A,
                         revision=1,
                         extra={reserved: "x"},
                     )
 
-    def test_empty_type_raises(self) -> None:
+    def test_empty_event_type_raises(self) -> None:
         with self.assertRaises(ValueError):
-            build_op_log_entry(type="", device_id=DEVICE_A, revision=1)
+            build_op_log_entry(event_type="", device_id=DEVICE_A, revision=1)
 
     def test_round_trips_through_normalize_op_log_entry(self) -> None:
         # The consumer side is the wire-format owner; assert build_op_log_entry's
         # output parses back via normalize_op_log_entry with no field loss.
         entry = build_op_log_entry(
-            type="vault.upload.completed",
+            event_type="vault.upload.completed",
             device_id=DEVICE_A,
             revision=12,
             path="Photos/IMG_0001.jpg",
@@ -125,9 +125,9 @@ class BuildOpLogEntryTests(unittest.TestCase):
 
 
 class AppendOpLogEntriesTests(unittest.TestCase):
-    def _make(self, ts: int, type: str = "vault.upload.completed") -> dict:
+    def _make(self, ts: int, event_type: str = "vault.upload.completed") -> dict:
         return build_op_log_entry(
-            type=type, device_id=DEVICE_A, revision=ts, ts=ts,
+            event_type=event_type, device_id=DEVICE_A, revision=ts, ts=ts,
         )
 
     def test_none_inputs_yield_empty_list(self) -> None:

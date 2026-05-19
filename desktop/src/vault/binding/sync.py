@@ -1031,7 +1031,7 @@ def _op_log_entries_for_batch(
         if batch_entry.kind == "upload":
             assert batch_entry.prepared is not None
             entries.append(build_op_log_entry(
-                type="vault.upload.completed",
+                event_type="vault.upload.completed",
                 device_id=device_id,
                 revision=revision,
                 path=batch_entry.prepared.normalized_remote_path,
@@ -1039,7 +1039,7 @@ def _op_log_entries_for_batch(
             ))
         elif batch_entry.kind == "delete":
             entries.append(build_op_log_entry(
-                type="vault.delete.completed",
+                event_type="vault.delete.completed",
                 device_id=device_id,
                 revision=revision,
                 path=normalize_manifest_path(batch_entry.op.relative_path),

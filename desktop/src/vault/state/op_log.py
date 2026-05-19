@@ -22,6 +22,9 @@ Wire shape (matches ``normalize_op_log_entry``)::
 The consumer drops entries whose ``type`` doesn't start with one of the
 whitelisted prefixes in ``ACTIVITY_KIND_PREFIXES`` (state/activity.py:44),
 so producers MUST use a known prefix or the row is silently invisible.
+At the API boundary the parameter is named ``event_type`` (so it
+doesn't shadow Python's ``type`` builtin) but the on-disk dict key
+stays ``"type"`` for wire-format compatibility.
 
 Tail-bounding policy (plan D3): keep the most-recent ``MAX_OP_LOG_TAIL``
 entries; drop-oldest beyond that. No rotation into ``archived_op_segments``
@@ -67,7 +70,7 @@ _RESERVED_FIELDS = frozenset({
 
 def build_op_log_entry(
     *,
-    type: str,
+    event_type: str,
     device_id: str,
     revision: int,
     path: str = "",
@@ -78,6 +81,10 @@ def build_op_log_entry(
 ) -> dict[str, Any]:
     """Build one op-log entry in the wire shape ``normalize_op_log_entry`` parses.
 
+    The on-disk dict key is ``"type"`` (matches the consumer parser at
+    ``state/activity.py``); the kwarg is named ``event_type`` so it
+    doesn't shadow Python's ``type`` builtin at the call site.
+
     ``ts`` defaults to the current epoch second. ``extra`` lets a caller
     stash supplementary fields (e.g., ``source_version_id`` on a restore);
     the consumer side surfaces them via ``ActivityRow.extra``.
@@ -87,11 +94,11 @@ def build_op_log_entry(
     production caller will pass ``config.device_id`` so the manifest's
     ``author_device_id`` and the entry's ``device_id`` agree.
     """
-    if not type:
-        raise ValueError("op-log entry requires non-empty 'type'")
+    if not event_type:
+        raise ValueError("op-log entry requires non-empty 'event_type'")
     entry: dict[str, Any] = {
         "ts": int(ts if ts is not None else time.time()),
-        "type": str(type),
+        "type": str(event_type),
         "device_id": str(device_id),
         "revision": int(revision),
     }

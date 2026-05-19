@@ -152,6 +152,19 @@ table reintroduction (rejected — `vault_audit_events` was retired
 because the encrypted op-log preserves the blind-relay invariant;
 re-introducing it would re-expose event metadata to the relay).
 
+**Threat-model note.** The op-log entries — including the
+`vault.vault.cleared` summary string (e.g.
+`"Cleared 42 file(s) across 7 folder(s)"`) — live in the AEAD-encrypted
+manifest so the relay can never decrypt them. They ARE visible to
+every other authorized device on the vault: any device holding a
+master-key grant for vault X can decrypt X's root + shards and read
+the timeline. That's the intended UX (cross-device audit), but it
+means aggregate counts + plaintext paths leak to co-authorized
+devices. Threat model: trust between same-vault devices is implicit
+in the master-key share; the leak is consistent with that boundary.
+A future folder-scoped grant model (only some folders visible to
+some devices) would need to revisit shard-tail visibility per-folder.
+
 **Anchor.**
 
 - Helper module: `desktop/src/vault/state/op_log.py`

@@ -547,7 +547,7 @@ def _build_candidate(
             parent_n.get("operation_log_tail"),
             [
                 build_op_log_entry(
-                    type=op_log_event,
+                    event_type=op_log_event,
                     device_id=author_device_id,
                     revision=next_revision,
                     path=p,

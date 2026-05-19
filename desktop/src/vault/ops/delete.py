@@ -105,7 +105,7 @@ def delete_file(
 
     def op_log_entries(new_revision: int) -> list[dict[str, Any]]:
         return [build_op_log_entry(
-            type="vault.delete.completed",
+            event_type="vault.delete.completed",
             device_id=author_device_id,
             revision=new_revision,
             path=normalize_manifest_path(remote_path),
@@ -175,7 +175,7 @@ def delete_folder_contents(
         last = captured[-1] if captured else []
         entries = [
             build_op_log_entry(
-                type="vault.delete.completed",
+                event_type="vault.delete.completed",
                 device_id=author_device_id,
                 revision=new_revision,
                 path=p,
@@ -188,7 +188,7 @@ def delete_folder_contents(
             # ("Folder cleared: Docs") alongside the per-file
             # audit trail.
             entries.append(build_op_log_entry(
-                type=summary_op_log_event,
+                event_type=summary_op_log_event,
                 device_id=author_device_id,
                 revision=new_revision,
                 path=summary_op_log_path,
@@ -281,7 +281,7 @@ def restore_version_to_current(
 
     def op_log_entries(new_revision: int) -> list[dict[str, Any]]:
         return [build_op_log_entry(
-            type="vault.restore.completed",
+            event_type="vault.restore.completed",
             device_id=author_device_id,
             revision=new_revision,
             path=normalize_manifest_path(remote_path),
@@ -419,7 +419,7 @@ def restore_folder_contents(
         last = captured[-1] if captured else []
         return [
             build_op_log_entry(
-                type="vault.restore.completed",
+                event_type="vault.restore.completed",
                 device_id=author_device_id,
                 revision=new_revision,
                 path=p,

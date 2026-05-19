@@ -140,6 +140,62 @@ class ClearVaultRootOpLogTests(unittest.TestCase):
         self.assertEqual(entry["revision"], int(root["root_revision"]))
 
 
+class ClearVaultAuditPublishFailedTests(unittest.TestCase):
+    """When the audit-publish fails (every CAS retry 409s, or any
+    other exception fires), ``clear_vault`` must surface the missing
+    audit row in its terminal log line — not silently report success
+    and confuse a future operator."""
+
+    def test_terminal_log_flags_audit_missing_when_publish_fails(self) -> None:
+        import logging
+        from unittest import mock
+        from src.vault.ops.clear import clear_vault
+
+        class _FakeVault:
+            vault_id = "ABCD2345WXYZ"
+
+            def fetch_root_manifest(self, relay):
+                return {"remote_folders": []}
+
+        # No folders to clear — the terminal log fires immediately.
+        # Mock _publish_root_op_log_entry to simulate exhaustion.
+        with mock.patch(
+            "src.vault.ops.clear._publish_root_op_log_entry",
+            return_value=False,  # simulate "every retry failed"
+        ):
+            with self.assertLogs("src.vault.ops.clear", level=logging.INFO) as cap:
+                clear_vault(
+                    vault=_FakeVault(), relay=object(),
+                    author_device_id="dev",
+                )
+        joined = "\n".join(cap.output)
+        self.assertIn("vault.vault.cleared", joined)
+        self.assertIn("audit_row=missing", joined)
+
+    def test_terminal_log_flags_audit_landed_when_publish_succeeds(self) -> None:
+        import logging
+        from unittest import mock
+        from src.vault.ops.clear import clear_vault
+
+        class _FakeVault:
+            vault_id = "ABCD2345WXYZ"
+
+            def fetch_root_manifest(self, relay):
+                return {"remote_folders": []}
+
+        with mock.patch(
+            "src.vault.ops.clear._publish_root_op_log_entry",
+            return_value=True,
+        ):
+            with self.assertLogs("src.vault.ops.clear", level=logging.INFO) as cap:
+                clear_vault(
+                    vault=_FakeVault(), relay=object(),
+                    author_device_id="dev",
+                )
+        joined = "\n".join(cap.output)
+        self.assertIn("audit_row=landed", joined)
+
+
 class ConfirmTextTests(unittest.TestCase):
     def test_folder_name_match_is_exact_case(self) -> None:
         self.assertTrue(confirm_folder_clear_text_matches("Documents", "Documents"))

@@ -13,6 +13,7 @@ Owns the per-file orchestration:
 import logging
 import secrets
 import stat as _stat
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -865,17 +866,26 @@ def _upload_op_log_entry(
     ``created_at`` is the RFC3339 string already stamped on the
     candidate shard; we parse it back to epoch seconds so the entry's
     ``ts`` agrees with the manifest's ``created_at`` within
-    sub-second precision.
+    sub-second precision. On any parse failure (e.g., a future format
+    drift), fall back to ``time.time()`` via ``build_op_log_entry``'s
+    default + emit a single DEBUG so the desync is observable.
     """
-    from datetime import datetime, timezone
+    ts: int | None
     try:
-        ts = int(datetime.strptime(
-            created_at, "%Y-%m-%dT%H:%M:%S.000Z",
-        ).replace(tzinfo=timezone.utc).timestamp())
-    except (TypeError, ValueError):
-        ts = None  # build_op_log_entry falls back to time.time()
+        # ``fromisoformat`` handles trailing-Z on Python 3.11+ natively
+        # and tolerates millisecond / microsecond variants — far less
+        # brittle than ``strptime`` with a fixed format string.
+        normalised = created_at.replace("Z", "+00:00") if created_at else ""
+        ts = int(datetime.fromisoformat(normalised).timestamp())
+    except (TypeError, ValueError, AttributeError):
+        log.debug(
+            "vault.upload.op_log_ts_parse_failed created_at=%r — "
+            "falling back to time.time()",
+            created_at,
+        )
+        ts = None
     return build_op_log_entry(
-        type="vault.upload.completed",
+        event_type="vault.upload.completed",
         device_id=device_id,
         revision=revision,
         path=path,

@@ -30,11 +30,19 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from ..relay_errors import VaultCASConflictError
 from ..state.op_log import append_op_log_entries, build_op_log_entry
 from .delete import DeleteVault, delete_folder_contents
 
 
 log = logging.getLogger(__name__)
+
+
+# How many times ``_publish_root_op_log_entry`` retries after a 409.
+# Bounded small — the audit publish is best-effort and the caller
+# log line surfaces the missed-row state, so an extended retry storm
+# isn't worth the latency on a destructive op the user is watching.
+_AUDIT_PUBLISH_RETRIES = 3
 
 
 def _now_rfc3339() -> str:
@@ -180,27 +188,19 @@ def clear_vault(
     # ``vault.folder.cleared`` summaries each per-folder shard publish
     # already landed. The cost is one extra root-only publish per
     # clear-vault — acceptable for this rare destructive op.
-    try:
-        _publish_root_op_log_entry(
-            vault, relay,
-            event_type="vault.vault.cleared",
-            device_id=author_device_id,
-            summary=(
-                f"Cleared {total} file(s) across {len(seen_folders)} folder(s)"
-            ),
-        )
-    except Exception:  # noqa: BLE001
-        # The destructive work has already landed; the audit row is a
-        # nice-to-have, not a correctness requirement. Log + continue
-        # so the user doesn't see a "clear failed" surface for a
-        # post-clear bookkeeping hiccup.
-        log.warning(
-            "vault.vault.cleared_audit_publish_failed vault=%s",
-            vault.vault_id, exc_info=True,
-        )
+    audit_landed = _publish_root_op_log_entry(
+        vault, relay,
+        event_type="vault.vault.cleared",
+        device_id=author_device_id,
+        summary=(
+            f"Cleared {total} file(s) across {len(seen_folders)} folder(s)"
+        ),
+    )
     log.info(
-        "vault.vault.cleared total_tombstoned=%d folders=%d author=%s",
+        "vault.vault.cleared total_tombstoned=%d folders=%d author=%s "
+        "audit_row=%s",
         total, len(seen_folders), author_device_id,
+        "landed" if audit_landed else "missing",
     )
     return total
 
@@ -212,33 +212,64 @@ def _publish_root_op_log_entry(
     event_type: str,
     device_id: str,
     summary: str,
-) -> None:
+) -> bool:
     """Append one root-scoped op-log entry via a no-mutation root publish.
 
     Used for vault-wide audit events that don't otherwise change the
     root's folder set (e.g., ``vault.vault.cleared``). Bumps the root
     revision so the entry is durably anchored to a CAS-stable point in
     the manifest chain.
+
+    Best-effort: the destructive work the caller did before this is
+    already landed; the audit row is a nice-to-have, not a correctness
+    requirement. Returns ``True`` if the publish landed,
+    ``False`` if every retry attempt failed. The caller surfaces the
+    distinction in its log line so an operator can see when the audit
+    row went missing instead of relying on absence-of-warning.
+
+    Retries up to ``_AUDIT_PUBLISH_RETRIES`` times on
+    :class:`VaultCASConflictError` (a concurrent device bumped the
+    root between our fetch and publish). Other exceptions also fail
+    closed — logged with ``exc_info`` and ``False`` returned.
     """
-    current_root = vault.fetch_root_manifest(relay)
-    parent_revision = int(current_root.get("root_revision", 0))
-    new_revision = parent_revision + 1
-    timestamp = _now_rfc3339()
-    candidate = copy.deepcopy(current_root)
-    candidate["root_revision"] = new_revision
-    candidate["parent_root_revision"] = parent_revision
-    candidate["created_at"] = timestamp
-    candidate["author_device_id"] = str(device_id)
-    candidate["operation_log_tail"] = append_op_log_entries(
-        candidate.get("operation_log_tail"),
-        [build_op_log_entry(
-            type=event_type,
-            device_id=device_id,
-            revision=new_revision,
-            summary=summary,
-        )],
+    last_exc: Exception | None = None
+    for attempt in range(_AUDIT_PUBLISH_RETRIES):
+        try:
+            current_root = vault.fetch_root_manifest(relay)
+            parent_revision = int(current_root.get("root_revision", 0))
+            new_revision = parent_revision + 1
+            timestamp = _now_rfc3339()
+            candidate = copy.deepcopy(current_root)
+            candidate["root_revision"] = new_revision
+            candidate["parent_root_revision"] = parent_revision
+            candidate["created_at"] = timestamp
+            candidate["author_device_id"] = str(device_id)
+            candidate["operation_log_tail"] = append_op_log_entries(
+                candidate.get("operation_log_tail"),
+                [build_op_log_entry(
+                    event_type=event_type,
+                    device_id=device_id,
+                    revision=new_revision,
+                    summary=summary,
+                )],
+            )
+            vault.publish_root_manifest(relay, candidate)
+            return True
+        except VaultCASConflictError as exc:
+            last_exc = exc
+            log.info(
+                "vault.audit_publish.cas_retry vault=%s event=%s attempt=%d/%d",
+                vault.vault_id, event_type, attempt + 1, _AUDIT_PUBLISH_RETRIES,
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            break
+    log.warning(
+        "vault.audit_publish.failed vault=%s event=%s last_error=%r",
+        vault.vault_id, event_type, last_exc,
     )
-    vault.publish_root_manifest(relay, candidate)
+    return False
 
 
 __all__ = [
