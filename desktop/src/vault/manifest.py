@@ -797,8 +797,16 @@ def assemble_unified_manifest(
     pointers with ``entries: []`` — useful when only one binding's
     shard has been fetched and the caller wants the full vault view
     without the round-trip to fetch every other shard.
+
+    The unified ``operation_log_tail`` field merges the root tail with
+    every available shard's tail, sorted by
+    ``(ts, device_id, revision)`` ascending so the consumer side sees a
+    deterministic timeline regardless of fetch order. Shards missing
+    from ``shards_by_id`` contribute no entries (per the same lazy-fetch
+    semantics that drive the ``entries: []`` fallback above).
     """
     root_n = normalize_root_manifest_plaintext(root)
+    merged_tail: list[dict[str, Any]] = list(root_n["operation_log_tail"])
     unified = {
         "schema": MANIFEST_SCHEMA,
         "vault_id": root_n["vault_id"],
@@ -808,7 +816,7 @@ def assemble_unified_manifest(
         "author_device_id": root_n["author_device_id"],
         "manifest_format_version": int(root_n["manifest_format_version"]),
         "remote_folders": [],
-        "operation_log_tail": list(root_n["operation_log_tail"]),
+        "operation_log_tail": [],
         "archived_op_segments": list(root_n["archived_op_segments"]),
     }
     for pointer in root_n["remote_folders"]:
@@ -827,8 +835,32 @@ def assemble_unified_manifest(
         if shard is not None:
             shard_n = normalize_shard_plaintext(shard)
             folder_entry["entries"] = copy.deepcopy(shard_n["entries"])
+            merged_tail.extend(copy.deepcopy(shard_n["operation_log_tail"]))
         unified["remote_folders"].append(folder_entry)
+    merged_tail.sort(key=_op_log_sort_key)
+    unified["operation_log_tail"] = merged_tail
     return normalize_manifest_plaintext(unified)
+
+
+def _op_log_sort_key(entry: dict[str, Any]) -> tuple[int, str, int]:
+    """Deterministic tie-break order for the unified op-log timeline.
+
+    Burst uploads from one device share a wall-clock second; sorting by
+    ``ts`` alone would shuffle them on every re-fetch. Tie-break first
+    on author ``device_id`` (lexicographic, lower-cased 32-hex) and
+    finally on ``revision`` so entries authored by the same device
+    in the same second land in revision order.
+    """
+    try:
+        ts = int(entry.get("ts", 0))
+    except (TypeError, ValueError):
+        ts = 0
+    try:
+        revision = int(entry.get("revision", 0))
+    except (TypeError, ValueError):
+        revision = 0
+    device_id = str(entry.get("device_id", ""))
+    return (ts, device_id, revision)
 
 
 # --------------------------------------------------------------------

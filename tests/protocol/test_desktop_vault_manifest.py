@@ -13,6 +13,8 @@ ensure_desktop_on_path()
 
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
+    make_folder_shard,
+    make_root_folder_pointer,
     make_root_manifest,
     normalize_manifest_plaintext,
 )
@@ -181,6 +183,173 @@ class ManifestRevisionInvariantTests(unittest.TestCase):
         self.assertEqual(bumped["parent_revision"], 10)
         # Result satisfies the publish invariant.
         assert_publishable_revision(bumped)
+
+
+DEVICE_A = AUTHOR
+DEVICE_B = "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7"
+
+
+def _make_root_with_two_folders(root_tail: list[dict] | None = None) -> dict:
+    return make_root_manifest(
+        vault_id=VAULT_ID,
+        root_revision=4,
+        parent_root_revision=3,
+        created_at="2026-05-19T12:00:00.000Z",
+        author_device_id=DEVICE_A,
+        remote_folders=[
+            make_root_folder_pointer(
+                remote_folder_id=DOCS_ID,
+                display_name_enc="Docs",
+                created_at="2026-05-19T12:00:00.000Z",
+                created_by_device_id=DEVICE_A,
+                shard_revision=2,
+                shard_hash="x" * 64,
+            ),
+            make_root_folder_pointer(
+                remote_folder_id=PHOTOS_ID,
+                display_name_enc="Photos",
+                created_at="2026-05-19T12:00:00.000Z",
+                created_by_device_id=DEVICE_A,
+                shard_revision=3,
+                shard_hash="y" * 64,
+            ),
+        ],
+        operation_log_tail=root_tail or [],
+    )
+
+
+def _make_shard(
+    *, remote_folder_id: str, shard_revision: int, tail: list[dict],
+) -> dict:
+    return make_folder_shard(
+        vault_id=VAULT_ID,
+        remote_folder_id=remote_folder_id,
+        shard_revision=shard_revision,
+        parent_shard_revision=shard_revision - 1,
+        created_at="2026-05-19T12:00:00.000Z",
+        author_device_id=DEVICE_A,
+        entries=[],
+        operation_log_tail=tail,
+    )
+
+
+def _op_entry(*, ts: int, type: str, device_id: str, revision: int, path: str = "") -> dict:
+    e = {"ts": ts, "type": type, "device_id": device_id, "revision": revision}
+    if path:
+        e["path"] = path
+    return e
+
+
+class AssembleUnifiedManifestOpLogMergeTests(unittest.TestCase):
+    """D2 — ``assemble_unified_manifest`` must merge root + shard op-log
+    tails into the unified view; tie-break sort keeps the timeline
+    deterministic across re-fetches.
+
+    Before this fix the unified ``operation_log_tail`` carried only the
+    root's tail — every shard-scoped entry (uploads, deletes, restores,
+    eviction) was invisible to the Activity tab.
+    """
+
+    def test_root_tail_alone_unchanged(self) -> None:
+        root_tail = [
+            _op_entry(ts=1_700_000_001, type="vault.grant.created",
+                      device_id=DEVICE_A, revision=4),
+        ]
+        root = _make_root_with_two_folders(root_tail=root_tail)
+        unified = assemble_unified_manifest(root, {})
+        # Shards omitted from shards_by_id contribute no entries.
+        self.assertEqual(unified["operation_log_tail"], root_tail)
+
+    def test_shard_tails_merged_into_unified(self) -> None:
+        docs_shard = _make_shard(
+            remote_folder_id=DOCS_ID, shard_revision=2,
+            tail=[
+                _op_entry(ts=1_700_000_005, type="vault.upload.completed",
+                          device_id=DEVICE_A, revision=2, path="Docs/a.txt"),
+            ],
+        )
+        photos_shard = _make_shard(
+            remote_folder_id=PHOTOS_ID, shard_revision=3,
+            tail=[
+                _op_entry(ts=1_700_000_004, type="vault.delete.completed",
+                          device_id=DEVICE_A, revision=3, path="Photos/b.jpg"),
+            ],
+        )
+        root = _make_root_with_two_folders(root_tail=[])
+        unified = assemble_unified_manifest(
+            root, {DOCS_ID: docs_shard, PHOTOS_ID: photos_shard},
+        )
+        types = [e["type"] for e in unified["operation_log_tail"]]
+        # Sorted by ts ascending: ts=1_700_000_004 (delete) before ts=1_700_000_005 (upload).
+        self.assertEqual(types, ["vault.delete.completed", "vault.upload.completed"])
+
+    def test_tie_break_by_device_id_then_revision(self) -> None:
+        # Two devices both author entries at the same ts; ties resolve
+        # lexicographically by device_id, then by revision.
+        docs_tail = [
+            _op_entry(ts=1, type="vault.upload.completed",
+                      device_id=DEVICE_B, revision=10, path="late"),
+            _op_entry(ts=1, type="vault.upload.completed",
+                      device_id=DEVICE_A, revision=20, path="A second"),
+            _op_entry(ts=1, type="vault.upload.completed",
+                      device_id=DEVICE_A, revision=10, path="A first"),
+        ]
+        docs_shard = _make_shard(
+            remote_folder_id=DOCS_ID, shard_revision=2, tail=docs_tail,
+        )
+        root = _make_root_with_two_folders(root_tail=[])
+        unified = assemble_unified_manifest(root, {DOCS_ID: docs_shard})
+        paths = [e["path"] for e in unified["operation_log_tail"]]
+        # DEVICE_A (a1b2...) < DEVICE_B (b2c3...) lexicographically;
+        # within DEVICE_A revisions ascend 10 then 20.
+        self.assertEqual(paths, ["A first", "A second", "late"])
+
+    def test_missing_shard_contributes_no_entries(self) -> None:
+        # Only Docs is in shards_by_id; Photos pointer exists in root but
+        # the shard is absent (mid-fetch state). Photos contributes nothing.
+        docs_shard = _make_shard(
+            remote_folder_id=DOCS_ID, shard_revision=2,
+            tail=[_op_entry(ts=42, type="vault.upload.completed",
+                            device_id=DEVICE_A, revision=2)],
+        )
+        root = _make_root_with_two_folders(root_tail=[])
+        unified = assemble_unified_manifest(root, {DOCS_ID: docs_shard})
+        self.assertEqual(len(unified["operation_log_tail"]), 1)
+        self.assertEqual(unified["operation_log_tail"][0]["revision"], 2)
+
+    def test_root_and_shard_tails_merge_under_one_sort(self) -> None:
+        # Vault-wide events live on root, file-level on shards. A real
+        # vault has both simultaneously; the unified view must interleave
+        # them by ts so the Activity tab renders chronologically.
+        root_tail = [
+            _op_entry(ts=10, type="vault.grant.created",
+                      device_id=DEVICE_A, revision=4),
+            _op_entry(ts=30, type="vault.vault.cleared",
+                      device_id=DEVICE_A, revision=6),
+        ]
+        docs_shard = _make_shard(
+            remote_folder_id=DOCS_ID, shard_revision=2,
+            tail=[_op_entry(ts=20, type="vault.upload.completed",
+                            device_id=DEVICE_A, revision=2)],
+        )
+        root = _make_root_with_two_folders(root_tail=root_tail)
+        unified = assemble_unified_manifest(root, {DOCS_ID: docs_shard})
+        ts_seq = [e["ts"] for e in unified["operation_log_tail"]]
+        self.assertEqual(ts_seq, [10, 20, 30])
+
+    def test_shard_tail_entries_are_copies(self) -> None:
+        # Mutating the unified output must not bleed back into the shard
+        # the caller passed in — matches the existing entries[] deepcopy.
+        shard_entry = _op_entry(ts=1, type="vault.upload.completed",
+                                device_id=DEVICE_A, revision=2)
+        docs_shard = _make_shard(
+            remote_folder_id=DOCS_ID, shard_revision=2,
+            tail=[shard_entry],
+        )
+        root = _make_root_with_two_folders(root_tail=[])
+        unified = assemble_unified_manifest(root, {DOCS_ID: docs_shard})
+        unified["operation_log_tail"][0]["mutated"] = True
+        self.assertNotIn("mutated", shard_entry)
 
 
 if __name__ == "__main__":
