@@ -1967,7 +1967,7 @@ class FakeUploadRelay:
         vault_id,
         vault_access_secret,
         *,
-        manifest_revision,
+        root_revision,
         candidate_chunk_ids,
         purpose="sync",
     ):
@@ -1981,7 +1981,7 @@ class FakeUploadRelay:
         # ``gc_execute``.
         already_deleted = [c for c in candidate_chunk_ids if c not in self.chunks]
         self.gc_plans[plan_id] = {
-            "manifest_revision": manifest_revision,
+            "root_revision": root_revision,
             "safe_to_delete": safe,
             "purpose": purpose,
         }

@@ -111,7 +111,7 @@ class EvictionRelay(Protocol):
         vault_id: str,
         vault_access_secret: str,
         *,
-        manifest_revision: int,
+        root_revision: int,
         candidate_chunk_ids: list[str],
         purpose: str = "sync",
     ) -> dict[str, Any]: ...
@@ -359,14 +359,16 @@ def _run_stage(
     if batch is None or not batch.chunk_ids:
         return None, manifest
 
-    # Use the unified manifest's revision as the plan-revision marker.
-    # The server tracks gc plans by an opaque manifest_revision; for
-    # the sharded path this is just a freshness anchor.
+    # Use the unified manifest's revision as the plan-freshness anchor.
+    # B5 follow-up (2026-05-19): the production relay's gc_plan takes
+    # ``root_revision=`` — the Protocol previously declared
+    # ``manifest_revision=`` which only matched the test fakes, so
+    # ``eviction_pass`` raised TypeError against the real HTTP relay.
     revision = int(manifest.get("revision", 0))
     plan = relay.gc_plan(
         vault.vault_id,
         vault.vault_access_secret,
-        manifest_revision=revision,
+        root_revision=revision,
         candidate_chunk_ids=list(batch.chunk_ids),
         purpose=purpose,
     )
@@ -893,7 +895,7 @@ def reap_orphan_chunks(
     revision = int(manifest.get("revision", 0))
     plan = relay.gc_plan(
         vault.vault_id, vault.vault_access_secret,
-        manifest_revision=revision,
+        root_revision=revision,
         candidate_chunk_ids=list(orphans),
         purpose="sync",
     )

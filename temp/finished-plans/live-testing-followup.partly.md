@@ -937,3 +937,83 @@ with a floor of 10 so operators can raise the cap on dedicated
 hosts without weakening the §1.H1 throttle. See ADR
 [`2026-05-19 — Vault config knobs`](../../docs/architecture-decisions.md).
 SO-3 (orphan chunks until shard publishes) is by design and stays.
+
+---
+
+## 16. Eviction algorithm walk + EvictionRelay Protocol drift fix (was B5 follow-up)
+
+**Symptom**: with SO-2 now landed (``vaultAuthLimit`` config knob), the
+B5 result writeup's "eviction_pass not exercised against real state"
+gap is unblocked. Driven 2026-05-19 on suite 0005/B5-followup-eviction
+against the same dev-twin harness as §15, this time with
+``vaultAuthLimit=200`` so a full sync cycle (chunk PUTs + batch-head +
+root fetch + shard publish) finishes inside one budget window.
+
+**Cause / Verification**: setup phase confirmed SO-1 wired correctly —
+``Vault.create_new`` against a config-set ``vaultQuotaBytes=8388608``
+landed exactly that value on the new ``vaults`` row's
+``quota_ciphertext_bytes`` column (first live verification, since the
+B5 phase 1 test forced quota via direct SQL). Sync of 5 × 1 MiB
+files completed cleanly: 5 chunks active, 5,243,080 used, root
+revision 3, **zero 429s** — confirming SO-2's premise that the floor-
+protected limit unblocks legitimate sync workloads. Overwriting 3
+files to build multi-version state then partially succeeded (file-1 +
+file-3 uploaded new versions; file-2 hit 507 at the quota boundary
+with ``used=7,340,312 quota=8,388,608``).
+
+State going into the eviction walk: 7 active chunks (5 originals + 2
+new versions), 2 old-version chunks now eligible as eviction
+candidates per the algorithm's "oldest non-current version" rule.
+
+**Bug surfaced**: calling ``eviction_pass`` from a probe script
+raised ``TypeError: VaultHttpRelay.gc_plan() got an unexpected
+keyword argument 'manifest_revision'``. Root cause: the
+``EvictionRelay`` ``Protocol`` in ``desktop/src/vault/ops/eviction.py``
+declared ``gc_plan(*, manifest_revision: int, ...)`` while the
+production ``VaultHttpRelay.gc_plan`` in ``binding/runtime.py``
+actually accepts ``root_revision=``. The two test fakes that backed
+the eviction unit suite matched the **Protocol**, not the
+production class — so every existing eviction test passed
+green while the real HTTP path raised ``TypeError`` on every
+invocation. ``eviction_pass`` had never run against the real relay.
+
+**Fix shape (landed in this same session)**: rename
+``manifest_revision`` → ``root_revision`` across the Protocol +
+both ``gc_plan`` call sites in ``eviction.py`` (eviction stage +
+``reap_orphan_chunks``) + the test fake's parameter + the fake's
+recorded plan dict. All 1113 vault tests stay green; the change is
+purely a kwarg-name realignment with no behavior shift.
+
+**Algorithm walk after fix**: same probe, this time with
+``target_bytes_to_free=1,500,000`` and ``mode="auto"``:
+
+| Metric | Before walk | After walk |
+|---|---|---|
+| ``used_ciphertext_bytes`` | 7,340,312 | **5,243,080** (−2,097,232) |
+| ``current_root_revision`` | 4 | **6** (one bump per stage publish) |
+| Active chunks | 7 | **5** |
+| ``eviction_pass`` result | n/a | ``bytes_freed=2,097,232 chunks_freed=2 target_met=True`` |
+| Stage events | n/a | 2 × ``vault.eviction.auto_purged_oldest`` |
+
+Bytes freed (2,097,232) is exactly 2 × 1,048,616 — both old-version
+chunks purged, matching the algorithm's "oldest non-current versions
+first, one at a time until target met or candidates exhausted"
+contract. Each stage published a fresh shard revision (root went 4 →
+5 → 6).
+
+**Re-drain after eviction**: re-running ``run_backup_only_cycle``
+picked up the stuck file-2.bin op, found space (used + chunk now
+6,291,696 ≤ 8,388,608), and uploaded cleanly. Pending ops queue
+drained to zero. The "507 → eviction → retry succeeds" loop holds
+end-to-end against real state.
+
+**Acceptance**: see assertions inline above. All four phases
+(SO-1 verification, multi-version build, eviction walk, post-purge
+re-drain) succeeded; the Protocol drift bug fix is regression-pinned
+implicitly by the test fakes now matching the production signature.
+
+**Status (2026-05-19)**: **PASS** on ``tresor-vault``. Closes the B5
+follow-up. The §15 GUI eviction dialog drive (alarm + passphrase
+prompt) is still un-driven, but that's an AT-SPI concern, not an
+algorithm one; the destructive purge logic is now proven correct
+against the real HTTP relay.
