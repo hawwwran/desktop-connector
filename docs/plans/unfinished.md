@@ -24,7 +24,28 @@ Threat-model decision is the user's; the leak is real either way. Tracked here s
 
 ---
 
-## 3. Source of truth references
+## 3. §A15 ransomware banner is dead code in the UI
+
+Suite 0007 Test B4 (2026-05-19) ran the live ransomware-detector trip and found that the detector + pause core work as designed (binding flips to `state=paused` within ~1 s of a 100-file rename burst, no tombstone bleed during the paused window), but **none of the §A15 banner copy reaches the user**.
+
+`vault/diagnostics/ransomware_detector.py` exports `BANNER_TITLE = "Suspicious mass change detected"`, `BANNER_BODY = "Vault sync has been paused for this folder. Review changes before uploading."`, and the four §A15 actions `ACTION_REVIEW / ACTION_ROLLBACK / ACTION_RESUME / ACTION_KEEP_PAUSED`. `vault/binding/runtime_watchers.py:248-260` logs the title+body on trip and exposes a `set_ransomware_callback(...)` hook — but no caller anywhere in the tree calls `set_ransomware_callback`. The callback stays `None`, the if-not-None branch is dead, and no UI surface renders the banner copy or the four-action affordance.
+
+What the user sees instead (post-trip, captured via AT-SPI in `temp/automation-tests-results/0007/test-B4/`):
+- The bound folder's sidebar subtitle changes from "backup-only" to "paused" (one word, no explanation).
+- The binding row's "Sync now" button is replaced with a generic "Resume" play-button.
+- That's it — indistinguishable from a user manually clicking the overflow "Pause sync" action.
+
+Threat-model implication: a user returning to a ransomware-hit folder sees only a generic "paused" indicator, likely clicks Resume, and the malicious encrypted blobs immediately flow to the relay as fresh uploads (catch-up scan re-enqueues them as new files), plus tombstones fire for whichever originals were synced before pause — destroying the only safe copies on the relay.
+
+Two resolution paths:
+- **(a) Minimum viable** — wire `set_ransomware_callback` from `tray/vault_submenu.py` (alongside the existing `VaultWatcherRuntime` construction near line 228) to `self.platform.notifications.notify(title=BANNER_TITLE, body=BANNER_BODY)`. ~10 lines; surfaces a notify-send toast on every trip. Doesn't carry the four §A15 actions but gets the user's attention.
+- **(b) Full §A15** — render an `Adw.Banner` on the bound folder's detail pane (or on the Sync safety panel, which is currently a deliberate placeholder) when the binding is paused for a ransomware reason. Requires a new column on `vault_bindings` (e.g. `pause_reason ∈ {user, ransomware}`) since the current schema doesn't preserve why a pause happened; without it the UI can't tell a user-pause from a detector-pause. The four §A15 buttons (Review / Rollback / Resume / Keep paused) land underneath; Resume already exists, Review/Rollback/Keep paused need new lifecycle helpers.
+
+Detailed evidence: [`temp/automation-tests-results/0007/test-B4/result.md`](../../temp/automation-tests-results/0007/test-B4/result.md) Finding 1.
+
+---
+
+## 4. Source of truth references
 
 - **Max-effort review fixes landed:** [`temp/finished-plans/max-review-result.md`](../../temp/finished-plans/max-review-result.md) — every fixed item has a strikethrough heading + commit SHA + Approach paragraph.
 - **Max-effort review fix log:** [`temp/finished-plans/max-review-result-progress.md`](../../temp/finished-plans/max-review-result-progress.md).
