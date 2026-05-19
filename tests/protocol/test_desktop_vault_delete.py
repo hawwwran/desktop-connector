@@ -30,11 +30,13 @@ from src.vault.manifest import (  # noqa: E402
     make_folder_shard,
     make_root_folder_pointer,
     make_root_manifest,
-    restore_file_entry,
     tombstone_file_entry_in_shard,
-    tombstone_files_under,
 )
-from _vault_helpers import entry_in_unified as _entry_in_unified  # noqa: E402
+from _vault_helpers import (  # noqa: E402
+    apply_tombstone_files_under_in_unified as tombstone_files_under,
+    entry_in_unified as _entry_in_unified,
+    restore_in_unified as restore_file_entry,
+)
 from src.vault.upload import upload_file
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402

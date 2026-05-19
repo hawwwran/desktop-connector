@@ -18,6 +18,7 @@ wrapper) without baking the unified shape back into the production
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from typing import Any
@@ -33,6 +34,8 @@ from src.vault.manifest import (  # noqa: E402
     make_folder_shard,
     make_root_folder_pointer,
     make_root_manifest,
+    restore_file_entry_in_shard,
+    tombstone_files_under_in_shard,
 )
 
 
@@ -97,3 +100,74 @@ def empty_single_folder_unified(
         entries=[],
     )
     return assemble_unified_manifest(root, {remote_folder_id: shard})
+
+
+def apply_tombstone_files_under_in_unified(
+    manifest: dict[str, Any],
+    *,
+    remote_folder_id: str,
+    path_prefix: str,
+    deleted_at: str,
+    author_device_id: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Bulk soft-delete (T7.2) against a unified-shape manifest.
+
+    Drop-in replacement for the dropped ``tombstone_files_under`` API:
+    splices entries through ``tombstone_files_under_in_shard`` against
+    the matching folder, then writes the result back into a deepcopy
+    of the unified manifest. Returns ``(manifest, paths_tombstoned)``.
+    """
+    out = copy.deepcopy(manifest)
+    folder = next(
+        (
+            f for f in out.get("remote_folders", []) or []
+            if f.get("remote_folder_id") == remote_folder_id
+        ),
+        None,
+    )
+    if folder is None:
+        raise KeyError(f"remote folder not found: {remote_folder_id}")
+    shard_result, tombstoned = tombstone_files_under_in_shard(
+        folder,
+        path_prefix=path_prefix,
+        deleted_at=deleted_at,
+        author_device_id=author_device_id,
+        folder_retention_policy=folder.get("retention_policy"),
+    )
+    folder["entries"] = shard_result["entries"]
+    return out, tombstoned
+
+
+def restore_in_unified(
+    manifest: dict[str, Any],
+    *,
+    remote_folder_id: str,
+    path: str,
+    new_version: dict[str, Any],
+    author_device_id: str,
+) -> dict[str, Any]:
+    """Restore a tombstoned file (T7.4) against a unified-shape manifest.
+
+    Drop-in replacement for the dropped ``restore_file_entry`` API:
+    splices entries through ``restore_file_entry_in_shard`` against
+    the matching folder, then writes the result back into a deepcopy
+    of the unified manifest.
+    """
+    out = copy.deepcopy(manifest)
+    folder = next(
+        (
+            f for f in out.get("remote_folders", []) or []
+            if f.get("remote_folder_id") == remote_folder_id
+        ),
+        None,
+    )
+    if folder is None:
+        raise KeyError(f"remote folder not found: {remote_folder_id}")
+    shard_result = restore_file_entry_in_shard(
+        folder,
+        path=path,
+        new_version=new_version,
+        author_device_id=author_device_id,
+    )
+    folder["entries"] = shard_result["entries"]
+    return out
