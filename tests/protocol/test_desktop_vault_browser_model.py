@@ -19,7 +19,12 @@ from src.vault.ui.browser_model import (  # noqa: E402
     list_folder,
     list_versions,
 )
-from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
+)
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
     AUTHOR,
@@ -163,33 +168,46 @@ class VaultBrowserListVersionsTests(unittest.TestCase):
 
 
 def _nested_manifest() -> dict:
-    return make_manifest(
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=11,
-        parent_revision=10,
+        root_revision=11,
+        parent_root_revision=10,
         created_at="2026-05-04T10:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T10:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[
-                    _current_entry("readme.txt", "fv_v1_bbbbbbbbbbbbbbbbbbbbbbbb", 512),
-                    _current_entry("Invoices/2026/report.pdf", "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa", 2048),
-                    _deleted_entry("Invoices/2025/old.pdf"),
-                ],
             ),
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=PHOTOS_ID,
                 display_name_enc="Photos",
                 created_at="2026-05-04T10:01:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             ),
         ],
     )
+    docs_shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at="2026-05-04T10:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=[
+            _current_entry("readme.txt", "fv_v1_bbbbbbbbbbbbbbbbbbbbbbbb", 512),
+            _current_entry("Invoices/2026/report.pdf", "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa", 2048),
+            _deleted_entry("Invoices/2025/old.pdf"),
+        ],
+    )
+    photos_shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=PHOTOS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at="2026-05-04T10:01:00.000Z",
+        author_device_id=AUTHOR,
+        entries=[],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: docs_shard, PHOTOS_ID: photos_shard})
 
 
 def _current_entry(path: str, version_id: str, logical_size: int) -> dict:
@@ -256,47 +274,54 @@ def _versioned_manifest() -> dict:
             "author_device_id": AUTHOR,
         },
     ]
-    return make_manifest(
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=12,
-        parent_revision=11,
+        root_revision=12,
+        parent_root_revision=11,
         created_at="2026-05-04T10:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T10:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[
-                    {
-                        "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
-                        "path": "report.pdf",
-                        "type": "file",
-                        "deleted": False,
-                        "latest_version_id": "fv_v1_cccccccccccccccccccccccc",
-                        "versions": versions,
-                    },
-                    {
-                        "entry_id": "fe_v1_bbbbbbbbbbbbbbbbbbbbbbbb",
-                        "path": "Invoices/2025/old.pdf",
-                        "type": "file",
-                        "deleted": True,
-                        "latest_version_id": "fv_v1_dddddddddddddddddddddddd",
-                        "versions": [{
-                            "version_id": "fv_v1_dddddddddddddddddddddddd",
-                            "created_at": "2025-12-01T08:00:00.000Z",
-                            "modified_at": "2025-12-01T07:58:00.000Z",
-                            "logical_size": 64,
-                            "ciphertext_size": 88,
-                            "chunks": [],
-                            "author_device_id": AUTHOR,
-                        }],
-                    },
-                ],
             ),
         ],
     )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at="2026-05-04T10:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=[
+            {
+                "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                "path": "report.pdf",
+                "type": "file",
+                "deleted": False,
+                "latest_version_id": "fv_v1_cccccccccccccccccccccccc",
+                "versions": versions,
+            },
+            {
+                "entry_id": "fe_v1_bbbbbbbbbbbbbbbbbbbbbbbb",
+                "path": "Invoices/2025/old.pdf",
+                "type": "file",
+                "deleted": True,
+                "latest_version_id": "fv_v1_dddddddddddddddddddddddd",
+                "versions": [{
+                    "version_id": "fv_v1_dddddddddddddddddddddddd",
+                    "created_at": "2025-12-01T08:00:00.000Z",
+                    "modified_at": "2025-12-01T07:58:00.000Z",
+                    "logical_size": 64,
+                    "ciphertext_size": 88,
+                    "chunks": [],
+                    "author_device_id": AUTHOR,
+                }],
+            },
+        ],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
 
 
 class BrowserIndexTests(unittest.TestCase):
@@ -386,7 +411,11 @@ class DecryptManifestSplitTests(unittest.TestCase):
             derive_subkey, normalize_vault_id,
         )
         from src.vault.manifest import (
-            canonical_manifest_json, make_manifest, make_remote_folder,
+            assemble_unified_manifest as _assemble,
+            canonical_manifest_json,
+            make_folder_shard as _make_shard,
+            make_root_folder_pointer as _make_pointer,
+            make_root_manifest as _make_root,
             normalize_manifest_plaintext,
         )
         from src.vault.ui.browser_model import (
@@ -401,20 +430,28 @@ class DecryptManifestSplitTests(unittest.TestCase):
                 self.master_key = master_key
                 self.vault_id = "ABCD2345WXYZ"
 
-        manifest = make_manifest(
-            vault_id="ABCD2345WXYZ", revision=1, parent_revision=0,
+        rf_id = "rf_v1_" + "a" * 24
+        root = _make_root(
+            vault_id="ABCD2345WXYZ", root_revision=1, parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z",
             author_device_id="a" * 32,
             remote_folders=[
-                make_remote_folder(
-                    remote_folder_id="rf_v1_" + "a" * 24,
+                _make_pointer(
+                    remote_folder_id=rf_id,
                     display_name_enc="Documents",
                     created_at="2026-05-04T12:00:00.000Z",
                     created_by_device_id="a" * 32,
-                    entries=[],
                 )
             ],
         )
+        shard = _make_shard(
+            vault_id="ABCD2345WXYZ", remote_folder_id=rf_id,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id="a" * 32,
+            entries=[],
+        )
+        manifest = _assemble(root, {rf_id: shard})
         # Build a legacy (dc-vault-manifest-v1) envelope under the
         # legacy HKDF label — what older export bundles carried.
         normalized = normalize_manifest_plaintext(manifest)
