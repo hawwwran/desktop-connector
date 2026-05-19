@@ -203,13 +203,18 @@ def merge_timeline(
             if normalised is not None:
                 out.append(normalised)
 
-    # F-509: dedup key drops display_path so an audit-event row
-    # (no plaintext path) and an op-log entry (with the plaintext
-    # path) collapse to a single row. The collision resolver picks
-    # whichever row carries the richer summary + path.
-    bucketed: dict[tuple[int, str, str], ActivityRow] = {}
+    # Dedup key includes ``display_path`` so two distinct file ops in the
+    # same wall-clock second from one device (a batch upload of two
+    # files lands both entries with identical ``ts``) render as two
+    # rows, not one. F-509 originally dropped path so an audit-event
+    # row (no plaintext path) could merge with an op-log entry — but
+    # F-S16 retired the server-side audit table, so op-log entries
+    # (which always carry path for file events) are now the sole
+    # source. Suite 0006 caught this with a 2-file batch upload that
+    # rendered as a single row.
+    bucketed: dict[tuple[int, str, str, str], ActivityRow] = {}
     for r in out:
-        key = (r.timestamp_epoch, r.event_type, r.device_id)
+        key = (r.timestamp_epoch, r.event_type, r.device_id, r.display_path)
         prior = bucketed.get(key)
         if prior is None:
             bucketed[key] = r
