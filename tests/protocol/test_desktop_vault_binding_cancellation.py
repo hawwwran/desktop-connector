@@ -43,7 +43,12 @@ from src.vault.binding.twoway import run_two_way_cycle  # noqa: E402
 from src.vault.binding.bindings import VaultBindingsStore  # noqa: E402
 from src.vault.state.local_index import VaultLocalIndex  # noqa: E402
 from src.vault.crypto import DefaultVaultCrypto  # noqa: E402
-from src.vault.manifest import make_manifest, make_remote_folder  # noqa: E402
+from src.vault.manifest import (  # noqa: E402
+    assemble_unified_manifest,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
+)
 from src.vault.upload import upload_file  # noqa: E402
 
 from tests.protocol.test_desktop_vault_manifest import (  # noqa: E402
@@ -120,17 +125,23 @@ class UploadFileCancellationTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _seeded_relay(self) -> tuple[FakeUploadRelay, dict]:
-        manifest = make_manifest(
-            vault_id=VAULT_ID, revision=1, parent_revision=0,
+        root = make_root_manifest(
+            vault_id=VAULT_ID, root_revision=1, parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z", author_device_id=AUTHOR,
-            remote_folders=[make_remote_folder(
+            remote_folders=[make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             )],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z", author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: shard})
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -231,17 +242,23 @@ class BackupOnlyCycleCancellationTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _empty_remote(self) -> tuple[FakeUploadRelay, dict]:
-        manifest = make_manifest(
-            vault_id=VAULT_ID, revision=1, parent_revision=0,
+        root = make_root_manifest(
+            vault_id=VAULT_ID, root_revision=1, parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z", author_device_id=AUTHOR,
-            remote_folders=[make_remote_folder(
+            remote_folders=[make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             )],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z", author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: shard})
         relay = FakeUploadRelay()
         vault = _vault()
         try:
@@ -377,17 +394,23 @@ class TwoWayCycleCancellationTests(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _empty_remote(self) -> tuple[FakeUploadRelay, dict]:
-        manifest = make_manifest(
-            vault_id=VAULT_ID, revision=1, parent_revision=0,
+        root = make_root_manifest(
+            vault_id=VAULT_ID, root_revision=1, parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z", author_device_id=AUTHOR,
-            remote_folders=[make_remote_folder(
+            remote_folders=[make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             )],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z", author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: shard})
         relay = FakeUploadRelay()
         vault = _vault()
         try:
