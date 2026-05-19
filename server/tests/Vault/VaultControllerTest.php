@@ -26,6 +26,8 @@ use PHPUnit\Framework\TestCase;
 #[RunTestsInSeparateProcesses]
 final class VaultControllerTest extends TestCase
 {
+    use ConfigOverrideTrait;
+
     private string $dbPath;
     private string $storageRoot;
     private Database $db;
@@ -361,41 +363,30 @@ final class VaultControllerTest extends TestCase
         $this->db->execute('DELETE FROM vault_folder_shards');
         $this->db->execute('DELETE FROM vault_folder_shard_heads');
 
-        $configPath = __DIR__ . '/../../data/config.json';
-        $backup = is_file($configPath) ? file_get_contents($configPath) : null;
-        try {
-            file_put_contents($configPath, json_encode([
-                'vaultQuotaBytes' => 4 * 1024 * 1024,   // 4 MiB
-            ]));
-            Config::flush();
-
-            $body = [
-                'vault_id'                => self::VAULT_ID_DASHED,
-                'vault_access_token_hash' => base64_encode(hash('sha256', 'sized-secret', true)),
-                'encrypted_header'        => base64_encode($this->headerEnvelope(1)),
-                'header_hash'             => self::HEADER_HASH,
-                'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
-                'initial_root_hash'       => self::ROOT_HASH,
-            ];
-            $res = $this->invoke(fn() => VaultController::create(
-                $this->db, $this->jctx('POST', [], $body)
-            ));
-            self::assertSame(201, $res['status']);
-            self::assertSame(
-                4 * 1024 * 1024,
-                $res['json']['data']['quota_ciphertext_bytes'],
-                'configured vaultQuotaBytes must land on the freshly-minted vault row'
-            );
-            $row = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
-            self::assertSame(4 * 1024 * 1024, (int)$row['quota_ciphertext_bytes']);
-        } finally {
-            if ($backup === null) {
-                @unlink($configPath);
-            } else {
-                file_put_contents($configPath, $backup);
-            }
-            Config::flush();
-        }
+        $this->withConfigOverride(
+            ['vaultQuotaBytes' => 4 * 1024 * 1024],   // 4 MiB
+            function (): void {
+                $body = [
+                    'vault_id'                => self::VAULT_ID_DASHED,
+                    'vault_access_token_hash' => base64_encode(hash('sha256', 'sized-secret', true)),
+                    'encrypted_header'        => base64_encode($this->headerEnvelope(1)),
+                    'header_hash'             => self::HEADER_HASH,
+                    'initial_root_ciphertext' => base64_encode($this->rootEnvelope(1, 0)),
+                    'initial_root_hash'       => self::ROOT_HASH,
+                ];
+                $res = $this->invoke(fn() => VaultController::create(
+                    $this->db, $this->jctx('POST', [], $body)
+                ));
+                self::assertSame(201, $res['status']);
+                self::assertSame(
+                    4 * 1024 * 1024,
+                    $res['json']['data']['quota_ciphertext_bytes'],
+                    'configured vaultQuotaBytes must land on the freshly-minted vault row'
+                );
+                $row = (new VaultsRepository($this->db))->getById(self::VAULT_ID);
+                self::assertSame(4 * 1024 * 1024, (int)$row['quota_ciphertext_bytes']);
+            },
+        );
     }
 
     public function test_create_returns_409_vault_already_exists(): void

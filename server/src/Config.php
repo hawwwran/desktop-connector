@@ -66,6 +66,11 @@ class Config
      *  repeated file reads in hot paths. Reset via ::flush() if needed. */
     private static ?array $cached = null;
 
+    /** Once-per-request flag so the clamp warning fires at most once
+     *  per request even if ``vaultAuthLimit()`` is called many times
+     *  (every chunk PUT). Reset by ::flush() so tests can re-arm it. */
+    private static bool $vaultAuthLimitClampLogged = false;
+
     public static function get(string $key): mixed
     {
         $data = self::load();
@@ -139,11 +144,30 @@ class Config
      *  raise the cap on dedicated hosts (B5 SO-2: legitimate sync
      *  workloads bill an auth attempt per chunk PUT and exceed 10/min)
      *  but a config typo can never lower it below the original §1.H1
-     *  design. */
+     *  design. Emits ``config.vaultAuthLimit.clamped`` to AppLog at
+     *  warning level the first time a sub-floor configured value is
+     *  observed within a request — silent clamping would let an
+     *  operator think they tightened the throttle while it actually
+     *  stayed at 10. */
     public static function vaultAuthLimit(): int
     {
         $raw = self::get('vaultAuthLimit');
         $value = is_numeric($raw) ? (int)$raw : 0;
+        if ($value > 0 && $value < self::VAULT_AUTH_LIMIT_FLOOR && !self::$vaultAuthLimitClampLogged) {
+            self::$vaultAuthLimitClampLogged = true;
+            if (class_exists('AppLog')) {
+                AppLog::log(
+                    'config.vaultAuthLimit.clamped',
+                    sprintf(
+                        'configured=%d floor=%d effective=%d',
+                        $value,
+                        self::VAULT_AUTH_LIMIT_FLOOR,
+                        self::VAULT_AUTH_LIMIT_FLOOR,
+                    ),
+                    'warning',
+                );
+            }
+        }
         return max(self::VAULT_AUTH_LIMIT_FLOOR, $value);
     }
 
@@ -155,6 +179,7 @@ class Config
     public static function flush(): void
     {
         self::$cached = null;
+        self::$vaultAuthLimitClampLogged = false;
     }
 
     private static function load(): array

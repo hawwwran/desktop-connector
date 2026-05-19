@@ -15,6 +15,9 @@ require_once $root . '/src/Database.php';
 require_once $root . '/src/Config.php';
 require_once $root . '/src/AppLog.php';
 
+// Test-only support traits.
+require_once $root . '/tests/Support/ConfigOverrideTrait.php';
+
 // Http pipeline (errors first — auth services raise from these).
 require_once $root . '/src/Http/RequestContext.php';
 require_once $root . '/src/Http/ApiError.php';

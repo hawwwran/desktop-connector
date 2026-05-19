@@ -19,6 +19,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class VaultAuthServiceTest extends TestCase
 {
+    use ConfigOverrideTrait;
+
     private string $dbPath;
     private Database $db;
     private VaultsRepository $vaultsRepo;
@@ -333,11 +335,7 @@ final class VaultAuthServiceTest extends TestCase
      */
     public function test_configured_vault_auth_limit_raises_cap_above_floor(): void
     {
-        $configPath = __DIR__ . '/../../data/config.json';
-        $backup = is_file($configPath) ? file_get_contents($configPath) : null;
-        try {
-            file_put_contents($configPath, json_encode(['vaultAuthLimit' => 15]));
-            Config::flush();
+        $this->withConfigOverride(['vaultAuthLimit' => 15], function (): void {
             self::assertSame(15, Config::vaultAuthLimit());
 
             $this->setValidDeviceAuth();
@@ -352,14 +350,7 @@ final class VaultAuthServiceTest extends TestCase
             } catch (VaultRateLimitedError $e) {
                 self::assertSame(429, $e->status);
             }
-        } finally {
-            if ($backup === null) {
-                @unlink($configPath);
-            } else {
-                file_put_contents($configPath, $backup);
-            }
-            Config::flush();
-        }
+        });
     }
 
     /**
@@ -370,32 +361,48 @@ final class VaultAuthServiceTest extends TestCase
      */
     public function test_vault_auth_limit_below_floor_clamped_to_ten(): void
     {
-        $configPath = __DIR__ . '/../../data/config.json';
-        $backup = is_file($configPath) ? file_get_contents($configPath) : null;
+        // Snapshot + truncate the on-disk server.log so we can assert the
+        // clamp warning fires exactly once per request (not per-attempt)
+        // even though Config::vaultAuthLimit() runs in every
+        // requireVaultAuth call.
+        $logPath = __DIR__ . '/../../data/logs/server.log';
+        $logBackup = is_file($logPath) ? file_get_contents($logPath) : null;
+        if (is_file($logPath)) {
+            file_put_contents($logPath, '');
+        }
         try {
-            file_put_contents($configPath, json_encode(['vaultAuthLimit' => 2]));
-            Config::flush();
-            self::assertSame(10, Config::vaultAuthLimit(),
-                'configured value below floor must be clamped to VAULT_AUTH_LIMIT_FLOOR');
+            $this->withConfigOverride(['vaultAuthLimit' => 2], function (): void {
+                self::assertSame(10, Config::vaultAuthLimit(),
+                    'configured value below floor must be clamped to VAULT_AUTH_LIMIT_FLOOR');
 
-            $this->setValidDeviceAuth();
-            $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . self::VAULT_SECRET;
-            for ($i = 0; $i < 10; $i++) {
-                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
-            }
-            try {
-                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
-                self::fail('expected 429 on attempt 11 — floor must hold even with config=2');
-            } catch (VaultRateLimitedError $e) {
-                self::assertSame(429, $e->status);
-            }
+                $this->setValidDeviceAuth();
+                $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . self::VAULT_SECRET;
+                for ($i = 0; $i < 10; $i++) {
+                    VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+                }
+                try {
+                    VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+                    self::fail('expected 429 on attempt 11 — floor must hold even with config=2');
+                } catch (VaultRateLimitedError $e) {
+                    self::assertSame(429, $e->status);
+                }
+            });
+
+            // The clamp warning must have fired exactly once. Each
+            // requireVaultAuth call invokes Config::vaultAuthLimit(),
+            // so without the once-per-request flag we'd see 11+ lines.
+            $logContents = is_file($logPath) ? file_get_contents($logPath) : '';
+            $matches = preg_match_all('/config\.vaultAuthLimit\.clamped/', $logContents);
+            self::assertSame(1, $matches,
+                "clamp warning should fire exactly once per request, got {$matches} occurrences");
+            self::assertStringContainsString('configured=2', $logContents);
+            self::assertStringContainsString('floor=10', $logContents);
         } finally {
-            if ($backup === null) {
-                @unlink($configPath);
-            } else {
-                file_put_contents($configPath, $backup);
+            if ($logBackup !== null) {
+                file_put_contents($logPath, $logBackup);
+            } elseif (is_file($logPath)) {
+                @unlink($logPath);
             }
-            Config::flush();
         }
     }
 

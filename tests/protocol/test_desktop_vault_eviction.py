@@ -642,6 +642,59 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertTrue(trash_entry["deleted"], "newer tombstone should still be present")
 
 
+class EvictionRelayProtocolAlignmentTests(unittest.TestCase):
+    """Regression — Protocol vs production-class signature drift.
+
+    Catches the bug fixed in commit ``ee7c08f`` (B5 follow-up,
+    2026-05-19): the ``EvictionRelay`` Protocol in
+    ``vault/ops/eviction.py`` declared ``gc_plan(*, manifest_revision=)``
+    while the production ``VaultHttpRelay.gc_plan`` in
+    ``binding/runtime.py`` actually accepted ``root_revision=``. Test
+    fakes matched the (incorrect) Protocol so every existing eviction
+    test passed green, but the real HTTP path raised TypeError on
+    every invocation. The full algorithm only became observable when
+    the B5 live test drove it against a real PHP relay.
+
+    These tests pin the Protocol against the production class via
+    ``inspect.signature`` so a future rename can't reintroduce the
+    same class of bug.
+    """
+
+    def _protocol_kwargs(self, method) -> set[str]:
+        import inspect
+        return {
+            name for name, param in inspect.signature(method).parameters.items()
+            if param.kind in (
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        }
+
+    def _check_method_alignment(self, method_name: str) -> None:
+        """Protocol.method kwargs must be a subset of the production class's kwargs."""
+        from src.vault.binding.runtime import VaultHttpRelay
+        from src.vault.ops.eviction import EvictionRelay
+
+        proto_kwargs = self._protocol_kwargs(getattr(EvictionRelay, method_name))
+        real_kwargs = self._protocol_kwargs(getattr(VaultHttpRelay, method_name))
+        missing = proto_kwargs - real_kwargs
+        self.assertSetEqual(
+            missing, set(),
+            f"EvictionRelay.{method_name} declares kwargs the real "
+            f"VaultHttpRelay.{method_name} doesn't accept: {missing}. "
+            f"Production signature has: {real_kwargs}",
+        )
+
+    def test_gc_plan_protocol_matches_real_relay(self) -> None:
+        self._check_method_alignment("gc_plan")
+
+    def test_gc_execute_protocol_matches_real_relay(self) -> None:
+        self._check_method_alignment("gc_execute")
+
+    def test_list_chunks_protocol_matches_real_relay(self) -> None:
+        self._check_method_alignment("list_chunks")
+
+
 def _vault() -> Vault:
     return Vault(
         vault_id=VAULT_ID,
