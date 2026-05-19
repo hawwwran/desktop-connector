@@ -57,7 +57,11 @@ from src.vault.crypto import (  # noqa: E402
     derive_content_fingerprint_key, make_content_fingerprint,
 )
 from src.vault.manifest import (  # noqa: E402
-    assemble_unified_manifest, find_file_entry, make_manifest, make_remote_folder,
+    assemble_unified_manifest,
+    find_file_entry_in_shard,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
 )
 from src.vault.upload import upload_file  # noqa: E402
 
@@ -181,20 +185,27 @@ class MultiDeviceH7Tests(unittest.TestCase):
         # Build the shared "remote" by publishing an empty manifest from
         # one ephemeral vault — that's how the existing T10.5 / T12.1
         # tests bootstrap a usable FakeUploadRelay.
-        manifest = make_manifest(
-            vault_id=VAULT_ID, revision=1, parent_revision=0,
+        root = make_root_manifest(
+            vault_id=VAULT_ID, root_revision=1, parent_root_revision=0,
             created_at="2026-05-04T12:00:00.000Z",
             author_device_id=AUTHOR,
             remote_folders=[
-                make_remote_folder(
+                make_root_folder_pointer(
                     remote_folder_id=DOCS_ID,
                     display_name_enc="Documents",
                     created_at="2026-05-04T12:00:00.000Z",
                     created_by_device_id=AUTHOR,
-                    entries=[],
                 ),
             ],
         )
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
+            author_device_id=AUTHOR,
+            entries=[],
+        )
+        manifest = assemble_unified_manifest(root, {DOCS_ID: shard})
         self.relay = FakeUploadRelay()
         bootstrap = _make_vault()
         try:
@@ -275,7 +286,8 @@ class MultiDeviceH7Tests(unittest.TestCase):
         b.backup_only_cycle(self.relay)
 
         head = self._decrypt_head()
-        entry = find_file_entry(head, DOCS_ID, "notes.txt")
+        folder = next((f for f in head["remote_folders"] if f["remote_folder_id"] == DOCS_ID), {})
+        entry = find_file_entry_in_shard(folder, "notes.txt")
         self.assertIsNotNone(entry)
         versions = entry.get("versions", []) or []
         # Both versions present in versions[].
@@ -353,7 +365,8 @@ class MultiDeviceH7Tests(unittest.TestCase):
         )
 
         head = self._decrypt_head()
-        entry = find_file_entry(head, DOCS_ID, "shared.txt")
+        folder = next((f for f in head["remote_folders"] if f["remote_folder_id"] == DOCS_ID), {})
+        entry = find_file_entry_in_shard(folder, "shared.txt")
         self.assertFalse(bool(entry.get("deleted")),
                          "B's re-upload should clear the tombstone")
         self.assertGreaterEqual(len(entry.get("versions", []) or []), 2)
@@ -394,7 +407,8 @@ class MultiDeviceH7Tests(unittest.TestCase):
             ("from-b.txt", b"beta"),
             ("from-c.txt", b"gamma"),
         ]:
-            entry = find_file_entry(head, DOCS_ID, path)
+            folder = next((f for f in head["remote_folders"] if f["remote_folder_id"] == DOCS_ID), {})
+            entry = find_file_entry_in_shard(folder, path)
             self.assertIsNotNone(entry, f"{path} missing from remote")
             self.assertFalse(bool(entry.get("deleted")))
             # Deterministic id check: the manifest's latest_version_id is
