@@ -91,11 +91,11 @@ Last updated: 2026-05-18.
 
 ## Partial work / time-budget overruns
 
-### Live tests B2, B5, B4, B1 — deferred from the plan's Step 2–6
+### Live tests B2, B4, B1 — deferred from the plan's Step 2–6
 
-**Why skipped:** Step 1 (the §3.5 test-fixture sweep across 22 files + final helper drop = 23 commits) consumed the bulk of the session budget. Doing five live tests across the remainder reliably enough to write up trustworthy findings was a higher risk than skipping them cleanly with concrete pickup recipes. (B3 already landed 2026-05-19 — see [`temp/finished-plans/skipped-while-autonomous.partly.md`](../../temp/finished-plans/skipped-while-autonomous.partly.md).)
+**Why skipped:** Step 1 (the §3.5 test-fixture sweep across 22 files + final helper drop = 23 commits) consumed the bulk of the session budget. Doing five live tests across the remainder reliably enough to write up trustworthy findings was a higher risk than skipping them cleanly with concrete pickup recipes. (B3 landed 2026-05-19 — see [`temp/finished-plans/skipped-while-autonomous.partly.md`](../../temp/finished-plans/skipped-while-autonomous.partly.md). B5 landed 2026-05-19 as partial PASS — see [`temp/finished-plans/live-testing-followup.partly.md`](../../temp/finished-plans/live-testing-followup.partly.md) §15.)
 
-Each live test below has a self-contained run recipe so a follow-up 1–2-hour session can pick it up without re-deriving context. Order is the original plan order (B2 → B5 → B4 → B1).
+Each live test below has a self-contained run recipe so a follow-up 1–2-hour session can pick it up without re-deriving context. Order is the original plan order (B2 → B4 → B1).
 
 #### B2 — Debug bundle leak scan on a real install
 
@@ -124,32 +124,6 @@ DC_ALLOW_MULTI_INSTANCE=1 python3 -m src.main --config-dir=~/.config/desktop-con
 5. Verify ZIP contents: should include `config.redacted.json`, `index_schema.txt`, `binding_states.json`, `activity_tail.txt`, `manifest_summary.json`. No `keys/`, `history.json`, `recovery_kit.bin`, or raw `config.json`.
 
 **Write up as the next §N in [`temp/finished-plans/live-testing-followup.partly.md`](../../temp/finished-plans/live-testing-followup.partly.md).** Status field: `done` if zero real-secret leaks, `partial — leaks at <file>` otherwise (then file follow-up entries here).
-
-#### B5 — Eviction under quota pressure live test
-
-**Status:** not run. The §3.C1 eviction implementation landed 2026-05-18 (`vault/ops/eviction.py`); unit coverage is in `tests/protocol/test_desktop_vault_eviction.py`. Live test stresses the full upload+alarm+purge cycle against a real low-quota relay.
-
-**Setup recipe:**
-```bash
-# Edit relay A's config to set a tiny quota.
-cat > server/data/config.json <<EOF
-{ "vaultQuotaBytes": 4194304 }
-EOF
-# Restart relay A so the new config takes effect.
-kill $(cat /tmp/relay-a.pid) 2>/dev/null
-php -S 127.0.0.1:4441 -t server/public/ > server/data/logs/relay-a.log 2>&1 &
-echo $! > /tmp/relay-a.pid
-```
-
-**Test flow:**
-1. On the dev twin, bind a folder with 5 files of 1 MiB each. Confirm all 5 land (relay quota now nearly full).
-2. Add a 6th 1 MiB file to the folder. Watch for the eviction alarm dialog (passphrase prompt).
-3. Enter the dev twin passphrase. Eviction should purge the oldest file's chunks (look for `vault.eviction.alarm_purged_oldest` in `vault.log`).
-4. Verify the Activity tab shows the eviction as a destructive event.
-5. Use Vault Browser → "Show deleted" toggle to verify the evicted file surfaces as a tombstone.
-6. Confirm restore works: pick a tombstone → Restore → file content reappears (chunk dedup means no re-upload).
-
-**Write up as the next §N in [`temp/finished-plans/live-testing-followup.partly.md`](../../temp/finished-plans/live-testing-followup.partly.md).**
 
 #### B4 — Ransomware detector trip live test
 

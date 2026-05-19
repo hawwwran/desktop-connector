@@ -865,3 +865,67 @@ Findings worth a follow-up:
   (a) configurable rate limits, (b) `time.sleep(60)` between phases,
   or (c) load-balancing API calls across multiple registered
   devices for the same vault. Filed as a follow-up; not on v1.
+
+---
+
+## 15. Eviction under quota pressure — server emission verified, GUI flow deferred (was B5)
+
+**Symptom**: B5 in the backlog ("Fill the relay quota, observe the
+desktop's eviction pass during upload, verify the right versions get
+culled"). Driven 2026-05-19 on suite 0005; full result writeup at
+`temp/automation-tests-results/0005/B5-eviction/result.md`.
+
+**Cause / Verification**: clean dev twin against `php -S` relay,
+vault `DMVT2PG6PLC3` with 1 folder + 5 × 1 MiB random files in a
+backup-only binding. Quota forced to 4 194 304 bytes via direct
+`UPDATE vaults SET quota_ciphertext_bytes = …` (the
+`vaultQuotaBytes` config key the recipe relied on turned out to be
+dead code — see SO-1 below).
+
+| Phase | Setup | What the server emitted | Client triage path |
+|---|---|---|---|
+| Phase 1 (auto-purge boundary, no candidates) | quota=4 MiB, 5 fresh files | **HTTP 507** `used=3145848 quota=4194304` after 3 chunks landed | `describe_quota_exceeded → alarm=False, eviction_available=False` → "Vault is full and no backup history remains" terminal banner |
+| Phase 2 (alarm condition) | quota lowered to 2 MiB after step 1 | **HTTP 507** `used=3145848 quota=2097152` | `→ alarm=True` → "Vault quota was reduced — approve cleanup" passphrase dialog |
+| Phase 3 (synthetic eviction-available) | probe-only, no relay call | `eviction_available=True` | `→ alarm=False, eviction_available=True` → "Vault is full — making space" silent auto-purge |
+
+Server emission + client-side triage (`describe_quota_exceeded`)
+cover all three UX routes correctly. Each 507 logged
+``vault.sync.upload_quota_exceeded binding=… path=… used=N quota=N``
+on the client; the alarm-condition emit carried `used > quota`
+verbatim, so no quota-shrink-specific code is needed on the server.
+
+**Three side observations** (none block B5 PASS):
+
+1. **SO-1 — `vaultQuotaBytes` config key is dead code.**
+   `server/data/config.json`'s `vaultQuotaBytes` is referenced by
+   `CLAUDE.md` and `skipped-while-autonomous.md` but **never read by
+   server code**. `VaultsRepository::create` issues an `INSERT INTO
+   vaults` that omits the quota column; rows fall through to the
+   schema default at `migrations/002_vault.sql:31` —
+   `DEFAULT 1073741824` (1 GB). The recipe + CLAUDE.md need
+   updating, or the config key needs wiring into the create path.
+2. **SO-2 — AUTH_LIMIT=10/(device,vault)/min blocks live eviction
+   workflows.** A single 5-file sync trips the limit before the
+   batch-end shard publish lands (batch-head + root fetch + chunk
+   PUTs + shard publish = >10 calls). Each retry replays into the
+   same wall. Same gap §14's migration test flagged; a
+   `vaultAuthLimit` config knob would unblock both.
+3. **SO-3 — Chunks land before shard publishes; failed publish
+   orphans them.** Phase 1's 3 successful chunk PUTs sat orphaned
+   on the relay because the shard-with-root publish 429'd. Expected
+   behaviour of the SO-3-batched publish design — chunks are
+   idempotent and HEAD-deflated on retry, §4.M1 orphan reaper
+   sweeps eventually — but means `eviction_pass` can't be
+   exercised against real state until at least one sync cycle
+   completes through to a published shard.
+
+**Acceptance**: see the result writeup. The two un-driven items —
+full GUI eviction flow + `eviction_pass` against live state —
+require either AT-SPI driving (alarm dialog, passphrase prompt) or
+SO-2 untied (so a sync completes through the shard publish).
+
+**Status (2026-05-19)**: **partial PASS** on `tresor-vault`. Server
+emission + client triage logic verified end-to-end. GUI dialog
+drive + algorithm walk filed as follow-ups; recipe in
+`docs/plans/skipped-while-autonomous.md` needs the SO-1 / SO-2
+caveats added.

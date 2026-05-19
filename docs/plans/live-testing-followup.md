@@ -16,7 +16,7 @@ Migrated 2026-05-15 from the archived [`temp/finished-plans/post-breakup-followu
 
 Ordered by priority (2026-05-16). Tier 1 = exercises core daily flows that block real use if broken. Tier 2 = silent-data-loss risk if a correctness path misbehaves. Tier 3 = ops/support/edge-case flows that matter but aren't day-one blockers. Identifiers descend down the list: **B6 is highest priority, B1 is lowest**.
 
-Closed so far: B8 (resume-after-kill — partly §12), B7 (large folder bind — partly §13), B3 (migration genesis-leg — partly §14). Wrong-passphrase rate-limit closed as partly §7 on 2026-05-12 (the protection is Argon2id-intrinsic; ADR at [`docs/architecture-decisions.md#2026-05-12`](../architecture-decisions.md)).
+Closed so far: B8 (resume-after-kill — partly §12), B7 (large folder bind — partly §13), B3 (migration genesis-leg — partly §14), B5 (eviction — partly §15, partial PASS). Wrong-passphrase rate-limit closed as partly §7 on 2026-05-12 (the protection is Argon2id-intrinsic; ADR at [`docs/architecture-decisions.md#2026-05-12`](../architecture-decisions.md)).
 
 ### Tier 1 — core daily flows
 
@@ -25,8 +25,8 @@ Closed so far: B8 (resume-after-kill — partly §12), B7 (large folder bind —
 ### Tier 2 — silent data-loss risk
 
 - **B6 — Concurrent edits with binding sync.** Edit the same file on both devices between syncs; verify the conflict-rename path (`vault/binding/twoway.py`) produces predictable output and the Activity tab logs both branches. Highest-frequency data-loss vector.
-- **B5 — Eviction under quota pressure.** Fill the relay quota, observe the desktop's eviction pass during upload, verify the right versions get culled (and that "Show deleted" surfaces them). Wrong eviction picks = silent version loss.
 - **B4 — Ransomware detector trip.** Simulate a mass-rewrite event in a bound folder; verify `vault/binding/ransomware_detector.py` pauses sync and surfaces the warning. Last-line safety net against worst-case cloud-replication of ransomware damage.
+- **B5 follow-up — full GUI eviction flow + `eviction_pass` walk.** Genesis 507 emission + triage routing closed as partly §15 (PARTIAL PASS); the alarm-dialog passphrase prompt + actual destructive purge step needs AT-SPI driving of the Vault Browser, and `eviction_pass` against real state needs SO-2 (auth limit) untied so a sync completes through the shard publish.
 
 ### Tier 3 — ops / support / edge cases
 
