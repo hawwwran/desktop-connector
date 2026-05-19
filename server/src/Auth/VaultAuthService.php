@@ -33,14 +33,20 @@ class VaultAuthService
         'admin'          => 4,
     ];
 
-    // Review §1.H1 — protocol §10 rate limits. Hardcoded here rather
-    // than in Config so a deployer can't accidentally widen them via
-    // a config typo; the values are tight enough that legitimate
-    // clients never hit them (a real user retries auth maybe 2-3
-    // times on a typed passphrase) and just lax enough to allow a
-    // brief network-flake retry storm.
+    // Review §1.H1 — protocol §10 rate limits. The window sizes +
+    // CREATE_LIMIT stay hardcoded so a config typo can't widen them.
+    //
+    // ``AUTH_LIMIT`` was hardcoded at 10 / minute on the same theory
+    // until the B5 live test (2026-05-19) showed legitimate sync
+    // workloads bill an auth attempt per chunk PUT and easily exceed
+    // 10 in a single drain cycle. The floor-protected
+    // ``Config::vaultAuthLimit()`` reads the runtime value: operators
+    // on dedicated hosts can raise the cap; a typo or hostile config
+    // can never *lower* it below ``Config::VAULT_AUTH_LIMIT_FLOOR`` =
+    // 10 (the original hardcoded value). The threat model — throttle
+    // a compromised paired device hammering auth — is preserved by
+    // the floor.
     private const AUTH_WINDOW_S    = 60;
-    private const AUTH_LIMIT       = 10;   // attempts per (device, vault) per minute
     private const CREATE_WINDOW_S  = 3600;
     private const CREATE_LIMIT     = 5;    // create attempts per device per hour
 
@@ -117,7 +123,7 @@ class VaultAuthService
             VaultAuthAttemptsRepository::KIND_AUTH,
             self::AUTH_WINDOW_S, $now,
         );
-        if ($state['attempts'] > self::AUTH_LIMIT) {
+        if ($state['attempts'] > Config::vaultAuthLimit()) {
             $retryAfterMs = max(0, ($state['window_end'] - $now) * 1000);
             throw new VaultRateLimitedError(
                 'too many vault auth attempts; retry after the rate-limit window',

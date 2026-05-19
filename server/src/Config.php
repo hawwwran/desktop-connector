@@ -35,7 +35,32 @@ class Config
         // wired through any UI on purpose — it's a deliberate
         // deployment-time choice.
         'migrationAllowPrivateUrls' => false,
+        // Per-vault ciphertext cap stamped onto every freshly-created
+        // vault row. Matches the pre-2026-05-19 schema default of 1 GB
+        // (``migrations/002_vault.sql`` line 31) when missing. Operators
+        // running tight-disk hosts can lower; B5-style live tests can
+        // also override to a few MiB to exercise the 507 / eviction
+        // paths without filling real storage. Existing vault rows are
+        // **not** retroactively resized — the key only affects new
+        // vaults. Wired through ``VaultsRepository::create``.
+        'vaultQuotaBytes' => 1073741824,
+        // Floor on per-(device, vault) vault auth attempts per minute.
+        // Hardcoded design (pre-2026-05-19) capped it at 10 / minute
+        // to throttle a compromised paired device; the B5 live test
+        // surfaced that legitimate sync workloads bill an auth attempt
+        // per chunk PUT and easily exceed 10 in a single cycle. The
+        // value is now configurable upward — operators on dedicated
+        // hosts that prefer raising the cap can; the floor of 10 is
+        // enforced in ``vaultAuthLimit()`` so a typo can never
+        // *weaken* the throttle below the original design.
+        'vaultAuthLimit' => 10,
     ];
+
+    /** Smallest accepted value for ``vaultAuthLimit``. Matches the
+     *  original hardcoded ``VaultAuthService::AUTH_LIMIT``. Refusing
+     *  values below this preserves the §1.H1 floor even if the
+     *  on-disk config carries a typo. */
+    public const VAULT_AUTH_LIMIT_FLOOR = 10;
 
     /** @var array<string,mixed>|null — memoised per-request to avoid
      *  repeated file reads in hot paths. Reset via ::flush() if needed. */
@@ -93,6 +118,33 @@ class Config
             return $raw !== 0;
         }
         return (bool)self::DEFAULTS['migrationAllowPrivateUrls'];
+    }
+
+    /** Per-vault ciphertext cap stamped on freshly-created vaults.
+     *  Falls back to the documented 1 GB default when the JSON is
+     *  missing the key or carries a non-positive value (an operator
+     *  who typed ``0`` would otherwise mint un-fillable vaults). */
+    public static function vaultQuotaBytes(): int
+    {
+        $raw = self::get('vaultQuotaBytes');
+        $value = is_numeric($raw) ? (int)$raw : 0;
+        if ($value <= 0) {
+            return (int)self::DEFAULTS['vaultQuotaBytes'];
+        }
+        return $value;
+    }
+
+    /** Floor-protected per-(device, vault) auth attempts/min. Returns
+     *  ``max(configured, VAULT_AUTH_LIMIT_FLOOR)`` so an operator can
+     *  raise the cap on dedicated hosts (B5 SO-2: legitimate sync
+     *  workloads bill an auth attempt per chunk PUT and exceed 10/min)
+     *  but a config typo can never lower it below the original §1.H1
+     *  design. */
+    public static function vaultAuthLimit(): int
+    {
+        $raw = self::get('vaultAuthLimit');
+        $value = is_numeric($raw) ? (int)$raw : 0;
+        return max(self::VAULT_AUTH_LIMIT_FLOOR, $value);
     }
 
     public static function all(): array

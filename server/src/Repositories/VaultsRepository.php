@@ -41,10 +41,58 @@ class VaultsRepository
         int $now,
         int $initialHeaderRevision = 1,
         int $initialRootRevision = 1,
-        ?string $purgeTokenHash = null
+        ?string $purgeTokenHash = null,
+        ?int $quotaCiphertextBytes = null
     ): void {
-        $this->db->execute(
-            'INSERT INTO vaults (
+        // B5 SO-1: ``quotaCiphertextBytes`` lets the caller stamp the
+        // configured ``vaultQuotaBytes`` onto the row instead of
+        // silently inheriting the schema default (1 GB). Null = use the
+        // column DEFAULT so the historical behaviour stays intact for
+        // any future caller that doesn't pass an explicit value.
+        if ($quotaCiphertextBytes !== null && $quotaCiphertextBytes > 0) {
+            $sql = 'INSERT INTO vaults (
+                vault_id,
+                vault_access_token_hash,
+                encrypted_header,
+                header_revision,
+                header_hash,
+                current_root_revision,
+                current_root_hash,
+                used_ciphertext_bytes,
+                chunk_count,
+                quota_ciphertext_bytes,
+                purge_token_hash,
+                created_at,
+                updated_at
+             ) VALUES (
+                :vault_id,
+                :token_hash,
+                :enc_header,
+                :header_rev,
+                :header_hash,
+                :root_rev,
+                :root_hash,
+                0,
+                0,
+                :quota,
+                :purge_hash,
+                :now,
+                :now
+             )';
+            $params = [
+                ':vault_id'    => $vaultId,
+                ':token_hash'  => new Blob($vaultAccessTokenHash),
+                ':enc_header'  => new Blob($encryptedHeader),
+                ':header_rev'  => $initialHeaderRevision,
+                ':header_hash' => $headerHash,
+                ':root_rev'    => $initialRootRevision,
+                ':root_hash'   => $initialRootHash,
+                ':quota'       => $quotaCiphertextBytes,
+                ':purge_hash'  => $purgeTokenHash !== null ? new Blob($purgeTokenHash) : null,
+                ':now'         => $now,
+            ];
+        } else {
+            $sql = 'INSERT INTO vaults (
                 vault_id,
                 vault_access_token_hash,
                 encrypted_header,
@@ -70,8 +118,8 @@ class VaultsRepository
                 :purge_hash,
                 :now,
                 :now
-             )',
-            [
+             )';
+            $params = [
                 ':vault_id'    => $vaultId,
                 ':token_hash'  => new Blob($vaultAccessTokenHash),
                 ':enc_header'  => new Blob($encryptedHeader),
@@ -81,8 +129,9 @@ class VaultsRepository
                 ':root_hash'   => $initialRootHash,
                 ':purge_hash'  => $purgeTokenHash !== null ? new Blob($purgeTokenHash) : null,
                 ':now'         => $now,
-            ]
-        );
+            ];
+        }
+        $this->db->execute($sql, $params);
     }
 
     /**

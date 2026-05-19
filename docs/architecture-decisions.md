@@ -74,6 +74,57 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-05-19 — Vault config knobs: `vaultQuotaBytes` + floor-protected `vaultAuthLimit`
+
+**Status:** landed.
+
+**Context.** B5 live test (2026-05-19,
+``temp/automation-tests-results/0005/B5-eviction/result.md``) surfaced
+two server-side config drifts. (1) ``vaultQuotaBytes`` was referenced
+by ``CLAUDE.md`` and ``docs/plans/skipped-while-autonomous.md`` as
+configurable but no controller read it; ``VaultsRepository::create``
+omitted the column from its INSERT, so every freshly-minted vault
+inherited the schema default of 1 GB regardless of operator intent.
+(2) ``VaultAuthService::AUTH_LIMIT`` was deliberately hardcoded at 10
+attempts/(device, vault)/minute to throttle compromised paired
+devices; the live test showed legitimate sync workloads bill one
+auth attempt per chunk PUT and trip the cap inside a single drain
+cycle (5 chunks + batch-head + root fetch + shard publish > 10).
+
+**Decision.** Wire ``vaultQuotaBytes`` through
+``VaultsRepository::create`` so the create endpoint stamps the
+configured cap onto each new vault row; existing rows aren't
+retroactively resized. Add ``vaultAuthLimit`` as a runtime-readable
+cap with a *floor* of 10: ``Config::vaultAuthLimit()`` returns
+``max(configured, VAULT_AUTH_LIMIT_FLOOR)`` so an operator can raise
+the cap on a dedicated host but a config typo can never lower it
+below the original §1.H1 design. Window sizes + ``CREATE_LIMIT``
+stay hardcoded.
+
+**Alternatives.** (a) Make ``AUTH_LIMIT`` freely configurable
+(rejected — would let a typo weaken the §1.H1 throttle protecting
+against a compromised paired device, the original threat model). (b)
+Change the billing semantics so only failed bearer-match attempts
+count (rejected here — larger behaviour change, would need its own
+ADR + careful audit; the floor-protected config approach gives
+operators an escape hatch immediately without re-litigating the
+billing rule). (c) Wire ``vaultQuotaBytes`` as a global cap applied
+to existing rows on first-read (rejected — destructive surprise for
+operators who deliberately raised individual vaults; the new key
+deliberately affects only freshly-created vaults).
+
+**Anchor.** ``server/src/Config.php`` (``vaultQuotaBytes()`` +
+``vaultAuthLimit()`` + ``VAULT_AUTH_LIMIT_FLOOR``);
+``server/src/Repositories/VaultsRepository.php::create`` (optional
+``$quotaCiphertextBytes`` parameter, conditional INSERT shape);
+``server/src/Controllers/VaultController.php::create`` (call-site
+passes ``Config::vaultQuotaBytes()``);
+``server/src/Auth/VaultAuthService.php`` (the comparison reads
+``Config::vaultAuthLimit()`` per attempt). Tests:
+``VaultControllerTest::test_create_stamps_configured_vault_quota_bytes``,
+``VaultAuthServiceTest::test_configured_vault_auth_limit_raises_cap_above_floor``,
+``VaultAuthServiceTest::test_vault_auth_limit_below_floor_clamped_to_ten``.
+
 ### 2026-05-18 — Rotation crash-recovery via plaintext-secret marker file
 
 **Status:** landed (commit ``f352dbe``).

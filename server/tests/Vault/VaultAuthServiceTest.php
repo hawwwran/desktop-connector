@@ -325,6 +325,80 @@ final class VaultAuthServiceTest extends TestCase
         }
     }
 
+    /**
+     * B5 SO-2: ``vaultAuthLimit`` config raises the cap above the
+     * hardcoded floor of 10. Verifies that with the config set to
+     * 15, attempts 11..15 still succeed and the 16th is the one
+     * that 429s.
+     */
+    public function test_configured_vault_auth_limit_raises_cap_above_floor(): void
+    {
+        $configPath = __DIR__ . '/../../data/config.json';
+        $backup = is_file($configPath) ? file_get_contents($configPath) : null;
+        try {
+            file_put_contents($configPath, json_encode(['vaultAuthLimit' => 15]));
+            Config::flush();
+            self::assertSame(15, Config::vaultAuthLimit());
+
+            $this->setValidDeviceAuth();
+            $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . self::VAULT_SECRET;
+            for ($i = 0; $i < 15; $i++) {
+                $vault = VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+                self::assertSame(self::VAULT_ID, $vault['vault_id']);
+            }
+            try {
+                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+                self::fail('expected 429 on attempt 16 when limit=15');
+            } catch (VaultRateLimitedError $e) {
+                self::assertSame(429, $e->status);
+            }
+        } finally {
+            if ($backup === null) {
+                @unlink($configPath);
+            } else {
+                file_put_contents($configPath, $backup);
+            }
+            Config::flush();
+        }
+    }
+
+    /**
+     * B5 SO-2: the floor protects the original §1.H1 design. Even if
+     * an operator types ``vaultAuthLimit: 2`` (intentionally or via a
+     * typo), Config::vaultAuthLimit() clamps back to 10, and the
+     * rate-limit fires on attempt 11 (not 3).
+     */
+    public function test_vault_auth_limit_below_floor_clamped_to_ten(): void
+    {
+        $configPath = __DIR__ . '/../../data/config.json';
+        $backup = is_file($configPath) ? file_get_contents($configPath) : null;
+        try {
+            file_put_contents($configPath, json_encode(['vaultAuthLimit' => 2]));
+            Config::flush();
+            self::assertSame(10, Config::vaultAuthLimit(),
+                'configured value below floor must be clamped to VAULT_AUTH_LIMIT_FLOOR');
+
+            $this->setValidDeviceAuth();
+            $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . self::VAULT_SECRET;
+            for ($i = 0; $i < 10; $i++) {
+                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+            }
+            try {
+                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+                self::fail('expected 429 on attempt 11 — floor must hold even with config=2');
+            } catch (VaultRateLimitedError $e) {
+                self::assertSame(429, $e->status);
+            }
+        } finally {
+            if ($backup === null) {
+                @unlink($configPath);
+            } else {
+                file_put_contents($configPath, $backup);
+            }
+            Config::flush();
+        }
+    }
+
     public function test_omitted_x_vault_id_header_is_acceptable(): void
     {
         // Per vault-v1.md §2 the X-Vault-ID header *redundantly* mirrors

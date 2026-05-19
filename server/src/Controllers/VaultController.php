@@ -247,6 +247,7 @@ class VaultController
         $vaultsRepo->create(
             $vaultId, $tokenHash, $encHeader, $headerHash, $rootHash, $now,
             $initialHeaderRevision, $initialRootRevision, $purgeTokenHash,
+            Config::vaultQuotaBytes(),
         );
 
         $rootRepo = new VaultRootManifestsRepository($db);
