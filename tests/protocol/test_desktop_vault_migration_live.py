@@ -150,13 +150,13 @@ class VaultMigrationLiveTests(unittest.TestCase):
 
         Scope is intentionally narrow (genesis vault, no folder
         publishes, no file uploads) so the test stays under the
-        server-side ``VaultAuthService::AUTH_LIMIT`` (10 calls / minute
-        / (device,vault) pair). With files + uploads the limit trips
-        before migration starts; the engine path is the same in both
-        cases, so genesis-only is enough to catch HTTP-layer regressions
-        (the broader chunk-copy scenario is covered by
-        ``test_desktop_vault_migration_runner.py``'s FakeMigrationRelay
-        suite).
+        server-side ``Config::vaultAuthLimit()`` (default 10 calls /
+        minute / (device,vault) pair; floor 10 — see ADR 2026-05-19).
+        With files + uploads the limit trips before migration starts;
+        the engine path is the same in both cases, so genesis-only is
+        enough to catch HTTP-layer regressions (the broader chunk-copy
+        scenario is covered by ``test_desktop_vault_migration_runner.py``'s
+        FakeMigrationRelay suite).
         """
         vault, relay_a, relay_b, dev_a, dev_b = self._bootstrap_vault_on_relay_a()
         try:

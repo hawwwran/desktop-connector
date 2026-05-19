@@ -929,3 +929,11 @@ emission + client triage logic verified end-to-end. GUI dialog
 drive + algorithm walk filed as follow-ups; recipe in
 `docs/plans/skipped-while-autonomous.md` needs the SO-1 / SO-2
 caveats added.
+
+**Update (2026-05-19, commit `242c5ff`)**: SO-1 + SO-2 landed.
+``vaultQuotaBytes`` config key now wired through
+``VaultsRepository::create``; ``vaultAuthLimit`` config key added
+with a floor of 10 so operators can raise the cap on dedicated
+hosts without weakening the §1.H1 throttle. See ADR
+[`2026-05-19 — Vault config knobs`](../../docs/architecture-decisions.md).
+SO-3 (orphan chunks until shard publishes) is by design and stays.

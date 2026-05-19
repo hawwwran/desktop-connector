@@ -32,6 +32,6 @@ Closed so far: B8 (resume-after-kill — partly §12), B7 (large folder bind —
 
 - **B2 — Debug bundle on a real install.** Generate a bundle, inspect the contents, confirm no plaintext / no keys / no tokens leak per the logging policy in CLAUDE.md. Complements partly §9's code-side leak-scan widening with a live-install spot check.
 - **B1 — Schedule purge.** Set a purge schedule, fast-forward time (mock `_now_rfc3339` if needed), verify the scheduled purge fires and audits correctly.
-- **B3 follow-up — full switch-back leg.** Genesis-leg landed as partly §14; the B→A switch-back leg is deferred (each leg burns the per-vault auth budget; running both consecutively trips `vault_rate_limited`). Bump the limit via a future `vaultAuthLimit` config knob or add a ~60s sleep between legs. Not blocking — switch-back propagation is independently covered by unit-level tests.
+- **B3 follow-up — full switch-back leg.** Genesis-leg landed as partly §14; the B→A switch-back leg is deferred (each leg burns the per-vault auth budget; running both consecutively trips `vault_rate_limited`). Now unblocked by the `vaultAuthLimit` config knob ([ADR 2026-05-19](../architecture-decisions.md)) — bump the cap above the floor of 10 for the test run, or add a ~60s sleep between legs. Not blocking — switch-back propagation is independently covered by unit-level tests.
 
 Pickup recipes for B3 / B2 / B5 / B4 / B1 live in [`docs/plans/skipped-while-autonomous.md`](skipped-while-autonomous.md).
