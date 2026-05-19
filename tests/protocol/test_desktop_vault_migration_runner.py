@@ -246,6 +246,82 @@ class VaultMigrationRunnerTests(unittest.TestCase):
         self.assertGreater(result.verify.sample_size, 0)
         self.assertEqual(result.verify.sample_size, result.verify.sample_passed)
 
+    def test_committed_publishes_audit_row_on_target_root(self) -> None:
+        """F-510 Phase 3.1 wire 3: after migration_commit succeeds, the
+        runner publishes a fresh root revision on the target relay
+        carrying a ``vault.migration.committed`` op-log row so the
+        Activity tab on every device that fetches the target's
+        manifest sees the migration.
+        """
+        source_relay, _ = self._populated_source(files={
+            "gamma.txt": b"audit-row test content",
+        })
+        target_relay = FakeMigrationRelay()
+
+        # Capture the target's root revision after bootstrap (= source's
+        # last-published revision).
+        author_device_id = "d" * 32
+        vault = _vault()
+        try:
+            run_migration(
+                vault=vault,
+                source_relay=source_relay,
+                target_relay=target_relay,
+                source_relay_url=SOURCE_URL,
+                target_relay_url=TARGET_URL,
+                config_dir=self.config_dir,
+                author_device_id=author_device_id,
+            )
+            self.assertEqual(source_relay.migrated_to, TARGET_URL)
+            # Target advanced by exactly one revision past the source.
+            self.assertEqual(
+                target_relay.root_revision,
+                source_relay.root_revision + 1,
+            )
+            # Decrypt the target's new root and inspect the op-log tail.
+            fetched = vault.fetch_root_manifest(target_relay)
+        finally:
+            vault.close()
+
+        tail = fetched.get("operation_log_tail") or []
+        migration_rows = [
+            e for e in tail
+            if isinstance(e, dict)
+            and e.get("type") == "vault.migration.committed"
+        ]
+        self.assertEqual(len(migration_rows), 1)
+        row = migration_rows[0]
+        self.assertEqual(row["device_id"], author_device_id)
+        self.assertEqual(row["source"], SOURCE_URL)
+        self.assertEqual(row["target"], TARGET_URL)
+        self.assertEqual(row["revision"], target_relay.root_revision)
+
+    def test_committed_skips_audit_when_no_author_device_id(self) -> None:
+        """Backwards-compat: existing callers that don't pass
+        ``author_device_id`` get the previous behaviour — target root
+        stays verbatim (no extra publish).
+        """
+        source_relay, _ = self._populated_source(files={
+            "delta.txt": b"no-author test content",
+        })
+        target_relay = FakeMigrationRelay()
+        vault = _vault()
+        try:
+            run_migration(
+                vault=vault,
+                source_relay=source_relay,
+                target_relay=target_relay,
+                source_relay_url=SOURCE_URL,
+                target_relay_url=TARGET_URL,
+                config_dir=self.config_dir,
+                # No author_device_id → audit publish skipped.
+            )
+        finally:
+            vault.close()
+        self.assertEqual(
+            target_relay.root_revision, source_relay.root_revision,
+        )
+
     def test_resumable_after_partial_copy(self) -> None:
         """T9.3 acceptance: a crash mid-copy resumes without re-uploading
         chunks the target already has."""

@@ -486,6 +486,11 @@ def show_vault_migration(config_dir: Path) -> None:
                             config_dir=config_dir,
                             progress=_on_progress,
                             on_committed=lambda rec: _commit_callback(rec, target_url),
+                            # F-510 Phase 3.1: needed by the post-commit
+                            # audit publish on the target relay.
+                            author_device_id=str(
+                                getattr(config, "device_id", "") or ""
+                            ),
                         )
                     finally:
                         vault.close()
