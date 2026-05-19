@@ -14,10 +14,14 @@ is the HTTP adapter only.
 from __future__ import annotations
 
 import base64
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from ..relay_errors import VaultRelayError
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -99,10 +103,22 @@ def rotate_access_secret(
         _raise_typed(exc, default_message="failed to rotate access secret")
         raise  # pragma: no cover
 
-    return RotationResponse(
+    response = RotationResponse(
         vault_id_dashed=str(data.get("vault_id") or ""),
         rotated_at=str(data.get("rotated_at") or ""),
     )
+    # Collateral fix per docs/plans/activity-timeline.md: the rotation
+    # wizard had no log emission today; the consumer side
+    # (state/activity._EVENT_TYPE_LABELS) already labels this event
+    # "Access secret rotated", so until a follow-up Phase 3.1 publishes
+    # an op-log entry, this is the only audit trail.
+    log.info(
+        "vault.rotation.completed vault=%s rotated_at=%s%s",
+        response.vault_id_dashed, response.rotated_at,
+        f" triggered_by_revoke_grant_id={triggered_by_revoke_grant_id}"
+        if triggered_by_revoke_grant_id else "",
+    )
+    return response
 
 
 def _raise_typed(exc: VaultRelayError, *, default_message: str) -> None:

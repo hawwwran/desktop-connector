@@ -89,6 +89,57 @@ class ClearVaultLoopUntilStableTests(unittest.TestCase):
         self.assertEqual(total, 9)  # 3 files × 3 folders
 
 
+class ClearVaultRootOpLogTests(unittest.TestCase):
+    """Phase 3 of docs/plans/activity-timeline.md — clear_vault now
+    publishes a post-clear root revision carrying a
+    ``vault.vault.cleared`` op-log entry. End-to-end test that decrypts
+    the post-clear root and asserts the entry is present.
+    """
+
+    def test_clear_vault_lands_root_audit_entry(self) -> None:
+        from src.vault.ops.clear import clear_vault
+        from tests.protocol.test_desktop_vault_delete import (
+            _seeded_manifest, _vault as _delete_vault,
+        )
+        from tests.protocol.test_desktop_vault_upload import (
+            FakeUploadRelay, seed_sharded_state,
+        )
+        from tests.protocol.test_desktop_vault_manifest import DOCS_ID, AUTHOR
+
+        manifest = _seeded_manifest([("alpha.txt", "a"), ("beta.txt", "b")])
+        relay = FakeUploadRelay()
+        vault = _delete_vault()
+        try:
+            seed_sharded_state(
+                vault, relay,
+                vault_id=manifest["vault_id"],
+                remote_folders=manifest["remote_folders"],
+                created_at=manifest["created_at"],
+                author_device_id=manifest["author_device_id"],
+            )
+            clear_vault(
+                vault=vault, relay=relay, author_device_id=AUTHOR,
+            )
+        finally:
+            vault.close()
+
+        # Decrypt the final root manifest and assert the audit row.
+        observer = _delete_vault()
+        try:
+            root = observer.decrypt_root_envelope(relay.root_envelope)
+        finally:
+            observer.close()
+        tail = root.get("operation_log_tail") or []
+        vault_cleared = [
+            e for e in tail if e.get("type") == "vault.vault.cleared"
+        ]
+        self.assertEqual(len(vault_cleared), 1)
+        entry = vault_cleared[0]
+        self.assertEqual(entry["device_id"], AUTHOR)
+        self.assertIn("Cleared 2 file(s)", entry.get("summary", ""))
+        self.assertEqual(entry["revision"], int(root["root_revision"]))
+
+
 class ConfirmTextTests(unittest.TestCase):
     def test_folder_name_match_is_exact_case(self) -> None:
         self.assertTrue(confirm_folder_clear_text_matches("Documents", "Documents"))

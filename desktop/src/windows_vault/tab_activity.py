@@ -26,6 +26,7 @@ def build_activity_tab(ctx: MainContext, win) -> "Gtk.Box":
         humanise_event_type,
         merge_timeline,
     )
+    from ..vault.state.op_log import MAX_OP_LOG_TAIL
 
     activity_tab = Gtk.Box(
         orientation=Gtk.Orientation.VERTICAL, spacing=12,
@@ -148,10 +149,23 @@ def build_activity_tab(ctx: MainContext, win) -> "Gtk.Box":
 
             op_entries = list(manifest.get("operation_log_tail") or [])
             rows = merge_timeline(op_log_entries=op_entries)
+            # D4: the producer's rolling tail caps at MAX_OP_LOG_TAIL
+            # per shard / root envelope, so a busy vault rolls history
+            # off the end silently. Surface that when the rendered
+            # timeline matches the cap so the user knows older events
+            # exist but aren't fetched (archived_op_segments rotation
+            # is a v1.1 follow-up).
+            truncated = len(op_entries) >= MAX_OP_LOG_TAIL
 
             def succeed() -> bool:
                 activity_state["rows"] = rows
-                activity_status.set_label(f"{len(rows)} event(s).")
+                if truncated:
+                    activity_status.set_label(
+                        f"{len(rows)} event(s) — showing most recent "
+                        f"{MAX_OP_LOG_TAIL}."
+                    )
+                else:
+                    activity_status.set_label(f"{len(rows)} event(s).")
                 _apply_activity_filter()
                 return False
             GLib.idle_add(succeed)

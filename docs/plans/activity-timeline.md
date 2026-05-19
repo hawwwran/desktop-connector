@@ -105,10 +105,20 @@ incrementally useful entries.
 9. CAS-retry preservation: thread `prior_tail` through `_merge_batch_into_shard_with_bump` and `_publish_folder_purge_with_retry`. Skip on no-op replay (D6).
 
 ### Phase 3 — Root-scoped events (less-frequent ops + missing emissions)
-10. Add missing log emissions: `grant.created`, `revoke.completed`, `rotation.completed`.
-11. Wire vault.create on first follow-up root publish (D5).
-12. Wire `vault.{vault.cleared, migration.committed, purge.executed, grant.created, revoke.completed, rotation.completed}` and the root-scoped `eviction.alarm_used_exceeds_quota` entry.
-13. Truncation observability: log line + UI status hint (D4).
+10. Add missing log emissions: `grant.created`, `revoke.completed`, `rotation.completed`. **Landed.**
+11. Wire `vault.create` on first follow-up root publish (D5). **Deferred** — see "Phase 3 deferred" below.
+12. Wire `vault.{vault.cleared, migration.committed, purge.executed, grant.created, revoke.completed, rotation.completed}` and the root-scoped `eviction.alarm_used_exceeds_quota` entry. **Partial** — only `vault.vault.cleared` lands an op-log entry in this phase (one extra root publish at the end of `clear_vault`). The remaining six events all need new follow-up root publishes attached to relay-side state changes that don't otherwise touch the manifest; deferring them keeps the producer-side change footprint surgical.
+13. Truncation observability: log line + UI status hint (D4). **Landed.**
+
+### Phase 3 deferred → Phase 3.1 follow-up
+
+These items were named in Phase 3 but require structural changes (an extra root publish per op, on relay paths that don't currently publish manifests). Bundling them together as a follow-up keeps each change traceable rather than smearing six new round-trips across as many commits.
+
+- **`vault.create` on first follow-up root publish (D5).** Needs a one-shot "first revision after genesis" detector at every root-bump call site, or a dedicated post-genesis publish from `Vault.prepare`. Cosmetic — the first row in a new vault's timeline currently starts at the second revision.
+- **`vault.migration.committed` op-log entry.** `migration/runner.py:307 migration_commit` is a relay call that hands off the vault to the target relay; the desktop doesn't publish a manifest revision in the commit step. Wiring an entry would mean a fresh root publish on the target relay post-switch.
+- **`vault.eviction.alarm_used_exceeds_quota` op-log entry.** The log emission already exists at `windows_vault_browser/quota.py:104`. Wiring an op-log row would mean a root publish before the alarm cleanup pass — extra cost on a stress path.
+- **`vault.grant.created` / `revoke.completed` / `rotation.completed` op-log entries.** Grant lifecycle is server-side state (server tables, not manifest fields). Adding entries means each grant/revoke/rotation triggers an extra follow-up root publish. Defensible but adds latency to user-facing flows.
+- **`vault.purge.*` op-log entries.** The scheduled-purge feature is fire-on-attended per ADR 2026-05-18 and `mark_purge_executed` has no current callers in the desktop tree. Wire op-log when the scheduled-purge auto-executor lands (currently out of scope).
 
 ### Phase 4 — Stabilization
 14. Integration test against the `FakeShardedRelay` harness: upload → fetch_unified_manifest → assert presence.

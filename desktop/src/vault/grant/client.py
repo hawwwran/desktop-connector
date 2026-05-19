@@ -17,10 +17,14 @@ directly.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from ..relay_errors import VaultRelayError
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -139,12 +143,22 @@ def revoke_device_grant(
         _raise_typed(exc, default_message="failed to revoke device grant")
         raise  # pragma: no cover
 
-    return RevokeResult(
+    result = RevokeResult(
         vault_id=str(data.get("vault_id") or ""),
         device_id=str(data.get("device_id") or ""),
         revoked_at=str(data.get("revoked_at") or ""),
         already_revoked=bool(data.get("already_revoked", False)),
     )
+    # Collateral fix per docs/plans/activity-timeline.md: the revoke
+    # flow had no log emission. Idempotent re-revoke logs are tagged so
+    # an operator can tell "user clicked Revoke again" from a fresh
+    # revocation.
+    log.info(
+        "vault.revoke.completed vault=%s device_id=%s revoked_at=%s already_revoked=%s",
+        result.vault_id, result.device_id[:12] if result.device_id else "?",
+        result.revoked_at, str(result.already_revoked).lower(),
+    )
+    return result
 
 
 # ---- private helpers ------------------------------------------------

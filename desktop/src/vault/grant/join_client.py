@@ -27,10 +27,14 @@ branch on outcome without inspecting HTTP details directly.
 from __future__ import annotations
 
 import base64
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from ..relay_errors import VaultRelayError
+
+
+log = logging.getLogger(__name__)
 
 
 # ----- typed payload shapes -----------------------------------------
@@ -191,7 +195,17 @@ def approve_join_request(
         _raise_typed(exc, default_message="failed to approve join-request")
         raise  # pragma: no cover
 
-    return _parse_join_request(data)
+    parsed = _parse_join_request(data)
+    # Collateral fix per docs/plans/activity-timeline.md: the join-grant
+    # approval path had no log emission. The op-log entry remains
+    # deferred — grant creation is a relay-side state change with no
+    # accompanying manifest publish, so attaching the entry needs a
+    # follow-up root publish that we haven't scoped yet (Phase 3.1).
+    log.info(
+        "vault.grant.created vault=%s req_id=%s approved_role=%s",
+        vault_id, req_id[:12] if req_id else "?", approved_role,
+    )
+    return parsed
 
 
 def reject_join_request(

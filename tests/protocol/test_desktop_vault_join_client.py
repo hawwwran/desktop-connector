@@ -250,6 +250,27 @@ class ApproveJoinRequestTests(unittest.TestCase):
                 approved_role="sync", wrapped_vault_grant=b"x" * 200,
             )
 
+    def test_approve_emits_audit_log_line(self) -> None:
+        # Phase 3 collateral fix per docs/plans/activity-timeline.md:
+        # approve_join_request had no log emission, so the consumer
+        # side's ``vault.grant.created`` row would never appear in
+        # the Activity tab.
+        import logging
+        relay = _FakeRelay()
+        relay.approve_response = _pending_payload(
+            state="approved", approved_role="sync",
+        )
+        with self.assertLogs(
+            "src.vault.grant.join_client", level=logging.INFO,
+        ) as captured:
+            approve_join_request(
+                relay, VAULT_ID, VAULT_ACCESS_SECRET, JOIN_REQUEST_ID,
+                approved_role="sync", wrapped_vault_grant=b"x" * 200,
+            )
+        joined = "\n".join(captured.output)
+        self.assertIn("vault.grant.created", joined)
+        self.assertIn("approved_role=sync", joined)
+
 
 class RejectJoinRequestTests(unittest.TestCase):
     def test_reject_is_void(self) -> None:

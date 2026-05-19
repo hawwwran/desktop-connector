@@ -25,13 +25,20 @@ the dialog can't silently slip through.
 
 from __future__ import annotations
 
+import copy
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
+from ..state.op_log import append_op_log_entries, build_op_log_entry
 from .delete import DeleteVault, delete_folder_contents
 
 
 log = logging.getLogger(__name__)
+
+
+def _now_rfc3339() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 class VaultClearDangerError(ValueError):
@@ -168,11 +175,70 @@ def clear_vault(
             "vault.vault.clear_pass_cap_hit folders_seen=%d cap=%d",
             len(seen_folders), max_passes,
         )
+    # Phase 3: leave a vault-wide audit row on the root manifest so the
+    # Activity tab shows "Vault cleared" alongside the per-folder
+    # ``vault.folder.cleared`` summaries each per-folder shard publish
+    # already landed. The cost is one extra root-only publish per
+    # clear-vault — acceptable for this rare destructive op.
+    try:
+        _publish_root_op_log_entry(
+            vault, relay,
+            event_type="vault.vault.cleared",
+            device_id=author_device_id,
+            summary=(
+                f"Cleared {total} file(s) across {len(seen_folders)} folder(s)"
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        # The destructive work has already landed; the audit row is a
+        # nice-to-have, not a correctness requirement. Log + continue
+        # so the user doesn't see a "clear failed" surface for a
+        # post-clear bookkeeping hiccup.
+        log.warning(
+            "vault.vault.cleared_audit_publish_failed vault=%s",
+            vault.vault_id, exc_info=True,
+        )
     log.info(
         "vault.vault.cleared total_tombstoned=%d folders=%d author=%s",
         total, len(seen_folders), author_device_id,
     )
     return total
+
+
+def _publish_root_op_log_entry(
+    vault: DeleteVault,
+    relay: Any,
+    *,
+    event_type: str,
+    device_id: str,
+    summary: str,
+) -> None:
+    """Append one root-scoped op-log entry via a no-mutation root publish.
+
+    Used for vault-wide audit events that don't otherwise change the
+    root's folder set (e.g., ``vault.vault.cleared``). Bumps the root
+    revision so the entry is durably anchored to a CAS-stable point in
+    the manifest chain.
+    """
+    current_root = vault.fetch_root_manifest(relay)
+    parent_revision = int(current_root.get("root_revision", 0))
+    new_revision = parent_revision + 1
+    timestamp = _now_rfc3339()
+    candidate = copy.deepcopy(current_root)
+    candidate["root_revision"] = new_revision
+    candidate["parent_root_revision"] = parent_revision
+    candidate["created_at"] = timestamp
+    candidate["author_device_id"] = str(device_id)
+    candidate["operation_log_tail"] = append_op_log_entries(
+        candidate.get("operation_log_tail"),
+        [build_op_log_entry(
+            type=event_type,
+            device_id=device_id,
+            revision=new_revision,
+            summary=summary,
+        )],
+    )
+    vault.publish_root_manifest(relay, candidate)
 
 
 __all__ = [

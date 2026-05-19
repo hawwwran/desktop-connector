@@ -59,6 +59,10 @@ class DeleteVault(Protocol):
         expected_shard_hash: str | None = None,
     ) -> dict: ...
 
+    def publish_root_manifest(
+        self, relay, root: dict, *, local_index=None,
+    ) -> dict: ...
+
     def publish_shard_with_root(
         self, relay, remote_folder_id: str,
         shard: dict, root: dict,

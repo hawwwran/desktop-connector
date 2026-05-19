@@ -86,6 +86,25 @@ class RotateClientTests(unittest.TestCase):
         # outgoing hash bytes (defense-in-depth).
         self.assertNotIn(new_secret.encode("utf-8"), sent_hash)
 
+    def test_success_emits_audit_log_line(self) -> None:
+        # Phase 3 collateral fix per docs/plans/activity-timeline.md:
+        # rotate_access_secret had no log emission, so the consumer
+        # side's ``vault.rotation.completed`` row would never appear in
+        # the Activity tab.
+        import logging
+        relay = _FakeRelay()
+        relay.response = {
+            "vault_id": "AAAA-BBBB-CCCC",
+            "rotated_at": "2026-05-19T18:00:00.000Z",
+        }
+        with self.assertLogs(
+            "src.vault.grant.rotate_client", level=logging.INFO,
+        ) as captured:
+            rotate_access_secret(relay, VAULT_ID, OLD_SECRET, "vas_new")
+        joined = "\n".join(captured.output)
+        self.assertIn("vault.rotation.completed", joined)
+        self.assertIn("AAAA-BBBB-CCCC", joined)
+
     def test_triggered_by_revoke_threaded_through(self) -> None:
         relay = _FakeRelay()
         relay.response = {

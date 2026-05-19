@@ -164,6 +164,28 @@ class RevokeDeviceGrantTests(unittest.TestCase):
             [(VAULT_ID, VAULT_ACCESS_SECRET, TARGET_DEVICE)],
         )
 
+    def test_revoke_success_emits_audit_log_line(self) -> None:
+        # Phase 3 collateral fix per docs/plans/activity-timeline.md:
+        # revoke_device_grant had no log emission, so the consumer
+        # side's ``vault.revoke.completed`` row would never appear in
+        # the Activity tab.
+        import logging
+        relay = _FakeRelay()
+        relay.revoke_response = {
+            "vault_id": VAULT_ID, "device_id": TARGET_DEVICE,
+            "revoked_at": "2026-05-19T18:00:00.000Z",
+            "already_revoked": False,
+        }
+        with self.assertLogs(
+            "src.vault.grant.client", level=logging.INFO,
+        ) as captured:
+            revoke_device_grant(
+                relay, VAULT_ID, VAULT_ACCESS_SECRET, TARGET_DEVICE,
+            )
+        joined = "\n".join(captured.output)
+        self.assertIn("vault.revoke.completed", joined)
+        self.assertIn("already_revoked=false", joined)
+
     def test_revoke_idempotent_already_revoked(self) -> None:
         relay = _FakeRelay()
         relay.revoke_response = {
