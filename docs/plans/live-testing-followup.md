@@ -802,6 +802,73 @@ numbered items.
 
 ---
 
+## 14. Migration round-trip against real PHP relays — works (was B3)
+
+**Symptom**: the §5.C1 migration wizard landed 2026-05-18 with the
+engine pinned by `test_desktop_vault_migration_runner.py`'s
+``FakeMigrationRelay`` unit tests, but no test had ever driven
+``run_migration`` against a real PHP relay. The risk this catches
+is HTTP-layer + PHP-side regressions: response envelope drift,
+auth-rate-limit interactions, the genesis-author-mismatch path
+relaxed in `b048d86`, and the migration-propagation
+``previous_relay_url`` side-effect on every paired client.
+
+**Cause**: gap in coverage, not a bug. The wire-protocol contract
+tests in `test_server_contract.py` exercise individual endpoints in
+isolation; the migration runner exercises the state-machine in
+isolation. The integration of "engine drives real HTTP client
+against real PHP" is the missing surface.
+
+**Fix shape**: new
+`tests/protocol/test_desktop_vault_migration_live.py` spins two
+hermetic `_ServerHarness` instances (the existing helper from
+`test_server_contract`), each with a config override flipping
+``migrationAllowPrivateUrls`` to `true` so the relay accepts the
+peer's `127.0.0.1:<random-port>` URL. The test creates a vault on
+relay A via `Vault.create_new` (Argon2id at reduced 64-MiB / 2-iter
+params to keep wall-clock under 500ms) and runs `run_migration` A→B
+through real HTTP, asserting `verify.matches=True`, root-revision
+parity on both relays post-migration, and that `get_header` still
+succeeds on the source after commit.
+
+**Scope decision**: genesis-vault migration only (no file uploads,
+no folder publishes). With files the test would exceed
+`VaultAuthService::AUTH_LIMIT` of **10 calls per (device, vault) per
+minute** before migration starts — `Vault.create_new` + per-folder
+publishes + 2 uploads = ~15 auth-billed calls. The chunk-copy path
+is the same code in both genesis and populated cases, so the live
+test catches the HTTP-integration regressions that matter; the
+``FakeMigrationRelay`` suite covers the broader chunk-content
+scenarios.
+
+**Acceptance**:
+- ``verify.matches`` returns `True` after the engine commits A→B.
+- ``relay_a.fetch_root_manifest`` and ``relay_b.fetch_root_manifest``
+  agree on `root_revision` post-migration.
+- ``relay_a.get_header`` still resolves on the source after the
+  commit step (the vault row is marked migrated, not deleted).
+- Server log records ``vault.sync.migration_propagation_applied``
+  exposing the new ``previous_relay_url`` + expiry — the §5.M6
+  switch-back grace window is wired through the HTTP boundary.
+
+**Status (2026-05-19): done** on `tresor-vault`. Wall-clock for
+the test is ~440ms; the full vault suite holds 1113/1113 green
+with the new test added.
+
+Findings worth a follow-up:
+- The B→A switch-back leg is NOT exercised (each leg burns the
+  per-vault auth budget; running both consecutively trips
+  `vault_rate_limited`). Either bump the limit via a future
+  ``vaultAuthLimit`` config knob or add a ~60s sleep between legs.
+  Not blocking — switch-back propagation is independently covered
+  by the unit-level tests.
+- File-upload coverage in the live test would need either
+  (a) configurable rate limits, (b) `time.sleep(60)` between phases,
+  or (c) load-balancing API calls across multiple registered
+  devices for the same vault. Filed as a follow-up; not on v1.
+
+---
+
 ## Backlog — un-driven flows
 
 Candidate live-test sessions that aren't yet in the chained
@@ -842,8 +909,7 @@ references.
 
 **Tier 3 — ops / support / edge cases**
 
-- **B3 — Migration switch-back.** Migrate from one relay to another,
-  then switch back, verify both sides agree on manifest revision.
+- ~~**B3 — Migration switch-back.**~~ Closed 2026-05-19 (genesis-leg) — see §14. Full switch-back leg is a follow-up; rate-limit gating notes inline.
 - **B2 — Debug bundle on a real install.** Generate a bundle, inspect
   the contents, confirm no plaintext / no keys / no tokens leak
   per the logging policy in CLAUDE.md. Complements item 9's
