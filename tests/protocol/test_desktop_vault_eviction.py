@@ -20,9 +20,10 @@ from src.vault.ops.delete import delete_file  # noqa: E402
 from src.vault.ops.eviction import eviction_pass  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    find_file_entry,
-    make_manifest,
-    make_remote_folder,
+    find_file_entry_in_shard,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
 )
 from src.vault.upload import upload_file  # noqa: E402
 
@@ -97,7 +98,7 @@ class VaultEvictionPassTests(unittest.TestCase):
         for cid in chunks_before:
             self.assertNotIn(cid, relay.chunks)
         # Manifest no longer references the dropped entry.
-        self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "old.txt"))
+        self.assertIsNone(_entry_in_unified(result.manifest, DOCS_ID, "old.txt"))
 
     def test_housekeeping_does_not_force_purge_unexpired_tombstones(self) -> None:
         local = self.tmpdir / "fresh.txt"
@@ -137,7 +138,7 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertEqual(result.bytes_freed, 0)
         self.assertEqual(result.stages, [])
         # Tombstone still present (chunks retained for restore).
-        entry = find_file_entry(result.manifest, DOCS_ID, "fresh.txt")
+        entry = _entry_in_unified(result.manifest, DOCS_ID, "fresh.txt")
         self.assertTrue(entry["deleted"])
         self.assertGreater(len(relay.chunks), 0)
 
@@ -189,8 +190,8 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertIn("vault.eviction.tombstone_purged_expired", events)
         self.assertIn("vault.eviction.auto_purged_oldest", events)
         # Both tombstones are gone from the manifest.
-        self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "expired.txt"))
-        self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "fresh.txt"))
+        self.assertIsNone(_entry_in_unified(result.manifest, DOCS_ID, "expired.txt"))
+        self.assertIsNone(_entry_in_unified(result.manifest, DOCS_ID, "fresh.txt"))
 
     def test_force_purge_walks_oldest_version_when_only_old_versions_remain(self) -> None:
         """A multi-version live file → destructive loop evicts oldest version."""
@@ -236,7 +237,7 @@ class VaultEvictionPassTests(unittest.TestCase):
         events = [stage.event for stage in result.stages]
         self.assertIn("vault.eviction.auto_purged_oldest", events)
         # Live entry survives but only one version remains.
-        entry = find_file_entry(result.manifest, DOCS_ID, "doc.txt")
+        entry = _entry_in_unified(result.manifest, DOCS_ID, "doc.txt")
         self.assertIsNotNone(entry)
         self.assertEqual(len(entry["versions"]), 1)
         # No more candidates may or may not have been hit depending on
@@ -277,7 +278,7 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertTrue(result.no_more_candidates)
         self.assertEqual(result.bytes_freed, 0)
         # Live file untouched.
-        entry = find_file_entry(result.manifest, DOCS_ID, "untouchable.txt")
+        entry = _entry_in_unified(result.manifest, DOCS_ID, "untouchable.txt")
         self.assertIsNotNone(entry)
         self.assertFalse(entry["deleted"])
         self.assertGreater(len(relay.chunks), 0)
@@ -348,7 +349,7 @@ class VaultEvictionPassTests(unittest.TestCase):
         # Shard cleanup ran without re-running gc_execute.
         self.assertEqual(gc_execute_call_count[0], 0)
         # Manifest no longer references the stranded entry.
-        self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "stranded.txt"))
+        self.assertIsNone(_entry_in_unified(result.manifest, DOCS_ID, "stranded.txt"))
 
     def test_stage_purposes_match_destructiveness(self) -> None:
         """ADR 2026-05-18: stage 1 sends purpose='sync'; the destructive
@@ -468,9 +469,9 @@ class VaultEvictionPassTests(unittest.TestCase):
         # Loop ran at least once; oldest was purged first.
         events = [stage.event for stage in result.stages]
         self.assertIn("vault.eviction.auto_purged_oldest", events)
-        self.assertIsNone(find_file_entry(result.manifest, DOCS_ID, "oldest.txt"))
+        self.assertIsNone(_entry_in_unified(result.manifest, DOCS_ID, "oldest.txt"))
         # Loop stopped at the boundary — newer tombstones intact.
-        self.assertIsNotNone(find_file_entry(result.manifest, DOCS_ID, "newest.txt"))
+        self.assertIsNotNone(_entry_in_unified(result.manifest, DOCS_ID, "newest.txt"))
         self.assertGreater(result.bytes_freed, 0)
 
     def test_auto_purge_excludes_latest_version(self) -> None:
@@ -513,7 +514,7 @@ class VaultEvictionPassTests(unittest.TestCase):
         self.assertTrue(result.no_more_candidates)
         self.assertEqual(result.bytes_freed, 0)
         # The single live version is intact.
-        entry = find_file_entry(result.manifest, DOCS_ID, "single-version.txt")
+        entry = _entry_in_unified(result.manifest, DOCS_ID, "single-version.txt")
         self.assertIsNotNone(entry)
         self.assertFalse(entry["deleted"])
         self.assertEqual(len(entry["versions"]), 1)
@@ -633,10 +634,10 @@ class VaultEvictionPassTests(unittest.TestCase):
 
         # First (and only) destructive iteration dropped the old version,
         # NOT the recent tombstone.
-        entry = find_file_entry(result.manifest, DOCS_ID, "stale-version.txt")
+        entry = _entry_in_unified(result.manifest, DOCS_ID, "stale-version.txt")
         self.assertIsNotNone(entry)
         self.assertEqual(len(entry["versions"]), 1, "old version should be purged")
-        trash_entry = find_file_entry(result.manifest, DOCS_ID, "recent-trash.txt")
+        trash_entry = _entry_in_unified(result.manifest, DOCS_ID, "recent-trash.txt")
         self.assertIsNotNone(trash_entry)
         self.assertTrue(trash_entry["deleted"], "newer tombstone should still be present")
 
@@ -655,22 +656,40 @@ def _vault() -> Vault:
 
 
 def _empty_manifest() -> dict:
-    return make_manifest(
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=1,
-        parent_revision=0,
+        root_revision=1,
+        parent_root_revision=0,
         created_at="2026-05-04T12:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             )
         ],
     )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=[],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
+
+
+def _entry_in_unified(manifest: dict, remote_folder_id: str, path: str) -> dict | None:
+    """Look up a file entry in the unified manifest's folder."""
+    folder = next(
+        (f for f in manifest.get("remote_folders", []) or [] if f.get("remote_folder_id") == remote_folder_id),
+        None,
+    )
+    if folder is None:
+        return None
+    return find_file_entry_in_shard(folder, path)
 
 
 def _decrypt_current_manifest(vault, relay) -> dict:
