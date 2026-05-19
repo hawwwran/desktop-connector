@@ -24,9 +24,10 @@ from src.vault.import_.bundle import (  # noqa: E402
 )
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
-    find_file_entry,
-    make_manifest,
-    make_remote_folder,
+    find_file_entry_in_shard,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
 )
 
 
@@ -180,8 +181,8 @@ class VaultImportMergeTests(unittest.TestCase):
         self.assertEqual(result.overwritten_paths, [])
         self.assertEqual(result.skipped_paths, [])
         self.assertEqual(result.renamed_paths, [])
-        self.assertIsNotNone(find_file_entry(result.manifest, DOCS_ID, "a.txt"))
-        self.assertIsNotNone(find_file_entry(result.manifest, DOCS_ID, "b.txt"))
+        self.assertIsNotNone(_entry_in_unified(result.manifest, DOCS_ID, "a.txt"))
+        self.assertIsNotNone(_entry_in_unified(result.manifest, DOCS_ID, "b.txt"))
 
     def test_two_folders_with_distinct_conflicts_each_resolve_independently(self) -> None:
         """§D9 + §A4 acceptance: per-folder conflict batches; each batch
@@ -288,8 +289,8 @@ class VaultImportMergeTests(unittest.TestCase):
             "Documents/report (conflict imported 2026-05-04 18-00).docx",
         )
         # Both files exist in the merged manifest.
-        self.assertIsNotNone(find_file_entry(result.manifest, DOCS_ID, "report.docx"))
-        self.assertIsNotNone(find_file_entry(
+        self.assertIsNotNone(_entry_in_unified(result.manifest, DOCS_ID, "report.docx"))
+        self.assertIsNotNone(_entry_in_unified(
             result.manifest, DOCS_ID,
             "report (conflict imported 2026-05-04 18-00).docx",
         ))
@@ -356,21 +357,92 @@ def _manifest_with_files(
                     "author_device_id": AUTHOR,
                 }],
             })
-        folders.append(make_remote_folder(
-            remote_folder_id=folder_id,
-            display_name_enc=display_name,
+        folders.append({
+            "remote_folder_id": folder_id,
+            "display_name_enc": display_name,
+            "entries": entries,
+        })
+    pointers = [
+        make_root_folder_pointer(
+            remote_folder_id=f["remote_folder_id"],
+            display_name_enc=f["display_name_enc"],
             created_at="2026-05-01T10:00:00.000Z",
             created_by_device_id=AUTHOR,
-            entries=entries,
-        ))
-    return make_manifest(
+        )
+        for f in folders
+    ]
+    shards_by_id = {
+        f["remote_folder_id"]: make_folder_shard(
+            vault_id=vault_id,
+            remote_folder_id=f["remote_folder_id"],
+            shard_revision=1,
+            parent_shard_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=AUTHOR,
+            entries=f["entries"],
+        )
+        for f in folders
+    }
+    root = make_root_manifest(
         vault_id=vault_id,
-        revision=1,
-        parent_revision=0,
+        root_revision=1,
+        parent_root_revision=0,
         created_at="2026-05-01T10:00:00.000Z",
         author_device_id=AUTHOR,
-        remote_folders=folders,
+        remote_folders=pointers,
     )
+    return assemble_unified_manifest(root, shards_by_id)
+
+
+def _empty_unified_for(
+    *,
+    vault_id: str,
+    author_device_id: str,
+    folder_specs: list[tuple[str, str]],
+) -> dict:
+    """Build an empty unified manifest for the given vault + folder specs.
+
+    Each folder_specs element is ``(folder_id, display_name)``.
+    """
+    pointers = [
+        make_root_folder_pointer(
+            remote_folder_id=fid,
+            display_name_enc=name,
+            created_at="2026-05-01T10:00:00.000Z",
+            created_by_device_id=author_device_id,
+        )
+        for (fid, name) in folder_specs
+    ]
+    shards_by_id = {
+        fid: make_folder_shard(
+            vault_id=vault_id,
+            remote_folder_id=fid,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-01T10:00:00.000Z",
+            author_device_id=author_device_id,
+            entries=[],
+        )
+        for (fid, _) in folder_specs
+    }
+    root = make_root_manifest(
+        vault_id=vault_id,
+        root_revision=1, parent_root_revision=0,
+        created_at="2026-05-01T10:00:00.000Z",
+        author_device_id=author_device_id,
+        remote_folders=pointers,
+    )
+    return assemble_unified_manifest(root, shards_by_id)
+
+
+def _entry_in_unified(manifest: dict, remote_folder_id: str, path: str) -> dict | None:
+    """Look up a file entry in the unified manifest's folder."""
+    folder = next(
+        (f for f in manifest.get("remote_folders", []) or [] if f.get("remote_folder_id") == remote_folder_id),
+        None,
+    )
+    if folder is None:
+        return None
+    return find_file_entry_in_shard(folder, path)
 
 
 class VaultImportRunnerTests(unittest.TestCase):
@@ -450,20 +522,10 @@ class VaultImportRunnerTests(unittest.TestCase):
                 aead_ciphertext_and_tag=ciphertext,
             )
 
-        empty = make_manifest(
+        empty = _empty_unified_for(
             vault_id=MASTER_VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-01T10:00:00.000Z",
             author_device_id=MASTER_AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=MASTER_DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-01T10:00:00.000Z",
-                    created_by_device_id=MASTER_AUTHOR,
-                    entries=[],
-                )
-            ],
+            folder_specs=[(MASTER_DOCS_ID, "Documents")],
         )
 
         # 1. Build a relay that already has one file. Export it.
@@ -542,7 +604,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         self.assertIsNotNone(result.published_manifest)
         # Imported file visible in the published manifest.
         self.assertIsNotNone(
-            find_file_entry(result.published_manifest, MASTER_DOCS_ID, "exported.txt")
+            _entry_in_unified(result.published_manifest, MASTER_DOCS_ID, "exported.txt")
         )
 
     def test_run_import_refuses_when_vault_identity_mismatches(self) -> None:
@@ -563,20 +625,10 @@ class VaultImportRunnerTests(unittest.TestCase):
         )
 
         VAULT_ACCESS_SECRET = "vault-secret"
-        empty = make_manifest(
+        empty = _empty_unified_for(
             vault_id=MASTER_VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-01T10:00:00.000Z",
             author_device_id=MASTER_AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=MASTER_DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-01T10:00:00.000Z",
-                    created_by_device_id=MASTER_AUTHOR,
-                    entries=[],
-                )
-            ],
+            folder_specs=[(MASTER_DOCS_ID, "Documents")],
         )
         relay = FakeUploadRelay()
         vault = Vault(
@@ -685,19 +737,10 @@ class VaultImportRunnerTests(unittest.TestCase):
                 aead_ciphertext_and_tag=ciphertext,
             )
 
-        empty = make_manifest(
-            vault_id=MASTER_VAULT_ID, revision=1, parent_revision=0,
-            created_at="2026-05-01T10:00:00.000Z",
+        empty = _empty_unified_for(
+            vault_id=MASTER_VAULT_ID,
             author_device_id=MASTER_AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=MASTER_DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-01T10:00:00.000Z",
-                    created_by_device_id=MASTER_AUTHOR,
-                    entries=[],
-                )
-            ],
+            folder_specs=[(MASTER_DOCS_ID, "Documents")],
         )
 
         relay_a = FakeUploadRelay()
@@ -846,19 +889,10 @@ class VaultImportRunnerTests(unittest.TestCase):
                 aead_ciphertext_and_tag=ciphertext,
             )
 
-        empty = make_manifest(
-            vault_id=MASTER_VAULT_ID, revision=1, parent_revision=0,
-            created_at="2026-05-01T10:00:00.000Z",
+        empty = _empty_unified_for(
+            vault_id=MASTER_VAULT_ID,
             author_device_id=MASTER_AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=MASTER_DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-01T10:00:00.000Z",
-                    created_by_device_id=MASTER_AUTHOR,
-                    entries=[],
-                )
-            ],
+            folder_specs=[(MASTER_DOCS_ID, "Documents")],
         )
 
         export_relay = FakeUploadRelay()
@@ -1003,27 +1037,10 @@ class VaultImportRunnerTests(unittest.TestCase):
                 aead_ciphertext_and_tag=ciphertext,
             )
 
-        manifest_a = make_manifest(
+        manifest_a = _empty_unified_for(
             vault_id=MASTER_VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-01T10:00:00.000Z",
             author_device_id=MASTER_AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=MASTER_DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-01T10:00:00.000Z",
-                    created_by_device_id=MASTER_AUTHOR,
-                    entries=[],
-                ),
-                make_remote_folder(
-                    remote_folder_id=PICS_ID,
-                    display_name_enc="Pictures",
-                    created_at="2026-05-01T10:00:00.000Z",
-                    created_by_device_id=MASTER_AUTHOR,
-                    entries=[],
-                ),
-            ],
+            folder_specs=[(MASTER_DOCS_ID, "Documents"), (PICS_ID, "Pictures")],
         )
         # Vault A: two folders, uploads one file into the PICS_ID folder
         # that doesn't yet exist in vault B's manifest.
@@ -1057,20 +1074,10 @@ class VaultImportRunnerTests(unittest.TestCase):
             vault.close()
 
         # Vault B: starts with only DOCS_ID — PICS_ID is bundle-only.
-        manifest_b_initial = make_manifest(
+        manifest_b_initial = _empty_unified_for(
             vault_id=MASTER_VAULT_ID,
-            revision=1, parent_revision=0,
-            created_at="2026-05-01T10:00:00.000Z",
             author_device_id=MASTER_AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=MASTER_DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-01T10:00:00.000Z",
-                    created_by_device_id=MASTER_AUTHOR,
-                    entries=[],
-                ),
-            ],
+            folder_specs=[(MASTER_DOCS_ID, "Documents")],
         )
         relay_b = FakeUploadRelay()
         vault = make_vault()
@@ -1110,7 +1117,7 @@ class VaultImportRunnerTests(unittest.TestCase):
         self.assertIn(MASTER_DOCS_ID, folder_ids)
         self.assertIn(PICS_ID, folder_ids)
         self.assertIsNotNone(
-            find_file_entry(result.published_manifest, PICS_ID, "exported.png")
+            _entry_in_unified(result.published_manifest, PICS_ID, "exported.png")
         )
 
 
