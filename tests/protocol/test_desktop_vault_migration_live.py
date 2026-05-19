@@ -31,13 +31,6 @@ ensure_desktop_on_path()
 from src.vault import Vault  # noqa: E402
 from src.vault.binding.runtime import VaultHttpRelay  # noqa: E402
 from src.vault.migration.runner import run_migration  # noqa: E402
-from src.vault.upload import upload_file  # noqa: E402
-from src.vault.manifest import (  # noqa: E402
-    assemble_unified_manifest,
-    make_folder_shard,
-    make_root_folder_pointer,
-    make_root_manifest,
-)
 
 from test_server_contract import _ServerHarness  # noqa: E402
 
@@ -48,8 +41,6 @@ from test_server_contract import _ServerHarness  # noqa: E402
 # would budget ~1.5s on Argon2id alone.
 TEST_ARGON_MEMORY_KIB = 65_536
 TEST_ARGON_ITERATIONS = 2
-
-DOCS_FOLDER_ID = "rf_v1_aaaaaaaaaaaaaaaaaaaaaaaa"
 
 
 @dataclass
@@ -151,54 +142,6 @@ class VaultMigrationLiveTests(unittest.TestCase):
             argon_iterations=TEST_ARGON_ITERATIONS,
         )
         return vault, relay_a, relay_b, dev_a, dev_b
-
-    def _publish_empty_docs_folder(
-        self, vault: Vault, relay: VaultHttpRelay, *, author_device_id: str,
-    ) -> None:
-        """Bootstrap the vault on the relay with one empty Documents folder."""
-        # Build the root pointer + empty shard, then publish both atomically
-        # via the standard shard-with-root path that uploads use.
-        import time
-        created_at = "2026-05-19T00:00:00.000Z"
-        head_root = vault.fetch_root_manifest(relay)
-        new_root = make_root_manifest(
-            vault_id=vault.vault_id,
-            root_revision=int(head_root["root_revision"]) + 1,
-            parent_root_revision=int(head_root["root_revision"]),
-            created_at=created_at,
-            author_device_id=author_device_id,
-            remote_folders=[
-                make_root_folder_pointer(
-                    remote_folder_id=DOCS_FOLDER_ID,
-                    display_name_enc="Documents",
-                    created_at=created_at,
-                    created_by_device_id=author_device_id,
-                )
-            ],
-        )
-        vault.publish_root_manifest(relay, new_root)
-        shard = make_folder_shard(
-            vault_id=vault.vault_id,
-            remote_folder_id=DOCS_FOLDER_ID,
-            shard_revision=1,
-            parent_shard_revision=0,
-            created_at=created_at,
-            author_device_id=author_device_id,
-            entries=[],
-        )
-        # publish_shard_with_root atomically advances both.
-        current_root = vault.fetch_root_manifest(relay)
-        bumped_root = dict(current_root)
-        bumped_root["root_revision"] = int(current_root["root_revision"]) + 1
-        bumped_root["parent_root_revision"] = int(current_root["root_revision"])
-        bumped_root["created_at"] = created_at
-        bumped_root["author_device_id"] = author_device_id
-        vault.publish_shard_with_root(
-            relay,
-            DOCS_FOLDER_ID,
-            shard,
-            bumped_root,
-        )
 
     def test_genesis_vault_round_trip_a_to_b(self) -> None:
         """Migrate a fresh (genesis) vault A→B against two real PHP
