@@ -27,11 +27,12 @@ from src.vault.ops.delete import (  # noqa: E402
 from src.vault.manifest import (  # noqa: E402
     assemble_unified_manifest,
     compute_recoverable_until,
-    find_file_entry,
-    make_manifest,
-    make_remote_folder,
+    find_file_entry_in_shard,
+    make_folder_shard,
+    make_root_folder_pointer,
+    make_root_manifest,
     restore_file_entry,
-    tombstone_file_entry,
+    tombstone_file_entry_in_shard,
     tombstone_files_under,
 )
 from src.vault.upload import upload_file
@@ -52,36 +53,30 @@ VAULT_ACCESS_SECRET = "vault-secret"
 
 
 class VaultManifestTombstoneTests(unittest.TestCase):
-    def test_tombstone_file_entry_marks_deleted_and_keeps_versions(self) -> None:
-        manifest = _seeded_manifest([
-            ("Invoices/2026/report.pdf", "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa"),
-            ("Photos/IMG_001.jpg", "fv_v1_bbbbbbbbbbbbbbbbbbbbbbbb"),
-        ])
+    # The dedicated `tombstone_file_entry` single-path + recoverable_until
+    # unit tests previously lived here are now covered by the shard
+    # equivalents in `test_desktop_vault_manifest_sharded.py`
+    # (test_tombstone_file_entry_marks_deleted_with_recoverable_until).
+    # The KeyError-on-missing case migrated to the shard variant below.
 
-        out = tombstone_file_entry(
-            manifest,
-            remote_folder_id=DOCS_ID,
-            path="Invoices/2026/report.pdf",
-            deleted_at="2026-05-04T18:00:00.000Z",
+    def test_tombstone_file_entry_in_shard_missing_raises(self) -> None:
+        shard = make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at="2026-05-04T12:00:00.000Z",
             author_device_id=AUTHOR,
+            entries=[{
+                "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                "type": "file",
+                "path": "a.txt",
+                "deleted": False,
+                "latest_version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
+                "versions": [{"version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa", "chunks": []}],
+            }],
         )
-
-        entry = find_file_entry(out, DOCS_ID, "Invoices/2026/report.pdf")
-        self.assertTrue(entry["deleted"])
-        self.assertEqual(entry["deleted_at"], "2026-05-04T18:00:00.000Z")
-        self.assertEqual(entry["deleted_by_device_id"], AUTHOR)
-        # Chunk references retained for restore (T7.4).
-        self.assertEqual(len(entry["versions"]), 1)
-        self.assertEqual(entry["latest_version_id"], "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa")
-        # Other entries untouched.
-        peer = find_file_entry(out, DOCS_ID, "Photos/IMG_001.jpg")
-        self.assertFalse(peer["deleted"])
-
-    def test_tombstone_file_entry_missing_raises(self) -> None:
-        manifest = _seeded_manifest([("a.txt", "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa")])
         with self.assertRaises(KeyError):
-            tombstone_file_entry(
-                manifest, remote_folder_id=DOCS_ID, path="missing.txt",
+            tombstone_file_entry_in_shard(
+                shard, path="missing.txt",
                 deleted_at="2026-05-04T18:00:00.000Z", author_device_id=AUTHOR,
             )
 
@@ -106,9 +101,9 @@ class VaultManifestTombstoneTests(unittest.TestCase):
             ["Invoices/2026/a.pdf", "Invoices/2026/b.pdf"],
         )
         for path in tombstoned:
-            self.assertTrue(find_file_entry(out, DOCS_ID, path)["deleted"])
+            self.assertTrue(_entry_in_unified(out, DOCS_ID, path)["deleted"])
         for survivor in ("Invoices/2025/old.pdf", "Photos/wedding.jpg"):
-            self.assertFalse(find_file_entry(out, DOCS_ID, survivor)["deleted"])
+            self.assertFalse(_entry_in_unified(out, DOCS_ID, survivor)["deleted"])
 
     def test_tombstone_files_under_root_drops_every_live_entry(self) -> None:
         manifest = _seeded_manifest([
@@ -123,9 +118,9 @@ class VaultManifestTombstoneTests(unittest.TestCase):
 
     def test_restore_file_entry_clears_tombstone_and_promotes_version(self) -> None:
         manifest = _seeded_manifest([("a.txt", "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa")])
-        manifest = tombstone_file_entry(
-            manifest, remote_folder_id=DOCS_ID, path="a.txt",
-            deleted_at="2026-05-04T18:00:00.000Z", author_device_id=AUTHOR,
+        manifest = _apply_tombstone_in_unified(
+            manifest, path="a.txt",
+            deleted_at="2026-05-04T18:00:00.000Z",
         )
 
         new_version = {
@@ -148,7 +143,7 @@ class VaultManifestTombstoneTests(unittest.TestCase):
             new_version=new_version, author_device_id=AUTHOR,
         )
 
-        entry = find_file_entry(out, DOCS_ID, "a.txt")
+        entry = _entry_in_unified(out, DOCS_ID, "a.txt")
         self.assertFalse(entry["deleted"])
         self.assertNotIn("deleted_at", entry)
         self.assertEqual(entry["latest_version_id"], "fv_v1_zzzzzzzzzzzzzzzzzzzzzzzz")
@@ -175,47 +170,11 @@ class VaultRetentionDisplayTests(unittest.TestCase):
         self.assertEqual(compute_recoverable_until("", 30), "")
         self.assertEqual(compute_recoverable_until("not a date", 30), "")
 
-    def test_tombstone_stamps_recoverable_until_using_folder_retention(self) -> None:
-        manifest = make_manifest(
-            vault_id=VAULT_ID,
-            revision=2,
-            parent_revision=1,
-            created_at="2026-05-04T12:00:00.000Z",
-            author_device_id=AUTHOR,
-            remote_folders=[
-                make_remote_folder(
-                    remote_folder_id=DOCS_ID,
-                    display_name_enc="Documents",
-                    created_at="2026-05-04T12:00:00.000Z",
-                    created_by_device_id=AUTHOR,
-                    retention_policy={"keep_deleted_days": 14, "keep_versions": 10},
-                    entries=[{
-                        "entry_id": "fe_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
-                        "type": "file",
-                        "path": "doomed.txt",
-                        "deleted": False,
-                        "latest_version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
-                        "versions": [{
-                            "version_id": "fv_v1_aaaaaaaaaaaaaaaaaaaaaaaa",
-                            "created_at": "2026-05-01T10:00:00.000Z",
-                            "modified_at": "2026-05-01T10:00:00.000Z",
-                            "logical_size": 1,
-                            "ciphertext_size": 25,
-                            "content_fingerprint": "x",
-                            "chunks": [],
-                            "author_device_id": AUTHOR,
-                        }],
-                    }],
-                )
-            ],
-        )
-
-        out = tombstone_file_entry(
-            manifest, remote_folder_id=DOCS_ID, path="doomed.txt",
-            deleted_at="2026-05-04T18:00:00.000Z", author_device_id=AUTHOR,
-        )
-        entry = find_file_entry(out, DOCS_ID, "doomed.txt")
-        self.assertEqual(entry["recoverable_until"], "2026-05-18T18:00:00.000Z")
+    # The recoverable_until / folder-retention coverage previously lived
+    # here is now in test_desktop_vault_manifest_sharded.py
+    # (test_tombstone_file_entry_marks_deleted_with_recoverable_until)
+    # — the shard helper takes folder_retention_policy explicitly, so
+    # the contract is equivalent.
 
 
 class VaultDeleteOrchestrationTests(unittest.TestCase):
@@ -275,7 +234,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         # only correct via interleaved ``mirror_legacy_from_sharded``
         # calls; counting shards directly is the durable shape.
         self.assertEqual(len(relay.published_shards), 2)
-        entry = find_file_entry(published, DOCS_ID, "doomed.txt")
+        entry = _entry_in_unified(published, DOCS_ID, "doomed.txt")
         self.assertTrue(entry["deleted"])
         # Chunks remain on the relay — soft delete only touches the manifest.
         self.assertGreater(len(relay.chunks), 0)
@@ -323,10 +282,10 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
             ["Invoices/2026/a.pdf", "Invoices/2026/b.pdf"],
         )
         for path in tombstoned:
-            self.assertTrue(find_file_entry(published, DOCS_ID, path)["deleted"])
+            self.assertTrue(_entry_in_unified(published, DOCS_ID, path)["deleted"])
         # Photo survived.
         self.assertFalse(
-            find_file_entry(published, DOCS_ID, "Photos/p.jpg")["deleted"]
+            _entry_in_unified(published, DOCS_ID, "Photos/p.jpg")["deleted"]
         )
 
     def test_restore_folder_contents_lifts_every_tombstone_under_prefix(self) -> None:
@@ -377,12 +336,12 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
             ["Invoices/2026/a.pdf", "Invoices/2026/b.pdf"],
         )
         for path in paths_restored:
-            entry = find_file_entry(restored, DOCS_ID, path)
+            entry = _entry_in_unified(restored, DOCS_ID, path)
             self.assertFalse(entry["deleted"])
             self.assertNotIn("deleted_at", entry)
             self.assertEqual(entry["restored_by_device_id"], AUTHOR)
         self.assertTrue(
-            find_file_entry(restored, DOCS_ID, "Photos/p.jpg")["deleted"],
+            _entry_in_unified(restored, DOCS_ID, "Photos/p.jpg")["deleted"],
         )
         # No new chunk uploads for a bulk restore — every restored
         # version points at the chunks of the entry's last-known
@@ -430,7 +389,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         # No new chunks were PUT for the restore.
         self.assertEqual(relay.put_calls, puts_before)
 
-        entry = find_file_entry(restored, DOCS_ID, "report.txt")
+        entry = _entry_in_unified(restored, DOCS_ID, "report.txt")
         self.assertEqual(len(entry["versions"]), 3)  # v1 + v2 + restored
         self.assertNotEqual(entry["latest_version_id"], v1.version_id)
         self.assertNotEqual(entry["latest_version_id"], v2.version_id)
@@ -474,7 +433,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
                 author_device_id=AUTHOR,
             )
             self.assertTrue(
-                find_file_entry(after_delete, DOCS_ID, "ghost.txt")["deleted"]
+                _entry_in_unified(after_delete, DOCS_ID, "ghost.txt")["deleted"]
             )
             after_restore = restore_version_to_current(
                 vault=vault, relay=relay, manifest=after_delete,
@@ -485,7 +444,7 @@ class VaultDeleteOrchestrationTests(unittest.TestCase):
         finally:
             vault.close()
 
-        entry = find_file_entry(after_restore, DOCS_ID, "ghost.txt")
+        entry = _entry_in_unified(after_restore, DOCS_ID, "ghost.txt")
         self.assertFalse(entry["deleted"])
         self.assertNotIn("deleted_at", entry)
 
@@ -504,22 +463,67 @@ def _vault() -> Vault:
 
 
 def _empty_manifest() -> dict:
-    return make_manifest(
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=1,
-        parent_revision=0,
+        root_revision=1,
+        parent_root_revision=0,
         created_at="2026-05-04T12:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=[],
             )
         ],
     )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=1, parent_shard_revision=0,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=[],
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
+
+
+def _entry_in_unified(manifest: dict, remote_folder_id: str, path: str) -> dict | None:
+    """Look up a file entry in the unified manifest's folder."""
+    folder = next(
+        (f for f in manifest.get("remote_folders", []) or [] if f.get("remote_folder_id") == remote_folder_id),
+        None,
+    )
+    if folder is None:
+        return None
+    return find_file_entry_in_shard(folder, path)
+
+
+def _apply_tombstone_in_unified(
+    unified: dict, *, path: str, deleted_at: str,
+) -> dict:
+    """Apply a tombstone via tombstone_file_entry_in_shard against the
+    unified manifest's DOCS_ID folder; splice entries back, bump revision."""
+    import copy as _copy
+    folder = next(f for f in unified["remote_folders"] if f["remote_folder_id"] == DOCS_ID)
+    tombstoned = tombstone_file_entry_in_shard(
+        make_folder_shard(
+            vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+            shard_revision=1, parent_shard_revision=0,
+            created_at=folder["created_at"],
+            author_device_id=AUTHOR,
+            entries=folder["entries"],
+        ),
+        path=path,
+        deleted_at=deleted_at,
+        author_device_id=AUTHOR,
+        folder_retention_policy=folder.get("retention_policy"),
+    )
+    out = _copy.deepcopy(unified)
+    for nf in out["remote_folders"]:
+        if nf["remote_folder_id"] == DOCS_ID:
+            nf["entries"] = tombstoned["entries"]
+    return out
 
 
 def _seeded_manifest(files: list[tuple[str, str]]) -> dict:
@@ -543,22 +547,29 @@ def _seeded_manifest(files: list[tuple[str, str]]) -> dict:
                 "author_device_id": AUTHOR,
             }],
         })
-    return make_manifest(
+    root = make_root_manifest(
         vault_id=VAULT_ID,
-        revision=2,
-        parent_revision=1,
+        root_revision=2,
+        parent_root_revision=1,
         created_at="2026-05-04T12:00:00.000Z",
         author_device_id=AUTHOR,
         remote_folders=[
-            make_remote_folder(
+            make_root_folder_pointer(
                 remote_folder_id=DOCS_ID,
                 display_name_enc="Documents",
                 created_at="2026-05-04T12:00:00.000Z",
                 created_by_device_id=AUTHOR,
-                entries=entries,
             )
         ],
     )
+    shard = make_folder_shard(
+        vault_id=VAULT_ID, remote_folder_id=DOCS_ID,
+        shard_revision=2, parent_shard_revision=1,
+        created_at="2026-05-04T12:00:00.000Z",
+        author_device_id=AUTHOR,
+        entries=entries,
+    )
+    return assemble_unified_manifest(root, {DOCS_ID: shard})
 
 
 def _decrypt_current_manifest(vault, relay) -> dict:
