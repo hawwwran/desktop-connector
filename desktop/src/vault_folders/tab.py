@@ -260,5 +260,24 @@ def build_vault_folders_tab(
     add_folder_btn.connect("clicked", lambda _b: open_add_folder_dialog(ctx))
 
     refresh_all()
-    refresh_folders_usage_async()
+    # F-510 follow-up: the manifest fetch behind ``refresh_folders_usage_async``
+    # makes ``1 + N`` auth-billed calls (root + one shard per folder).
+    # Firing it eagerly at build time tripped the server-side
+    # ``vaultAuthLimit`` (default 60-second rolling window) the moment
+    # Vault Settings opened — even before the user clicked the Folders
+    # tab — because every Vault Settings open builds every tab. Defer
+    # to the first ``map`` so the fetch only runs when the tab is
+    # actually shown. Idempotent: subsequent tab switches do **not**
+    # re-fetch (would burn budget on every click); user-initiated
+    # actions still fan out to ``refresh_folders_usage_async`` via
+    # ``ctx`` if they need a fresh snapshot.
+    usage_load_state = {"loaded": False}
+
+    def _on_first_map(_widget) -> None:
+        if usage_load_state["loaded"]:
+            return
+        usage_load_state["loaded"] = True
+        refresh_folders_usage_async()
+
+    split.connect("map", _on_first_map)
     return split
