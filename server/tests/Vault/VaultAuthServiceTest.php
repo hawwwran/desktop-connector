@@ -242,33 +242,39 @@ final class VaultAuthServiceTest extends TestCase
     }
 
     /**
-     * Review §1.H1: protocol §10 caps vault auth at 10 attempts per
-     * (device, vault) per minute. Each successful auth still bills
-     * the counter — the limit caps total attempts, successful or
-     * not, so a misbehaving client storm can't drown out the IDS
-     * signal. Hitting the cap must surface as a 429 with
-     * ``Retry-After``.
+     * Review §1.H1: protocol §10 caps vault auth at the configured
+     * ``vaultAuthLimit`` attempts per (device, vault) per minute.
+     * Each successful auth still bills the counter — the limit caps
+     * total attempts, successful or not, so a misbehaving client
+     * storm can't drown out the IDS signal. Hitting the cap must
+     * surface as a 429 with ``Retry-After``.
+     *
+     * Pinned at the floor value of 10 via ``withConfigOverride`` so
+     * the assertion stays meaningful regardless of the production
+     * default (raised to 120 on 2026-05-20).
      */
     public function test_vault_auth_429s_after_attempts_cap(): void
     {
-        $this->setValidDeviceAuth();
-        $this->setValidVaultAuth();
+        $this->withConfigOverride(['vaultAuthLimit' => 10], function (): void {
+            $this->setValidDeviceAuth();
+            $this->setValidVaultAuth();
 
-        // Burn the 10 allowed attempts.
-        for ($i = 0; $i < 10; $i++) {
-            VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
-        }
-        try {
-            VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
-            self::fail('expected VaultRateLimitedError on the 11th attempt');
-        } catch (VaultRateLimitedError $e) {
-            self::assertSame(429, $e->status);
-            self::assertSame('vault_rate_limited', $e->errorCode);
-            self::assertArrayHasKey('retry_after_ms', $e->details);
-            self::assertGreaterThan(0, $e->details['retry_after_ms']);
-            // Retry-After header populated.
-            self::assertArrayHasKey('Retry-After', $e->headers);
-        }
+            // Burn the 10 allowed attempts.
+            for ($i = 0; $i < 10; $i++) {
+                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+            }
+            try {
+                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+                self::fail('expected VaultRateLimitedError on the 11th attempt');
+            } catch (VaultRateLimitedError $e) {
+                self::assertSame(429, $e->status);
+                self::assertSame('vault_rate_limited', $e->errorCode);
+                self::assertArrayHasKey('retry_after_ms', $e->details);
+                self::assertGreaterThan(0, $e->details['retry_after_ms']);
+                // Retry-After header populated.
+                self::assertArrayHasKey('Retry-After', $e->headers);
+            }
+        });
     }
 
     /**
@@ -279,23 +285,25 @@ final class VaultAuthServiceTest extends TestCase
      */
     public function test_vault_auth_counter_is_per_vault(): void
     {
-        $otherVaultId = 'P3QR4ST5UVWY';
-        $otherSecret = 'other-vault-secret-32-bytes-long-padding-padding';
-        $this->vaultsRepo->create(
-            $otherVaultId,
-            hash('sha256', $otherSecret, true),
-            "\xde\xad", self::HEADER_HASH, self::MFST_HASH, self::NOW,
-        );
-        $this->setValidDeviceAuth();
-        // Burn 10 against VAULT_ID.
-        $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . self::VAULT_SECRET;
-        for ($i = 0; $i < 10; $i++) {
-            VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
-        }
-        // Switch to the other vault — should succeed (fresh counter).
-        $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . $otherSecret;
-        $vault = VaultAuthService::requireVaultAuth($this->db, $otherVaultId);
-        self::assertSame($otherVaultId, $vault['vault_id']);
+        $this->withConfigOverride(['vaultAuthLimit' => 10], function (): void {
+            $otherVaultId = 'P3QR4ST5UVWY';
+            $otherSecret = 'other-vault-secret-32-bytes-long-padding-padding';
+            $this->vaultsRepo->create(
+                $otherVaultId,
+                hash('sha256', $otherSecret, true),
+                "\xde\xad", self::HEADER_HASH, self::MFST_HASH, self::NOW,
+            );
+            $this->setValidDeviceAuth();
+            // Burn 10 against VAULT_ID — exhausts the floor-pinned cap.
+            $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . self::VAULT_SECRET;
+            for ($i = 0; $i < 10; $i++) {
+                VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+            }
+            // Switch to the other vault — should succeed (fresh counter).
+            $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer ' . $otherSecret;
+            $vault = VaultAuthService::requireVaultAuth($this->db, $otherVaultId);
+            self::assertSame($otherVaultId, $vault['vault_id']);
+        });
     }
 
     /**
@@ -306,25 +314,27 @@ final class VaultAuthServiceTest extends TestCase
      */
     public function test_failed_vault_auth_still_bills_counter(): void
     {
-        $this->setValidDeviceAuth();
-        $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer wrong-secret';
-        // 10 failed attempts all return vault_auth_failed.
-        for ($i = 0; $i < 10; $i++) {
+        $this->withConfigOverride(['vaultAuthLimit' => 10], function (): void {
+            $this->setValidDeviceAuth();
+            $_SERVER['HTTP_X_VAULT_AUTHORIZATION'] = 'Bearer wrong-secret';
+            // 10 failed attempts all return vault_auth_failed.
+            for ($i = 0; $i < 10; $i++) {
+                try {
+                    VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
+                } catch (VaultAuthFailedError $e) {
+                    $this->assertSame('vault', $e->details['kind']);
+                }
+            }
+            // 11th attempt: the rate limit fires BEFORE the auth check
+            // so the user sees a 429 (telemetry / IDS) rather than yet
+            // another 401.
             try {
                 VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
-            } catch (VaultAuthFailedError $e) {
-                $this->assertSame('vault', $e->details['kind']);
+                self::fail('expected VaultRateLimitedError');
+            } catch (VaultRateLimitedError $e) {
+                self::assertSame(429, $e->status);
             }
-        }
-        // 11th attempt: the rate limit fires BEFORE the auth check
-        // so the user sees a 429 (telemetry / IDS) rather than yet
-        // another 401.
-        try {
-            VaultAuthService::requireVaultAuth($this->db, self::VAULT_ID);
-            self::fail('expected VaultRateLimitedError');
-        } catch (VaultRateLimitedError $e) {
-            self::assertSame(429, $e->status);
-        }
+        });
     }
 
     /**

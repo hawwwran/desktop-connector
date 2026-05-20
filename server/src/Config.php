@@ -44,16 +44,23 @@ class Config
         // **not** retroactively resized — the key only affects new
         // vaults. Wired through ``VaultsRepository::create``.
         'vaultQuotaBytes' => 1073741824,
-        // Floor on per-(device, vault) vault auth attempts per minute.
-        // Hardcoded design (pre-2026-05-19) capped it at 10 / minute
-        // to throttle a compromised paired device; the B5 live test
+        // Per-(device, vault) vault auth attempts per minute. Every
+        // authenticated ``/api/vaults/{id}/*`` call bills one attempt
+        // against this counter, regardless of success/failure: the
+        // §1.H1 threat model is "throttle a compromised paired device
+        // hammering the relay", not "rate-limit failed credentials".
+        // Hardcoded at 10/min pre-2026-05-19; the B5 live test
         // surfaced that legitimate sync workloads bill an auth attempt
-        // per chunk PUT and easily exceed 10 in a single cycle. The
-        // value is now configurable upward — operators on dedicated
-        // hosts that prefer raising the cap can; the floor of 10 is
-        // enforced in ``vaultAuthLimit()`` so a typo can never
-        // *weaken* the throttle below the original design.
-        'vaultAuthLimit' => 10,
+        // per chunk PUT plus N+1 per ``fetch_unified_manifest``
+        // (Folders tab open, vault browser open, every sync cycle)
+        // and easily exceed 10 in a single user session. Default
+        // raised to 120 on 2026-05-20 so the cap matches realistic
+        // single-user workloads out of the box; operators on busy
+        // hosts can raise further. The floor of 10 enforced in
+        // ``vaultAuthLimit()`` preserves the original design as a
+        // minimum — a typo or hostile config can never *weaken* the
+        // throttle below 10.
+        'vaultAuthLimit' => 120,
     ];
 
     /** Smallest accepted value for ``vaultAuthLimit``. Matches the
