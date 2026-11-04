@@ -234,12 +234,13 @@ desktop/
     backends/linux/                    # Linux implementations of the 4 Protocols
     platform/                          # DesktopPlatform contract + compose (non-Linux raises NotImplementedError)
     messaging/                         # MessageType/Transport, DeviceMessage, fn_transfer_adapter, fasttrack_adapter, dispatcher
-    crypto.py  connection.py  config.py  api_client.py
-    poller.py                          # poll/download/decrypt/delivery; platform via self.platform.*
+    crypto.py  connection.py  config.py
+    api/                               # relay HTTP client, composed from topical mixins (api_client.py = back-compat shim)
+    receive/                           # poll/download/decrypt/delivery; platform via self.platform.* (poller.py = back-compat shim)
     history.py                         # JSON history (50 items); TransferStatus enum
     pairing.py                         # QR + tkinter pairing window
-    tray.py                            # pystray; spawns GTK4 windows as subprocesses; update menu items + 24h check thread
-    windows.py                         # GTK4/libadwaita windows (send-files, settings, history, pairing, find-phone, onboarding)
+    tray/                              # pystray app + mixins; spawns GTK4 windows as subprocesses; update menu items + 24h check thread
+    windows.py                         # GTK4 window CLI dispatcher; per-window code in windows_*.py, windows_history/, windows_settings/
     clipboard.py  dialogs.py  notifications.py   # Linux helpers (wl-copy/xclip, zenity, notify-send)
 
 android/app/src/main/kotlin/com/desktopconnector/

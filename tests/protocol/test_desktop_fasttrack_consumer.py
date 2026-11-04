@@ -243,7 +243,7 @@ class FasttrackConsumerTests(unittest.TestCase):
             sender_id="peer-A",
         )
 
-        with patch("src.poller.sync_file_manager_targets") as sync_targets:
+        with patch("src.receive.fn_transfer.sync_file_manager_targets") as sync_targets:
             poller._handle_message_unpair(message)
 
         devices = poller.config.paired_devices

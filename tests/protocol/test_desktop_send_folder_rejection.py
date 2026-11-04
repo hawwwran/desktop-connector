@@ -96,7 +96,10 @@ class FileManagerScriptTemplateTests(unittest.TestCase):
 class SendFilesWindowSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+        cls.source = (
+            Path(REPO_ROOT, "desktop/src/windows_send.py").read_text()
+            + Path(REPO_ROOT, "desktop/src/windows_common.py").read_text()
+        )
 
     def test_drop_handler_counts_skipped_folders(self):
         for text in (
