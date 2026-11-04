@@ -20,7 +20,7 @@ SCRIPT_DIR="$(dirname -- "$(readlink -f -- "$0")")"
 
 # Pinned upstream URLs. Bump deliberately and update the AppImage SHA
 # pinning in P.5b's reproducibility plan when these change.
-PYTHON_APPIMAGE_URL="https://github.com/niess/python-appimage/releases/download/python3.11/python3.11.14-cp311-cp311-manylinux2014_x86_64.AppImage"
+PYTHON_APPIMAGE_URL="https://github.com/niess/python-appimage/releases/download/python3.11/python3.11.17-cp311-cp311-manylinux2014_x86_64.AppImage"
 APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
 LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
 # linuxdeploy-plugin-gtk has no releases; sourced from the master branch.
