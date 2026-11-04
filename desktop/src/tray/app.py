@@ -168,7 +168,19 @@ class TrayApp(
         self._state_paths = _bake_state_paths(self.config.config_dir / "tray")
         self._last_applied_state: str | None = None
 
-        self.conn.on_state_change(lambda state: self._update_icon())
+        def _on_state_change(_state):
+            # Repaint the icon AND rebuild the menu. On AppIndicator backends
+            # (libappindicator / StatusNotifierItem) the menu is D-Bus-bound
+            # and lambda labels (e.g. _status_text) are only re-evaluated on
+            # update_menu(); without this rebuild the menu kept showing the
+            # last-rendered "Online" while the icon flipped to disconnected.
+            self._update_icon()
+            try:
+                if self._icon:
+                    self._icon.update_menu()
+            except Exception:
+                pass
+        self.conn.on_state_change(_on_state_change)
 
         def _on_auth_failure(kind):
             log.warning("auth.failure.surface kind=%s", kind.value)
@@ -211,9 +223,14 @@ class TrayApp(
         self._last_ping_time = 0.0
         self._ping_in_flight = False
         self._ping_lock = threading.Lock()
-        # 5 min between probes: icon may be stale, but phone battery stays near-zero.
-        # On-connect triggers an immediate ping regardless.
-        self._ping_interval = 300.0
+        # 15 min between background probes — was 5 min, but android_logs_4/5
+        # (2026-05-12) attributed ~25 mAh / 10 h on the phone to LTE-tail
+        # cost after each pong over cellular (12 pongs/h × ~25 s tail).
+        # On-connect and menu-open paths still ping immediately/with their
+        # own 30 s cache, so the dot stays accurate when the user actually
+        # looks. See docs/plans/android-radio-tail-cost.md for the dumpsys
+        # methodology behind the number.
+        self._ping_interval = 900.0
 
         def icon_poll():
             was_connected = False
@@ -246,8 +263,15 @@ class TrayApp(
 
                 connected = self.conn.state == ConnectionState.CONNECTED
                 if connected:
+                    # On a transition back to CONNECTED, use the same 30 s
+                    # cache window as the menu-open ping rather than forcing
+                    # an unconditional ping (min_age=0). Otherwise every
+                    # transient wifi-reassoc / DHCP-renew / route-flap blip
+                    # cascades into a fresh FCM ping wake on the phone —
+                    # 1 modem-active session per blip — even though we
+                    # pinged seconds ago and the result is still meaningful.
                     just_connected = not was_connected
-                    min_age = 0.0 if just_connected else self._ping_interval
+                    min_age = 30.0 if just_connected else self._ping_interval
                     self._maybe_ping(min_age)
                 elif self._remote_online:
                     self._remote_online = False

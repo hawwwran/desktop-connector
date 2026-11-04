@@ -153,6 +153,37 @@ backing the sweep);
 (11 cases covering both helpers); `docs/plans/android-radio-tail-cost.md`
 "What `_9.txt` showed" + "Changes deployed (2026-05-13)" sections.
 
+### 2026-05-11 — Reconnect ping reuses a <30 s result; background cadence 15 min
+
+**Status:** accepted.
+
+**Context.** A battery dump from a paired phone showed Desktop
+Connector as the #2 power consumer (109 mAh / 4h 50m, 95 % on
+`mobile_radio`, 80 `FcmService` launches). Over the same window the
+desktop log showed transient `[Errno 101] Network is unreachable`
+retry storms. `icon_poll` called `_maybe_ping(0.0)` on every
+CONNECTED transition, so each wifi-reassoc / DHCP-renew blip forced a
+fresh HIGH-priority FCM wake on the phone, and the 5 min background
+probe added ~12 pongs/h, each followed by ~25 s of LTE tail
+(android_logs_4/5, 2026-05-12).
+
+**Decision.** The reconnect ping uses `min_age = 30.0`, the same cache
+window as the menu-open ping, so sub-30 s blips reuse the recent
+result. The background probe interval goes from 300 s to 900 s. The
+on-connect and menu-open paths still ping, so the tray dot is fresh
+whenever the user actually looks at it.
+
+**Alternatives.** Dropping the reconnect ping entirely (rejected: the
+"opened the laptop after lunch" case still wants fast feedback).
+Subscribing to NetworkManager D-Bus network-up signals (rejected:
+platform-specific; the connection-state callback is portable and
+sufficient). Coalescing pongs or debouncing server-side (see
+`docs/plans/android-radio-tail-cost.md`; the client-side cadence
+change was the smallest fix with the biggest effect).
+
+**Anchor.** `desktop/src/tray/app.py`: `_ping_interval` and the
+`min_age` choice in `icon_poll`.
+
 ### 2026-05-06 — Keyring service name derives from `config_dir`; device_id lives beside auth_token
 
 **Status:** accepted.

@@ -2,12 +2,16 @@
 
 
 class LivenessMixin:
-    def get_stats(self, paired_with: str | None = None) -> dict | None:
-        """Get connection statistics from the server."""
+    def get_stats(self, paired_with: str | None = None,
+                  timeout: float | None = None) -> dict | None:
+        """Get connection statistics from the server. ``timeout`` overrides
+        the ConnectionManager default (30 s) — settings-window construction
+        passes a short value so the window doesn't block on a hung relay."""
         path = "/api/devices/stats"
         if paired_with:
             path += f"?paired_with={paired_with}"
-        resp = self.conn.request("GET", path)
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        resp = self.conn.request("GET", path, **kwargs)
         if resp and resp.status_code == 200:
             return resp.json()
         return None
