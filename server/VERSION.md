@@ -1,5 +1,5 @@
 ---
 component: server
-version: 0.2.0
-tag: server/v0.2.0
+version: 1.0.0
+tag: server/v1.0.0
 ---
