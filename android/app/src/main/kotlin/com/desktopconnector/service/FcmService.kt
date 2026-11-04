@@ -1,10 +1,12 @@
 package com.desktopconnector.service
 
+import android.os.PowerManager
 import android.util.Log
 import com.desktopconnector.data.AppLog
 import com.desktopconnector.data.AppPreferences
 import com.desktopconnector.network.ApiClient
 import com.desktopconnector.network.FcmManager
+import com.desktopconnector.util.NetworkPolicy
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -56,11 +58,24 @@ class FcmService : FirebaseMessagingService() {
         val server = prefs.serverUrl ?: return
         val id = prefs.deviceId ?: return
         val token = prefs.authToken ?: return
+        // Battery-attribution tags: pong over metered cellular while the
+        // screen is off is the load-bearing case for radio tail cost (see
+        // android_logs_4 analysis, 2026-05-12). 12 pongs/h × ~30 s LTE
+        // tail ≈ 60 min/10 h of radio active time billed to the app.
+        val pm = getSystemService(PowerManager::class.java)
+        val screenOff = pm?.isInteractive == false
+        val metered = NetworkPolicy.isMetered(this)
+        val tStart = System.currentTimeMillis()
         try {
-            ApiClient(server, id, token).pong()
-            AppLog.log("FCM", "ping.pong.sent")
+            val ok = ApiClient(server, id, token).pong()
+            val dur = System.currentTimeMillis() - tStart
+            AppLog.log("FCM",
+                "ping.pong.sent screen_off=$screenOff metered=$metered ok=$ok duration_ms=$dur")
         } catch (e: Exception) {
-            AppLog.log("FCM", "ping.pong.failed error_kind=${e.javaClass.simpleName}", "warning")
+            val dur = System.currentTimeMillis() - tStart
+            AppLog.log("FCM",
+                "ping.pong.failed screen_off=$screenOff metered=$metered duration_ms=$dur error_kind=${e.javaClass.simpleName}",
+                "warning")
             Log.w("FcmService", "Pong failed: ${e.message}")
         }
     }
