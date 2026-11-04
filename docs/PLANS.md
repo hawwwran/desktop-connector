@@ -16,13 +16,9 @@ current set). Protocol reference docs under
 
 ## Plans
 
-| Plan | Intent | Status |
-|------|--------|--------|
-| [brand-rollout.md](plans/brand-rollout.md) | Apply `visual-identity-guide.md` across Android, desktop, and server. | Done |
-| [desktop-multi-device-support.md](plans/desktop-multi-device-support.md) | Add desktop support for multiple paired connected devices, target pickers, per-device file-manager actions, and find-device receiver behavior. | Done; manual GTK smoke / lock-screen hardening remain documented follow-ups |
-| [readme_changes_plan.md](plans/readme_changes_plan.md) | Sharpen the top-level README so the project presents more credibly to first-time visitors and contributors. | Done |
-| [desktop-connector-tresor-plan-md/](plans/desktop-connector-tresor-plan-md/desktop-connector-tresor-00-index.md) | 11-part incremental plan to add a persistent, account-less, E2E-encrypted **Tresor / Vault** with remote folders, browse-only import, versioned upload/delete, export/import bundles, and guarded sync engine. | Open |
-| [desktop-connector-vault-open-ux-gaps.md](plans/desktop-connector-vault-open-ux-gaps.md) | Discussion notes supplementing the Tresor plan: recovery testing, emergency access state, and other UX/safety gaps to resolve before or during Vault implementation. | Open |
+_No open plans._
+
+Finished plans are archived under [`temp/finished-plans/`](../temp/finished-plans/): `brand-rollout.md`, `desktop-multi-device-support.md`, `readme_changes_plan.md`.
 
 ## Protocol reference (living docs)
 

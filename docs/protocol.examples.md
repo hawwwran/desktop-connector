@@ -307,7 +307,7 @@ After ack the server deletes chunk files and flips `downloaded=1`, `chunks_downl
 The wire keeps `fn=find-phone` as the canonical name. Receivers also
 accept the alias `fn=find-device` (desktop M.8+); senders stay on the
 legacy name until both platforms migrate. See D5 in
-`docs/plans/desktop-multi-device-support.md`.
+`temp/finished-plans/desktop-multi-device-support.md`.
 
 Sender → receiver:
 

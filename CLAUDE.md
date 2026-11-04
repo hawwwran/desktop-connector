@@ -51,6 +51,14 @@ cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-de
 ./test_loop.sh
 ```
 
+## Testing the desktop GTK app (AT-SPI)
+
+The host has `python3-dogtail` + `accerciser` + `at-spi2-core` installed so Claude can drive the running GTK4/libadwaita windows via the GNOME accessibility bus instead of fragile keystroke injection (xdotool/ydotool). `dogtail` walks the widget tree from Python, invokes named buttons / menu items, and reads visible text; `accerciser` is the GUI inspector for one-off exploration of a live window. Works on both X11 and Wayland under GNOME.
+
+Intended use: confirm a window/dialog rendered, click "Send" / "Cancel" / "Pair" without a real pointer, read pairing codes and progress bars, regression-check after edits to `windows*.py` or `dialogs.py`. Pair with `gnome-screenshot -w` for visual evidence. Tray icon (`pystray`) is **not** AT-SPI-exposed — drive its menu via the underlying subprocess windows or by invoking `python3 -m src.windows {…}` directly. Setup script: `~/temp-scripts/048-install-at-spi-tooling.sh`.
+
+**Dev twin isolation**: run a second copy against a separate `--config-dir` and a local PHP relay on `127.0.0.1:4441`. Keyring isolation is automatic: `Config` derives the service name from `config_dir.name`, so `--config-dir=~/.config/desktop-connector-dev` writes to keyring service `desktop-connector-dev` rather than aliasing the user's real install. **Never set `GTK_A11Y=atspi`** on this host: it crashed the user's GNOME Wayland session in earlier runs; AT-SPI is already enabled system-wide.
+
 ## Installation (desktop)
 
 The release shape is a **signed AppImage** fetched from GitHub Releases — single self-contained file, no host apt/pip touched, in-app updates via the tray menu. The dev-tree apt+pip path stays available as `install-from-source.sh` for contributors.
@@ -77,6 +85,13 @@ desktop-connector/
 Requires PHP 8.0+, SQLite3, mod_rewrite (+ curl/openssl for FCM). Router auto-detects base path from `SCRIPT_NAME` — works in any subdirectory.
 
 ## Key design decisions
+
+> **New decisions go in [`docs/architecture-decisions.md`](docs/architecture-decisions.md).**
+> That file is the long-term tracker; this section keeps the legacy /
+> cross-cutting narrative for fast scan-ability. When you make a
+> non-trivial architectural choice (protocol, state machine, security
+> boundary, dependency, threat-model assumption), add a dated entry
+> there before or alongside the implementation commit.
 
 ### Server pipeline & persistence
 - **Request pipeline**: handlers take `(Database $db, RequestContext $ctx)`. `Router` builds `RequestContext` (route params, query, lazy body) and routes registered via `authGet`/`authPost` resolve identity through `AuthService::requireAuth` before dispatch. Controllers validate via `Validators::*` and throw `ApiError` subclasses; top-level `try/catch` hands them to `ErrorResponder`. No controller touches `$_SERVER`/`$_GET`/`php://input` or hand-writes error JSON. The path-traversal guard on `{transfer_id}` is a pipeline validator, so every endpoint accepting that param is protected.
@@ -179,7 +194,7 @@ See [`docs/visual-identity-guide.md`](docs/visual-identity-guide.md). Blue-domin
 
 Monochrome notifications encode state via shape (full sparkle = connected, outline = disconnected). `Notification.Builder.setColor(#2058F0)` tints the shade header brand blue.
 
-**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop and server branding landed on 2026-04-30; see `docs/plans/brand-rollout.md`.
+**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop and server branding landed on 2026-04-30; see `temp/finished-plans/brand-rollout.md`.
 
 ## Project structure
 
