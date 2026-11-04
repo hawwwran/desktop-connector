@@ -22,7 +22,7 @@ class AndroidClipboardImageSourceTests(unittest.TestCase):
     def test_clipboard_image_fn_transfer_is_saved_as_file(self):
         for text in (
             'fileName.startsWith(".fn.clipboard.image")',
-            "saveClipboardImageTransfer(data, mimeType, transferId, prefs, db)",
+            "saveClipboardImageTransfer(data, mimeType, transferId, senderId, prefs, db)",
             'saveFile("clipboard-image${imageType.first}", data)',
             "displayName = file.name",
             "displayLabel = file.name",
