@@ -2,9 +2,12 @@
 
 Generates one Nautilus/Nemo script per paired device named
 ``Send to <device-name>`` and a single Dolphin service-menu file with
-one action per device. Every managed entry carries a sentinel plus the
-pairing's device id so the sync can identify our own files and never
-touch user-created scripts that happen to share a name.
+one action per device. Every managed entry carries a sentinel, the
+pairing's device id, and a **config-id marker** identifying the
+``--config-dir`` whose install wrote it. Cleanup never touches managed
+entries owned by a different install — so a dev twin running with
+``--config-dir=~/.config/desktop-connector-dev`` cannot delete the
+canonical install's "Send to" scripts in the shared XDG path.
 
 Idempotent: safe to call at startup, after a pairing save, after a
 Settings rename, and after a Settings unpair. Dev-tree runs that have
@@ -13,7 +16,9 @@ no-op — there's no installed launcher to wire scripts into.
 
 Legacy single-pair scripts created by older AppImage hooks or by
 ``install-from-source.sh`` are recognized via fingerprint and removed
-on first sync so the multi-device targets take over cleanly.
+on first sync so the multi-device targets take over cleanly. **Only the
+canonical install** (``config_dir.name == "desktop-connector"``) does
+that cleanup; alternate-config installs never touch unmarked scripts.
 """
 
 from __future__ import annotations
@@ -35,6 +40,8 @@ LEGACY_NAUTILUS_NAME = "Send to Phone"
 
 MANAGED_SENTINEL = "desktop-connector:managed-fm-target"
 PAIRING_ID_PREFIX = "desktop-connector:pairing-id="
+CONFIG_ID_PREFIX = "desktop-connector:config-id="
+CANONICAL_CONFIG_ID = APP_NAME
 
 # Telltale substrings of legacy single-pair file-manager scripts
 # (AppImage hook + contributor nautilus-send-to-phone.py templates).
@@ -91,6 +98,9 @@ def sync_file_manager_targets(
     registry = ConnectedDeviceRegistry(config)
     devices = registry.list_devices()  # also normalizes duplicates
 
+    config_id = _config_marker(config)
+    is_canonical = config_id == CANONICAL_CONFIG_ID
+
     nautilus_dir = home / ".local/share/nautilus/scripts"
     nemo_dir = home / ".local/share/nemo/scripts"
     dolphin_path = (
@@ -98,11 +108,20 @@ def sync_file_manager_targets(
     )
 
     if "nautilus" in file_managers:
-        _sync_script_dir(nautilus_dir, devices, launcher, "nautilus")
+        _sync_script_dir(
+            nautilus_dir, devices, launcher, "nautilus",
+            config_id=config_id, is_canonical=is_canonical,
+        )
     if "nemo" in file_managers:
-        _sync_script_dir(nemo_dir, devices, launcher, "nemo")
+        _sync_script_dir(
+            nemo_dir, devices, launcher, "nemo",
+            config_id=config_id, is_canonical=is_canonical,
+        )
     if "dolphin" in file_managers:
-        _sync_dolphin_service(dolphin_path, devices, launcher)
+        _sync_dolphin_service(
+            dolphin_path, devices, launcher,
+            config_id=config_id, is_canonical=is_canonical,
+        )
 
 
 def _detect_file_managers() -> set[str]:
@@ -111,6 +130,16 @@ def _detect_file_managers() -> set[str]:
         if shutil.which(name):
             found.add(name)
     return found
+
+
+def _config_marker(config: Config) -> str:
+    """The ``# CONFIG: <name>`` value to embed in scripts written by this
+    install. Falls back to the canonical id if ``config_dir.name`` is
+    blank or contains characters that can't survive a one-line comment.
+    """
+    raw = config.config_dir.name
+    cleaned = raw.split("\n", 1)[0].split("\r", 1)[0].strip()
+    return cleaned or CANONICAL_CONFIG_ID
 
 
 def _invocation_command(
@@ -158,6 +187,7 @@ re-paired or renamed.
 """
 # {sentinel}
 # {pairing_id_prefix}{pairing_id}
+# {config_id_prefix}{config_id}
 import os
 import subprocess
 import sys
@@ -210,7 +240,11 @@ if __name__ == "__main__":
 '''
 
 
-def _script_text(device: ConnectedDevice, launcher: str) -> str:
+def _script_text(
+    device: ConnectedDevice,
+    launcher: str,
+    config_id: str,
+) -> str:
     safe_name = device.name.replace('"', "'").replace("\\", "\\\\")
     return _SCRIPT_TEMPLATE.format(
         display_name=safe_name,
@@ -218,6 +252,8 @@ def _script_text(device: ConnectedDevice, launcher: str) -> str:
         sentinel=MANAGED_SENTINEL,
         pairing_id_prefix=PAIRING_ID_PREFIX,
         pairing_id=device.device_id,
+        config_id_prefix=CONFIG_ID_PREFIX,
+        config_id=config_id,
     )
 
 
@@ -229,12 +265,37 @@ def _is_legacy_script(content: str) -> bool:
     return any(fp in content for fp in _LEGACY_SCRIPT_FINGERPRINTS)
 
 
-def _extract_pairing_id(content: str) -> str | None:
+def _extract_marker(content: str, prefix: str) -> str | None:
     for line in content.splitlines():
         stripped = line.strip()
-        if stripped.startswith("# " + PAIRING_ID_PREFIX):
-            return stripped[len("# " + PAIRING_ID_PREFIX) :].strip()
+        if stripped.startswith("# " + prefix):
+            return stripped[len("# " + prefix) :].strip()
     return None
+
+
+def _extract_pairing_id(content: str) -> str | None:
+    return _extract_marker(content, PAIRING_ID_PREFIX)
+
+
+def _extract_config_id(content: str) -> str | None:
+    return _extract_marker(content, CONFIG_ID_PREFIX)
+
+
+def _owns(content: str, config_id: str, *, is_canonical: bool) -> bool:
+    """Return True if a managed entry should be considered owned by the
+    current install.
+
+    A managed entry whose config marker matches ``config_id`` is always
+    ours. A managed entry **without** a config marker is a pre-fix
+    legacy-managed script: only the canonical install adopts it (and
+    will rewrite it with a marker on the next pass). Non-canonical
+    installs must leave unmarked managed entries alone — they may
+    belong to the canonical install on the same host.
+    """
+    marker = _extract_config_id(content)
+    if marker is None:
+        return is_canonical
+    return marker == config_id
 
 
 def _sync_script_dir(
@@ -242,6 +303,9 @@ def _sync_script_dir(
     devices: list[ConnectedDevice],
     launcher: str,
     kind: str,
+    *,
+    config_id: str,
+    is_canonical: bool,
 ) -> None:
     scripts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -250,7 +314,9 @@ def _sync_script_dir(
     }
 
     # Pass 1: clean managed entries that are stale, plus legacy
-    # single-pair scripts that the new sync supersedes.
+    # single-pair scripts that the new sync supersedes. Each entry is
+    # owned by exactly one install — identified by its config marker —
+    # and we never touch entries we don't own.
     for entry in list(scripts_dir.iterdir()):
         if not entry.is_file():
             continue
@@ -260,6 +326,16 @@ def _sync_script_dir(
             continue
 
         if entry.name == LEGACY_NAUTILUS_NAME and _is_legacy_script(content):
+            if not is_canonical:
+                # Legacy unmarked script — only the canonical install
+                # adopts and removes it. A dev twin / alternate config
+                # leaves it alone for the canonical install to handle.
+                log.debug(
+                    "file_manager.%s.skip_legacy_other_config name=%s "
+                    "config=%s",
+                    kind, entry.name, config_id,
+                )
+                continue
             try:
                 entry.unlink()
                 log.info("file_manager.%s.legacy_removed name=%s",
@@ -272,6 +348,15 @@ def _sync_script_dir(
         if not _is_managed_script(content):
             continue  # never touch unmanaged user files
 
+        if not _owns(content, config_id, is_canonical=is_canonical):
+            other = _extract_config_id(content) or "(unmarked)"
+            log.debug(
+                "file_manager.%s.skip_other_config name=%s "
+                "owner=%s self=%s",
+                kind, entry.name, other, config_id,
+            )
+            continue
+
         pairing_id = _extract_pairing_id(content)
         expected = desired_filename_by_id.get(pairing_id) if pairing_id else None
         if expected is None or expected != entry.name:
@@ -283,15 +368,28 @@ def _sync_script_dir(
             except OSError as exc:
                 log.warning("file_manager.%s.cleanup_failed: %s", kind, exc)
 
-    # Pass 2: write/refresh the per-device script for each pair.
+    # Pass 2: write/refresh the per-device script for each pair. Refuse
+    # to overwrite a managed entry owned by another install — that
+    # belongs to a sibling DC config sharing this host's XDG dirs.
     for device in devices:
         target = scripts_dir / _script_filename(device)
-        new_content = _script_text(device, launcher)
+        new_content = _script_text(device, launcher, config_id)
         if target.exists():
             try:
                 existing = target.read_text()
                 if existing == new_content:
                     target.chmod(0o755)
+                    continue
+                if _is_managed_script(existing) and not _owns(
+                    existing, config_id, is_canonical=is_canonical,
+                ):
+                    log.warning(
+                        "file_manager.%s.skip_other_config_collision "
+                        "name=%s owner=%s self=%s",
+                        kind, target.name,
+                        _extract_config_id(existing) or "(unmarked)",
+                        config_id,
+                    )
                     continue
                 if not (_is_managed_script(existing) or _is_legacy_script(existing)):
                     log.warning(
@@ -318,12 +416,14 @@ def _sync_script_dir(
 def _dolphin_service_text(
     devices: list[ConnectedDevice],
     launcher: str,
+    config_id: str,
 ) -> str:
     actions = [_action_id(d) for d in devices]
     pairing_marker = " ".join(d.device_id for d in devices)
     lines = [
         f"# {MANAGED_SENTINEL}",
         f"# {PAIRING_ID_PREFIX}{pairing_marker}",
+        f"# {CONFIG_ID_PREFIX}{config_id}",
         "[Desktop Entry]",
         "Type=Service",
         "ServiceTypes=KonqPopupMenu/Plugin",
@@ -355,35 +455,70 @@ def _sync_dolphin_service(
     path: Path,
     devices: list[ConnectedDevice],
     launcher: str,
+    *,
+    config_id: str,
+    is_canonical: bool,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not devices:
-        if path.exists():
-            try:
-                content = path.read_text()
-            except OSError:
-                content = ""
-            if _is_managed_dolphin(content) or _is_legacy_dolphin(content):
-                try:
-                    path.unlink()
-                    log.info("file_manager.dolphin.removed reason=no_pairs")
-                except OSError as exc:
-                    log.warning(
-                        "file_manager.dolphin.remove_failed: %s", exc,
-                    )
-        return
-
-    new_content = _dolphin_service_text(devices, launcher)
+    existing_content: str | None = None
     if path.exists():
         try:
-            existing = path.read_text()
+            existing_content = path.read_text()
         except OSError as exc:
             log.warning("file_manager.dolphin.skip_unreadable_collision: %s", exc)
             return
-        if existing == new_content:
+
+    if not devices:
+        if existing_content is None:
             return
-        if not (_is_managed_dolphin(existing) or _is_legacy_dolphin(existing)):
+        if _is_legacy_dolphin(existing_content):
+            if not is_canonical:
+                log.debug(
+                    "file_manager.dolphin.skip_legacy_other_config "
+                    "config=%s", config_id,
+                )
+                return
+            try:
+                path.unlink()
+                log.info("file_manager.dolphin.removed reason=no_pairs")
+            except OSError as exc:
+                log.warning("file_manager.dolphin.remove_failed: %s", exc)
+            return
+        if _is_managed_dolphin(existing_content):
+            if not _owns(existing_content, config_id, is_canonical=is_canonical):
+                log.debug(
+                    "file_manager.dolphin.skip_other_config "
+                    "owner=%s self=%s",
+                    _extract_config_id(existing_content) or "(unmarked)",
+                    config_id,
+                )
+                return
+            try:
+                path.unlink()
+                log.info("file_manager.dolphin.removed reason=no_pairs")
+            except OSError as exc:
+                log.warning("file_manager.dolphin.remove_failed: %s", exc)
+        return
+
+    new_content = _dolphin_service_text(devices, launcher, config_id)
+    if existing_content is not None:
+        if existing_content == new_content:
+            return
+        if _is_managed_dolphin(existing_content) and not _owns(
+            existing_content, config_id, is_canonical=is_canonical,
+        ):
+            log.warning(
+                "file_manager.dolphin.skip_other_config_collision "
+                "owner=%s self=%s",
+                _extract_config_id(existing_content) or "(unmarked)",
+                config_id,
+            )
+            return
+        if not (
+            _is_managed_dolphin(existing_content)
+            or _is_legacy_dolphin(existing_content)
+        ):
             log.warning("file_manager.dolphin.skip_unmanaged_collision")
             return
 

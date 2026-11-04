@@ -51,6 +51,14 @@ cd android && ./gradlew assembleDebug   # → app/build/outputs/apk/debug/app-de
 ./test_loop.sh
 ```
 
+## Testing the desktop GTK app (AT-SPI)
+
+The host has `python3-dogtail` + `accerciser` + `at-spi2-core` installed so Claude can drive the running GTK4/libadwaita windows via the GNOME accessibility bus instead of fragile keystroke injection (xdotool/ydotool). `dogtail` walks the widget tree from Python, invokes named buttons / menu items, and reads visible text; `accerciser` is the GUI inspector for one-off exploration of a live window. Works on both X11 and Wayland under GNOME.
+
+Intended use: confirm a window/dialog rendered, click "Send" / "Cancel" / "Pair" without a real pointer, read pairing codes and progress bars, regression-check after edits to `windows*.py` or `dialogs.py`. Pair with `gnome-screenshot -w` for visual evidence. Tray icon (`pystray`) is **not** AT-SPI-exposed — drive its menu via the underlying subprocess windows or by invoking `python3 -m src.windows {…}` directly. Setup script: `~/temp-scripts/048-install-at-spi-tooling.sh`.
+
+**Dev twin isolation**: run a second copy against a separate `--config-dir` and a local PHP relay on `127.0.0.1:4441`. Keyring isolation is automatic: `Config` derives the service name from `config_dir.name`, so `--config-dir=~/.config/desktop-connector-dev` writes to keyring service `desktop-connector-dev` rather than aliasing the user's real install. **Never set `GTK_A11Y=atspi`** on this host: it crashed the user's GNOME Wayland session in earlier runs; AT-SPI is already enabled system-wide.
+
 ## Installation (desktop)
 
 The release shape is a **signed AppImage** fetched from GitHub Releases — single self-contained file, no host apt/pip touched, in-app updates via the tray menu. The dev-tree apt+pip path stays available as `install-from-source.sh` for contributors.
@@ -77,6 +85,13 @@ desktop-connector/
 Requires PHP 8.0+, SQLite3, mod_rewrite (+ curl/openssl for FCM). Router auto-detects base path from `SCRIPT_NAME` — works in any subdirectory.
 
 ## Key design decisions
+
+> **New decisions go in [`docs/architecture-decisions.md`](docs/architecture-decisions.md).**
+> That file is the long-term tracker; this section keeps the legacy /
+> cross-cutting narrative for fast scan-ability. When you make a
+> non-trivial architectural choice (protocol, state machine, security
+> boundary, dependency, threat-model assumption), add a dated entry
+> there before or alongside the implementation commit.
 
 ### Server pipeline & persistence
 - **Request pipeline**: handlers take `(Database $db, RequestContext $ctx)`. `Router` builds `RequestContext` (route params, query, lazy body) and routes registered via `authGet`/`authPost` resolve identity through `AuthService::requireAuth` before dispatch. Controllers validate via `Validators::*` and throw `ApiError` subclasses; top-level `try/catch` hands them to `ErrorResponder`. No controller touches `$_SERVER`/`$_GET`/`php://input` or hand-writes error JSON. The path-traversal guard on `{transfer_id}` is a pipeline validator, so every endpoint accepting that param is protected.
@@ -117,9 +132,9 @@ Shared dot-notation event vocabulary (`transfer.init.accepted`, `ping.request.ra
 
 ### Liveness (ping/pong)
 - On-demand only — no periodic heartbeats. `POST /api/devices/ping` → HIGH-priority FCM `{type:"ping"}` → phone's `FcmService` replies `POST /api/devices/pong` (auth middleware bumps `last_seen_at`) → ping handler polls `last_seen_at` up to 5 s, returns `{online, rtt_ms, via}`.
-- Fires on desktop connect, tray menu open (30 s cache), and every 5 min background. HIGH FCM bypasses Doze, RTT ~1 s. Worst case ~288 wakes/day; ~0 when desktop isn't running.
+- Fires on desktop connect (reconnects reuse a ping younger than 30 s), tray menu open (30 s cache), and every 15 min background. HIGH FCM bypasses Doze, RTT ~1 s. Worst case ~96 background wakes/day; ~0 when desktop isn't running. (Was 5 min; the per-pong LTE tail on the phone made it the dominant battery cost, see `docs/plans/android-radio-tail-cost.md`.)
 - **Shortcut**: if `last_seen_at >= baseline` (phone hit server via transfers/long poll this second), server skips FCM and returns `via: fresh`.
-- Pong uses 3 s-timeout OkHttp, synchronous on `onMessageReceived` thread (inside FCM's ~10 s wakelock) — guaranteed completion without detached workers.
+- Pong uses 5 s-timeout OkHttp, synchronous on `onMessageReceived` thread (inside FCM's ~10 s wakelock) — guaranteed completion without detached workers. (Was 3 s; android_logs_8 caught a 22-min window of duration_ms=~3100 timeouts driving a retry storm.)
 - **Rate limit + debounce** = one primitive: atomic UPSERT on `ping_rate(sender_id, recipient_id, cooldown_until)` with `ON CONFLICT ... DO UPDATE ... WHERE cooldown_until <= now`. `changes()==0` → live slot exists → 429 with `Retry-After`. 30 s cooldown > 5 s max blocking wait, so concurrent pings for a pair are impossible AND a pair is capped at 1 ping / 30 s. Defends against compromised-paired-device abuse (PHP-worker starvation + phone battery drain). Legit clients don't notice — desktop caches 30 s client-side anyway.
 - **Security boundary**: `/api/devices/ping` and `/pong` are behind `Router::authenticate`. Registration is public but produces creds bound to a fresh device that isn't paired with anyone; ping handler 403s if no `pairings` row links caller and target. Threat model for rate limiting is "compromised/malicious already-paired device", not "public internet".
 
@@ -160,6 +175,9 @@ Desktop sends encrypted start/stop via fasttrack. Phone: alarm (STREAM_ALARM, by
 ### Logging (opt-in)
 Off by default, "Allow logging" toggle in Settings. Desktop: Python `RotatingFileHandler` (1 MB + 1 backup = 2 MB max) at `~/.config/desktop-connector/logs/`. Android: `AppLog` writes gated on pref. Server: `data/logs/server.log` with 2-file rotation (1 MB each). Desktop settings has "Download Logs" (copies to `~/Downloads/`, opens folder).
 
+### Notification toggles (opt-out)
+Desktop Settings → Notifications → "Connection state messages" gates the toast emitted on relay connection lost / restored (`config.connection_state_notifications`, default `True`). The receiver (`runners/receiver_runner.on_state_change`) calls `config.reload()` before reading the flag on every state transition, so the toggle takes effect without a tray restart.
+
 ## Visual identity
 
 See [`docs/visual-identity-guide.md`](docs/visual-identity-guide.md). Blue-dominant (70%) + neutral soft-white (20%) + warm accents (10%); 4-point sparkle = status/spark mark; monitor + phone + orbital arc = full symbol.
@@ -179,7 +197,7 @@ See [`docs/visual-identity-guide.md`](docs/visual-identity-guide.md). Blue-domin
 
 Monochrome notifications encode state via shape (full sparkle = connected, outline = disconnected). `Notification.Builder.setColor(#2058F0)` tints the shade header brand blue.
 
-**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop and server branding landed on 2026-04-30; see `docs/plans/brand-rollout.md`.
+**Rollout:** Android v0.2.0 complete (`ThemeMode` pref, `BrandColors` CompositionLocal, star notification icons, adaptive launcher `master-spark.png` on `#0920AC`, `core-splashscreen` backport, themed system bars). Desktop and server branding landed on 2026-04-30; see `temp/finished-plans/brand-rollout.md`.
 
 ## Project structure
 
@@ -219,12 +237,13 @@ desktop/
     backends/linux/                    # Linux implementations of the 4 Protocols
     platform/                          # DesktopPlatform contract + compose (non-Linux raises NotImplementedError)
     messaging/                         # MessageType/Transport, DeviceMessage, fn_transfer_adapter, fasttrack_adapter, dispatcher
-    crypto.py  connection.py  config.py  api_client.py
-    poller.py                          # poll/download/decrypt/delivery; platform via self.platform.*
+    crypto.py  connection.py  config.py
+    api/                               # relay HTTP client, composed from topical mixins (api_client.py = back-compat shim)
+    receive/                           # poll/download/decrypt/delivery; platform via self.platform.* (poller.py = back-compat shim)
     history.py                         # JSON history (50 items); TransferStatus enum
     pairing.py                         # QR + tkinter pairing window
-    tray.py                            # pystray; spawns GTK4 windows as subprocesses; update menu items + 24h check thread
-    windows.py                         # GTK4/libadwaita windows (send-files, settings, history, pairing, find-phone, onboarding)
+    tray/                              # pystray app + mixins; spawns GTK4 windows as subprocesses; update menu items + 24h check thread
+    windows.py                         # GTK4 window CLI dispatcher; per-window code in windows_*.py, windows_history/, windows_settings/
     clipboard.py  dialogs.py  notifications.py   # Linux helpers (wl-copy/xclip, zenity, notify-send)
 
 android/app/src/main/kotlin/com/desktopconnector/

@@ -210,7 +210,9 @@ renamed/restructured.
 |---|---|---|---|---|
 | `delivery.progress` | server (new), desktop, android | debug | `transfer_id`, `chunks_downloaded`, `chunk_count` | Progress advanced |
 | `delivery.acked` | server (new), desktop, android | info | `transfer_id`, `recipient`, `total_bytes` | Recipient ACK finalized the transfer |
-| `delivery.tracker.stall` | desktop, android | warning | `transfer_id`, `stall_seconds` | Tracker gave up; transfer row preserved |
+| `delivery.tracker.stall` | desktop, android | warning | `transfer_id`, `stall_seconds`, `mode`, `action` | Tracker gave up; transfer row preserved. `mode=classic` (give up), `mode=streaming` (clear Y display, keep polling), `mode=absent` (server has no row — 2 min of absence → give up) |
+| `delivery.tracker.orphan_sweep` | android | info | `stale`, `delivered`, `aborted`, `age_threshold_h` | One-shot startup sweep mopped up undelivered outgoing rows older than the age threshold whose server-side row is gone — flipped delivered=1 for completed-uploads, ABORTED for never-completed uploads |
+| `delivery.tracker.orphan_sweep.failed` | android | warning | `reason`, `stale` | Sweep aborted (network/auth/etc.); next service restart retries. Stale rows stay tracked until the in-runtime stall safeguard catches them |
 
 ### fasttrack
 
@@ -262,7 +264,8 @@ renamed/restructured.
 | `ping.fcm.sent` | server (new) | info | `sender`, `recipient` | HIGH-priority wake dispatched |
 | `ping.fcm.timeout` | server (new) | info | `sender`, `recipient` | Phone didn't respond within 5s |
 | `ping.response.received` | desktop | info | `recipient`, `via`, `rtt_ms` | `via ∈ {fresh, fcm, no_fcm, fcm_failed, fcm_timeout}` |
-| `ping.pong.sent` | android | info | — | Phone's onMessageReceived fired pong |
+| `ping.pong.sent` | android | info | `screen_off`, `metered`, `ok`, `duration_ms` | Phone's onMessageReceived fired pong. Tags added 2026-05-12 to attribute LTE-tail radio cost on cellular sleep (android_logs_4 — ~12 pongs/h on default 5-min desktop cadence). |
+| `ping.pong.failed` | android | warning | `screen_off`, `metered`, `duration_ms`, `error_kind` | Pong threw before completing. |
 | `ping.pong.received` | server (new) | info | `device_id` | Auth middleware already bumped last_seen |
 
 ### poll
@@ -274,9 +277,12 @@ renamed/restructured.
 | `poll.notify.timeout` | server (new), desktop | info | `device_id` | 25s window expired |
 | `poll.notify.available` | desktop, android | info | — | Long-poll probe succeeded |
 | `poll.notify.unavailable` | desktop, android | warning | — | Falls back to regular polling |
+| `poll.loop.iteration` | android | info | `screen_off`, `metered`, `fcm`, `connected` | Top of each pollLoop iteration before any HTTP fires. Tag added 2026-05-12 to count actual long-poll cycles vs screen-off waits — an iteration with `screen_off=true` is a full ~25 s long-poll + LTE tail billed to the app. |
 | `poll.loop.screen_off` | android | info | — | Phone paused polling |
 | `poll.loop.screen_on` | android | info | — | Phone resumed polling |
 | `poll.loop.fcm_wake` | android | info | `type` | FCM woke the poll loop |
+| `poll.loop.metered_hold` | android | info | — | Long-poll paused while screen-on + metered cellular + FCM healthy (modem stays cold; FCM is the wake path) |
+| `poll.loop.metered_release` | android | info | — | Network became unmetered (Wi-Fi) or FCM dropped — resume long-poll |
 | `fgs.start.denied` | android | error | `reason` | `startForeground` rejected (e.g. `dataSync` budget exhausted on Android 15+, or background-restricted). PollService stops itself; activity-foreground retry will re-attempt on next app open |
 | `fgs.bind.denied` | android | error | `reason` | `startForegroundService` from `PollService.start(context)` rejected by the system; service never bound |
 | `fgs.type.changed` | android | info | `location` | Boolean `location` indicates whether LOCATION was added to the FGS type for find-phone GPS |
@@ -337,7 +343,7 @@ renamed/restructured.
 ### device (multi-device support)
 
 Desktop multi-device events introduced by the
-`docs/plans/desktop-multi-device-support.md` rollout (M.0–M.10). All
+`temp/finished-plans/desktop-multi-device-support.md` rollout (M.0–M.10). All
 fields are short id (12 chars max) so the same correlation rule
 applies as elsewhere.
 
@@ -350,6 +356,9 @@ applies as elsewhere.
 | `file_manager.<kind>.legacy_removed` | desktop (M.6) | info | `name` | Pre-multi-device "Send to Phone" script adopted via fingerprint and removed; per-device replacements come from the same sync pass |
 | `file_manager.dolphin.written` | desktop (M.6) | info | `peers` | Dolphin service-menu file rewritten with N actions, one per paired device |
 | `file_manager.dolphin.removed` | desktop (M.6) | info | `reason=no_pairs` | Dolphin file removed when the last pairing was deleted |
+| `file_manager.<kind>.skip_other_config_collision` | desktop | warning | `name`, `owner`, `self` | Refused to overwrite a managed `Send to <peer>` entry owned by another `--config-dir` install sharing this host's XDG dirs. `<kind> ∈ {nautilus, nemo, dolphin}`. Fires when two installs (e.g. canonical + dev twin) both try to write the same filename |
+| `file_manager.<kind>.skip_other_config` | desktop | debug | `name`, `owner`, `self` | Cleanup pass left a managed entry alone because its config-id marker doesn't match this install's. Same isolation invariant as `skip_other_config_collision` but for the cleanup pass. Debug-level; only useful when investigating cross-config interactions |
+| `file_manager.<kind>.skip_legacy_other_config` | desktop | debug | `name`, `config` | Pre-fix legacy "Send to Phone" / Dolphin file left alone because we're not the canonical install. Only the canonical install (`config_dir.name == "desktop-connector"`) adopts and replaces unmarked legacy entries |
 
 ### config
 
@@ -379,6 +388,7 @@ applies as elsewhere.
 | Event | Where | Severity | Context | Notes |
 |---|---|---|---|---|
 | `apierror.caught` | server | warning | `status`, `uri`, `reason` | Router top-level catch; message must not echo request body |
+| `apierror.uncaught_throwable` | server | error | `type`, `method`, `uri`, `reason`, `at` | Router catch-all for non-`ApiError` exceptions (SQLite prepare/execute failures, type errors). Client gets a bare 500 `{"error": "internal error"}`. `at` is `file:line` of the throw; no stack trace, since traces can carry argument values |
 
 ---
 

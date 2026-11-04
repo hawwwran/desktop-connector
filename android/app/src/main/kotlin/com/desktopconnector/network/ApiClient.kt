@@ -3,12 +3,19 @@ package com.desktopconnector.network
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 
 /** Why the server rejected our credentials. 401 vs 403 mark different
@@ -380,14 +387,51 @@ class ApiClient(
         }
     }
 
-    fun getSentStatus(): List<JSONObject> {
+    /**
+     * Suspend variant that is properly coroutine-cancellable so callers can
+     * wrap it in `withTimeout(N)` and have the underlying HTTP call actually
+     * abort at N ms. The blocking `client.newCall(...).execute()` path
+     * Kotlin's `withTimeout` cannot interrupt — the coroutine looks active
+     * for as long as the socket is busy, and we observed streak=38 (19 s
+     * in-flight) in `android_logs_7.txt` with zero timeout fires despite
+     * `withTimeout(3000)` wrapping. Using `enqueue` + `Callback` here lets
+     * `cont.invokeOnCancellation` call `Call.cancel()` which closes the
+     * socket and unwinds immediately.
+     */
+    suspend fun getSentStatus(): List<JSONObject> {
         val request = authHeaders(Request.Builder())
             .url("$serverUrl/api/transfers/sent-status")
             .get()
             .build()
-        val result = executeJson(request) ?: return emptyList()
+        val result = executeJsonCancellable(request) ?: return emptyList()
         val arr = result.optJSONArray("transfers") ?: return emptyList()
         return (0 until arr.length()).map { arr.getJSONObject(it) }
+    }
+
+    private suspend fun Call.awaitResponse(): Response =
+        suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { try { cancel() } catch (_: Throwable) {} }
+            enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) {
+                    if (cont.isActive) cont.resume(response)
+                    else response.close()
+                }
+                override fun onFailure(call: Call, e: IOException) {
+                    if (cont.isActive) cont.resumeWithException(e)
+                }
+            })
+        }
+
+    private suspend fun executeJsonCancellable(request: Request, peerId: String? = null): JSONObject? {
+        return try {
+            client.newCall(request).awaitResponse().use { resp ->
+                reportAuthStatus(resp.code, peerId)
+                val body = resp.body?.string() ?: return null
+                if (resp.isSuccessful) JSONObject(body) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun downloadChunk(transferId: String, chunkIndex: Int, peerId: String? = null): ByteArray? {
@@ -489,9 +533,27 @@ class ApiClient(
 
     // Short-timeout client for liveness pong — must fit inside FCM's
     // ~10s onMessageReceived wakelock even on slow networks.
+    //
+    // Read timeout was 3 s. android_logs_8.txt caught a 22-minute window
+    // of pong timeouts at duration_ms=~3100 — pongs hitting the 3 s cap,
+    // not server failures. Server logs for the same window confirmed
+    // why: the relay's ping handler waits up to 5 s for `last_seen_at`
+    // to update (`Liveness (ping/pong)` in CLAUDE.md), and the pong
+    // POSTs were arriving server-side at exactly +5 s while the client
+    // had bailed at +3 s. So the 3 s phone cap was the wrong side of an
+    // intermittent RTT spike (cellular tower hand-off, PHP worker
+    // contention, modem cold-start) and the only side timing out.
+    //
+    // When pong drops on the client, the desktop's connection state
+    // flips, on-reconnect re-pings fire, and the phone ends up in a
+    // retry storm (60–130 s cadence instead of the steady 15 min).
+    //
+    // 5 s matches the server's own polling budget: if the response
+    // comes back at all, we wait for it. Still leaves ~5 s slack inside
+    // FCM's onMessageReceived wakelock.
     private val pongClient = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
         .build()
 
     fun pong(): Boolean {

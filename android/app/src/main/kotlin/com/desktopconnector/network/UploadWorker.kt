@@ -202,7 +202,7 @@ class UploadWorker(
 
         db.transferDao().updateStatus(transferDbId, TransferStatus.UPLOADING)
         db.transferDao().updateProgress(transferDbId, 0, chunkCount)
-        AppLog.log("Upload", "transfer.init.accepted transfer_id=${transferId.take(12)} recipient=${transfer.peerDeviceId.take(12)} chunks=$chunkCount requested_mode=$requestedMode negotiated_mode=$negotiatedMode")
+        AppLog.log("Upload", "transfer.init.accepted transfer_id=${transferId.take(12)} recipient=${transfer.peerDeviceId.take(12)} chunks=$chunkCount bytes=$sourceSize requested_mode=$requestedMode negotiated_mode=$negotiatedMode")
 
         return try {
             if (negotiatedMode == "streaming") {
@@ -266,7 +266,7 @@ class UploadWorker(
         // Upload logic cleans up its own progress fields; DeliveryTracker owns deliveryChunks/deliveryTotal from here.
         db.transferDao().updateProgress(transferDbId, 0, 0)
         db.transferDao().updateStatus(transferDbId, TransferStatus.COMPLETE)
-        AppLog.log("Upload", "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName mode=classic")
+        AppLog.log("Upload", "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName bytes=$sourceSize mode=classic")
         return Result.success()
     }
 
@@ -392,7 +392,7 @@ class UploadWorker(
                         maybeFlipToSending(db, transferDbId, isExitingWaitingStream = false,
                                            forceFlip = true)
                         AppLog.log("Upload",
-                            "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName mode=streaming awaiting_delivery_ack=true")
+                            "transfer.upload.completed transfer_id=${transferId.take(12)} name=$displayName bytes=$sourceSize mode=streaming awaiting_delivery_ack=true")
                         Result.success()
                     }
                     is StreamOutcome.AbortedByRecipient -> {

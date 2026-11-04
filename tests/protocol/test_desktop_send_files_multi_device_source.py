@@ -12,16 +12,18 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _send_files_source() -> str:
-    source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
-    start = source.index("def show_send_files(")
-    end = source.index("# \u2500\u2500\u2500 Settings Window", start)
-    return source[start:end]
+    return Path(REPO_ROOT, "desktop/src/windows_send.py").read_text()
 
 
 class SendFilesMultiDeviceSourceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.full_source = Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+        # _create_device_picker now lives in windows_common.py \u2014 concat
+        # so substring checks for it still match.
+        cls.full_source = (
+            Path(REPO_ROOT, "desktop/src/windows_send.py").read_text()
+            + Path(REPO_ROOT, "desktop/src/windows_common.py").read_text()
+        )
         cls.source = _send_files_source()
 
     def test_send_files_window_uses_new_name(self):

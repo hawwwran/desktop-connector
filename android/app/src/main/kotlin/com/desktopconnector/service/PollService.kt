@@ -36,6 +36,7 @@ import com.desktopconnector.messaging.DeviceMessage
 import com.desktopconnector.messaging.MessageAdapters
 import com.desktopconnector.messaging.MessageDispatcher
 import com.desktopconnector.messaging.MessageType
+import com.desktopconnector.util.NetworkPolicy
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import java.util.Collections
@@ -51,6 +52,14 @@ class PollService : Service() {
         private const val POLL_INTERVAL = 10_000L
         private const val DELIVERY_STALL_TIMEOUT_MS = 2 * 60 * 1000L
         private const val STALE_PART_TTL_MS = 60 * 60 * 1000L
+        /** Startup orphan sweep age threshold. Rows undelivered+active in
+         *  Room past this age without server-side observability get
+         *  flipped terminal (delivered or aborted, per
+         *  `orphanSweepAction`). Sits above the server's longest
+         *  non-delivery expiry (24h INCOMPLETE_EXPIRY) by half so the
+         *  decision can rely on the server having had ample chance to
+         *  resolve the row one way or another. */
+        private const val ORPHAN_SWEEP_AGE_SECONDS = 12L * 60 * 60
         private val SAFE_TRANSFER_ID = Regex("^[a-zA-Z0-9-]+$")
         // Brand accent (DcBlue700 = #2058F0) — tints notifications in the shade header.
         private val BRAND_ACCENT = android.graphics.Color.rgb(0x20, 0x58, 0xF0)
@@ -143,6 +152,7 @@ class PollService : Service() {
         scope.launch { pollLoop() }
         scope.launch { deliveryTrackerLoop() }
         scope.launch { sweepStaleParts() }
+        scope.launch { sweepOrphanOutgoingTransfers() }
         scope.launch { observeAuthForNotification() }
         Log.i(TAG, "PollService started")
     }
@@ -173,6 +183,80 @@ class PollService : Service() {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * One-shot orphan sweep for outgoing transfers stuck in Room with
+     * `delivered = 0` past `ORPHAN_SWEEP_AGE_SECONDS` whose server-side
+     * row has been GC'd / pruned. Pre-fix these phantoms kept
+     * `getActiveDeliveryIds` non-empty forever, so the 500 ms tracker
+     * loop spent every screen-on window paying radio cost on hopeless
+     * `getSentStatus` calls. The runtime stall safeguard (Fix A in
+     * `runDeliveryPoll`) handles new orphans within 2 min; this sweep
+     * mops up rows that aged in during a prior session.
+     *
+     * Decision policy lives in `orphanSweepAction`:
+     *   - present in /sent-status → leave (regular tracker handles it)
+     *   - absent + status COMPLETE/SENDING (upload reached the server)
+     *       → markDelivered (most likely delivered then pruned out of
+     *         LIMIT-50 or 7d TRANSFER_EXPIRY)
+     *   - absent + status UPLOADING/WAITING_STREAM (upload never finished)
+     *       → markAborted reason="tracking_expired"
+     *
+     * Failure modes are non-fatal: a flaky network or expired auth just
+     * means the sweep no-ops; next service start retries.
+     */
+    private suspend fun sweepOrphanOutgoingTransfers() {
+        delay(5_000)  // let the rest of onCreate settle before extra network
+        try {
+            val prefs = AppPreferences(this)
+            val serverUrl = prefs.serverUrl ?: return
+            val deviceId = prefs.deviceId ?: return
+            val authToken = prefs.authToken ?: return
+
+            val db = AppDatabase.getInstance(this)
+            val nowSeconds = System.currentTimeMillis() / 1000
+            val ageThreshold = nowSeconds - ORPHAN_SWEEP_AGE_SECONDS
+            val stale = db.transferDao().getStaleUndeliveredOutgoing(ageThreshold)
+            if (stale.isEmpty()) return
+
+            val api = ApiClient(serverUrl, deviceId, authToken)
+            val knownIds = try {
+                api.getSentStatus().map { it.optString("transfer_id") }.toSet()
+            } catch (e: Exception) {
+                AppLog.log("Delivery",
+                    "delivery.tracker.orphan_sweep.failed reason=${e.javaClass.simpleName} stale=${stale.size}",
+                    "warning")
+                return
+            }
+
+            var deliveredCount = 0
+            var abortedCount = 0
+            for (row in stale) {
+                val tid = row.transferId ?: continue
+                val present = tid in knownIds
+                when (orphanSweepAction(row.status, present)) {
+                    OrphanSweepAction.LEAVE -> Unit
+                    OrphanSweepAction.MARK_DELIVERED -> {
+                        db.transferDao().markDelivered(tid)
+                        deliveredCount++
+                    }
+                    OrphanSweepAction.MARK_ABORTED -> {
+                        db.transferDao().markAborted(row.id, "tracking_expired")
+                        abortedCount++
+                    }
+                }
+            }
+
+            if (deliveredCount + abortedCount > 0) {
+                AppLog.log("Delivery",
+                    "delivery.tracker.orphan_sweep stale=${stale.size} delivered=$deliveredCount aborted=$abortedCount age_threshold_h=${ORPHAN_SWEEP_AGE_SECONDS / 3600}")
+            }
+        } catch (e: Exception) {
+            AppLog.log("Delivery",
+                "delivery.tracker.orphan_sweep.failed reason=${e.javaClass.simpleName}",
+                "warning")
         }
     }
 
@@ -338,6 +422,15 @@ class PollService : Service() {
 
             val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
             activeApi = api
+            // Per-iteration battery attribution: an iteration that fires
+            // while screen_off=true is one full long-poll (≈25 s) + LTE
+            // tail (≈20–30 s) of radio time billed to the app. Use this
+            // alongside ping.pong.sent to attribute the 137 mAh of
+            // mobile_radio drain — android_logs_4 analysis 2026-05-12.
+            val iterScreenOff = !isScreenOn()
+            val iterMetered = com.desktopconnector.util.NetworkPolicy.isMetered(this)
+            AppLog.log("Poll",
+                "poll.loop.iteration screen_off=$iterScreenOff metered=$iterMetered fcm=${FcmManager.isInitialized} connected=$isConnected")
             try {
                 // Ensure we're connected first
                 if (!isConnected) {
@@ -380,12 +473,20 @@ class PollService : Service() {
                 }
 
                 if (longPollAvailable == true) {
+                    val notifyStart = System.currentTimeMillis()
                     val notifyResult = api.longPollNotify(lastPollTime / 1000)
+                    val notifyDurationMs = System.currentTimeMillis() - notifyStart
 
                     if (notifyResult != null) {
                         lastPollTime = System.currentTimeMillis()
 
                         val hasPending = notifyResult.optBoolean("pending", false)
+                        // Per-cycle attribution for mobile_radio time. A "wait" cycle
+                        // (~25 s, no pending) is the dominant idle-cellular cost.
+                        AppLog.log(
+                            "Poll",
+                            "poll.notify.cycle duration_ms=$notifyDurationMs has_pending=$hasPending",
+                        )
 
                         if (hasPending) {
                             val transfers = api.getPendingTransfers()
@@ -473,6 +574,40 @@ class PollService : Service() {
                     AppLog.log("Poll", "poll.loop.screen_on")
                     continue
                 }
+            } else if (FcmManager.isInitialized && NetworkPolicy.isMetered(this)) {
+                // Battery-friendly hold: on metered cellular with FCM
+                // healthy, each long-poll cycle costs ~30 s of modem
+                // active time for marginal value (FCM is HIGH-priority,
+                // bypasses Doze, and delivers transfer-ready in ~1 s).
+                // Wait for FCM wake, fasttrack wake, or the network
+                // becoming unmetered (Wi-Fi attach). See NetworkPolicy
+                // and the android_logs_3 analysis (2026-05-11) — this
+                // branch is where 95 mAh / 5 h goes when the user is on
+                // mobile data. 2 s tick keeps the CPU cold during long
+                // holds; FCM/fasttrack flags are checked on every tick.
+                longPollStatus = "active"  // FCM is the wake path; the dot is still online
+                AppLog.log("Poll", "poll.loop.metered_hold")
+                while (running && !fcmWakeSignal && !fasttrackWakeSignal
+                       && FcmManager.isInitialized
+                       && NetworkPolicy.isMetered(this)) {
+                    delay(2_000)
+                }
+                if (fcmWakeSignal) {
+                    fcmWakeSignal = false
+                    longPollAvailable = null
+                    AppLog.log("Poll", "poll.loop.fcm_wake type=transfer")
+                    continue
+                }
+                if (fasttrackWakeSignal) {
+                    longPollAvailable = null
+                    AppLog.log("Poll", "poll.loop.fcm_wake type=fasttrack")
+                    continue
+                }
+                if (running) {
+                    longPollAvailable = null
+                    AppLog.log("Poll", "poll.loop.metered_release")
+                    continue
+                }
             }
             if (!fasttrackWakeSignal) delay(POLL_INTERVAL)
         }
@@ -486,7 +621,15 @@ class PollService : Service() {
             return
         }
 
-        AppLog.log("Fasttrack", "fasttrack.message.pending_listed count=${messages.size}")
+        // Sum encrypted base64 lengths so we can attribute fasttrack's share
+        // of the app's mobile_radio rx bytes (dumpsys batterystats).
+        val totalEncryptedBytes = messages.sumOf {
+            it.optString("encrypted_data").length.toLong()
+        }
+        AppLog.log(
+            "Fasttrack",
+            "fasttrack.message.pending_listed count=${messages.size} encrypted_b64_bytes=$totalEncryptedBytes",
+        )
 
         for (msg in messages) {
             val messageId = msg.getInt("id")
@@ -720,9 +863,10 @@ class PollService : Service() {
         val dbRowId: Long = if (existing != null) {
             db.transferDao().updateStatus(existing.id, TransferStatus.UPLOADING)
             db.transferDao().updateProgress(existing.id, 0, chunkCount)
-            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)}")
+            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)} chunks=$chunkCount")
             existing.id
         } else {
+            AppLog.log("Recv", "transfer.download.started transfer_id=${transferId.take(12)} chunks=$chunkCount mode=classic")
             db.transferDao().insert(QueuedTransfer(
                 contentUri = "",
                 displayName = fileName,
@@ -876,9 +1020,10 @@ class PollService : Service() {
         val dbRowId: Long = if (existing != null) {
             db.transferDao().updateStatus(existing.id, TransferStatus.UPLOADING)
             db.transferDao().updateProgress(existing.id, 0, chunkCount)
-            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)} mode=streaming")
+            AppLog.log("Recv", "transfer.download.resumed transfer_id=${transferId.take(12)} chunks=$chunkCount mode=streaming")
             existing.id
         } else {
+            AppLog.log("Recv", "transfer.download.started transfer_id=${transferId.take(12)} chunks=$chunkCount mode=streaming")
             db.transferDao().insert(QueuedTransfer(
                 contentUri = "",
                 displayName = fileName,
@@ -1093,6 +1238,11 @@ class PollService : Service() {
     private val trackerLastProgress = ConcurrentHashMap<String, Pair<Int, Long>>()
     private val trackerGaveUp: MutableSet<String> =
         Collections.newSetFromMap(ConcurrentHashMap())
+    /** Separate clock for "absent from /sent-status" observations so we
+     *  don't lose the prior present-side progress timestamp when a row
+     *  flickers in and out of the LIMIT-50 window. See
+     *  `service/DeliveryTrackerDecisions.kt::trackerAbsentDecision`. */
+    private val trackerAbsentSince = ConcurrentHashMap<String, Long>()
 
     private suspend fun deliveryTrackerLoop() {
         delay(3000)
@@ -1100,11 +1250,28 @@ class PollService : Service() {
         val db = AppDatabase.getInstance(this)
         var inFlightJob: Job? = null
 
+        // Streak-coalescing for the spammiest skip reason. The previous in-flight
+        // call regularly runs >750 ms on cellular, so the 500 ms-tick loop was
+        // writing a `delivery.tracker.skipped` line every tick — up to ~50% of
+        // app.log when an upload is mid-flight. Log first skip immediately; on
+        // streak end (next non-skip tick) emit a `streak=N` summary if N>1.
+        var inFlightSkipStreak = 0
+        fun flushInFlightSkipStreak() {
+            if (inFlightSkipStreak > 1) {
+                AppLog.log(
+                    "Delivery",
+                    "delivery.tracker.skipped reason=previous_in_flight streak=$inFlightSkipStreak",
+                )
+            }
+            inFlightSkipStreak = 0
+        }
+
         while (running) {
             val tickStart = System.currentTimeMillis()
             try {
                 if (prefs.serverUrl == null || prefs.deviceId == null || prefs.authToken == null
                     || !isScreenOn()) {
+                    flushInFlightSkipStreak()
                     delay(500); continue
                 }
 
@@ -1113,21 +1280,30 @@ class PollService : Service() {
                 // Prune tracker state for transfers no longer active (deleted, delivered via long-poll, etc.)
                 trackerGaveUp.retainAll(allActiveIds)
                 trackerLastProgress.keys.retainAll(allActiveIds)
+                trackerAbsentSince.keys.retainAll(allActiveIds)
 
                 val trackedIds = (allActiveIds - trackerGaveUp).toList()
                 if (trackedIds.isEmpty()) {
+                    flushInFlightSkipStreak()
                     delay(500); continue
                 }
 
                 if (inFlightJob?.isActive == true) {
-                    AppLog.log("Delivery", "delivery.tracker.skipped reason=previous_in_flight")
+                    if (inFlightSkipStreak == 0) {
+                        AppLog.log("Delivery", "delivery.tracker.skipped reason=previous_in_flight")
+                    }
+                    inFlightSkipStreak++
                 } else {
+                    flushInFlightSkipStreak()
                     val api = ApiClient(prefs.serverUrl!!, prefs.deviceId!!, prefs.authToken!!)
                     inFlightJob = scope.launch {
                         try {
-                            withTimeout(750) { runDeliveryPoll(api, trackedIds, db) }
+                            // 3000 ms was 750 ms. The shorter timeout was chosen for
+                            // Wi-Fi LAN round-trips and elapsed routinely on cellular,
+                            // turning every cellular tick into a skip.
+                            withTimeout(3000) { runDeliveryPoll(api, trackedIds, db) }
                         } catch (_: TimeoutCancellationException) {
-                            AppLog.log("Delivery", "delivery.tracker.skipped reason=poll_timeout_750ms")
+                            AppLog.log("Delivery", "delivery.tracker.skipped reason=poll_timeout_3000ms")
                         } catch (_: Exception) {
                             // transient — next tick retries
                         }
@@ -1152,7 +1328,34 @@ class PollService : Service() {
 
         var anyJustDelivered = false
         for (tid in activeIds) {
-            val s = byId[tid] ?: continue
+            val s = byId[tid]
+            if (s == null) {
+                // Server has no row for this tid — it was GC'd or fell
+                // out of the LIMIT-50 window. Pre-fix this branch was a
+                // silent `continue`, which left phantom outgoing rows in
+                // Room polling sent-status every 500 ms forever (every
+                // screen-on window paid the radio cost). Engage the
+                // stall safeguard: 2 min of continuous absence → give up.
+                val prevTs = trackerAbsentSince[tid]
+                when (trackerAbsentDecision(prevTs, now, DELIVERY_STALL_TIMEOUT_MS)) {
+                    TrackerAbsentDecision.StartClock ->
+                        trackerAbsentSince[tid] = now
+                    TrackerAbsentDecision.KeepWaiting -> Unit
+                    TrackerAbsentDecision.GiveUp -> {
+                        val stallSeconds = (now - prevTs!!) / 1000
+                        AppLog.log("Delivery",
+                            "delivery.tracker.stall transfer_id=${tid.take(12)} stall_seconds=$stallSeconds mode=absent action=gave_up")
+                        db.transferDao().clearDeliveryProgress(tid)
+                        trackerGaveUp.add(tid)
+                        trackerLastProgress.remove(tid)
+                        trackerAbsentSince.remove(tid)
+                    }
+                }
+                continue
+            }
+            // Row is present in /sent-status — reset any absent-clock so a
+            // future flicker out starts a fresh 2 min window.
+            trackerAbsentSince.remove(tid)
             val state = s.optString("delivery_state", "not_started")
             val downloaded = s.optInt("chunks_downloaded", 0)
             val total = s.optInt("chunk_count", 0)

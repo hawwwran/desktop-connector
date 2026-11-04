@@ -54,15 +54,22 @@ def run_receiver(
     last_notified = [None]  # "connected", "disconnected", or None (never notified)
 
     def on_state_change(state):
+        # Reload before each transition so Settings → Notifications
+        # toggle takes effect on the next state change without a
+        # tray restart. State changes are rare (every few minutes in
+        # the steady-state case), so the JSON re-read cost is
+        # negligible.
+        config.reload()
+        emit = config.connection_state_notifications
         if state == ConnectionState.CONNECTED and last_notified[0] != "connected":
-            if last_notified[0] == "disconnected":
+            if last_notified[0] == "disconnected" and emit:
                 platform.notifications.notify_connection_restored()
             last_notified[0] = "connected"
         elif (
             state == ConnectionState.DISCONNECTED
             and last_notified[0] != "disconnected"
         ):
-            if last_notified[0] == "connected":
+            if last_notified[0] == "connected" and emit:
                 platform.notifications.notify_connection_lost()
             last_notified[0] = "disconnected"
 

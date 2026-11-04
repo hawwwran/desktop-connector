@@ -20,7 +20,7 @@ from _paths import REPO_ROOT  # noqa: E402
 
 
 def _windows_source() -> str:
-    return Path(REPO_ROOT, "desktop/src/windows.py").read_text()
+    return Path(REPO_ROOT, "desktop/src/windows_pairing.py").read_text()
 
 
 def _pairing_key_source() -> str:

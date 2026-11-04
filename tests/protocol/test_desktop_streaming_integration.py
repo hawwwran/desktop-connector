@@ -51,6 +51,7 @@ sys.path.insert(0, REPO_ROOT)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: E402
 
 from desktop.src import api_client as api_client_mod  # noqa: E402
+from desktop.src.api import transfers_streaming as streaming_mod  # noqa: E402
 from desktop.src.api_client import ApiClient  # noqa: E402
 from desktop.src.connection import ConnectionManager  # noqa: E402
 from desktop.src.crypto import KeyManager, CHUNK_SIZE  # noqa: E402
@@ -411,7 +412,12 @@ class StreamingQuotaGateTests(unittest.TestCase):
                 # backoff loop — same thread.
                 drain_one(tid)
 
-        with patch.object(api_client_mod, "STREAM_QUOTA_BACKOFF_RAMP_S",
+        # Patch the constant in the module that owns the function reading
+        # it (api.transfers_streaming). Patching api_client_mod here would
+        # be silently ineffective post-split: the shim re-exports the
+        # constant by value, but the streaming mixin reads its own
+        # module-globals binding.
+        with patch.object(streaming_mod, "STREAM_QUOTA_BACKOFF_RAMP_S",
                           _FAST_QUOTA_RAMP):
             sent_tid = sender.send_file(
                 src, fx.recipient_id, fx.key,
