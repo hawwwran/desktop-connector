@@ -388,6 +388,7 @@ applies as elsewhere.
 | Event | Where | Severity | Context | Notes |
 |---|---|---|---|---|
 | `apierror.caught` | server | warning | `status`, `uri`, `reason` | Router top-level catch; message must not echo request body |
+| `apierror.uncaught_throwable` | server | error | `type`, `method`, `uri`, `reason`, `at` | Router catch-all for non-`ApiError` exceptions (SQLite prepare/execute failures, type errors). Client gets a bare 500 `{"error": "internal error"}`. `at` is `file:line` of the throw; no stack trace, since traces can carry argument values |
 
 ---
 

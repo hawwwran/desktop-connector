@@ -98,6 +98,22 @@ class Router
                 $e->getMessage()
             ), $level);
             ErrorResponder::send($e);
+        } catch (\Throwable $e) {
+            // Non-ApiError escapes (SQLite failures, type errors) would
+            // otherwise reach PHP's default handler, which can leak file
+            // paths and stack frames when display_errors is on. Log the
+            // throw site only: a full trace can carry argument values
+            // (token prefixes) when zend.exception_ignore_args is off.
+            AppLog::log('Api', sprintf(
+                'apierror.uncaught_throwable type=%s method=%s uri=%s reason=%s at=%s:%d',
+                $e::class,
+                $_SERVER['REQUEST_METHOD'] ?? '-',
+                $_SERVER['REQUEST_URI'] ?? '-',
+                $e->getMessage(),
+                basename($e->getFile()),
+                $e->getLine(),
+            ), 'error');
+            ErrorResponder::send(new ApiError(500, 'internal error'));
         }
     }
 

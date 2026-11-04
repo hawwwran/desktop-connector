@@ -125,10 +125,26 @@ class Database
     public function query(string $sql, array $params = []): SQLite3Result
     {
         $stmt = $this->db->prepare($sql);
+        if ($stmt === false) {
+            throw new RuntimeException(
+                'SQLite prepare failed: ' . $this->db->lastErrorMsg(),
+                $this->db->lastErrorCode()
+            );
+        }
         foreach ($params as $key => $value) {
             $stmt->bindValue($key, $value);
         }
-        return $stmt->execute();
+        // @ suppresses the PHP warning execute() emits on constraint
+        // violations; the failure surfaces as the exception below instead
+        // of a warning printed into the JSON response body.
+        $result = @$stmt->execute();
+        if ($result === false) {
+            throw new RuntimeException(
+                'SQLite execute failed: ' . $this->db->lastErrorMsg(),
+                $this->db->lastErrorCode()
+            );
+        }
+        return $result;
     }
 
     public function querySingle(string $sql, array $params = []): ?array

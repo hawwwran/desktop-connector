@@ -17,7 +17,8 @@ class Validators
 
     public static function requireNonEmptyString(array $body, string $field): string
     {
-        if (empty($body[$field]) || !is_string($body[$field])) {
+        // Not empty(): it treats the string "0" as empty.
+        if (!isset($body[$field]) || !is_string($body[$field]) || $body[$field] === '') {
             throw new ValidationError("Missing $field");
         }
         return $body[$field];
