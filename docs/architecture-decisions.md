@@ -153,6 +153,89 @@ backing the sweep);
 (11 cases covering both helpers); `docs/plans/android-radio-tail-cost.md`
 "What `_9.txt` showed" + "Changes deployed (2026-05-13)" sections.
 
+### 2026-05-06 — Keyring service name derives from `config_dir`; device_id lives beside auth_token
+
+**Status:** accepted.
+
+**Context.** The OS keyring is per-user, shared by every Desktop
+Connector process on the host. With a hard-coded service name, a dev
+twin started with `--config-dir=~/.config/desktop-connector-dev` loaded
+the real install's key material and overwrote the real `auth_token`
+when it registered against a local relay; recovery needed a full
+re-pair. The `DC_KEYRING_SERVICE` env var only helped when someone
+remembered to set it. Separately, `auth_token` lived in the keyring
+while `device_id` lived in plaintext `config.json`, so an interrupted
+registration could leave a half-registered install (token present,
+id missing) that every relay call rejected.
+
+**Decision.** `Config` computes the keyring service as
+`DC_KEYRING_SERVICE` env, else `config_dir.name`, else
+`"desktop-connector"`, and passes it to `open_default_store`. The
+default config dir maps to the historical service name, so existing
+installs need no migration. `device_id` moves into the secret store
+under `SECRET_KEY_DEVICE_ID`; `_migrate_legacy_secrets_if_needed`
+moves an existing JSON `device_id` into the keyring on first boot, and
+`JsonFallbackStore` keeps the plaintext shape on hosts without
+libsecret.
+
+**Alternatives.** Keeping the env var as the only isolation knob
+(rejected: isolation that depends on shell discipline fails silently,
+and the failure mode is damage to the user's real credentials).
+Forcing the JSON fallback for non-default config dirs (rejected:
+loses keyring protection for legitimate multi-profile setups).
+
+**Anchor.** `desktop/src/config.py` (`Config.__init__` service
+derivation, `device_id` property, `_migrate_legacy_secrets_if_needed`),
+`desktop/src/secrets.py` (`SecretServiceStore(service_name=…)`,
+`open_default_store`, `SECRET_KEY_DEVICE_ID`).
+
+### 2026-05-06 — File-manager scripts carry a config-id marker for cross-install isolation
+
+**Status:** accepted.
+
+**Context.** `~/.local/share/nautilus/scripts/`, `~/.local/share/nemo/scripts/`,
+and `~/.local/share/kservices5/ServiceMenus/` are per-user XDG paths
+shared across **all** Desktop Connector installs on a host. A test
+run launched a dev twin
+(`--config-dir=~/.config/desktop-connector-dev`, no pairings); on
+startup the twin's `sync_file_manager_targets` call iterated the shared
+Nautilus dir, treated the canonical install's "Send to Vivo Phone"
+managed script as stale (because its peer wasn't in the dev twin's
+empty pair list), and unlinked it. Same shape as the 2026-05-06
+keyring-isolation bug (see the keyring entry above) but on a different shared
+resource. Per `feedback_test_isolation.md` the rule is: shared-resource
+isolation must live in the code path, not in shell discipline.
+
+**Decision.** Every managed file-manager entry now embeds a
+`# desktop-connector:config-id=<config_dir.name>` marker alongside the
+existing `MANAGED_SENTINEL` and `PAIRING_ID_PREFIX`. Both the cleanup
+pass and the write-collision check honour ownership: a managed entry
+whose marker doesn't match the current `config_dir.name` is left alone
+(even if it would otherwise look stale), and the write pass refuses to
+clobber such an entry with `skip_other_config_collision`. Pre-fix
+unmarked managed entries (and unmarked legacy "Send to Phone" scripts)
+are treated as canonical-owned: only the canonical install
+(`config_dir.name == "desktop-connector"`, the XDG default) adopts and
+rewrites them with the marker on first sync; alternate-config installs
+leave them untouched.
+
+**Alternatives.** (a) Skip `sync_file_manager_targets` entirely on
+non-default config dirs — one-line change, but loses multi-profile
+support for power users running e.g. AppImage + dev-tree side by side
+with their own paired phones. (b) Add a `--no-file-manager-sync` flag
+used only by test runs — same shape as the
+`DC_KEYRING_SERVICE` mistake the rule above warns against (easy to
+forget, leaves shared-state damage as the failure mode). (c) The
+config-id marker — chosen — costs one comment line per script and
+keeps multi-profile working correctly.
+
+**Anchor.** `desktop/src/file_manager_integration.py`:
+`CONFIG_ID_PREFIX`, `_config_marker`, `_owns`, `_extract_config_id`;
+the cleanup ownership gate and the collision refusal in
+`_sync_script_dir` and `_sync_dolphin_service`. Tests:
+`tests/protocol/test_desktop_file_manager_integration.py`
+`FileManagerCrossConfigIsolationTests`.
+
 ---
 
 _(add new decisions above this section header)_

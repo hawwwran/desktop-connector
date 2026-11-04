@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .secrets import (
     SECRET_KEY_AUTH_TOKEN,
+    SECRET_KEY_DEVICE_ID,
     JsonFallbackStore,
     SecretServiceUnavailable,
     SecretStore,
@@ -212,7 +213,23 @@ class Config:
         elif os.environ.get(_NO_KEYRING_ENV_VAR):
             self._secret_store = JsonFallbackStore(self._data, self.save)
         else:
-            self._secret_store = open_default_store(self._data, self.save)
+            # Per-Config keyring namespacing: derive service name from
+            # the config dir basename so a non-default --config-dir
+            # cannot share a keyring slot with a default-config-dir
+            # process running on the same user account. A dev twin run
+            # with ``--config-dir=~/.config/desktop-connector-dev`` ends
+            # up at service ``desktop-connector-dev``, fully isolated
+            # from the user's real install at service ``desktop-connector``.
+            # The ``DC_KEYRING_SERVICE`` env var is a global override
+            # for callers that want to opt out of the auto-derivation.
+            service = (
+                os.environ.get("DC_KEYRING_SERVICE")
+                or self.config_dir.name
+                or "desktop-connector"
+            )
+            self._secret_store = open_default_store(
+                self._data, self.save, service_name=service,
+            )
         self._migrate_legacy_secrets_if_needed()
         self._migrate_receive_actions()
         self._migrate_receive_action_limits()
@@ -294,6 +311,19 @@ class Config:
             except SecretServiceUnavailable as exc:
                 log.warning(
                     "config.secrets.migration_failed key=auth_token reason=%s "
+                    "(plaintext left in place; retrying next boot)",
+                    exc,
+                )
+
+        legacy_device_id = self._data.get("device_id")
+        if isinstance(legacy_device_id, str) and legacy_device_id:
+            try:
+                self._secret_store.set(SECRET_KEY_DEVICE_ID, legacy_device_id)
+                del self._data["device_id"]
+                migrated_keys.append("device_id")
+            except SecretServiceUnavailable as exc:
+                log.warning(
+                    "config.secrets.migration_failed key=device_id reason=%s "
                     "(plaintext left in place; retrying next boot)",
                     exc,
                 )
@@ -395,12 +425,23 @@ class Config:
 
     @property
     def device_id(self) -> str | None:
-        return self._data.get("device_id")
+        # Read from the secret store so device_id shares storage and
+        # fate with auth_token. The two are written together by
+        # ``register_device`` and the relay only authenticates a
+        # request when both match its own row — splitting their
+        # persistence (keyring vs. JSON) created a half-registered
+        # state if the install was killed between the two writes.
+        # ``JsonFallbackStore`` continues to map this back to
+        # ``_data["device_id"]`` so the on-disk shape is unchanged on
+        # hosts without libsecret.
+        return self._secret_store.get(SECRET_KEY_DEVICE_ID)
 
     @device_id.setter
     def device_id(self, value: str) -> None:
-        self._data["device_id"] = value
-        self.save()
+        # Callers don't need a separate self.save() — the secret store
+        # commits atomically (libsecret transaction or JSON-fallback
+        # save_fn callback into ``Config.save``).
+        self._secret_store.set(SECRET_KEY_DEVICE_ID, value)
 
     @property
     def active_device_id(self) -> str | None:
@@ -674,7 +715,7 @@ class Config:
         self._data.pop("active_device_id", None)
         if scope == "full":
             self._secret_store.delete(SECRET_KEY_AUTH_TOKEN)
-            self._data.pop("device_id", None)
+            self._secret_store.delete(SECRET_KEY_DEVICE_ID)
         self.save()
 
     @property

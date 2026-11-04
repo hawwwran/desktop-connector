@@ -63,7 +63,7 @@ class FileManagerScriptTemplateTests(unittest.TestCase):
             name="Alpha",
             paired_at=0,
         )
-        self.rendered = _script_text(device, "/x.AppImage")
+        self.rendered = _script_text(device, "/x.AppImage", "desktop-connector")
 
     def test_rendered_script_parses_as_python(self):
         import ast
