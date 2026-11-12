@@ -172,7 +172,7 @@ Desktop sends encrypted start/stop via fasttrack. Phone: alarm (STREAM_ALARM, by
 - **History clear**: both platforms have "Clear all" with confirm. Android preserves active uploads/downloads; desktop removes all. Swipe-to-delete animated (250 ms shrink+fade).
 
 ### Desktop UX bits
-- **Tray icon**: sparkle status indicator. Filled blue = connected, sky-blue = paired device offline, yellow = reconnecting/uploading, orange = disconnected.
+- **Tray icon**: filled sparkle, tint carries state. First match wins (`tray/status.py`): orange = disconnected (server unreachable or any pending/latched 401/403), yellow = reconnecting, dark blue with yellow inner diamond = outgoing transfer (uploading or delivering), sky-blue = paired device offline (last ping unanswered), dark blue = connected.
 - **Config reload**: `paired_devices` reloads from disk on every access to pick up subprocess-window changes (settings, pairing).
 - **Dependency checker** at startup — GTK4 dialog with "Install" button opens installer in terminal.
 

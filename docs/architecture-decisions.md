@@ -73,6 +73,79 @@ want when arguing whether to flip the decision.
 
 ## Entries
 
+### 2026-11-12 — Locked keyring stops startup; tracker polls back off to 60 s
+
+**Status:** accepted.
+
+**Context.** On 2026-11-11 a one-shot `--send` ran while the keyring
+could not be unlocked. `Config` fell back to the JSON store, which was
+empty because the identity lives in the keyring, so startup registered a
+second device. The next keyring-backed run migrated that plaintext
+identity over the paired one. Sends from then on went out under a device
+the phone was not paired with and were never fetched. The running tray
+still held the old credentials, so the server listed none of those
+transfers for it: the stall safeguard only looked at listed transfers,
+the rows counted as live outgoing indefinitely, and the tracker plus the
+incoming poll hit the relay about four times a second for hours.
+
+**Decision.** Identity:
+- `Config` writes `secrets_backend: "keyring"` to `config.json` whenever
+  the active store is the keyring. With that marker (or the older
+  `secrets_migrated_at`) present and the keyring unreachable,
+  `Config.identity_locked_in_keyring` is true, `build_startup_context`
+  raises before `KeyManager` can generate a key file, and `main` exits 1
+  with a message. `register_device` refuses in the same state.
+- Legacy-secret migration keeps a complete keyring identity and drops a
+  differing plaintext `device_id` / `auth_token` pair, the same rule
+  `KeyManager` applies to a stray PEM.
+
+- Startup compares the stored `device_id` with the hash of the device's
+  public key. On a mismatch `--send`, `--pair` and `--headless` exit 1;
+  the interactive tray starts with `CREDENTIALS_INVALID` latched so the
+  existing full-wipe re-pair banner is the way out.
+- The relay refuses `POST /api/transfers/init` with 403 unless sender
+  and recipient are paired (ping and fasttrack already did). The desktop
+  treats 401/403 at init as terminal.
+
+Polling:
+- The tracker's `sent-status` poll stays at 0.5 s while a delivery is
+  progressing. After 30 s with no news it doubles its interval on every
+  further poll without news, up to 60 s, and resets on recipient
+  progress, delivery, a new send, or local upload progress.
+- The 2 min stall now also covers transfers the server does not list;
+  those are dropped from polling. Listed transfers that stall stop
+  counting as live outgoing but stay on the backed-off poll and are
+  revived when the recipient moves.
+- The incoming poll that stands in for long-polling during a live send
+  uses the tracker interval instead of a fixed 0.5 s.
+
+**Alternatives.** (a) Let the fallback run read-only instead of exiting:
+every caller that needs credentials would still fail, later and less
+clearly. (b) Prefer the newer plaintext identity during migration: it is
+the one without pairings. (c) Keep the fixed 0.5 s poll and rely on the
+stall give-up alone: bounded per transfer, but it loses delivery
+detection on relays without long-polling and still spends 240 requests
+on every send to an offline phone.
+
+**Consequences.** A user who removes the keyring for good must delete
+`secrets_backend` and `secrets_migrated_at` from `config.json` to start
+over with a new identity. Progress painting for a recipient that wakes
+after a long silence can lag by up to 60 s. Android's tracker is
+unchanged (fixed 500 ms, give-up after 2 min).
+
+**Anchor.** `desktop/src/config.py`: `identity_locked_in_keyring`,
+`_record_keyring_backend`, `_drop_plaintext_identity_shadowed_by_store`;
+`desktop/src/bootstrap/startup_context.py`: `IdentityLockedInKeyring`,
+`stored_identity_matches_key`; `server/src/Services/TransferService.php`:
+`init`;
+`desktop/src/receive/delivery_tracker.py`: `_tracker_poll_due`,
+`_tracker_reschedule`, `_note_absent_transfer`. Tests:
+`tests/protocol/test_desktop_delivery_tracker.py`,
+`test_desktop_secrets.py` `KeyringLockoutTests`.
+
+---
+
+
 ### 2026-05-13 — Android delivery tracker gives up on absent rows + 12h orphan sweep
 
 **Status:** accepted.
