@@ -181,6 +181,7 @@ renamed/restructured.
 | `transfer.init.failed` | desktop, android | error | `error_kind` | Pre-upload validation failed |
 | `transfer.init.waiting` | desktop, android | warning | `transfer_id`, `reason=storage_full` | 507 from server; client will retry until cap |
 | `transfer.init.waiting.timed_out` | desktop, android | warning | `transfer_id`, `elapsed_ms` | 30-min retry budget exhausted — row flipped to Failed |
+| `transfer.init.rejected` | desktop | error | `transfer_id`, `recipient` | 401 / 403 from server at init: credentials invalid, or sender not paired with the recipient. Terminal, no retry. |
 | `transfer.init.too_large` | desktop, android | error | `transfer_id` | 413 from server; transfer alone exceeds quota — terminal |
 | `transfer.cancel.accepted` | server | info | `transfer_id`, `sender`, `recipient` | Sender DELETE tore down in-flight transfer |
 | `transfer.chunk.uploaded` | server (new), desktop, android | debug | `transfer_id`, `chunk_index`, `size` | Per-chunk; debug by default |

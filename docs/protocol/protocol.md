@@ -417,6 +417,7 @@ Validation:
 - all fields are required
 - `chunk_count` must be between `1` and `500`, inclusive
 - `transfer_id` must be unique
+- sender and recipient must be paired
 
 Server storage protection:
 
@@ -439,6 +440,7 @@ Representative failure cases:
 
 - `400 Missing required fields`
 - `400 Invalid chunk_count`
+- `403 Devices are not paired`
 - `409 Transfer ID already exists`
 - `507 Recipient storage limit exceeded`
 

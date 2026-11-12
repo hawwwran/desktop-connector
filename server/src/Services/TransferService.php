@@ -57,6 +57,14 @@ class TransferService
             throw new ValidationError('Invalid chunk_count');
         }
 
+        // Same boundary as ping and fasttrack. Without it a registered
+        // but unpaired device can fill a stranger's quota, and a client
+        // whose identity drifted away from its pairing gets a 201 for a
+        // transfer the recipient will never fetch.
+        if (!(new PairingRepository($db))->findPairing($senderId, $recipientId)) {
+            throw new ForbiddenError('Devices are not paired');
+        }
+
         $negotiatedMode = self::negotiateMode($db, $recipientId, $requestedMode);
 
         $transferRepo = new TransferRepository($db);

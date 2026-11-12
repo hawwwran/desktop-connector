@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import os
 import sys
+import time
 import unittest
 import uuid
 
@@ -148,6 +149,23 @@ class ApiClientStreamingOutcomeTests(unittest.TestCase):
         self.assertEqual(status, "ok")
         # Client didn't request streaming → server returns classic.
         self.assertEqual(negotiated, "classic")
+
+    def test_init_to_unpaired_recipient_is_rejected_without_retry(self):
+        sender_id, sender_token, _ = self.bound.register("desktop")
+        recipient_id, _recipient_token, _ = self.bound.register("phone")
+        api = self.bound.api_for(sender_id, sender_token)
+        tid = str(uuid.uuid4())
+
+        status, negotiated = api.init_transfer(tid, recipient_id, "e30=", 1)
+        self.assertEqual(status, "rejected")
+        self.assertIsNone(negotiated)
+
+        # The retry wrapper must return at once, not sit in its 2 min
+        # failure window.
+        started = time.monotonic()
+        self.assertIsNone(
+            api._init_transfer_with_retry(tid, recipient_id, "e30=", 1))
+        self.assertLess(time.monotonic() - started, 2.0)
 
     def test_init_streaming_online_recipient(self):
         ctx = self._streaming_pair(chunk_count=2)

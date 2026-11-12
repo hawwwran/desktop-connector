@@ -60,6 +60,7 @@ release build of the desktop or Android client could start misbehaving.
 | `/api/transfers/init` request | Add required field | breaking |
 | `/api/transfers/init` request | Add optional field with a default | extending |
 | `/api/transfers/init` response | Return 413 (quota, terminal) | extending — existing clients should treat 4xx as failed; new clients render "exceeds server quota" |
+| `/api/transfers/init` response | Return 403 when sender and recipient are not paired | extending — clients already treat 401/403 as a pairing failure; correctly paired clients never see it |
 | `/api/transfers/init` response | Return 507 (queue full, transient) | extending — clients aware of 507 enter WAITING; unaware clients treat as generic failure |
 | `DELETE /api/transfers/{id}` | New sender-cancel endpoint | extending — old clients never call it |
 | Chunk upload/download URL shape | Change `/chunks/{i}` path format | breaking |

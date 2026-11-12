@@ -430,6 +430,32 @@ class ServerProtocolContractTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("error", body)
 
+    def test_init_between_unpaired_devices_is_forbidden(self):
+        # Registration is public, so without this gate any registered
+        # device could queue transfers for any device id it knows.
+        sender_id, sender_token, _ = self._register_device("desktop")
+        recipient_id, _recipient_token, _ = self._register_device("phone")
+        import uuid
+        tid = str(uuid.uuid4())
+        status, _h, body = self.h.request(
+            "POST", "/api/transfers/init",
+            token=sender_token, device_id=sender_id,
+            json_body={
+                "transfer_id": tid,
+                "recipient_id": recipient_id,
+                "encrypted_meta": "e30=",
+                "chunk_count": 1,
+            },
+        )
+        self.assertEqual(status, 403)
+        self.assertIn("error", body)
+        status, _h, body = self.h.request(
+            "GET", "/api/transfers/sent-status",
+            token=sender_token, device_id=sender_id,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body.get("transfers"), [])
+
     def _pair_and_init(self):
         """Create a sender+recipient pair and init a tiny transfer.
         Returns (sender_id, sender_token, recipient_id, transfer_id)."""

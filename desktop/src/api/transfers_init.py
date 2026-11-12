@@ -32,6 +32,9 @@ class TransfersInitMixin:
              only — streaming init skips the projected reservation.
           * ('too_large', None) — 413, transfer alone exceeds the
              server's quota. Terminal.
+          * ('rejected', None) — 401 / 403: the server refuses this
+             sender (credentials invalid, or not paired with the
+             recipient). Terminal.
           * ('failed', None) — anything else (network exception, 4xx,
              5xx) — caller decides retry budget.
 
@@ -67,6 +70,8 @@ class TransfersInitMixin:
             # amount of waiting makes it fit. Caller bails immediately
             # instead of entering WAITING / retry loops.
             return "too_large", None
+        if resp.status_code in (401, 403):
+            return "rejected", None
         return "failed", None
 
     def _init_transfer_with_retry(self, transfer_id: str, recipient_id: str,
@@ -82,6 +87,8 @@ class TransfersInitMixin:
           tray / HomeScreen banner can surface it. (Streaming init
           never returns 507 — the projected-size check is skipped and
           quota is enforced per-chunk instead; see `_upload_stream`.)
+
+        * 401 / 403 rejected: no retry.
 
         * Network exception / other 5xx: retry on the same 5s cadence
           as chunk upload, capped at CHUNK_MAX_FAILURE_WINDOW_S (2 min),
@@ -146,6 +153,14 @@ class TransfersInitMixin:
                         on_progress(transfer_id, -2, chunk_count)
                     except Exception:
                         log.exception("too_large on_progress failed")
+                return None
+
+            if status == "rejected":
+                # 401 / 403 — waiting won't change the answer. The auth
+                # counter in ConnectionManager has already seen it.
+                log.error("transfer.init.rejected transfer_id=%s recipient=%s "
+                          "(not paired with the recipient, or credentials invalid)",
+                          transfer_id[:12], recipient_id[:12])
                 return None
 
             if status == "storage_full":
