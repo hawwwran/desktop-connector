@@ -118,6 +118,16 @@ class ConnectionManager:
         with self._lock:
             return self._auth_failure_kind
 
+    def latch_auth_failure(self, kind: "AuthFailureKind") -> None:
+        """Latch an auth failure known before any request was made (e.g.
+        startup found the stored identity unusable). Same end state as a
+        tripped 401/403 streak: effective_state reads DISCONNECTED and the
+        re-pair banner shows until clear_auth_failure()."""
+        with self._lock:
+            previous = self._compute_effective_state_locked()
+            self._auth_failure_kind = kind
+        self._notify_effective_state_change(previous)
+
     def clear_auth_failure(self) -> None:
         """Clear the latched auth-invalid flag. Called after the user accepts
         the banner and local credentials are wiped (or new ones take effect)."""

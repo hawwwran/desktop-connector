@@ -23,9 +23,18 @@ class StartupContext:
     platform: DesktopPlatform
 
 
+class IdentityLockedInKeyring(Exception):
+    """The install's identity lives in the OS keyring and the keyring is
+    locked or unreachable, so startup has no usable credentials."""
+
+
 def build_startup_context(args: StartupArgs) -> StartupContext:
     """Create shared startup services from parsed CLI args."""
     config = Config(Path(args.config_dir) if args.config_dir else None)
+    if config.identity_locked_in_keyring:
+        # Raised before KeyManager runs: in fallback mode it would
+        # generate a fresh private key file for an identity nobody has.
+        raise IdentityLockedInKeyring()
     if args.server_url:
         config.server_url = args.server_url
     if args.save_dir:
@@ -43,6 +52,20 @@ def build_startup_context(args: StartupArgs) -> StartupContext:
     platform = compose_desktop_platform()
 
     return StartupContext(args=args, config=config, crypto=crypto, api=api, platform=platform)
+
+
+def stored_identity_matches_key(config: Config, crypto: KeyManager) -> bool:
+    """False when the stored device_id is not the one this device's key
+    derives to.
+
+    The relay issues ``device_id`` as a hash of the public key, and every
+    pairing is made against that key. A stored id that belongs to some
+    other key authenticates fine but is paired with nobody, so sends
+    under it are accepted nowhere. An unregistered install has nothing
+    to compare and passes.
+    """
+    stored = config.device_id
+    return stored is None or stored == crypto.get_device_id()
 
 
 def rebuild_authenticated_api(context: StartupContext) -> None:

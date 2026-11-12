@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _paths import ensure_desktop_on_path  # noqa: E402
@@ -15,8 +16,11 @@ from _paths import ensure_desktop_on_path  # noqa: E402
 ensure_desktop_on_path()
 
 from src.api_client import DeviceRegistrationResult  # noqa: E402
+from src.bootstrap.startup_context import stored_identity_matches_key  # noqa: E402
 from src.config import Config  # noqa: E402
+from src.crypto import KeyManager  # noqa: E402
 from src.runners.registration_runner import register_device  # noqa: E402
+from src.secrets import JsonFallbackStore  # noqa: E402
 
 
 class _FakeCrypto:
@@ -131,6 +135,44 @@ class RegistrationRunnerTests(unittest.TestCase):
             self.assertNotIn("device_id", on_disk)
             self.assertNotIn("auth_token", on_disk)
             self.assertIn("secrets_migrated_at", on_disk)
+
+    def test_stored_identity_must_match_the_device_key(self) -> None:
+        config = Config(self.config_dir)
+        crypto = KeyManager(self.config_dir, secret_store=config.secret_store)
+
+        # Unregistered: nothing to compare yet.
+        self.assertTrue(stored_identity_matches_key(config, crypto))
+
+        config.device_id = crypto.get_device_id()
+        self.assertTrue(stored_identity_matches_key(config, crypto))
+
+        # Identity issued for some other key, as left behind by a run
+        # that registered while the keyring was locked.
+        config.device_id = "319b66262644dcfb6a6ef13120158b6d"
+        self.assertFalse(stored_identity_matches_key(config, crypto))
+
+    def test_refuses_to_register_while_keyring_identity_is_locked(self) -> None:
+        (self.config_dir / "config.json").write_text(
+            json.dumps({"secrets_backend": "keyring"}))
+
+        def fallback(data, save_fn, *, service_name=None):
+            return JsonFallbackStore(data, save_fn)
+
+        env = {k: v for k, v in os.environ.items()
+               if k != "DESKTOP_CONNECTOR_NO_KEYRING"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("src.config.open_default_store", side_effect=fallback):
+            config = Config(self.config_dir)
+        api = _FakeApi([
+            DeviceRegistrationResult(
+                201, {"device_id": "second-device", "auth_token": "second-token"}),
+        ])
+
+        registered = register_device(config, api)  # type: ignore[arg-type]
+
+        self.assertFalse(registered)
+        self.assertEqual(api.server_urls, [])
+        self.assertIsNone(config.device_id)
 
     def test_wipe_credentials_full_clears_both_identity_fields(self) -> None:
         config = Config(self.config_dir)

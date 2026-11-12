@@ -8,7 +8,7 @@ import threading
 
 from ..api_client import ApiClient
 from ..config import Config
-from ..connection import ConnectionManager, ConnectionState
+from ..connection import AuthFailureKind, ConnectionManager, ConnectionState
 from ..crypto import KeyManager
 from ..find_device_alert import GtkSubprocessAlert
 from ..platform import DesktopPlatform
@@ -22,11 +22,20 @@ def run_receiver(
     crypto: KeyManager,
     headless: bool,
     platform: DesktopPlatform,
+    *,
+    identity_unusable: bool = False,
 ) -> None:
-    """Run the receiver loop (with tray or headless)."""
+    """Run the receiver loop (with tray or headless).
+
+    ``identity_unusable`` starts the tray with the re-pair banner already
+    latched: the stored identity can't work, and the banner's full-wipe
+    re-pair is the way out.
+    """
     from ..history import TransferHistory
 
     conn = ConnectionManager(config.server_url, config.device_id, config.auth_token)
+    if identity_unusable:
+        conn.latch_auth_failure(AuthFailureKind.CREDENTIALS_INVALID)
     api = ApiClient(conn, crypto)
     history = TransferHistory(config.config_dir)
 

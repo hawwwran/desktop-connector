@@ -143,6 +143,8 @@ Shared dot-notation event vocabulary (`transfer.init.accepted`, `ping.request.ra
 Optional. Server reads `firebase-service-account.json` + `google-services.json` at root. Data-only FCM with HIGH priority on transfer complete (bypasses Doze). Android initializes Firebase dynamically from `GET /api/fcm/config` — no baked-in `google-services.json`, so each server deployment can use its own Firebase project. Falls back to long-polling if unavailable.
 
 ### Auth recovery
+Desktop identity guards at startup: (1) keyring-backed install with the keyring locked → exit 1 before anything registers (`config.secrets.keyring_locked`); (2) stored `device_id` ≠ hash of the device's public key → one-shot modes exit 1, the tray starts with the full re-pair banner latched (`startup.identity.mismatch`). See the 2026-11-12 entry in `docs/architecture-decisions.md`.
+
 Both clients treat 401/403 as **terminal pairing failure**, not transient. 3-in-a-row latching streak surfaces a home-screen banner ("Pairing lost — re-pair to continue"). Desktop: `on_auth_failure` callbacks (single-pair scope). Android: `AuthObservation` `SharedFlow` on `ApiClient`'s companion object, per-peer attribution under `ConnectionManager._authFailureByPeer: Map<peerId, AuthFailureKind>`. Empty-string key = global (every CREDENTIALS_INVALID, plus 403s without peer attribution); a real device id = scoped to that pair only. Per-key 3-in-a-row latch so 401-then-403-to-different-peers doesn't collapse. Tapping "Re-pair X" on a per-peer banner removes only that pair (`deleteAllForPeer` + `pairingRepo.unpair`); global key wipes all paired devices and resets the keypair on CREDENTIALS_INVALID.
 
 ### Android multi-pair

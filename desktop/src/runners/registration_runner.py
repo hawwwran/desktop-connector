@@ -12,6 +12,16 @@ log = logging.getLogger("desktop-connector")
 
 def register_device(config: Config, api: ApiClient) -> bool:
     """Register device with server if not already registered."""
+    if config.identity_locked_in_keyring:
+        # The fallback store looks unregistered here only because the
+        # keyring holding the real identity is locked. Registering would
+        # mint a second device that the phone isn't paired with.
+        log.error(
+            "startup.register.refused reason=keyring_unreachable "
+            "(identity lives in the OS keyring; unlock it and retry)"
+        )
+        return False
+
     if config.is_registered:
         log.info("Already registered as %s", config.device_id)
         return True

@@ -24,6 +24,8 @@ from .secrets import (
 # sets this so the test runner never writes to the dev machine's
 # real keyring. Production code never sets this.
 _NO_KEYRING_ENV_VAR = "DESKTOP_CONNECTOR_NO_KEYRING"
+_SECRETS_BACKEND_KEY = "secrets_backend"
+_SECRETS_BACKEND_KEYRING = "keyring"
 
 
 @dataclass(frozen=True)
@@ -208,6 +210,10 @@ class Config:
         # DESKTOP_CONNECTOR_NO_KEYRING=1 to keep their writes off the
         # dev machine's real keyring. Callers can override entirely
         # by passing secret_store=.
+        # True only when the default path wanted the OS keyring and had
+        # to fall back; an injected store or the env opt-out is a choice,
+        # not an outage. Feeds ``identity_locked_in_keyring``.
+        self._keyring_unreachable = False
         if secret_store is not None:
             self._secret_store: SecretStore = secret_store
         elif os.environ.get(_NO_KEYRING_ENV_VAR):
@@ -230,6 +236,8 @@ class Config:
             self._secret_store = open_default_store(
                 self._data, self.save, service_name=service,
             )
+            self._keyring_unreachable = not self._secret_store.is_secure()
+        self._record_keyring_backend()
         self._migrate_legacy_secrets_if_needed()
         self._migrate_receive_actions()
         self._migrate_receive_action_limits()
@@ -283,6 +291,67 @@ class Config:
                 pass
             raise
 
+    def _record_keyring_backend(self) -> None:
+        """Leave a marker in config.json once secrets live in the keyring.
+
+        The marker is the only evidence a later process has, when the
+        keyring is locked or unreachable, that an empty JSON fallback
+        means "identity is elsewhere" and not "fresh install".
+        """
+        if not self._secret_store.is_secure():
+            return
+        if self._data.get(_SECRETS_BACKEND_KEY) == _SECRETS_BACKEND_KEYRING:
+            return
+        self._data[_SECRETS_BACKEND_KEY] = _SECRETS_BACKEND_KEYRING
+        self.save()
+
+    @property
+    def identity_locked_in_keyring(self) -> bool:
+        """True when this install keeps its identity in the OS keyring
+        and the keyring can't be reached right now.
+
+        In that state the JSON fallback reads as unregistered. Acting on
+        that (registering, pairing) mints a second identity that a later
+        keyring-backed run would then pick up, so callers must refuse.
+        """
+        if not self._keyring_unreachable:
+            return False
+        return (
+            self._data.get(_SECRETS_BACKEND_KEY) == _SECRETS_BACKEND_KEYRING
+            or "secrets_migrated_at" in self._data
+        )
+
+    def _drop_plaintext_identity_shadowed_by_store(self) -> None:
+        """Discard a plaintext device_id + auth_token pair when the
+        keyring already holds a complete identity.
+
+        The keyring copy is the one the private key and the pairings
+        belong to (KeyManager applies the same rule to a stray PEM). A
+        plaintext pair next to it comes from a run that could not reach
+        the keyring; migrating it would replace the paired identity.
+        """
+        legacy_token = self._data.get("auth_token")
+        legacy_device_id = self._data.get("device_id")
+        if not legacy_token and not legacy_device_id:
+            return
+        try:
+            stored_token = self._secret_store.get(SECRET_KEY_AUTH_TOKEN)
+            stored_device_id = self._secret_store.get(SECRET_KEY_DEVICE_ID)
+        except SecretServiceUnavailable:
+            return
+        if not stored_token or not stored_device_id:
+            return
+        if legacy_token == stored_token and legacy_device_id in (None, stored_device_id):
+            return
+        log.warning(
+            "config.secrets.migration_skipped reason=keyring_identity_present "
+            "kept=%s discarded=%s",
+            stored_device_id[:12], (legacy_device_id or "unknown")[:12],
+        )
+        self._data.pop("auth_token", None)
+        self._data.pop("device_id", None)
+        self.save()
+
     def _migrate_legacy_secrets_if_needed(self) -> None:
         """Move plaintext secrets from config.json into the secret store.
 
@@ -299,6 +368,8 @@ class Config:
         """
         if not self._secret_store.is_secure():
             return
+
+        self._drop_plaintext_identity_shadowed_by_store()
 
         migrated_keys: list[str] = []
 

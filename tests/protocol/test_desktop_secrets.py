@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _paths import ensure_desktop_on_path  # noqa: E402
@@ -26,6 +27,7 @@ ensure_desktop_on_path()
 from src.config import Config, ScrubResult  # noqa: E402
 from src.secrets import (  # noqa: E402
     SECRET_KEY_AUTH_TOKEN,
+    SECRET_KEY_DEVICE_ID,
     SERVICE_NAME,
     JsonFallbackStore,
     SecretServiceStore,
@@ -578,6 +580,46 @@ class LegacySecretsMigrationTests(unittest.TestCase):
                 "sk-A",
             )
 
+    def test_plaintext_identity_does_not_replace_keyring_identity(self) -> None:
+        # A run that couldn't reach the keyring registered a second
+        # device and left it in config.json. The keyring identity is
+        # the paired one and must survive the next keyring-backed start.
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            _seed_legacy_config(config_dir, auth_token="stray-tok")
+            disk_path = config_dir / "config.json"
+            seeded = json.loads(disk_path.read_text())
+            seeded["device_id"] = "stray-device"
+            disk_path.write_text(json.dumps(seeded))
+            fake = _FakeKeyring()
+            fake.values[(SERVICE_NAME, SECRET_KEY_AUTH_TOKEN)] = "paired-tok"
+            fake.values[(SERVICE_NAME, SECRET_KEY_DEVICE_ID)] = "paired-device"
+            store = SecretServiceStore(keyring_module=fake)
+
+            cfg = Config(config_dir=config_dir, secret_store=store)
+
+            self.assertEqual(cfg.device_id, "paired-device")
+            self.assertEqual(cfg.auth_token, "paired-tok")
+            disk = json.loads(disk_path.read_text())
+            self.assertNotIn("auth_token", disk)
+            self.assertNotIn("device_id", disk)
+
+    def test_plaintext_device_id_joins_keyring_token(self) -> None:
+        # Older layout: token already in the keyring, device_id still in
+        # config.json. That half must still migrate.
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            (config_dir / "config.json").write_text(
+                json.dumps({"device_id": "legacy-device"}))
+            fake = _FakeKeyring()
+            fake.values[(SERVICE_NAME, SECRET_KEY_AUTH_TOKEN)] = "tok"
+            store = SecretServiceStore(keyring_module=fake)
+
+            cfg = Config(config_dir=config_dir, secret_store=store)
+
+            self.assertEqual(cfg.device_id, "legacy-device")
+            self.assertEqual(cfg.auth_token, "tok")
+
     def test_no_migration_when_store_insecure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             config_dir = Path(td)
@@ -934,6 +976,60 @@ class OpenDefaultStoreTests(unittest.TestCase):
                 sys.modules.pop("keyring", None)
             else:
                 sys.modules["keyring"] = saved
+
+
+class KeyringLockoutTests(unittest.TestCase):
+    """An install whose identity lives in the keyring must not look
+    like a fresh install when the keyring is locked."""
+
+    def _config_with_unreachable_keyring(self, config_dir: Path) -> Config:
+        def fallback(data, save_fn, *, service_name=None):
+            return JsonFallbackStore(data, save_fn)
+
+        env = {k: v for k, v in os.environ.items()
+               if k != "DESKTOP_CONNECTOR_NO_KEYRING"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch("src.config.open_default_store", side_effect=fallback):
+            return Config(config_dir=config_dir)
+
+    def test_secure_store_leaves_backend_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            store = SecretServiceStore(keyring_module=_FakeKeyring())
+            Config(config_dir=Path(td), secret_store=store)
+            disk = json.loads((Path(td) / "config.json").read_text())
+            self.assertEqual(disk["secrets_backend"], "keyring")
+
+    def test_locked_when_keyring_install_loses_keyring(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            store = SecretServiceStore(keyring_module=_FakeKeyring())
+            Config(config_dir=config_dir, secret_store=store).auth_token = "tok"
+
+            cfg = self._config_with_unreachable_keyring(config_dir)
+
+            self.assertTrue(cfg.identity_locked_in_keyring)
+            self.assertFalse(cfg.is_registered)
+
+    def test_locked_for_install_migrated_before_the_marker_existed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            (config_dir / "config.json").write_text(
+                json.dumps({"secrets_migrated_at": "2026-05-06T10:00:00+00:00"}))
+            cfg = self._config_with_unreachable_keyring(config_dir)
+            self.assertTrue(cfg.identity_locked_in_keyring)
+
+    def test_not_locked_on_host_that_never_had_a_keyring(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = self._config_with_unreachable_keyring(Path(td))
+            self.assertFalse(cfg.identity_locked_in_keyring)
+
+    def test_not_locked_when_fallback_is_an_explicit_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            config_dir = Path(td)
+            (config_dir / "config.json").write_text(
+                json.dumps({"secrets_backend": "keyring"}))
+            cfg = Config(config_dir=config_dir)  # env opt-out from _paths
+            self.assertFalse(cfg.identity_locked_in_keyring)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,14 @@ class ConnectionAuthStateTests(unittest.TestCase):
         self.assertEqual(self.cm.auth_failure_kind, AuthFailureKind.CREDENTIALS_INVALID)
         self.assertEqual(self.auth_events, [AuthFailureKind.CREDENTIALS_INVALID])
 
+    def test_latch_auth_failure_reads_as_disconnected_and_survives_success(self) -> None:
+        self.cm.latch_auth_failure(AuthFailureKind.CREDENTIALS_INVALID)
+        self.assertEqual(self.cm.auth_failure_kind, AuthFailureKind.CREDENTIALS_INVALID)
+        self.assertEqual(self.cm.effective_state, ConnectionState.DISCONNECTED)
+        self.assertEqual(self.state_events, [ConnectionState.DISCONNECTED])
+        self.cm._record_auth_response(200)
+        self.assertEqual(self.cm.auth_failure_kind, AuthFailureKind.CREDENTIALS_INVALID)
+
     def test_latched_flag_does_not_refire(self) -> None:
         for _ in range(AUTH_FAILURE_THRESHOLD):
             self.cm._record_auth_response(401)

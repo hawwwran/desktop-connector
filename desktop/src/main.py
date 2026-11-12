@@ -36,15 +36,66 @@ from .bootstrap.appimage_relocate import (
     relocate_to_canonical_if_needed,
 )
 from .bootstrap.args import parse_startup_args, resolve_startup_mode
-from .bootstrap.startup_context import build_startup_context, rebuild_authenticated_api
+from .bootstrap.startup_context import (
+    IdentityLockedInKeyring,
+    build_startup_context,
+    rebuild_authenticated_api,
+    stored_identity_matches_key,
+)
 from .bootstrap.dependency_check import check_dependencies, show_missing_deps_dialog
 from .bootstrap.logging_setup import setup_logging
+from .platform.compose import compose_desktop_platform
 from .runners.pairing_runner import run_pairing_flow
 from .runners.registration_runner import register_device
 from .runners.receiver_runner import run_receiver
 from .runners.send_runner import run_send_file
 
 log = logging.getLogger("desktop-connector")
+
+def _exit_keyring_locked(*, headless: bool) -> int:
+    """Stop before anything acts on the empty fallback identity.
+
+    Continuing would run onboarding and registration as if this were a
+    fresh install and leave a second device identity behind.
+    """
+    message = (
+        "The OS keyring that holds this device's identity is locked or "
+        "unreachable. Unlock it (log in to the desktop session) and try "
+        "again. Nothing was sent or changed."
+    )
+    print(f"Desktop Connector: {message}", file=sys.stderr)
+    log.error("config.secrets.keyring_locked action=exit")
+    if not headless:
+        try:
+            compose_desktop_platform().notifications.notify("Desktop Connector", message)
+        except Exception:  # noqa: BLE001 a failed toast must not mask the exit code
+            log.debug("keyring-locked notification failed", exc_info=True)
+    return 1
+
+
+def _report_identity_mismatch(context, *, notify: bool) -> None:
+    """Stored device id belongs to a different key than this device's.
+
+    One-shot modes stop here: a send would be accepted by nobody. The
+    interactive tray keeps running with the re-pair banner latched.
+    """
+    message = (
+        "The stored device identity doesn't match this device's key, so "
+        "paired devices won't accept anything sent from here. Open "
+        "Desktop Connector from the tray and re-pair."
+    )
+    print(f"Desktop Connector: {message}", file=sys.stderr)
+    log.error(
+        "startup.identity.mismatch stored=%s derived=%s",
+        (context.config.device_id or "")[:12],
+        context.crypto.get_device_id()[:12],
+    )
+    if notify:
+        try:
+            context.platform.notifications.notify("Desktop Connector", message)
+        except Exception:  # noqa: BLE001 a failed toast must not mask the exit code
+            log.debug("identity-mismatch notification failed", exc_info=True)
+
 
 def main() -> int:
     # --version short-circuits before dep checks so it works on a
@@ -134,7 +185,17 @@ def main() -> int:
             )
         return 0
 
-    context = build_startup_context(args)
+    try:
+        context = build_startup_context(args)
+    except IdentityLockedInKeyring:
+        return _exit_keyring_locked(headless=args.headless)
+
+    identity_unusable = not stored_identity_matches_key(context.config, context.crypto)
+    if identity_unusable:
+        interactive_tray = not (args.headless or args.send or args.pair)
+        _report_identity_mismatch(context, notify=not args.headless)
+        if not interactive_tray:
+            return 1
 
     # H.5: surface the JSON-fallback state to the user at every
     # startup. Tray-mode users also see a clickable menu warning row
@@ -224,6 +285,7 @@ def main() -> int:
         context.crypto,
         mode == "headless_receive",
         context.platform,
+        identity_unusable=identity_unusable,
     )
     return 0
 
