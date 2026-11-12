@@ -38,9 +38,15 @@ class _Sandbox(unittest.TestCase):
         self._home = Path(self._tmp.name)
         self._canonical_dir = self._home / ".local/share/desktop-connector"
         self._canonical = self._canonical_dir / "desktop-connector.AppImage"
+        self._empty_proc = self._home / "proc"
+        self._empty_proc.mkdir()
         self._patches = [
             mock.patch.object(relocate, "CANONICAL_INSTALL_DIR", self._canonical_dir),
             mock.patch.object(relocate, "CANONICAL_APPIMAGE_PATH", self._canonical),
+            # The relocate flow stops other instances by scanning /proc and
+            # sending SIGTERM/SIGKILL. Against the real /proc that kills the
+            # developer's running tray; give it an empty tree instead.
+            mock.patch.object(relocate, "_PROC_ROOT", self._empty_proc),
             # Don't shell out to notify-send during tests.
             mock.patch.object(relocate, "_notify"),
             # Force the print branch — modal would try to load GTK4 which
