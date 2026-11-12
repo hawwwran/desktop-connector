@@ -284,16 +284,31 @@ class TransferHistory:
         row that doesn't exist, and the tray would stay stuck on
         "uploading" forever.
         """
+        return list(self.get_undelivered_upload_state())
+
+    def get_undelivered_upload_state(self) -> dict[str, tuple]:
+        """transfer_id -> uploader-owned fields for sent items still in
+        flight (same membership as ``get_undelivered_transfer_ids``).
+
+        The delivery tracker never writes these fields, so a change
+        between two snapshots means a sender is alive locally. The
+        tracker uses that to drop its poll backoff.
+        """
         # Reload from disk to pick up transfers added by other processes
         self._items = self._load()
         with self._lock:
-            return [
-                item["transfer_id"] for item in self._items
+            return {
+                item["transfer_id"]: (
+                    item.get("status"),
+                    item.get("chunks_downloaded"),  # classic upload progress
+                    item.get("chunks_uploaded"),    # streaming upload progress
+                )
+                for item in self._items
                 if item.get("direction") == "sent"
                 and item.get("transfer_id")
                 and not item.get("delivered")
                 and item.get("status") not in _TERMINAL_SENT_STATUSES
-            ]
+            }
 
     def remove(self, item: dict) -> None:
         """Remove a specific item from history."""

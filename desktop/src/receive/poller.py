@@ -34,7 +34,7 @@ from ..messaging import MessageDispatcher, MessageType
 from ..platform import DesktopPlatform
 from ..receive_actions import ReceiveActionLimiter
 from .classic_download import ClassicDownloadMixin
-from .delivery_tracker import DeliveryTrackerMixin
+from .delivery_tracker import DeliveryTrackerMixin, TRACKER_MIN_INTERVAL
 from .device_helpers import DeviceHelpersMixin
 from .fasttrack import FasttrackMixin
 from .finalize import FinalizeMixin
@@ -102,6 +102,13 @@ class Poller(
         self._tracker_state_lock = threading.Lock()
         self._tracker_last_progress: dict[str, tuple[int, float]] = {}  # tid -> (chunks_downloaded, monotonic_ts)
         self._tracker_gave_up: set[str] = set()
+        # Subset of _tracker_gave_up the server no longer lists: nothing
+        # left to learn about them, so they don't keep the poll alive.
+        self._tracker_absent: set[str] = set()
+        self._tracker_interval = TRACKER_MIN_INTERVAL
+        self._tracker_next_poll_at = 0.0  # monotonic
+        self._tracker_last_news_at = 0.0  # monotonic
+        self._tracker_upload_state: dict[str, tuple] = {}
         self._receive_action_limiter = ReceiveActionLimiter(config)
 
     def on_file_received(self, callback) -> None:
@@ -168,9 +175,11 @@ class Poller(
                             log.warning("poll.notify.unavailable")
 
                     # Skip long poll while outgoing transfers in progress (avoids blocking single-threaded PHP server)
+                    # has_live_outgoing() drops transfers the tracker gave up
+                    # on, so a send that never gets delivered hands the loop
+                    # back to long polling instead of pinning it here.
                     upload_active = (self.config.config_dir / "upload_active.json").exists()
-                    has_undelivered = bool(self.history.get_undelivered_transfer_ids())
-                    busy_outgoing = upload_active or has_undelivered
+                    busy_outgoing = upload_active or self.has_live_outgoing()
 
                     if long_poll_available and not busy_outgoing:
                         result = self._long_poll(last_check_time)
@@ -193,7 +202,8 @@ class Poller(
                             self._sleep(self._current_interval())
                     else:
                         self._poll_once()
-                        self._sleep(0.5 if busy_outgoing else self._current_interval())
+                        self._sleep(self._busy_outgoing_interval() if busy_outgoing
+                                    else self._current_interval())
                 except Exception:
                     log.exception("Error during poll")
                     self._sleep(self._current_interval())
@@ -304,6 +314,13 @@ class Poller(
         if time.time() < self._fast_poll_until:
             return FAST_POLL_INTERVAL
         return DEFAULT_POLL_INTERVAL
+
+    def _busy_outgoing_interval(self) -> float:
+        """Incoming-poll cadence while a send is in flight: follows the
+        delivery tracker's backoff, never slower than the idle cadence."""
+        with self._tracker_state_lock:
+            tracker_interval = self._tracker_interval
+        return min(tracker_interval, self._current_interval())
 
     def _sleep(self, seconds: float) -> None:
         self._wake_event.clear()

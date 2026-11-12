@@ -70,8 +70,15 @@ class TransfersLifecycleMixin:
         "server is down" and shouldn't trigger the exponential backoff
         (which caused a CONNECTED⇄DISCONNECTED thrash under any slow
         network)."""
+        return self.fetch_sent_status(timeout, track_state=track_state) or []
+
+    def fetch_sent_status(self, timeout: float = 30, *,
+                          track_state: bool = True) -> list[dict] | None:
+        """Like ``get_sent_status`` but returns None when the server gave
+        no usable answer, so a caller can tell "no transfers listed" from
+        "request failed"."""
         resp = self.conn.request("GET", "/api/transfers/sent-status",
                                   timeout=timeout, track_state=track_state)
-        if resp and resp.status_code == 200:
+        if resp is not None and resp.status_code == 200:
             return resp.json().get("transfers", [])
-        return []
+        return None
